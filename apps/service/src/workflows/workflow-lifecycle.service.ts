@@ -93,7 +93,7 @@ export class WorkflowLifecycleService {
   }
 
   /** Create a workflow from an IR document; v1 goes live on create (the one exception to Save ≠ Live). */
-  async deployCreateOnOrchestr(
+  async deployCreateOnSarati(
     userId: string,
     orgId: string | null,
     irDoc: Record<string, unknown>,

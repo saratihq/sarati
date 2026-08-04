@@ -73,7 +73,7 @@ export class IconsController {
     if (nodeType.startsWith('orchestr:')) return null; // control nodes have no app logo
     const dot = nodeType.indexOf('.');
     if (dot <= 0) return null;
-    const svg = loadOrchestrIcons(this.logger)[nodeType.slice(0, dot)];
+    const svg = loadAppIcons(this.logger)[nodeType.slice(0, dot)];
     return typeof svg === 'string' && svg ? svg : null;
   }
 
@@ -99,7 +99,7 @@ export class IconsController {
 // App logos (data/app-icons.json, slug → inline SVG); regenerate via scripts/build-icons.mjs.
 let orchestrIconsCache: Record<string, unknown> | null = null;
 
-function loadOrchestrIcons(logger: Logger): Record<string, unknown> {
+function loadAppIcons(logger: Logger): Record<string, unknown> {
   if (orchestrIconsCache) return orchestrIconsCache;
   try {
     const path = dataFile(__dirname, 'app-icons.json');

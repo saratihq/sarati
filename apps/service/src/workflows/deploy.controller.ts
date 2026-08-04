@@ -28,7 +28,7 @@ export class DeployController {
   @Post()
   async deploy(@Req() req: Request, @Body() body: DeployDto): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
-    return this.lifecycle.deployCreateOnOrchestr(
+    return this.lifecycle.deployCreateOnSarati(
       principal.user.id,
       principal.activeOrgId,
       body.workflow_json,
