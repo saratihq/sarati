@@ -1,0 +1,56 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+import { createDirectAuth } from '@sarati/actions-sdk';
+import type { AuthHandle } from '@sarati/actions-sdk';
+
+import { DryRunHttpClient } from './dry-run-http-client';
+
+/** Records every request that actually reaches the server. */
+function captureServer(): Promise<{ url: string; hits: Array<{ method: string }>; close: () => void }> {
+  const hits: Array<{ method: string }> = [];
+  return new Promise((resolve) => {
+    const server: Server = createServer((req, res) => {
+      hits.push({ method: req.method ?? '' });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"real":true}');
+    });
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        hits,
+        close: () => server.close(),
+      });
+    });
+  });
+}
+
+const noneAuth = (): AuthHandle => createDirectAuth({ type: 'none' }, { type: 'none' });
+
+describe('DryRunHttpClient (ADR 0041 — preview without firing side effects)', () => {
+  it('does NOT send a mutating request — returns a dry_run stub, server never hit', async () => {
+    const srv = await captureServer();
+    try {
+      const client = new DryRunHttpClient();
+      const post = await client.post(`${srv.url}/write`, { auth: noneAuth(), body: { x: 1 } });
+      const put = await client.put(`${srv.url}/write`, { auth: noneAuth(), body: {} });
+      expect(post.data).toMatchObject({ dry_run: true, method: 'POST' });
+      expect(put.data).toMatchObject({ dry_run: true, method: 'PUT' });
+      expect(srv.hits).toEqual([]); // no write ever reached the server
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('DOES execute a GET — reads are real so downstream data flows', async () => {
+    const srv = await captureServer();
+    try {
+      const client = new DryRunHttpClient();
+      const res = await client.get(`${srv.url}/read`, { auth: noneAuth() });
+      expect(res.data).toEqual({ real: true });
+      expect(srv.hits).toEqual([{ method: 'GET' }]);
+    } finally {
+      srv.close();
+    }
+  });
+});

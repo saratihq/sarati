@@ -1,0 +1,76 @@
+# Sarati — the whole stack, one command.
+#
+#   curl -fsSL https://get.sarati.io | bash        (generates .env, then runs this)
+#   docker compose up -d                          (if you already have a .env)
+#
+# Everything is reached through one origin on ${SARATI_PORT} — the browser never talks to a
+# service directly, so this works identically on localhost, a VPS, or behind your own domain.
+name: sarati
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sarati
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: sarati
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sarati -d sarati']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  service:
+    image: ghcr.io/saratihq/sarati-service:${SARATI_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://sarati:${POSTGRES_PASSWORD}@db:5432/sarati
+      # Both are generated once by the installer. Losing FERNET_KEY makes stored credentials
+      # unrecoverable; rotating SECRET_KEY signs everyone out.
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      FERNET_KEY: ${FERNET_KEY:?set FERNET_KEY in .env}
+      # One origin fronts everything, so the browser's origin is the only one CORS ever sees.
+      CORS_ORIGINS: ${SARATI_URL:-http://localhost:8080}
+      FRONTEND_URL: ${SARATI_URL:-http://localhost:8080}
+      PUBLIC_BASE_URL: ${SARATI_URL:-http://localhost:8080}
+    volumes:
+      - service-data:/data
+
+  agent:
+    image: ghcr.io/saratihq/sarati-agent:${SARATI_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      # Same SECRET_KEY as the service — that is what lets the composer verify a session the
+      # service issued. Without it the composer reports itself unavailable instead of failing later.
+      SECRET_KEY: ${SECRET_KEY}
+      WORKFLOW_SERVICE_URL: http://service:8001
+      # Absent is fine: the composer reports itself disabled and the rest of the product works.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CORS_ORIGINS: ${SARATI_URL:-http://localhost:8080}
+
+  client:
+    image: ghcr.io/saratihq/sarati-client:${SARATI_VERSION:-latest}
+    restart: unless-stopped
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [service, client]
+    ports:
+      - '${SARATI_PORT:-8080}:8080'
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  db-data:
+  service-data:
+  caddy-data:
+  caddy-config:

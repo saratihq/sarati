@@ -1,0 +1,107 @@
+{
+  "name": "@sarati/service",
+  "version": "0.1.0",
+  "description": "Sarati — native workflow version control + execution on the Sarati Actions SDK and Composio. NestJS API and DAG engine.",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saratihq/sarati.git",
+    "directory": "apps/service"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "nest build && node -e \"require('fs').cpSync('data','dist/data',{recursive:true})\"",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint:fix": "eslint \"{src,test}/**/*.ts\" --fix",
+    "format": "prettier --write \"{src,test}/**/*.ts\"",
+    "format:check": "prettier --check \"{src,test}/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:e2e": "jest --config test/jest-e2e.json --runInBand",
+    "db:init": "node scripts/init-db.mjs",
+    "db:migrate": "node scripts/migrate-db.mjs",
+    "db:release": "pnpm db:init && pnpm db:migrate",
+    "catalog:build:composio": "node scripts/build-composio-catalog.mjs",
+    "depcruise": "depcruise src --config .dependency-cruiser.cjs",
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm depcruise && pnpm test && pnpm test:e2e",
+    "auth:set-password": "node dist/scripts/set-password.cli.js"
+  },
+  "dependencies": {
+    "@dbos-inc/dbos-sdk": "4.23.6",
+    "@jitl/quickjs-singlefile-cjs-release-asyncify": "^0.32.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/throttler": "^6.3.0",
+    "@nestjs/typeorm": "^11.0.3",
+    "@sarati/actions-sdk": "^0.1.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "cron-parser": "5.6.1",
+    "esbuild": "^0.28.1",
+    "express": "^5.2.1",
+    "jose": "^5.10.0",
+    "nestjs-pino": "^4.1.0",
+    "pg": "^8.13.0",
+    "pg-boss": "^10.1.0",
+    "pino-http": "^10.3.0",
+    "quickjs-emscripten": "^0.32.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "typeorm": "^1.0.0",
+    "undici": "^7.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@iconify-json/logos": "^1.2.11",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "@types/supertest": "^6.0.2",
+    "dependency-cruiser": "^16.8.0",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "jest": "^29.7.0",
+    "pino-pretty": "^13.0.0",
+    "prettier": "^3.4.0",
+    "simple-icons": "^16.27.0",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.18.0"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.ts$": [
+        "ts-jest",
+        {
+          "tsconfig": "tsconfig.json"
+        }
+      ]
+    },
+    "setupFiles": [
+      "<rootDir>/../test/support/test-env.ts"
+    ],
+    "testEnvironment": "node"
+  }
+}

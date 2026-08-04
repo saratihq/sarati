@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+.git
+.claude
+secrets
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/coverage
+apps/client/ds-bundle
+apps/client/.design-sync
+apps/client/.ds-sync

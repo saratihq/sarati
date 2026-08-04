@@ -1,0 +1,35 @@
+# The Sarati monorepo: apps/service (API + engine), apps/client (UI), apps/agent (composer).
+# `actions-sdk` stays a separate repo — it is published standalone and deliberately
+# independent of this platform, so it is ignored here rather than vendored.
+/actions-sdk/
+
+# Credentials, never versioned — npm tokens and recovery codes live here.
+/secrets/
+
+# Local stack state: the generated SECRET_KEY/FERNET_KEY pair and per-install overrides.
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+
+# Volumes and logs a local `docker compose up` leaves behind.
+/data/
+*.log
+
+# Design-system bundle — regenerated from the design source, not authored here.
+/apps/client/ds-bundle/
+
+.DS_Store
+
+# Agent worktrees — full stale copies of the tree, never committed.
+.claude/worktrees/
+
+# Assistant skills — local working aids, and they describe the people using them.
+.claude/skills/
+
+# Design-system sync — local tooling; its config carries an account-scoped project id.
+/apps/client/.design-sync/

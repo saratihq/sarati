@@ -1,0 +1,637 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * LIGHT theme — the default (`:root`). Authored to mirror the dark palette
+ * role-for-role, NOT by literal inversion:
+ *
+ *  - Surface order flips. Dark lifts a surface by getting LIGHTER
+ *    (#0f0f10 → #161617 → #1c1c1e → node #212127); light lifts by getting
+ *    WHITER, so the app sits on a soft grey and cards/nodes are pure white.
+ *    A white-on-white hierarchy would be invisible, which is the whole risk here.
+ *  - Alpha inks/lines become BLACK alpha, at slightly different strengths:
+ *    black-on-white and white-on-black do not read equally at equal alpha.
+ *    `ink-muted` is held at 4.5:1 (AA body text); `subtle` is meta text;
+ *    `faint` is decorative only.
+ *  - Status hues are re-picked, not reused. #55c98a / #f5b453 are tuned for a
+ *    near-black backdrop and wash out on white, so light uses the darker
+ *    600-weight equivalents that keep AA against a white card.
+ *  - `action`/`accent` invert outright: a default button is white-on-dark in
+ *    dark, and near-black-on-white in light.
+ */
+:root {
+  --radius: 0.75rem;
+  --background: #f7f7f8;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --secondary: #f1f1f3;
+  --secondary-foreground: #18181b;
+  --muted: #f1f1f3;
+  --muted-foreground: rgba(9, 9, 11, 0.62);
+  --accent: rgba(9, 9, 11, 0.06);
+  --accent-foreground: #18181b;
+  --destructive: #dc2626;
+  --border: rgba(9, 9, 11, 0.1);
+  --input: rgba(9, 9, 11, 0.14);
+  --ring: rgba(9, 9, 11, 0.2);
+  --chart-1: #18181b;
+  --chart-2: rgba(9, 9, 11, 0.35);
+  --chart-3: #16a34a;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #18181b;
+  --sidebar-primary: #18181b;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-accent: rgba(9, 9, 11, 0.06);
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: rgba(9, 9, 11, 0.1);
+  --sidebar-ring: rgba(9, 9, 11, 0.2);
+
+  /* Sarati semantic tokens — the light counterpart of the .dark block below.
+     Every token there MUST exist here: app code styles almost entirely with
+     these, and an undefined variable paints nothing at all. */
+  --orchestr-surface: #f7f7f8;
+  --orchestr-surface-card: #ffffff;
+  --orchestr-surface-raised: #ffffff;
+  /* Canvas node cards — pure white so steps lift off the grey canvas, the
+     light-mode equivalent of #212127 lifting off near-black. */
+  --orchestr-surface-node: #ffffff;
+  --orchestr-surface-overlay: rgba(255, 255, 255, 0.96);
+  --orchestr-ink: #18181b;
+  --orchestr-ink-strong: #09090b;
+  --orchestr-ink-muted: rgba(9, 9, 11, 0.62);
+  --orchestr-ink-subtle: rgba(9, 9, 11, 0.5);
+  --orchestr-ink-faint: rgba(9, 9, 11, 0.3);
+  --orchestr-line: rgba(9, 9, 11, 0.1);
+  --orchestr-line-strong: rgba(9, 9, 11, 0.18);
+  --orchestr-action: #18181b;
+  --orchestr-action-hover: #303034;
+  --orchestr-accent: #18181b;
+  --orchestr-accent-bright: #09090b;
+  --orchestr-accent-tint: rgba(9, 9, 11, 0.06);
+  --orchestr-accent-tint-strong: rgba(9, 9, 11, 0.11);
+  --orchestr-success: #16a34a;
+  --orchestr-success-tint: rgba(22, 163, 74, 0.12);
+  --orchestr-warning: #b45309;
+  --orchestr-warning-tint: rgba(180, 83, 9, 0.12);
+  --orchestr-danger: #dc2626;
+  --orchestr-danger-tint: rgba(220, 38, 38, 0.1);
+  /* Blue — the AI touchpoint + primary CTA. Held one step darker than dark
+     mode's #3b82f6 so white label text on a filled button clears AA. */
+  --orchestr-ai: #2563eb;
+  --orchestr-ai-bright: #1d4ed8;
+  --orchestr-ai-tint: rgba(37, 99, 235, 0.1);
+
+  /* Chrome hue — the ink that canvas/scrollbar/control furniture is tinted with,
+     as an RGB triple so each rule keeps its own hand-tuned alpha:
+     `rgb(var(--orchestr-chrome-rgb) / 0.12)`. Dark tints with near-white, light
+     with near-black; without this every one of those rules was white-on-white in
+     light mode, i.e. invisible (scrollbars, canvas grid, zoom controls, edges). */
+  --orchestr-chrome-rgb: 9 9 11;
+
+  /* Canvas wires. Settled edges must read against the canvas without shouting;
+     pending (beaded) edges are deliberately faint. */
+  --orchestr-edge: rgba(9, 9, 11, 0.45);
+  --orchestr-edge-pending: rgba(9, 9, 11, 0.18);
+
+  /* Ink for text sitting ON a solid status fill. Light mode darkens the status
+     hues for contrast against white, which flips what reads on top of them. */
+  --orchestr-on-warning: #ffffff;
+
+  /* Chip hues that were hardcoded light-blue/lilac for a dark backdrop. */
+  --orchestr-info: #1565c0;
+  --orchestr-info-tint: rgba(21, 101, 192, 0.1);
+  --orchestr-violet: #7b1fa2;
+  --orchestr-violet-tint: rgba(123, 31, 162, 0.1);
+
+  /* Recessed field/well fill (inputs, code blocks, JSON viewers). Dark used a
+     25% black hole; on a light page that is a dark grey box holding near-black
+     text — legible-but-wrong, so light tints faintly instead. */
+  --orchestr-field: rgba(9, 9, 11, 0.04);
+  --orchestr-field-strong: rgba(9, 9, 11, 0.06);
+}
+
+.dark {
+  --background: #0f0f10;
+  --foreground: #fafafa;
+  --card: #161617;
+  --card-foreground: #fafafa;
+  --popover: #1c1c1e;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #0f0f10;
+  --secondary: #1c1c1e;
+  --secondary-foreground: #fafafa;
+  --muted: #1c1c1e;
+  --muted-foreground: rgba(250, 250, 250, 0.6);
+  --accent: rgba(250, 250, 250, 0.08);
+  --accent-foreground: #fafafa;
+  --destructive: #ef7070;
+  --border: rgba(250, 250, 250, 0.07);
+  --input: rgba(250, 250, 250, 0.1);
+  --ring: rgba(250, 250, 250, 0.1);
+  --chart-1: #fafafa;
+  --chart-2: rgba(250, 250, 250, 0.35);
+  --chart-3: #55c98a;
+  --chart-4: #f5b453;
+  --chart-5: #ef7070;
+  --sidebar: #161617;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: #fafafa;
+  --sidebar-primary-foreground: #0f0f10;
+  --sidebar-accent: rgba(250, 250, 250, 0.08);
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: rgba(250, 250, 250, 0.07);
+  --sidebar-ring: rgba(250, 250, 250, 0.1);
+
+  /* Sarati semantic tokens — use these in app code */
+  --orchestr-surface: #0f0f10;
+  --orchestr-surface-card: #161617;
+  --orchestr-surface-raised: #1c1c1e;
+  /* Canvas node cards — deliberately lifted off the near-black canvas so steps
+     read as tangible objects (not the flat, sink-into-the-void look). */
+  --orchestr-surface-node: #212127;
+  --orchestr-surface-overlay: rgba(15, 15, 16, 0.96);
+  --orchestr-ink: #fafafa;
+  --orchestr-ink-strong: #ffffff;
+  --orchestr-ink-muted: rgba(250, 250, 250, 0.6);
+  --orchestr-ink-subtle: rgba(250, 250, 250, 0.38);
+  --orchestr-ink-faint: rgba(250, 250, 250, 0.18);
+  --orchestr-line: rgba(250, 250, 250, 0.07);
+  --orchestr-line-strong: rgba(250, 250, 250, 0.13);
+  --orchestr-action: #fafafa;
+  --orchestr-action-hover: #e4e4e5;
+  --orchestr-accent: #fafafa;
+  --orchestr-accent-bright: #ffffff;
+  --orchestr-accent-tint: rgba(250, 250, 250, 0.08);
+  --orchestr-accent-tint-strong: rgba(250, 250, 250, 0.14);
+  --orchestr-success: #55c98a;
+  --orchestr-success-tint: rgba(85, 201, 138, 0.1);
+  --orchestr-warning: #f5b453;
+  --orchestr-warning-tint: rgba(245, 180, 83, 0.1);
+  --orchestr-danger: #ef7070;
+  --orchestr-danger-tint: rgba(239, 112, 112, 0.1);
+  /* Blue — used only on AI-touchpoint surfaces (chat send, AI badge) */
+  --orchestr-ai: #3b82f6;
+  --orchestr-ai-bright: #60a5fa;
+  --orchestr-ai-tint: rgba(59, 130, 246, 0.12);
+
+  /* Chrome hue (see :root) — near-white here, so every furniture rule keeps the
+     exact appearance it had when these values were hardcoded as rgba(250,250,250,α). */
+  --orchestr-chrome-rgb: 250 250 250;
+
+  /* Canvas wires — the exact values these were before they became tokens. */
+  --orchestr-edge: rgba(250, 250, 250, 0.55);
+  --orchestr-edge-pending: rgba(250, 250, 250, 0.16);
+
+  /* Dark keeps a near-black ink on its light amber — unchanged. */
+  --orchestr-on-warning: #0f0f10;
+
+  /* The exact chip hues these were before they became tokens. */
+  --orchestr-info: #64b5f6;
+  --orchestr-info-tint: rgba(33, 150, 243, 0.15);
+  --orchestr-violet: #ce93d8;
+  --orchestr-violet-tint: rgba(156, 39, 176, 0.15);
+
+  /* The exact well fills these were before they became tokens. */
+  --orchestr-field: rgba(0, 0, 0, 0.25);
+  --orchestr-field-strong: rgba(0, 0, 0, 0.3);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* ─── Custom Dark Theme Overrides ─── */
+html,
+body {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  background: var(--orchestr-surface);
+  color: var(--orchestr-ink);
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--orchestr-chrome-rgb) / 0.12);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--orchestr-chrome-rgb) / 0.2);
+}
+
+/* Custom animations */
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.animate-fadeSlideUp {
+  animation: fadeSlideUp 0.5s ease;
+}
+
+.animate-blink {
+  animation: blink 1s infinite;
+}
+
+.animate-spin-slow {
+  animation: spin 1s linear infinite;
+}
+
+.animate-pulse-slow {
+  animation: pulse 1s infinite;
+}
+
+/* Node icon SVG sizing */
+.node-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Compose stream — edges materialize instead of popping in */
+@keyframes edge-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.react-flow__edge {
+  animation: edge-in 0.45s ease both;
+}
+
+/* ─── Creation canvas language (2026-07 overhaul) ─── */
+
+/* Connection ports — small sockets on the card edge (visible, quiet).
+   In editable mode they brighten on hover to invite wiring. */
+.wf-port {
+  width: 7px !important;
+  height: 7px !important;
+  background: var(--orchestr-surface-raised) !important;
+  border: 1px solid var(--orchestr-line-strong) !important;
+  border-radius: 999px !important;
+}
+.flow-editable .wf-port {
+  background: var(--orchestr-surface-overlay) !important;
+  border-color: rgb(var(--orchestr-chrome-rgb) / 0.35) !important;
+}
+.flow-editable .wf-port:hover {
+  background: var(--orchestr-ink) !important;
+  border-color: var(--orchestr-ink) !important;
+  box-shadow: 0 0 0 4px var(--orchestr-accent-tint-strong);
+}
+/* Error-output port (ADR 0020) — a distinct danger-tinted socket at the node's
+   base; a wire from here routes the error lane, never the main flow. */
+.wf-port-err {
+  background: rgba(239, 112, 112, 0.35) !important;
+  border-color: rgba(239, 112, 112, 0.75) !important;
+}
+.flow-editable .wf-port-err {
+  background: rgba(239, 112, 112, 0.45) !important;
+  border-color: rgba(239, 112, 112, 0.85) !important;
+}
+.flow-editable .wf-port-err:hover {
+  background: rgba(239, 112, 112, 0.95) !important;
+  border-color: rgba(239, 112, 112, 0.95) !important;
+  box-shadow: 0 0 0 4px rgba(239, 112, 112, 0.25);
+}
+/* Agent tool-output port (ADR 0045) — an AI-accent socket at the agent's base;
+   a wire from here binds an action node as a tool the agent can call. */
+.wf-port-tool {
+  background: rgba(122, 162, 247, 0.35) !important;
+  border-color: rgba(122, 162, 247, 0.8) !important;
+}
+.flow-editable .wf-port-tool {
+  background: rgba(122, 162, 247, 0.5) !important;
+  border-color: rgba(122, 162, 247, 0.9) !important;
+}
+.flow-editable .wf-port-tool:hover {
+  background: rgba(122, 162, 247, 0.95) !important;
+  border-color: rgba(122, 162, 247, 0.95) !important;
+  box-shadow: 0 0 0 4px rgba(122, 162, 247, 0.25);
+}
+.react-flow__connection-path {
+  stroke: rgb(var(--orchestr-chrome-rgb) / 0.5);
+  stroke-width: 1.75;
+  stroke-dasharray: 0.1 8;
+  stroke-linecap: round;
+}
+
+/* Build ticker rows — newest slides in, older rows dim */
+@keyframes ticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.ticker-row {
+  animation: ticker-in 0.3s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-row {
+    animation: none;
+  }
+}
+
+/* Skeleton shimmer — placeholder lines while the stream connects */
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.skeleton-line {
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--orchestr-accent-tint) 25%,
+    var(--orchestr-accent-tint-strong) 50%,
+    var(--orchestr-accent-tint) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 2.2s ease-in-out infinite;
+}
+
+/* AI activity hairline — indeterminate sweep while the model streams */
+@keyframes ai-sweep {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(520%);
+  }
+}
+.ai-sweep-bar {
+  animation: ai-sweep 1.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge,
+  .skeleton-line,
+  .ai-sweep-bar,
+  .animate-blink,
+  .animate-ping,
+  .animate-pulse-slow,
+  .animate-spin-slow {
+    animation: none;
+  }
+}
+
+/* Sarati loader — a soft shimmer travels around the mark's ring (a glow that
+   sweeps the dots into the strokes), over a gentle breathing scale. Calm and
+   organic rather than a mechanical spin. Each element carries its own
+   animation-delay (set inline, by ring position) so the bright arc rotates. */
+@keyframes orchestr-mark-shimmer {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  25% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 0.25;
+  }
+}
+.orchestr-mark-shimmer {
+  animation: orchestr-mark-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes orchestr-mark-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.035);
+  }
+}
+.orchestr-mark-breathe {
+  transform-origin: 50% 50%;
+  animation: orchestr-mark-breathe 3.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .orchestr-mark-shimmer {
+    animation: none;
+    opacity: 0.85;
+  }
+  .orchestr-mark-breathe {
+    animation: none;
+  }
+}
+
+/* Retained for any legacy caller; the loader now uses the shimmer above. */
+@keyframes orchestr-orbit-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.orchestr-orbit-spin {
+  transform-origin: 50% 50%;
+  animation: orchestr-orbit-spin 1.4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .orchestr-orbit-spin {
+    animation-duration: 2.8s;
+  }
+}
+
+/* Canvas-grid surface — graph-paper lines for workflow creation / preview */
+.canvas-grid {
+  background-image:
+    linear-gradient(to right, rgb(var(--orchestr-chrome-rgb) / 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--orchestr-chrome-rgb) / 0.05) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/*
+ * The editor canvas surface — a soft top-down lift so it reads as a lit
+ * workspace rather than a flat void, textured with a faint honeycomb.
+ *
+ * This lives in CSS, not inline in FlowCanvas, for one reason: the honeycomb is
+ * an SVG data-URI and its stroke colour is baked INTO the URL, where a custom
+ * property cannot reach. A themed canvas therefore needs two whole declarations,
+ * which is exactly what a `.dark` override is for. Light strokes near-black on a
+ * white-to-grey lift; dark keeps the original near-white on near-black, byte for
+ * byte, so the designed dark canvas is unchanged.
+ */
+.canvas-surface {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='52' viewBox='0 0 30 52'%3E%3Cpath fill='none' stroke='%23090909' stroke-opacity='0.05' stroke-width='1' d='M15 0L30 8.65L30 25.95L15 34.6L0 25.95L0 8.65ZM15 34.6L15 52M15 34.6L0 26M15 34.6L30 26'/%3E%3C/svg%3E")
+      repeat,
+    radial-gradient(130% 100% at 50% 0%, #ffffff 0%, #f7f7f8 55%, #efeff1 100%);
+}
+
+.dark .canvas-surface {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='52' viewBox='0 0 30 52'%3E%3Cpath fill='none' stroke='%23fafafa' stroke-opacity='0.05' stroke-width='1' d='M15 0L30 8.65L30 25.95L15 34.6L0 25.95L0 8.65ZM15 34.6L15 52M15 34.6L0 26M15 34.6L30 26'/%3E%3C/svg%3E")
+      repeat,
+    radial-gradient(130% 100% at 50% 0%, #151517 0%, #0f0f11 55%, #0a0a0b 100%);
+}
+
+/* The embedded (non-transparent) canvas: a recessed well inside a card. Was a
+   flat 30% black scrim, which on a light card reads as a grey box. */
+.canvas-inset {
+  background: rgb(var(--orchestr-chrome-rgb) / 0.04);
+}
+
+.dark .canvas-inset {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* React Flow dark theme overrides */
+.react-flow__background {
+  background: transparent !important;
+}
+
+.react-flow__controls {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.react-flow__controls-button {
+  background: rgb(var(--orchestr-chrome-rgb) / 0.04) !important;
+  border: 1px solid rgb(var(--orchestr-chrome-rgb) / 0.07) !important;
+  border-radius: 6px !important;
+  fill: rgb(var(--orchestr-chrome-rgb) / 0.5) !important;
+  color: rgb(var(--orchestr-chrome-rgb) / 0.5) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.react-flow__controls-button:hover {
+  background: rgb(var(--orchestr-chrome-rgb) / 0.1) !important;
+  fill: rgb(var(--orchestr-chrome-rgb) / 0.85) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: inherit !important;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Placeholders — one quiet tone everywhere (design system: ink-subtle) */
+input::placeholder,
+textarea::placeholder {
+  color: var(--orchestr-ink-subtle);
+  opacity: 1;
+}
+
+/* Keyboard focus — visible ring for keyboard users only (audit G16) */
+:focus-visible {
+  outline: 2px solid var(--orchestr-accent-tint-strong);
+  outline-offset: 2px;
+}
+
+/* Composer canvas mirrors (A3): a node with a PENDING question chip must
+   stack above its neighbours — annotations render below the card and would
+   otherwise sit under the next node's badges (tap interception). */
+.react-flow__node:has([data-testid="node-question"]),
+.react-flow__node:has([data-testid="node-connect"]) {
+  z-index: 1000 !important;
+}

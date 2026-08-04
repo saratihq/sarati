@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes the run in flight; main is never cancelled so its history stays complete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orchestr
+          POSTGRES_PASSWORD: orchestr
+          POSTGRES_DB: orchestr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orchestr" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://orchestr:orchestr@localhost:5432/orchestr
+      PGBOSS_ENABLED: 'false'
+      # NEXT_PUBLIC_* are inlined by `next build` and the client refuses to build without them,
+      # rather than silently baking in a dev host. `same-origin` is what the image ships.
+      NEXT_PUBLIC_API_URL: same-origin
+      NEXT_PUBLIC_AGENT_URL: same-origin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # One gate for the whole workspace: lint, format, types, the open-core boundary
+      # (core must never import apps/service/src/ee), unit and e2e for every package.
+      - run: pnpm check
+
+  # Proves the stack still comes up, which a per-image build cannot: the compose file, the
+  # proxy routing and the shared SECRET_KEY between service and agent are only exercised together.
+  # Publishing lives in release.yml, driven by a version tag.
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Every image builds from the workspace root — the lockfile lives there, so a package
+      # cannot be built from its own directory.
+      - run: |
+          for app in service client agent; do
+            docker build -f "apps/$app/Dockerfile" -t "ghcr.io/saratihq/sarati-$app:latest" .
+          done
+      - run: |
+          cat > .env <<EOF
+          SECRET_KEY=$(openssl rand -base64 36 | tr '+/' '-_')
+          FERNET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')
+          POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr '+/' '-_')
+          SARATI_URL=http://localhost:8080
+          SARATI_PORT=8080
+          EOF
+          docker compose up -d
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:8080/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/auth/local/status | grep -q '"awaiting_bootstrap":true'
+          curl -fsS http://localhost:8080/api/composer/status | grep -q '"status"'
+          curl -fsS -o /dev/null http://localhost:8080/login
+          echo "stack up: service, agent and client all reachable through the proxy"
+      - if: failure()
+        run: docker compose logs --no-color | tail -100

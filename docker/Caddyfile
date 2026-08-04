@@ -1,0 +1,32 @@
+# One origin in front of the whole stack. The browser only ever talks to this, which is why the
+# client is built with relative API URLs and why CORS has a single origin to allow.
+#
+# Order matters: the composer's routes are a subpath of the service's `/api`, so they must be
+# matched first or the service would answer them.
+
+:8080 {
+	handle /api/composer/* {
+		reverse_proxy agent:8010
+	}
+
+	handle /api/* {
+		reverse_proxy service:8001
+	}
+
+	# The agent-facing MCP endpoint — streams, so no buffering.
+	handle /mcp* {
+		reverse_proxy service:8001 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy client:3000
+	}
+
+	encode gzip
+	log {
+		output stdout
+		format console
+	}
+}

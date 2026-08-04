@@ -1,0 +1,94 @@
+name: release
+
+# Publishing is driven by a version tag, so `latest` only ever moves deliberately:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. 0.1.0 (no leading v)'
+        required: true
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One failing image must not leave a half-published release behind a moved `latest`.
+      fail-fast: true
+      matrix:
+        app: [service, client, agent]
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 matters: a lot of self-hosters are on Apple Silicon or an ARM VPS, and an
+      # amd64-only image would run under emulation for them.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sarati-${{ matrix.app }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
+  # Proves the published tag actually installs, using the compose file exactly as a
+  # self-hoster gets it — a green build says nothing about whether the stack comes up.
+  verify:
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the published stack
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > .env <<EOF
+          SECRET_KEY=$(openssl rand -base64 36 | tr '+/' '-_')
+          FERNET_KEY=$(openssl rand -base64 32 | tr '+/' '-_')
+          POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr '+/' '-_')
+          SARATI_URL=http://localhost:8080
+          SARATI_PORT=8080
+          SARATI_VERSION=${VERSION:-latest}
+          EOF
+          docker compose up -d
+      - name: Wait for it to answer, then walk the first run
+        run: |
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:8080/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/health
+          test "$(curl -fsS http://localhost:8080/api/auth/local/status | grep -o '"awaiting_bootstrap":true')" \
+            = '"awaiting_bootstrap":true'
+          curl -fsS -X POST http://localhost:8080/api/auth/local/register \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"a-long-enough-passphrase","name":"CI"}' >/dev/null
+          curl -fsS http://localhost:8080/api/auth/local/status | grep -q '"awaiting_bootstrap":false'
+          echo "published stack installs and bootstraps"
+      - if: failure()
+        run: docker compose logs --no-color | tail -100
