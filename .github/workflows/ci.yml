@@ -35,9 +35,9 @@ jobs:
       NEXT_PUBLIC_AGENT_URL: same-origin
     steps:
       - uses: actions/checkout@v4
+      # No `version:` — the root package.json's `packageManager` field is the one source,
+      # and specifying both makes the action refuse.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 24
