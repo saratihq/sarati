@@ -62,8 +62,18 @@ jobs:
   verify:
     needs: images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
+      # Authenticate rather than rely on the packages being public — a release must verify
+      # itself the same way whether the repository is private or not.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Start the published stack
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
