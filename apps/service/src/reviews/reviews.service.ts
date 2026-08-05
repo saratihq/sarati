@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { In, type DataSource } from 'typeorm';
+import { In, Not, type DataSource } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
@@ -10,6 +10,7 @@ import {
   WorkflowReviewEntity,
   type ApprovalDecision,
 } from '../database/entities/review.entity';
+import { OrgMemberEntity } from '../database/entities/organization.entity';
 import { UserEntity } from '../database/entities/user.entity';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
@@ -196,6 +197,18 @@ export class ReviewsService {
       if (!review) throw new DomainError(`Review ${reviewId} not found`, 404);
       if (review.status === 'merged' || review.status === 'closed') {
         throw new DomainError('Cannot approve a closed or merged review');
+      }
+      if (decision === 'approved' && review.authorId === reviewerId) {
+        // Only where someone else could actually approve — a solo workspace must not deadlock.
+        const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
+        const others = wf?.orgId
+          ? await em.count(OrgMemberEntity, { where: { orgId: wf.orgId, userId: Not(reviewerId) } })
+          : 0;
+        if (others > 0) {
+          throw new DomainError('Your own review needs someone else to approve it', 409, {
+            code: 'self_approval_blocked',
+          });
+        }
       }
 
       const approval = em.create(ReviewApprovalEntity, {
