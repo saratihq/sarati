@@ -77,7 +77,7 @@ describe('workflows read slice (e2e, isolated DB, mock auth)', () => {
     // Mock user + personal org (provisioning normally does this — seed directly).
     await db.query(
       `INSERT INTO users (id, email, hashed_password, name, created_at, updated_at)
-       VALUES ($1, 'test@orchestr.dev', 'mock', 'Test User', now(), now())`,
+       VALUES ($1, 'test@example.com', 'mock', 'Test User', now(), now())`,
       [MOCK_USER],
     );
 

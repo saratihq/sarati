@@ -47,15 +47,16 @@ settings on the same step reconcile cleanly instead of conflicting. Renames keep
 rather than showing up as an add plus a delete.
 
 **Reviews before things go live.** Open a review on a branch, see exactly what changed, merge when
-it's approved. Promotion moves an environment pointer — dev, staging, production — so shipping is a
+it's approved. Promotion moves an environment pointer — staging, uat, production — so shipping is a
 pointer move, not a copy-paste.
 
 **Runs that survive a restart.** Execution is durable: if a worker crashes or you redeploy
 mid-flight, runs resume instead of being orphaned.
 
-**Built for agents, not just people.** The whole platform is exposed over MCP, so an AI agent can
-read your workflows, open a branch, propose an edit and run a dry test — through the same review
-gate a human goes through. Any workflow you publish becomes a tool an agent can call.
+**Built for agents, not just people.** Fifteen MCP tools let an AI agent read your workflows, open a
+branch, propose an edit and run a dry test — through the same review gate a human goes through, and
+without the authority to merge or promote. Any workflow you publish also becomes a tool an agent can
+call.
 
 **AI that produces reviewable output.** Describe what you want and the composer drafts it on the
 canvas. What it produces is ordinary versioned workflow structure — diffable, mergeable, reviewable —

@@ -119,7 +119,7 @@ export class UserProvisioningService {
       .transaction(async (em) => {
         const user = em.create(UserEntity, {
           id: MOCK_USER_ID,
-          email: 'test@orchestr.dev',
+          email: 'test@example.com',
           name: 'Test User',
           clerkUserId: null,
           hashedPassword: 'mock',

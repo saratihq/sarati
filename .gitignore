@@ -31,5 +31,14 @@ dist/
 # Assistant skills — local working aids, and they describe the people using them.
 .claude/skills/
 
+# Per-machine assistant settings. These were only ever ignored by one developer's personal
+# global gitignore, so on any other machine they would be committed.
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# Saved browser auth state from local e2e runs — real session cookies.
+.auth/
+**/.auth/
+
 # Design-system sync — local tooling; its config carries an account-scoped project id.
 /apps/client/.design-sync/

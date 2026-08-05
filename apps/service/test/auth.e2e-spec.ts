@@ -194,6 +194,6 @@ describe('mock-auth mode (e2e, isolated DB)', () => {
   it('mock user parity: fixed id, /auth/me works without a token', async () => {
     const res = await request(app.getHttpServer()).get('/api/auth/me').expect(200);
     expect(res.body.user.id).toBe('00000000-0000-0000-0000-000000000001');
-    expect(res.body.user.email).toBe('test@orchestr.dev');
+    expect(res.body.user.email).toBe('test@example.com');
   });
 });
