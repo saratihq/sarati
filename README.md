@@ -50,8 +50,9 @@ mid-flight, runs resume instead of being orphaned.
 
 **Built for agents, not just people.** Fifteen MCP tools let an AI agent read your workflows, open a
 branch, propose an edit and run a dry test — through the same review gate a human goes through, and
-without the authority to merge or promote. Any workflow you publish also becomes a tool an agent can
-call.
+without the authority to merge or promote. A workflow becomes callable by an agent only when you
+give it a "Callable by an agent" trigger and publish it — exposure is a deliberate act, not a side
+effect of publishing.
 
 **AI that produces reviewable output.** Describe what you want and the composer drafts it on the
 canvas. What it produces is ordinary versioned workflow structure — diffable, mergeable, reviewable —

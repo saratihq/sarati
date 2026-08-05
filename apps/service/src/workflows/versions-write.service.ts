@@ -275,6 +275,16 @@ export class VersionsWriteService {
       if (!wf) throw new DomainError(`Workflow ${input.workflowId} not found`, 404);
       const branch = await this.lockBranchByName(em, wf.id, input.branchName);
 
+      // Protection would be decorative if authored change could land here directly: merge is gated,
+      // so this must be too. Rollback deliberately still lands — it is the documented recovery path.
+      if (branch.isProtected) {
+        throw new DomainError(
+          `Branch '${branch.name}' is protected — commit to a branch and open a review to bring it in`,
+          409,
+          { code: 'branch_protected' },
+        );
+      }
+
       // Demanded HERE because the same key is a bearer on this route AND on the tool wrapping it (ADR 0052).
       if (branch.headVersionId && input.principal?.kind === 'api_key' && !input.baseVersionId) {
         throw new DomainError(BASE_VERSION_REQUIRED, 400, { code: 'base_version_id_required' });

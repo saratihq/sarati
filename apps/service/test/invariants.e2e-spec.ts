@@ -320,6 +320,13 @@ describe('domain invariants (the constitution)', () => {
       .send({ is_protected: true })
       .expect(200);
 
+    // Authored change cannot land on it directly either — otherwise the merge gate is walk-around-able.
+    const direct_commit = await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: ir(['straight-to-main']), branch: 'main' })
+      .expect(409);
+    expect(direct_commit.body.code).toBe('branch_protected');
+
     // Branches page: no review at all. This goes red if the guard moves back into the reviews path.
     const direct = await http()
       .post(`/api/workflows/${wf}/branches/lane/merge`)

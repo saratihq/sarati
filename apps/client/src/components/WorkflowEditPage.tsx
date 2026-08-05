@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Check, GitBranch } from "lucide-react";
 import InlineRename from "./InlineRename";
+import * as api from "@/api/client";
 import { useWorkflow } from "@/store/useWorkflow";
 import { Button } from "@/components/ui/button";
 import { ResumeDraftModal } from "@/components/ResumeDraftModal";
@@ -134,6 +135,22 @@ export default function WorkflowEditPage() {
   // Create gate uses, so an incomplete node is caught here, not at run time.
   const missing = useMissingRequired(workflowJson);
 
+  // The server refuses a commit to a protected branch; say so before the edit, not after it.
+  const [branchProtected, setBranchProtected] = useState(false);
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    void api
+      .listBranches(id)
+      .then((res) => {
+        if (!cancelled) setBranchProtected(res.branches.some((b) => b.name === branch && b.is_protected));
+      })
+      .catch(() => undefined); // the save still fails closed on the server
+    return () => {
+      cancelled = true;
+    };
+  }, [id, branch]);
+
   const [commitMessage, setCommitMessage] = useState("");
   const handleSave = async () => {
     if (missing.length > 0) {
@@ -222,7 +239,9 @@ export default function WorkflowEditPage() {
             )}
           </div>
           <p className="text-[11px] m-0 leading-tight" style={{ color: "var(--orchestr-ink-subtle)" }}>
-            {effectiveFromVersion
+            {branchProtected
+              ? `${branch} is protected · start a branch and open a review to change it`
+              : effectiveFromVersion
               ? `Continuing from v${effectiveFromVersion} · Save creates a new version, v${effectiveFromVersion} stays as it was`
               : !onMain
               ? `Editing branch ${branch} · saves commit to this branch, the live workflow is untouched`
@@ -250,12 +269,17 @@ export default function WorkflowEditPage() {
               }}
             />
           )}
-          {dirty && missing.length > 0 && (
+          {dirty && missing.length > 0 && !branchProtected && (
             <span className="text-[11px] shrink-0" style={{ color: "var(--orchestr-warning)" }}>
               {missing.length} required field{missing.length !== 1 ? "s" : ""} missing
             </span>
           )}
-          <Button size="sm" onClick={handleSave} disabled={!dirty || isLoading || missing.length > 0}>
+          <Button
+            size="sm"
+            onClick={handleSave}
+            disabled={!dirty || isLoading || missing.length > 0 || branchProtected}
+            title={branchProtected ? `${branch} is protected — changes come in through a review` : undefined}
+          >
             {isLoading ? (
               <>
                 <SaratiLoader size={13} /> Saving…
