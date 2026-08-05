@@ -11,7 +11,6 @@ import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
 import { ConnectionsService } from '../connections/connections.service';
-import { PolicyService } from '../policy/policy.service';
 import { isIdShape, newId, now } from '../database/ids';
 import { ComposioWebhookDeliveryEntity } from '../database/entities/composio-webhook-delivery.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
@@ -47,6 +46,7 @@ import {
 } from './trigger-catalog.service';
 import { WebhookSecretsService } from './webhook-secrets.service';
 import { verifyWebhookSignature, type WebhookVerification } from './webhook-verify';
+import { WorkflowAccessService } from '../workflows/workflow-access.service';
 
 /** One inbound delivery as the public intake sees it (raw bytes + headers required for HMAC verify). */
 export interface InboundWebhook {
@@ -131,7 +131,7 @@ export class TriggersService {
     private readonly runs: RunsService,
     private readonly envPointers: EnvPointersService,
     private readonly environments: EnvironmentsService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
     private readonly compiler: RuntimeCompiler,
     private readonly webhookSecrets: WebhookSecretsService,
     private readonly connections: ConnectionsService,
@@ -689,16 +689,8 @@ export class TriggersService {
    * counterpart of {@link pollActivation}'s writes. Authorized through the single policy point.
    */
   async activationHealth(principal: Principal, workflowId: string): Promise<ActivationHealth[]> {
-    const notFound = new DomainError(`Workflow ${workflowId} not found`, 404);
-    if (!isIdShape(workflowId)) throw notFound;
+    await this.access.require(principal, workflowId, 'read');
     const em = this.dataSource.manager;
-    const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
-    if (!wf) throw notFound;
-    const allowed = await this.policy.can(principal, 'read', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError('Not authorised to access this workflow', 403);
 
     const rows = await em.find(RuntimeTriggerActivationEntity, {
       where: { workflowId },

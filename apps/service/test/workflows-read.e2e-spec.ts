@@ -238,10 +238,10 @@ describe('workflows read slice (e2e, isolated DB, mock auth)', () => {
     expect(missing.body.detail).toContain('Branch not found');
   });
 
-  it('E2 authz: foreign workflow 403 (parity message); NULL-owner 403; unknown 404', async () => {
-    const foreign = await request(app.getHttpServer()).get(`/api/workflows/${foreignWfId}`).expect(403);
-    expect(foreign.body.detail).toBe('Not authorised to access this workflow');
-    await request(app.getHttpServer()).get(`/api/workflows/${orphanWfId}`).expect(403);
+  it('E2 authz: a foreign workflow, a NULL-owner one and an unknown id are all the same 404', async () => {
+    const foreign = await request(app.getHttpServer()).get(`/api/workflows/${foreignWfId}`).expect(404);
+    expect(foreign.body.detail).toContain('not found');
+    await request(app.getHttpServer()).get(`/api/workflows/${orphanWfId}`).expect(404);
     await request(app.getHttpServer()).get(`/api/workflows/${randomUUID()}`).expect(404);
     await request(app.getHttpServer()).get('/api/workflows/not-a-uuid').expect(404);
   });

@@ -420,12 +420,12 @@ describe('orchestr_diff (e2e, real MCP client, isolated DB)', () => {
       from_version_id: mainV1,
       to_version_id: mainV2,
     });
-    expect(text).toContain('Not authorised');
+    expect(text).toContain('not found'); // unreachable ≡ missing
 
     const rest = await request(app.getHttpServer())
       .get(`/api/workflows/${foreignWfId}/diff?from_version=1&to_version=2`)
       .set('Authorization', `Bearer ${readKey}`)
-      .expect(403);
-    expect(rest.body.detail).toBe('Not authorised to access this workflow');
+      .expect(404);
+    expect(rest.body.detail).toContain('not found');
   });
 });

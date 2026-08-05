@@ -1,15 +1,4 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  HttpException,
-  Param,
-  Patch,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Type } from 'class-transformer';
 import {
@@ -25,12 +14,13 @@ import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
-import { PolicyService, type PolicyAction } from '../policy/policy.service';
+import type { PolicyAction } from '../policy/policy.service';
 import { BranchService } from './branch.service';
 import { MergeOrchestrationService } from './merge-orchestration.service';
 import { MergeResolutionDto } from './merge-resolution.dto';
 import { branchView, WorkflowsReadService } from './workflows-read.service';
 import { Scope } from '../auth/scope.decorator';
+import { WorkflowAccessService } from './workflow-access.service';
 
 class CreateBranchDto {
   @IsString()
@@ -71,7 +61,7 @@ export class BranchesController {
     private readonly branches: BranchService,
     private readonly merges: MergeOrchestrationService,
     private readonly reads: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   @Scope('workflow:read')
@@ -168,11 +158,6 @@ export class BranchesController {
   }
 
   private async authorize(req: Request, workflowId: string, action: PolicyAction): Promise<void> {
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(requirePrincipal(req), action, {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new HttpException({ detail: 'Not authorised to access this workflow' }, 403);
+    await this.access.require(requirePrincipal(req), workflowId, action);
   }
 }

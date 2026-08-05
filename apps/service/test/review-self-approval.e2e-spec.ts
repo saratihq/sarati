@@ -206,6 +206,35 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
       .expect(201);
   });
 
+  it('unreachable reads as missing; reachable-but-not-permitted names what you cannot do', async () => {
+    // Solo's workflow is in nobody else's org, so the member cannot even see that it exists.
+    const hidden = await asSolo(
+      http()
+        .post('/api/deploy')
+        .send({ workflow_json: ir('solo private') }),
+    ).expect(201);
+    const hiddenId = hidden.body.workflow_id as string;
+    const unreachable = await asMember(http().get(`/api/workflows/${hiddenId}`)).expect(404);
+    expect(unreachable.body.detail).toContain('not found');
+    // Byte-identical to a workflow that never existed — the id must not confirm itself.
+    const ghost = await asMember(http().get(`/api/workflows/${randomUUID()}`)).expect(404);
+    expect(ghost.body.detail).toContain('not found');
+
+    // In the shared org the member CAN read, so a refusal must say what they may not do instead.
+    const shared = await asOwner(
+      http()
+        .post('/api/deploy')
+        .set('X-Org-Id', orgId)
+        .send({ workflow_json: ir('acme shared') }),
+    ).expect(201);
+    const sharedId = shared.body.workflow_id as string;
+    await asMember(http().get(`/api/workflows/${sharedId}`).set('X-Org-Id', orgId)).expect(200);
+    const refused = await asMember(http().delete(`/api/workflows/${sharedId}`).set('X-Org-Id', orgId)).expect(
+      403,
+    );
+    expect(refused.body.detail).toContain('manage');
+  });
+
   it('a workspace with nobody else to ask does not deadlock: the author may approve', async () => {
     const { workflowId, reviewId } = await openReview(asSolo, null, 'solo change');
     await asSolo(http().post(`/api/workflows/${workflowId}/reviews/${reviewId}/approve`))

@@ -8,13 +8,13 @@ import type { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { EnvironmentsService } from '../environments/environments.service';
 import type { WorkflowIR } from '../ir/models';
-import { PolicyService } from '../policy/policy.service';
 import { RunsService } from '../runs/runs.service';
 import type { RunOutcome } from '../runtime/run-plan';
 import { extractChatReply } from '../runtime/terminal-output';
 import { AGENT_TOOL_PUBLIC } from '../triggers/trigger-catalog.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { WorkflowsReadService } from './workflows-read.service';
+import { WorkflowAccessService } from './workflow-access.service';
 
 /** How long an invocation waits before handing back a run handle to poll (ADR 0053 §5). */
 export const DEFAULT_INVOKE_AWAIT_MS = 15_000;
@@ -57,7 +57,7 @@ export class WorkflowInvokeService {
     private readonly reads: WorkflowsReadService,
     private readonly envPointers: EnvPointersService,
     private readonly environments: EnvironmentsService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
     private readonly runs: RunsService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
@@ -98,13 +98,7 @@ export class WorkflowInvokeService {
    * may not reach must be indistinguishable from a missing one — hence the identical 404, never a 403.
    */
   private async reachableWorkflow(principal: Principal, workflowId: string): Promise<WorkflowEntity> {
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(principal, 'read', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError(`Workflow ${workflowId} not found`, 404);
-    return wf;
+    return this.access.require(principal, workflowId, 'read');
   }
 
   /**

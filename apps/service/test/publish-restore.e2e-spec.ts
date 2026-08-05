@@ -173,7 +173,7 @@ describe('publish / restore (e2e, isolated DB, mock auth)', () => {
     await http().post(`/api/workflows/${wfId}/restore`).send({ version_number: 0 }).expect(400);
   });
 
-  it('authz: nonexistent id 404s; a workflow you cannot access 403s', async () => {
+  it('authz: a nonexistent id and one you cannot reach answer the same 404', async () => {
     await http().post(`/api/workflows/${randomUUID()}/publish`).send({}).expect(404);
     await http().post(`/api/workflows/not-a-uuid/publish`).send({}).expect(404);
 
@@ -190,7 +190,7 @@ describe('publish / restore (e2e, isolated DB, mock auth)', () => {
        VALUES ($1, 'theirs', 'generated', $2, now(), now())`,
       [foreignWf, foreignUser],
     );
-    await http().post(`/api/workflows/${foreignWf}/publish`).send({}).expect(403);
-    await http().post(`/api/workflows/${foreignWf}/restore`).send({ version_number: 1 }).expect(403);
+    await http().post(`/api/workflows/${foreignWf}/publish`).send({}).expect(404);
+    await http().post(`/api/workflows/${foreignWf}/restore`).send({ version_number: 1 }).expect(404);
   });
 });

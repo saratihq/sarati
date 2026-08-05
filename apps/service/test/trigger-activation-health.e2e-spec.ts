@@ -185,8 +185,8 @@ describe('trigger activation health (e2e, mocked provider)', () => {
     expect(Number.isNaN(Date.parse(a.last_polled_at as string))).toBe(false);
   });
 
-  it('a non-owner is refused (403) — authz mirrors every workflow-scoped read', async () => {
-    await asB(http().get(`/api/triggers/activations?workflow_id=${wfId}`)).expect(403);
+  it('a non-owner is refused — authz mirrors every workflow-scoped read', async () => {
+    await asB(http().get(`/api/triggers/activations?workflow_id=${wfId}`)).expect(404);
   });
 
   it('an unknown workflow is 404 and a missing workflow_id is 400', async () => {

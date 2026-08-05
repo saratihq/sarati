@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Delete,
-  HttpException,
   Logger,
   Param,
   ParseIntPipe,
@@ -20,13 +19,14 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
-import { PolicyService, type PolicyAction } from '../policy/policy.service';
+import type { PolicyAction } from '../policy/policy.service';
 import { EnvPointersService } from './env-pointers.service';
 import { VersionsWriteService } from './versions-write.service';
 import { WorkflowLifecycleService } from './workflow-lifecycle.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { versionResponse } from './workflow-responses';
 import { Scope } from '../auth/scope.decorator';
+import { WorkflowAccessService } from './workflow-access.service';
 
 class WorkflowUpdateDto {
   @IsOptional()
@@ -110,7 +110,7 @@ export class WorkflowsWriteController {
     private readonly reads: WorkflowsReadService,
     private readonly lifecycle: WorkflowLifecycleService,
     private readonly versionsWrite: VersionsWriteService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
     private readonly envPointers: EnvPointersService,
   ) {}
 
@@ -257,13 +257,7 @@ export class WorkflowsWriteController {
     return this.versionsWrite.restore(workflowId, body.version_number, principal.user.id);
   }
 
-  private async authorize(req: Request, workflowId: string, action: PolicyAction): Promise<WorkflowEntity> {
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(requirePrincipal(req), action, {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new HttpException({ detail: 'Not authorised to access this workflow' }, 403);
-    return wf;
+  private authorize(req: Request, workflowId: string, action: PolicyAction): Promise<WorkflowEntity> {
+    return this.access.require(requirePrincipal(req), workflowId, action);
   }
 }

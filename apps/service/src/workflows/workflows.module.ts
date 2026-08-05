@@ -18,6 +18,7 @@ import { WorkflowInvokeController } from './workflow-invoke.controller';
 import { WorkflowInvokeService } from './workflow-invoke.service';
 import { WorkflowLifecycleService } from './workflow-lifecycle.service';
 import { WorkflowsController } from './workflows.controller';
+import { WorkflowAccessService } from './workflow-access.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { WorkflowsWriteController } from './workflows-write.controller';
 
@@ -41,6 +42,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
     WorkflowsController,
   ],
   providers: [
+    WorkflowAccessService,
     WorkflowsReadService,
     VersionsReadService,
     DiffService,
@@ -52,6 +54,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
     MergeOrchestrationService,
   ],
   exports: [
+    WorkflowAccessService,
     WorkflowsReadService,
     VersionsReadService,
     DiffService,

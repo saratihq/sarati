@@ -2,11 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
 import type { ApiScope } from '../../auth/scopes';
-import { DomainError } from '../../common/domain-error';
 import { isRecord } from '../../common/json-util';
-import { PolicyService } from '../../policy/policy.service';
 import { WorkflowsReadService, type BranchView } from '../../workflows/workflows-read.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 
 const Input = z.object({
   workflow_id: z.string(),
@@ -124,17 +123,12 @@ export class GetWorkflowTool implements McpTool {
 
   constructor(
     private readonly reads: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<WorkflowView> {
     const { workflow_id: workflowId, branch } = Input.parse(input);
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(ctx.principal, 'read', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError('Not authorised to access this workflow', 403);
+    await this.access.require(ctx.principal, workflowId, 'read');
 
     const view = await this.reads.getBranchHead(workflowId, branch ?? null);
     return {

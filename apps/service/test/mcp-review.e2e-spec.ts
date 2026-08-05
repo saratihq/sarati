@@ -443,14 +443,14 @@ describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
     expect(tools.some((t) => /merge/i.test(t.name))).toBe(false);
   });
 
-  it('a workflow the key cannot write is refused BEFORE a review row is created', async () => {
+  it('a workflow the key cannot reach is refused BEFORE a review row is created', async () => {
     const { text } = await refusal({
       workflow_id: foreignWfId,
       source_branch: 'main',
       target_branch: 'main',
       title: 'Not mine',
     });
-    expect(text).toContain('Not authorised');
+    expect(text).toContain('not found'); // unreachable ≡ missing
 
     const rows = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM workflow_reviews WHERE workflow_id = $1`,

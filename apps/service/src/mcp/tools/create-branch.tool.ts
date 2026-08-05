@@ -2,11 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
 import type { ApiScope } from '../../auth/scopes';
-import { DomainError } from '../../common/domain-error';
-import { PolicyService } from '../../policy/policy.service';
 import { BranchService } from '../../workflows/branch.service';
 import { WorkflowsReadService } from '../../workflows/workflows-read.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 
 const Input = z.object({
   workflow_id: z.uuid(),
@@ -67,17 +66,12 @@ export class CreateBranchTool implements McpTool {
   constructor(
     private readonly branches: BranchService,
     private readonly reads: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const args = Input.parse(input);
-    const wf = await this.reads.getWorkflowEntity(args.workflow_id);
-    const allowed = await this.policy.can(ctx.principal, 'write', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError('Not authorised to access this workflow', 403);
+    const wf = await this.access.require(ctx.principal, args.workflow_id, 'write');
 
     const branch = await this.branches.createBranch(
       wf.id,

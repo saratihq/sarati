@@ -5,9 +5,9 @@ import { DomainError } from '../common/domain-error';
 import type { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { computeDiff, IRDiffOperation, type IRDiff, type IRDiffEntry, type RenamePair } from '../ir/diff';
 import type { WorkflowIR } from '../ir/models';
-import { PolicyService } from '../policy/policy.service';
 import { branchIdsOf, VersionsReadService, type VersionRef } from './versions-read.service';
 import { WorkflowsReadService } from './workflows-read.service';
+import { WorkflowAccessService } from './workflow-access.service';
 
 /** One side of a diff, resolved — a version id is the only unambiguous reference (invariant #1). */
 export interface DiffSide {
@@ -65,7 +65,7 @@ export class DiffService {
   constructor(
     private readonly versionsRead: VersionsReadService,
     private readonly workflowsRead: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   /** The REST shape: the raw ops, plus both sides resolved to their id/number/branch. */
@@ -121,12 +121,7 @@ export class DiffService {
     from: VersionRef,
     to: VersionRef,
   ): Promise<{ from: DiffSide; to: DiffSide; diff: IRDiff }> {
-    const wf = await this.workflowsRead.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(principal, 'read', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError('Not authorised to access this workflow', 403);
+    await this.access.require(principal, workflowId, 'read');
 
     const fromVer = await this.versionsRead.resolveVersion(workflowId, from);
     if (!fromVer) throw notFound(workflowId, from);

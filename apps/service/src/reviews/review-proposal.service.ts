@@ -4,14 +4,13 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
 import type { Principal } from '../auth/principal';
-import { DomainError } from '../common/domain-error';
 import type { EnvConfig } from '../config/env.config';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
-import { PolicyService } from '../policy/policy.service';
 import { DiffService, type WorkflowChangeSet } from '../workflows/diff.service';
 import { WorkflowsReadService } from '../workflows/workflows-read.service';
 import { MergeProbeService, type Mergeability } from './merge-probe.service';
 import { ReviewsService } from './reviews.service';
+import { WorkflowAccessService } from '../workflows/workflow-access.service';
 
 /** What a reviewer is being asked to approve: the field-level ops, without their values. */
 export interface ReviewDiffSummary {
@@ -94,17 +93,12 @@ export class ReviewProposalService {
     private readonly diffs: DiffService,
     private readonly mergeProbe: MergeProbeService,
     private readonly reads: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
   ) {}
 
   async open(principal: Principal, input: OpenReviewInput): Promise<ReviewProposal> {
-    const wf = await this.reads.getWorkflowEntity(input.workflowId);
-    const allowed = await this.policy.can(principal, 'write', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new DomainError('Not authorised to access this workflow', 403);
+    await this.access.require(principal, input.workflowId, 'write');
 
     const review = await this.reviews.createReview(
       input.workflowId,

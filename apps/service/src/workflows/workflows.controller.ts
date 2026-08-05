@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, Param, ParseIntPipe, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, ParseIntPipe, Query, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
@@ -6,12 +6,12 @@ import { requirePrincipal } from '../auth/principal';
 import { ConfigService } from '@nestjs/config';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import type { EnvConfig } from '../config/env.config';
-import { PolicyService } from '../policy/policy.service';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
 import { DiffService } from './diff.service';
 import { VersionsReadService, type VersionRef } from './versions-read.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { Scope } from '../auth/scope.decorator';
+import { WorkflowAccessService } from './workflow-access.service';
 
 /** The workflow read surface; EVERY workflow-scoped route passes the policy check. */
 @Controller('api/workflows')
@@ -21,7 +21,7 @@ export class WorkflowsController {
     private readonly reads: WorkflowsReadService,
     private readonly versions: VersionsReadService,
     private readonly diffs: DiffService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
     private readonly envConfig: ConfigService<{ env: EnvConfig }, true>,
     private readonly encryption: EncryptionService,
   ) {}
@@ -105,14 +105,8 @@ export class WorkflowsController {
   }
 
   /** 404 unknown, 403 not-yours; a NULL owner AND NULL org denies. */
-  private async authorizeRead(req: Request, workflowId: string): Promise<WorkflowEntity> {
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(requirePrincipal(req), 'read', {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new HttpException({ detail: 'Not authorised to access this workflow' }, 403);
-    return wf;
+  private authorizeRead(req: Request, workflowId: string): Promise<WorkflowEntity> {
+    return this.access.require(requirePrincipal(req), workflowId, 'read');
   }
 }
 

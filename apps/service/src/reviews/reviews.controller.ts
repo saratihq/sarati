@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpException, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request } from 'express';
@@ -6,12 +6,13 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import type { ApprovalDecision } from '../database/entities/review.entity';
-import { PolicyService, type PolicyAction } from '../policy/policy.service';
+import type { PolicyAction } from '../policy/policy.service';
 import { MergeResolutionDto } from '../workflows/merge-resolution.dto';
 import { WorkflowsReadService } from '../workflows/workflows-read.service';
 import { ReviewTestService } from './review-test.service';
 import { ReviewsService } from './reviews.service';
 import { Scope } from '../auth/scope.decorator';
+import { WorkflowAccessService } from '../workflows/workflow-access.service';
 
 class CreateReviewDto {
   @IsString()
@@ -86,7 +87,7 @@ export class ReviewsController {
     private readonly reviews: ReviewsService,
     private readonly reviewTest: ReviewTestService,
     private readonly reads: WorkflowsReadService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   @Scope('workflow:read')
@@ -248,11 +249,6 @@ export class ReviewsController {
   }
 
   private async authorize(req: Request, workflowId: string, action: PolicyAction): Promise<void> {
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    const allowed = await this.policy.can(requirePrincipal(req), action, {
-      orgId: wf.orgId,
-      ownerUserId: wf.userId,
-    });
-    if (!allowed) throw new HttpException({ detail: 'Not authorised to access this workflow' }, 403);
+    await this.access.require(requirePrincipal(req), workflowId, action);
   }
 }

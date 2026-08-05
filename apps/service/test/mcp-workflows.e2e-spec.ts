@@ -270,7 +270,7 @@ describe('Platform MCP workflow reads (e2e, real client, isolated DB)', () => {
     const result = await call('orchestr_get_workflow', { workflow_id: foreignWfId });
     expect(result.isError).toBe(true);
     expect(result.structuredContent?.nodes).toBeUndefined();
-    expect(String(result.structuredContent?.error)).toContain('Not authorised');
+    expect(String(result.structuredContent?.error)).toContain('not found'); // unreachable ≡ missing
   });
 
   it('orchestr_list_workflows pages with the opaque cursor and stays inside the org', async () => {

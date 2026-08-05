@@ -386,7 +386,7 @@ describe('Platform MCP create surface (e2e, real client, isolated DB)', () => {
     const result = await call('orchestr_create_branch', { workflow_id: foreignWfId, name: 'intruder' });
 
     expect(result.isError).toBe(true);
-    expect(String(result.structuredContent?.error)).toContain('Not authorised');
+    expect(String(result.structuredContent?.error)).toContain('not found'); // unreachable ≡ missing
     expect(
       await rows(`SELECT id FROM workflow_branches WHERE workflow_id = $1 AND name = 'intruder'`, [
         foreignWfId,
