@@ -6,6 +6,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { ApiKeysService } from '../src/api-keys/api-keys.service';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
 import { createE2eDatabase } from './support/test-db';
@@ -57,6 +58,18 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
     await app.close();
     await db.end();
     process.env.DATABASE_URL = ADMIN_URL;
+  });
+
+  it('a new key must name its scopes — a stored null means full authority and only legacy rows carry it', async () => {
+    const keys = app.get(ApiKeysService);
+    // The UI used to send only a name; that minted an unscoped, therefore omnipotent, key.
+    await expect(keys.issue(userId, null, 'no scopes', null)).rejects.toThrow(/must name its scopes/);
+    await expect(keys.issue(userId, null, 'empty scopes', [])).rejects.toThrow(/must name its scopes/);
+
+    const issued = await keys.issue(userId, null, 'scoped', ['workflow:read']);
+    expect(issued.key).toMatch(/^ork_/);
+    const row = await db.query(`SELECT scopes FROM api_keys WHERE prefix = $1`, [issued.prefix]);
+    expect(row.rows[0].scopes).toEqual(['workflow:read']);
   });
 
   it('a valid ork_ key resolves to its owner + updates last_used_at', async () => {

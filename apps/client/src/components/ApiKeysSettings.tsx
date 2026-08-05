@@ -11,9 +11,26 @@ import { formatDate } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import { SaratiLoader } from "./SaratiLogo";
 
+/** Plain-language wording for the scopes the server grants; an unlabelled one shows its raw name. */
+const SCOPE_LABELS: Record<string, string> = {
+  "workflow:read": "Read workflows",
+  "workflow:write": "Create and edit workflows",
+  "workflow:deploy": "Publish, promote and merge",
+  "run:dry": "Preview runs — changes nothing outside",
+  "run:execute": "Run for real",
+  "workflow:invoke": "Call published workflows",
+  "connection:read": "See connected accounts",
+  "connection:write": "Manage connected accounts",
+  "org:manage": "Manage the organization",
+};
+
+const scopeLabel = (scope: string) => SCOPE_LABELS[scope] ?? scope;
+
 /** Personal `ork_` API keys — create (shown once) / list / revoke. Server: /api/api-keys. */
 export default function ApiKeysSettings() {
   const [keys, setKeys] = useState<ApiKeySummary[] | null>(null); // null = loading
+  const [grantable, setGrantable] = useState<string[]>([]);
+  const [scopes, setScopes] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -25,6 +42,7 @@ export default function ApiKeysSettings() {
     try {
       const res = await api.listApiKeys();
       setKeys(res.api_keys.filter((k) => !k.revoked_at)); // active only
+      setGrantable(res.grantable_scopes);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load API keys");
@@ -39,12 +57,13 @@ export default function ApiKeysSettings() {
 
   const create = async () => {
     const trimmed = name.trim();
-    if (!trimmed || creating) return;
+    if (!trimmed || scopes.length === 0 || creating) return;
     setCreating(true);
     try {
-      const key = await api.createApiKey(trimmed);
+      const key = await api.createApiKey(trimmed, scopes);
       setIssued(key);
       setName("");
+      setScopes([]);
       setCopied(false);
       await load();
     } catch (e) {
@@ -123,26 +142,62 @@ export default function ApiKeysSettings() {
         )}
 
         {/* Create */}
-        <div className="flex items-center gap-2 mb-4">
+        <div className="mb-4">
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void create();
-            }}
             placeholder="Key name (e.g. CI deploy)"
             maxLength={100}
-            className="flex-1 text-xs rounded px-2.5 py-1.5 outline-none"
+            aria-label="Key name"
+            className="w-full text-xs rounded px-2.5 py-1.5 outline-none"
             style={{
               background: "var(--orchestr-surface)",
               color: "var(--orchestr-ink)",
               border: "1px solid var(--orchestr-line)",
             }}
           />
-          <Button variant="secondary" size="sm" onClick={() => void create()} disabled={creating || !name.trim()}>
-            <Plus size={13} />
-            {creating ? "Creating…" : "Create key"}
-          </Button>
+
+          <fieldset className="border-none p-0 m-0 mt-3">
+            <legend className="text-[11px] mb-1.5 p-0" style={{ color: "var(--orchestr-ink-muted)" }}>
+              What may this key do? A key can only ever do what you pick here.
+            </legend>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+              {grantable.map((scope) => (
+                <label
+                  key={scope}
+                  className="flex items-center gap-2 text-[11px] cursor-pointer py-0.5"
+                  style={{ color: "var(--orchestr-ink)" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={scopes.includes(scope)}
+                    onChange={(e) =>
+                      setScopes((prev) => (e.target.checked ? [...prev, scope] : prev.filter((s) => s !== scope)))
+                    }
+                    className="shrink-0 cursor-pointer"
+                  />
+                  <span>{scopeLabel(scope)}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <div className="flex items-center gap-3 mt-3">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void create()}
+              disabled={creating || !name.trim() || scopes.length === 0}
+            >
+              <Plus size={13} />
+              {creating ? "Creating…" : "Create key"}
+            </Button>
+            {(!name.trim() || scopes.length === 0) && (
+              <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                {!name.trim() ? "Name the key" : "Pick at least one thing it may do"}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* List (active keys only) */}
@@ -173,6 +228,15 @@ export default function ApiKeysSettings() {
                     {k.prefix}… · created {formatDate(k.created_at)} ·{" "}
                     {k.last_used_at ? `last used ${formatDate(k.last_used_at)}` : "never used"}
                   </p>
+                  {k.scopes === null ? (
+                    <p className="text-[11px] mt-0.5 m-0" style={{ color: "var(--orchestr-warning)" }}>
+                      Full access — issued before keys carried scopes. Replace it with a scoped key.
+                    </p>
+                  ) : (
+                    <p className="text-[11px] mt-0.5 m-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                      {k.scopes.map(scopeLabel).join(" · ")}
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => setConfirmRevoke(k)}

@@ -36,22 +36,27 @@ export class ApiKeysService {
     name: string,
     scopes: string[] | null,
   ): Promise<IssuedKey> {
-    // Only known scopes, never the escalation scope. `null` = legacy full-authority key.
+    // A stored `null` means full authority, so a new key must never be issued with one — only rows
+    // that predate ADR 0051 carry it.
     const requested = scopes && scopes.length > 0 ? [...new Set(scopes)] : null;
-    if (requested) {
-      const unknown = requested.filter((s) => !isApiScope(s));
-      if (unknown.length > 0) {
-        throw new DomainError(
-          `Unknown scope(s): ${unknown.join(', ')}. Valid scopes: ${GRANTABLE_SCOPES.join(', ')}.`,
-          400,
-        );
-      }
-      if (requested.includes(NON_GRANTABLE_SCOPE)) {
-        throw new DomainError(
-          `The "${NON_GRANTABLE_SCOPE}" scope cannot be granted to an API key — a key that issues keys can issue an unscoped one. Manage keys from a signed-in session.`,
-          400,
-        );
-      }
+    if (!requested) {
+      throw new DomainError(
+        `Choose what this key may do — an API key must name its scopes. Valid scopes: ${GRANTABLE_SCOPES.join(', ')}.`,
+        400,
+      );
+    }
+    const unknown = requested.filter((s) => !isApiScope(s));
+    if (unknown.length > 0) {
+      throw new DomainError(
+        `Unknown scope(s): ${unknown.join(', ')}. Valid scopes: ${GRANTABLE_SCOPES.join(', ')}.`,
+        400,
+      );
+    }
+    if (requested.includes(NON_GRANTABLE_SCOPE)) {
+      throw new DomainError(
+        `The "${NON_GRANTABLE_SCOPE}" scope cannot be granted to an API key — a key that issues keys can issue an unscoped one. Manage keys from a signed-in session.`,
+        400,
+      );
     }
 
     const secret = randomBytes(24).toString('base64url');

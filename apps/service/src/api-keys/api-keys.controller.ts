@@ -4,6 +4,7 @@ import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
+import { GRANTABLE_SCOPES } from '../auth/scopes';
 import { WorkflowLifecycleService } from '../workflows/workflow-lifecycle.service';
 import { ApiKeysService, type IssuedKey } from './api-keys.service';
 import { Scope } from '../auth/scope.decorator';
@@ -31,8 +32,14 @@ export class ApiKeysController {
 
   @Scope('key:manage')
   @Get()
-  async list(@Req() req: Request): Promise<{ api_keys: Array<Record<string, unknown>> }> {
-    return { api_keys: await this.apiKeys.list(requirePrincipal(req).user.id) };
+  async list(
+    @Req() req: Request,
+  ): Promise<{ api_keys: Array<Record<string, unknown>>; grantable_scopes: readonly string[] }> {
+    // The picker offers what the server grants, so the two can never drift apart.
+    return {
+      api_keys: await this.apiKeys.list(requirePrincipal(req).user.id),
+      grantable_scopes: GRANTABLE_SCOPES,
+    };
   }
 
   @Scope('key:manage')

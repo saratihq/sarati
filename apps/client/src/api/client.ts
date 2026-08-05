@@ -393,14 +393,17 @@ export interface IssuedApiKey {
   created_at: string | null;
 }
 
-export async function listApiKeys(): Promise<{ api_keys: ApiKeySummary[] }> {
+export async function listApiKeys(): Promise<{
+  api_keys: ApiKeySummary[];
+  grantable_scopes: string[];
+}> {
   return request("/api-keys");
 }
 
-export async function createApiKey(name: string): Promise<IssuedApiKey> {
+export async function createApiKey(name: string, scopes: string[]): Promise<IssuedApiKey> {
   return request("/api-keys", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, scopes }),
   });
 }
 
