@@ -9,11 +9,6 @@ convenience, and not once it moves money, messages customers or runs payroll.
 
 Sarati treats a workflow the way you already treat code.
 
-<!-- BEFORE PUBLIC: the install below is verified working end to end against locally-built images.
-     Two things still have to be true for a stranger: the images must be pushed to GHCR, and
-     get.sarati.io must serve install.sh. Until both are done, this command fails for everyone
-     but us. -->
-
 ## Quickstart
 
 ```bash
