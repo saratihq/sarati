@@ -1,4 +1,6 @@
-import { beforeEach } from "vitest";
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach, beforeEach } from "vitest";
 
 // Node ships its own no-op `localStorage` global, and it SHADOWS jsdom's inside the test environment
 // — every setItem/removeItem call would throw. Install a real in-memory Storage instead.
@@ -19,6 +21,9 @@ function createStorage(): Storage {
 for (const name of ["localStorage", "sessionStorage"] as const) {
   Object.defineProperty(globalThis, name, { configurable: true, value: createStorage() });
 }
+
+// `globals` is off, so RTL's own auto-cleanup never registers.
+afterEach(cleanup);
 
 beforeEach(() => {
   window.localStorage.clear();

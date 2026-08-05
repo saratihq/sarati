@@ -5,6 +5,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { DomainError } from '../common/domain-error';
 import { newId, now } from '../database/ids';
 import { UserEntity } from '../database/entities/user.entity';
+import { WorkflowReviewEntity } from '../database/entities/review.entity';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
@@ -262,6 +263,22 @@ export class BranchService {
       if (!target) throw new DomainError(`Branch '${targetBranchName}' not found`);
       if (!source.headVersionId || !target.headVersionId) {
         throw new DomainError('Both branches must have at least one commit');
+      }
+
+      // Enforced here, not per caller, so the branches page inherits it too (constitution row 5).
+      if (target.isProtected) {
+        const approvals = await em
+          .createQueryBuilder(WorkflowReviewEntity, 'r')
+          .where('r.workflow_id = :workflowId', { workflowId })
+          .andWhere('r.source_branch_id = :sourceId', { sourceId: source.id })
+          .andWhere('r.target_branch_id = :targetId', { targetId: target.id })
+          .andWhere('r.status = :status', { status: 'approved' })
+          .getCount();
+        if (approvals === 0) {
+          throw new DomainError(
+            `Branch '${targetBranchName}' is protected — merge it through an approved review`,
+          );
+        }
       }
 
       if (source.headVersionId === target.headVersionId) {

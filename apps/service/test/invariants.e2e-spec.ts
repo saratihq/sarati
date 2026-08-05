@@ -1,5 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
 
@@ -175,10 +176,19 @@ describe('domain invariants (the constitution)', () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
-    process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    // Rate limits have their own contract test (app.e2e-spec "429 contract"); left on here they only
+    // cap how many invariants this file may assert, and the cap is wall-clock dependent. Disabled at
+    // the storage: a per-route @Throttle overrides the env-driven limit, and APP_GUARD ignores
+    // overrideGuard, so this is the only seam that actually stops the counting.
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ThrottlerStorage)
+      .useValue({
+        increment: () =>
+          Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
+      })
+      .compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
@@ -296,6 +306,46 @@ describe('domain invariants (the constitution)', () => {
     expect(announce.parameters.separator).toBe(' | '); // main's field survived
     expect(announce.parameters.texts).toEqual(['lane-edit']); // lane's field survived
     await http().delete(`/api/workflows/${wf2}`).expect(200);
+  });
+
+  it('a protected target refuses any merge no approved review authorised, through BOTH entry points', async () => {
+    const wf = await seed('inv protected-merge');
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: ir(['lane-change']), branch: 'lane' })
+      .expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/main/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+
+    // Branches page: no review at all. This goes red if the guard moves back into the reviews path.
+    const direct = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(400);
+    expect(direct.body.detail).toContain('protected');
+
+    // Reviews page: a review that exists but is not approved.
+    const review = await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+      .expect(201);
+    await http().post(`/api/workflows/${wf}/reviews/${review.body.id}/merge`).send({}).expect(400);
+    await http().post(`/api/workflows/${wf}/branches/lane/merge`).send({ target_branch: 'main' }).expect(400);
+
+    // Approved — both entry points open.
+    await http()
+      .post(`/api/workflows/${wf}/reviews/${review.body.id}/approve`)
+      .send({ decision: 'approved' })
+      .expect(201);
+    const merged = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(merged.body.status).toBe('merged');
+    await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
   it('latest floats to the merge commit, inside the merge itself', async () => {

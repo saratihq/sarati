@@ -1,12 +1,19 @@
+import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NodeParamSchema, NodeTypeEntry } from "@/api/client";
-import { collectMissingRequired } from "@/lib/workflow-validation";
+import { collectMissingRequired, useMissingRequired } from "@/lib/workflow-validation";
 
 // The catalog is fetched over HTTP by the panel module; the gate only needs its schema lookup.
 // Hoisted alongside the mock, which vitest lifts above every import.
-const { catalog } = vi.hoisted(() => ({ catalog: new Map<string, NodeTypeEntry>() }));
+const { catalog, lookups } = vi.hoisted(() => ({
+  catalog: new Map<string, NodeTypeEntry>(),
+  lookups: { count: 0 },
+}));
 vi.mock("@/components/NodeCatalogPanel", () => ({
-  catalogEntryFor: (nodeType: string) => Promise.resolve(catalog.get(nodeType) ?? null),
+  catalogEntryFor: (nodeType: string) => {
+    lookups.count += 1;
+    return Promise.resolve(catalog.get(nodeType) ?? null);
+  },
 }));
 
 function publish(type: string, parameters: Record<string, NodeParamSchema>) {
@@ -29,6 +36,7 @@ const fieldsOf = async (doc: Record<string, unknown> | null) =>
 
 beforeEach(() => {
   catalog.clear();
+  lookups.count = 0;
   publish("gmail.send_message", {
     to: { type: "STRING", required: true },
     subject: { type: "STRING", required: true },
@@ -246,5 +254,43 @@ describe("the shape check and the flat walk together", () => {
     );
     const missing = await collectMissingRequired(doc);
     expect(missing.map((m) => `${m.nodeId}.${m.field}`)).toEqual(["b.to", "b.subject", "c.cases"]);
+  });
+});
+
+describe("the live gate the editor's Save button reads", () => {
+  const incomplete = () => ir(node({ node_type: "gmail.send_message" }));
+
+  it("reports nothing until the walk resolves, then the missing fields", async () => {
+    const { result } = renderHook(() => useMissingRequired(incomplete()));
+    expect(result.current).toEqual([]);
+    await waitFor(() => expect(result.current.map((m) => m.field)).toEqual(["to", "subject"]));
+  });
+
+  it("clears once the fields are filled", async () => {
+    const { result, rerender } = renderHook(({ doc }) => useMissingRequired(doc), {
+      initialProps: { doc: incomplete() },
+    });
+    await waitFor(() => expect(result.current).toHaveLength(2));
+
+    rerender({ doc: ir(node({ node_type: "gmail.send_message", parameters: { to: "a", subject: "b" } })) });
+    await waitFor(() => expect(result.current).toEqual([]));
+  });
+
+  it("does not re-walk when only a position changed — dragging a card is not an edit", async () => {
+    const { result, rerender } = renderHook(({ doc }) => useMissingRequired(doc), {
+      initialProps: { doc: ir(node({ node_type: "gmail.send_message", position: { x: 0, y: 0 } })) },
+    });
+    await waitFor(() => expect(result.current).toHaveLength(2));
+    const afterFirstWalk = lookups.count;
+    expect(afterFirstWalk).toBeGreaterThan(0);
+
+    rerender({ doc: ir(node({ node_type: "gmail.send_message", position: { x: 900, y: 40 } })) });
+    await waitFor(() => expect(result.current).toHaveLength(2));
+    expect(lookups.count).toBe(afterFirstWalk);
+
+    // A parameter edit on the same node DOES re-walk, so the memo is not just frozen.
+    rerender({ doc: ir(node({ node_type: "gmail.send_message", parameters: { to: "a", subject: "b" } })) });
+    await waitFor(() => expect(result.current).toEqual([]));
+    expect(lookups.count).toBeGreaterThan(afterFirstWalk);
   });
 });
