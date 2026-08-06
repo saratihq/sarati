@@ -209,6 +209,63 @@ describe('orchestr:agent — durable loop (scripted model)', () => {
     return { model, interpreter, calls, plan: compileWorkflowIrDag(doc) };
   };
 
+  it("hands the model the sub-workflow's DECLARED contract, and its own text still wins", async () => {
+    const doc = ir(
+      [
+        node('chat', 'orchestr:chat'),
+        node('agent', 'orchestr:agent', { max_steps: 3 }),
+        node('sub', 'orchestr:call_workflow', { workflow_id: 'wf-doubler', tool_name: 'doubler' }),
+      ],
+      [edge('chat', 'agent'), edge('agent', 'sub', 'tool')],
+    );
+    const { model, interpreter, plan } = runWith(
+      doc,
+      [{ text: 'done', toolCalls: [], usage: { totalTokens: 1 } }],
+      recordingProvider([], () => ({})),
+    );
+    interpreter.setAgentWorkflowCatalog({
+      describeWorkflow: () =>
+        Promise.resolve({
+          description: 'Doubles a number. Pass the number as n.',
+          parameters: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
+        }),
+    });
+
+    await interpreter.run(plan, { externalUserId: 'u1', initialScope: { trigger: { chatInput: 'go' } } });
+
+    const tool = model.requests[0]!.tools[0]!;
+    expect(tool.description).toBe('Doubles a number. Pass the number as n.');
+    // Without this the model is handed an open schema and can only ever call the tool with {}.
+    expect(tool.parameters).toEqual({
+      type: 'object',
+      properties: { n: { type: 'number' } },
+      required: ['n'],
+    });
+  });
+
+  it('offers an open schema when the sub-workflow declares nothing, rather than failing the run', async () => {
+    const doc = ir(
+      [
+        node('chat', 'orchestr:chat'),
+        node('agent', 'orchestr:agent', { max_steps: 3 }),
+        node('sub', 'orchestr:call_workflow', { workflow_id: 'wf-bare', tool_name: 'bare' }),
+      ],
+      [edge('chat', 'agent'), edge('agent', 'sub', 'tool')],
+    );
+    const { model, interpreter, plan } = runWith(
+      doc,
+      [{ text: 'done', toolCalls: [], usage: { totalTokens: 1 } }],
+      recordingProvider([], () => ({})),
+    );
+    interpreter.setAgentWorkflowCatalog({ describeWorkflow: () => Promise.resolve(undefined) });
+
+    await interpreter.run(plan, { externalUserId: 'u1', initialScope: { trigger: { chatInput: 'go' } } });
+
+    const tool = model.requests[0]!.tools[0]!;
+    expect(tool.description).toBe('Runs the bare workflow');
+    expect(tool.parameters).toEqual({ type: 'object', properties: {} });
+  });
+
   it('runs the tool via the durable dispatch, returns {text,...}, and records steps[] in the pinned shape', async () => {
     const calls: ActionCall[] = [];
     const provider = recordingProvider(calls, () => ({ ok: true, msg: 'sent' }));

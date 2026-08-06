@@ -102,6 +102,15 @@ export interface AgentToolCatalog {
   describeAction(actionId: string): { description: string; parameters: JsonSchema } | undefined;
 }
 
+/**
+ * Optional seam describing a SUB-WORKFLOW tool for the model call — the contract its
+ * `orchestr:tool_trigger` declares (ADR 0053 §1). Behind a seam because resolving it reads the
+ * published version, which the pure runtime must not do itself. `undefined` = nothing declared.
+ */
+export interface AgentWorkflowCatalog {
+  describeWorkflow(workflowId: string): Promise<{ description: string; parameters: JsonSchema } | undefined>;
+}
+
 /** DI token for the action-tool describer. Optional. */
 export const AGENT_TOOL_CATALOG = Symbol('AGENT_TOOL_CATALOG');
 

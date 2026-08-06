@@ -14,6 +14,7 @@ import {
   type AgentStepSink,
   type AgentSubWorkflowRunner,
   type AgentToolCatalog,
+  type AgentWorkflowCatalog,
   type DagAgentTool,
   type JsonSchema,
   type ToolSchema,
@@ -192,6 +193,8 @@ export abstract class BasePlanInterpreter {
   protected readonly agentStepSink?: AgentStepSink;
   /** Sub-workflow tool runner (ADR 0045 §3); setter-injected because a constructor dep would be a module cycle. */
   protected agentSubWorkflowRunner?: AgentSubWorkflowRunner;
+  /** Declared contract for a sub-workflow tool (ADR 0053 §1); setter-injected for the same cycle. */
+  protected agentWorkflowCatalog?: AgentWorkflowCatalog;
 
   constructor(
     provider: ManagedIntegrationProvider,
@@ -211,6 +214,11 @@ export abstract class BasePlanInterpreter {
   /** Bind the sub-workflow tool runner (ADR 0045 §3) — called once by `RunsService`. */
   setAgentSubWorkflowRunner(runner: AgentSubWorkflowRunner): void {
     this.agentSubWorkflowRunner = runner;
+  }
+
+  /** Bind the sub-workflow tool contract source (ADR 0053 §1) — called once by `RunsService`. */
+  setAgentWorkflowCatalog(catalog: AgentWorkflowCatalog): void {
+    this.agentWorkflowCatalog = catalog;
   }
 
   /** Run a whole plan under the shared lifecycle envelope: context, scope, `schedule`, terminal record, blob cleanup. */
@@ -618,7 +626,7 @@ export abstract class BasePlanInterpreter {
     if (!model) {
       throw new Error(`Agent "${node.id}" cannot run: no tool-aware model call is configured`);
     }
-    const tools = this.buildToolSchemas(node.tools);
+    const tools = await this.buildToolSchemas(node.tools);
     const buffer: AgentMessage[] = [];
     // First user message: the `input` expression resolved against scope, else the trigger
     // payload; `inputLiteral` (test runs) passes verbatim — a typed task is not an expression.
@@ -803,24 +811,30 @@ export abstract class BasePlanInterpreter {
    * Build the tool schemas the model call receives (ADR 0045 §4): an action tool's is derived from
    * its prop schema via the optional catalog, a sub-workflow tool's is declared. Author text wins.
    */
-  private buildToolSchemas(tools: DagAgentTool[]): ToolSchema[] {
-    return tools.map((tool) => {
-      if (tool.kind === 'workflow') {
-        // Never emit an empty description — it is the top degrader of model tool selection.
+  private async buildToolSchemas(tools: DagAgentTool[]): Promise<ToolSchema[]> {
+    return Promise.all(
+      tools.map(async (tool) => {
+        if (tool.kind === 'workflow') {
+          // What the sub-workflow DECLARES about being called; never inferred from its expressions,
+          // which would publish a contract nobody wrote down (ADR 0053 §1).
+          const declared = await this.agentWorkflowCatalog?.describeWorkflow(tool.workflowId);
+          // Never emit an empty description — it is the top degrader of model tool selection.
+          return {
+            name: tool.name,
+            description:
+              firstNonEmpty(tool.description, declared?.description) ?? `Runs the ${tool.name} workflow`,
+            parameters: tool.parameters ?? declared?.parameters ?? OPEN_TOOL_SCHEMA,
+          };
+        }
+        const described = this.agentToolCatalog?.describeAction(tool.actionId);
+        // Author override → catalog description → the action id as a last-resort non-empty label.
         return {
           name: tool.name,
-          description: firstNonEmpty(tool.description) ?? `Runs the ${tool.name} workflow`,
-          parameters: tool.parameters ?? OPEN_TOOL_SCHEMA,
+          description: firstNonEmpty(tool.description, described?.description) ?? tool.actionId,
+          parameters: described?.parameters ?? OPEN_TOOL_SCHEMA,
         };
-      }
-      const described = this.agentToolCatalog?.describeAction(tool.actionId);
-      // Author override → catalog description → the action id as a last-resort non-empty label.
-      return {
-        name: tool.name,
-        description: firstNonEmpty(tool.description, described?.description) ?? tool.actionId,
-        parameters: described?.parameters ?? OPEN_TOOL_SCHEMA,
-      };
-    });
+      }),
+    );
   }
 
   /**

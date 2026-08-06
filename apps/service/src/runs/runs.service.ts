@@ -15,7 +15,7 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { DbosRuntime } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
 import { PassThroughDurableStep } from '../providers/durable-step';
-import type { AgentSubWorkflowRunner } from '../runtime/agent';
+import type { AgentSubWorkflowRunner, AgentWorkflowCatalog } from '../runtime/agent';
 import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
@@ -195,6 +195,11 @@ export class RunsService {
   /** Bind the sub-workflow-as-tool runner onto the ONE interpreter (ADR 0045 §3) — a setter, since the runner sits above us and a constructor dep would cycle. */
   bindSubWorkflowRunner(runner: AgentSubWorkflowRunner): void {
     this.interpreter.setAgentSubWorkflowRunner(runner);
+  }
+
+  /** Bind the sub-workflow tool CONTRACT source onto the same interpreter (ADR 0053 §1). */
+  bindWorkflowToolCatalog(catalog: AgentWorkflowCatalog): void {
+    this.interpreter.setAgentWorkflowCatalog(catalog);
   }
 
   /**
