@@ -6,6 +6,30 @@ import type { EnvConfig } from '../config/env.config';
 
 export const PG_BOSS = Symbol('PG_BOSS');
 
+/**
+ * Serializes queue registration. Concurrent `createQueue`/`schedule` calls from separate modules
+ * deadlock against pg-boss's own schema creation on a cold database, and the loser's job never runs.
+ */
+@Injectable()
+export class JobRegistry {
+  private chain: Promise<unknown> = Promise.resolve();
+
+  constructor(@Inject(PG_BOSS) private readonly boss: PgBoss | null) {}
+
+  /** Runs `register` after every earlier registration has settled; resolves false when jobs are off. */
+  async register(register: (boss: PgBoss) => Promise<void>): Promise<boolean> {
+    const boss = this.boss;
+    if (!boss) return false;
+    const run = this.chain.then(() => register(boss));
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
+    return true;
+  }
+}
+
 @Injectable()
 export class JobsLifecycle implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(JobsLifecycle.name);
@@ -44,7 +68,8 @@ export class JobsLifecycle implements OnModuleInit, OnApplicationShutdown {
       },
     },
     JobsLifecycle,
+    JobRegistry,
   ],
-  exports: [PG_BOSS],
+  exports: [PG_BOSS, JobRegistry],
 })
 export class JobsModule {}
