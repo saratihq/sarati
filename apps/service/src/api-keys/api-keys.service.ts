@@ -36,8 +36,7 @@ export class ApiKeysService {
     name: string,
     scopes: string[] | null,
   ): Promise<IssuedKey> {
-    // A stored `null` means full authority, so a new key must never be issued with one — only rows
-    // that predate ADR 0051 carry it.
+    // A stored `null` means full authority; only legacy rows carry it and no new key may.
     const requested = scopes && scopes.length > 0 ? [...new Set(scopes)] : null;
     if (!requested) {
       throw new DomainError(

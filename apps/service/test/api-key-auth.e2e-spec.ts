@@ -60,9 +60,8 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
     process.env.DATABASE_URL = ADMIN_URL;
   });
 
-  it('a new key must name its scopes — a stored null means full authority and only legacy rows carry it', async () => {
+  it('a new key must name its scopes — a stored null means full authority', async () => {
     const keys = app.get(ApiKeysService);
-    // The UI used to send only a name; that minted an unscoped, therefore omnipotent, key.
     await expect(keys.issue(userId, null, 'no scopes', null)).rejects.toThrow(/must name its scopes/);
     await expect(keys.issue(userId, null, 'empty scopes', [])).rejects.toThrow(/must name its scopes/);
 
