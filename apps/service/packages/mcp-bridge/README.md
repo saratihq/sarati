@@ -36,10 +36,12 @@ the server refuses anything beyond them whether or not a tool was listed:
 | `workflow:read` | Reading workflows, versions, diffs and runs. Required to open a session at all. |
 | `connection:read` | Listing which connections exist (ids and status only — never credentials). |
 | `workflow:write` | Editing, committing to a branch, opening a review. |
-| `run:execute` | Running a workflow for real rather than as a dry run. |
+| `run:dry` | Testing a workflow as a dry run, which changes nothing outside. |
+| `run:execute` | Letting that test fire for real instead. |
 
-No issuable scope grants deploy, promote, merge, connection changes, organization administration or
-key issuance. An agent's terminal move is opening a review for a human.
+Those five are every scope the tools ask for. No tool deploys, promotes, merges, changes a connection
+or administers an organization — so a key carrying broader scopes still cannot reach those operations
+here. An agent's terminal move is opening a review for a human.
 
 ## License
 
