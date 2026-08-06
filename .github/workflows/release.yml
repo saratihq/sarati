@@ -18,8 +18,10 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # One failing image must not leave a half-published release behind a moved `latest`.
-      fail-fast: true
+      # Each image pushes independently, so cancelling siblings cannot prevent a partial release —
+      # it only hides which ones would have worked and makes a rerun cancel itself. `verify` is the
+      # gate: it needs all three, and a missing one fails the release there.
+      fail-fast: false
       matrix:
         app: [service, client, agent]
     steps:
