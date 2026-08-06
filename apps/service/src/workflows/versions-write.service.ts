@@ -275,8 +275,7 @@ export class VersionsWriteService {
       if (!wf) throw new DomainError(`Workflow ${input.workflowId} not found`, 404);
       const branch = await this.lockBranchByName(em, wf.id, input.branchName);
 
-      // Protection would be decorative if authored change could land here directly: merge is gated,
-      // so this must be too. Rollback deliberately still lands — it is the documented recovery path.
+      // Rollback deliberately still lands here — it is the documented recovery path.
       if (branch.isProtected) {
         throw new DomainError(
           `Branch '${branch.name}' is protected — commit to a branch and open a review to bring it in`,

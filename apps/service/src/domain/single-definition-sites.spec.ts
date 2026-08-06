@@ -48,11 +48,7 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(offenders).toEqual([]);
   });
 
-  /**
-   * Constitution #16: ten hand-rolled copies of this check once existed and one of them answered
-   * differently, which is how a workflow you cannot read came to confirm its own existence. Deciding
-   * it inline is the drift; `WorkflowAccessService.require` is the only place allowed to.
-   */
+  /** Constitution #16: `WorkflowAccessService.require` is the only place allowed to decide it. */
   it('no route re-decides workflow access inline — it asks WorkflowAccessService', () => {
     // Loading a workflow AND deciding on it is the pattern; authorizing a CREATE has no workflow to
     // reach, so it legitimately asks `policy.can` on the org alone.
