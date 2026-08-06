@@ -1,6 +1,6 @@
 {
   "name": "sarati-mcp",
-  "version": "0.0.0-semantically-released",
+  "version": "0.1.0",
   "description": "stdio bridge to a Sarati instance's MCP endpoint \u2014 forwards frames, holds no tool definitions",
   "license": "MIT",
   "repository": {
