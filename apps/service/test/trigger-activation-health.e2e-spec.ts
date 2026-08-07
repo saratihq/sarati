@@ -14,9 +14,7 @@ import {
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A canvas-node polling workflow (ADR 0018) — the kind whose activation records poll health. */
 function pollingDoc(): Record<string, unknown> {

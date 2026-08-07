@@ -12,9 +12,7 @@ import { AgentStepBus } from '../src/runtime/agent-step-bus';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A `chat → agent(one tool) → reply` workflow; `reply` is the unique terminal leaf, so its output is the chat reply. */
 function agentChatDoc(): Record<string, unknown> {

@@ -8,9 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A canvas webhook trigger feeding an announce step whose output proves WHICH version ran. */
 function irDoc(prefix: string): Record<string, unknown> {

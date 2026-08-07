@@ -9,9 +9,8 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const ACCOUNT_ID = 'ca_stub_gmail';
 

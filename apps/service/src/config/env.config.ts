@@ -2,7 +2,9 @@ import { plainToInstance } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsString, Min, validateSync } from 'class-validator';
 
 const INSECURE_SECRET_KEY = 'change-me-in-production';
-const DEFAULT_DATABASE_URL = 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+
+/** The database CONTRIBUTING tells you to create, so a fresh clone runs with no .env at all. */
+export const DEFAULT_DATABASE_URL = 'postgresql://orchestr:orchestr@localhost:5432/orchestr_svc';
 
 /** Where the client runs in development — the one default behind CORS, azp and the OAuth redirect. */
 const DEFAULT_CLIENT_ORIGIN = 'http://localhost:3100';

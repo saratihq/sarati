@@ -9,9 +9,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** The trigger IS the `orchestr:webhook` node (ADR 0018) — its activation derives from the env pointer. */
 function webhookDoc(): Record<string, unknown> {

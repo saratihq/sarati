@@ -10,9 +10,8 @@ import { UserProvisioningService } from '../src/auth/user-provisioning.service';
 import { AgentModelCallProvider, AGENT_MODEL_FETCH } from '../src/providers/agent-model-call.provider';
 import { AGENT_MODEL_CALL, type AgentResult } from '../src/runtime/agent';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 

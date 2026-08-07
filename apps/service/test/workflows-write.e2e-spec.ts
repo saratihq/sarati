@@ -6,9 +6,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A trigger feeding one REAL catalog action (so the node-type gate passes) whose `subject` diverges per commit. */
 const wfJson = (name: string, subject: string): Record<string, unknown> => ({

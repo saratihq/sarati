@@ -9,9 +9,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** An `orchestr:chat` node → step → sink; the sink is the unique terminal leaf, so its output is the reply. */
 function chatDoc(): Record<string, unknown> {

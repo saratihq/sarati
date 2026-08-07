@@ -8,9 +8,8 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 /** ADR 0023 — compiled IR and raw plans both lower onto the ONE DagInterpreter; DBOS off (direct path). */

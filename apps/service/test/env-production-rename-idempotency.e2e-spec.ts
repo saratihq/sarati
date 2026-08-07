@@ -4,9 +4,8 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const mig = (name: string): string => readFileSync(join(__dirname, '..', 'db', 'migrations', name), 'utf8');
 const M005 = mig('005_env_promotion_pointers.sql');
 const M006 = mig('006_environments.sql');

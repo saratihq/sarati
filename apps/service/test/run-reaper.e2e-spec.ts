@@ -7,9 +7,7 @@ import { Client } from 'pg';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { RunReaperService } from '../src/runs/run-reaper.service';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** The reaper errors out crashed non-terminal runs; RUN_MAX_DURATION_SECONDS defaults to 3600. */
 describe('run durability reaper (B8, e2e, isolated DB)', () => {

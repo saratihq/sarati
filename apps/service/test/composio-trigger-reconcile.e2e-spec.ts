@@ -12,9 +12,7 @@ import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provi
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A manual-trigger workflow: no desired composio activation, so a seeded row converges to a teardown (F2). */
 const manualDoc = (name: string): Record<string, unknown> => ({

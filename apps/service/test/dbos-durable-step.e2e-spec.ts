@@ -16,7 +16,7 @@ import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import type { RunPlan } from '../src/runtime/run-plan';
-import { withDatabase } from './support/test-db';
+import { ADMIN_URL, withDatabase } from './support/test-db';
 
 // A ManagedIntegrationProvider backed by the SDK http.send_request action (auth `none`, in-process).
 const sdkConfig = {
@@ -32,8 +32,6 @@ function sdkProvider(): ManagedIntegrationProvider {
     disableTrigger: () => Promise.resolve(),
   };
 }
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 
 /** Re-invoking a run with the same id (DBOS crash recovery) must replay the checkpoint, not re-fire. */
 describe('DBOS durable execution (Phase 1b)', () => {
