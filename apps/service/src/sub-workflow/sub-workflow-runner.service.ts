@@ -15,6 +15,7 @@ import { MAX_SUB_WORKFLOW_DEPTH, MAX_SUB_WORKFLOW_INVOCATIONS } from '../runtime
 import type { DagPlan } from '../runtime/dag-plan';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import { extractChatReply } from '../runtime/terminal-output';
+import { WorkflowToolContractService } from '../workflows/workflow-tool-contract.service';
 import { EnvPointersService } from '../workflows/env-pointers.service';
 
 /**
@@ -37,11 +38,13 @@ export class SubWorkflowRunnerService implements AgentSubWorkflowRunner, OnModul
     private readonly runs: RunsService,
     private readonly compiler: RuntimeCompiler,
     private readonly envPointers: EnvPointersService,
+    private readonly toolContracts: WorkflowToolContractService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
   onModuleInit(): void {
     this.runs.bindSubWorkflowRunner(this);
+    this.runs.bindWorkflowToolCatalog(this.toolContracts);
   }
 
   async run(call: SubWorkflowToolCall, ctx: AgentSubWorkflowContext): Promise<unknown> {
