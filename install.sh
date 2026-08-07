@@ -34,6 +34,18 @@ done
 if [ -f .env ]; then
   say "Keeping the existing .env — your keys and data are untouched."
 else
+  # The compose file pins one project name, so its volumes are shared by every install on this
+  # machine unless COMPOSE_PROJECT_NAME says otherwise. Writing fresh secrets against an existing
+  # database gives Postgres a password it never had (crash loop) and a FERNET_KEY that cannot
+  # decrypt what the old one stored.
+  project="${COMPOSE_PROJECT_NAME:-sarati}"
+  if docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
+    die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
+  Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
+  To run a SECOND instance alongside it:  COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
+  To erase that database and start over:  docker volume rm ${project}_db-data"
+  fi
+
   say "Generating this install's secrets…"
   # Base64url so the values are safe unquoted in an env file.
   rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"; }
