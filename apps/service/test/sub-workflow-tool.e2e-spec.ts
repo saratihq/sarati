@@ -23,9 +23,8 @@ import {
 import { MAX_SUB_WORKFLOW_DEPTH, MAX_SUB_WORKFLOW_INVOCATIONS } from '../src/runtime/base-plan-interpreter';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const STRIPE_OWNER_KEY = 'sk_test_slot_owner_key'; // the CALLER env slot's key → what a run-AS-caller resolves
 const STRIPE_SUBOWNER_KEY = 'sk_test_subworkflow_owner_personal'; // the sub-workflow OWNER's personal key → must NOT appear

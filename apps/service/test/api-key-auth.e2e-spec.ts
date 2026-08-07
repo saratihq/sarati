@@ -9,9 +9,7 @@ import { AppModule } from '../src/app.module';
 import { ApiKeysService } from '../src/api-keys/api-keys.service';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A NON-mock app — MOCK_AUTH is read once at boot, so the `ork_` key is the only credential here. */
 describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {

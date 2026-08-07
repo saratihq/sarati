@@ -4,9 +4,14 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
+import { DEFAULT_DATABASE_URL } from '../../src/config/env.config';
+
 /** Canonical baseline schema — the same file the OSS `db:init` bootstrap applies. */
 const SCHEMA_PATH = join(__dirname, '..', '..', 'db', 'schema.sql');
 const E2E_DB_PREFIX = 'orchestr_e2e';
+
+/** The database every suite creates its throwaway copy from — the app's own default, never a second one. */
+export const ADMIN_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
 
 /**
  * e2e tests never touch the live database: each suite gets its OWN `orchestr_e2e_<rand>` built

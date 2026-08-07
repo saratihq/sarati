@@ -8,9 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** ADR 0041 — a dry run stubs state-changing calls and records `dry_run`; a real run hits the server. */
 describe('dry run (ADR 0041, e2e, isolated DB, mock auth)', () => {

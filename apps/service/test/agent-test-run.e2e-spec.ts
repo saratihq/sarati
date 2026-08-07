@@ -11,9 +11,7 @@ import { AGENT_MODEL_CALL, type AgentStep } from '../src/runtime/agent';
 import { AgentStepBus } from '../src/runtime/agent-step-bus';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
-
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A WEBHOOK-triggered agent (no chat trigger, so try-it chat can't reach it) with a tool and a reply step. */
 function draftAgentDoc(): Record<string, unknown> {

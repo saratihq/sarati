@@ -11,9 +11,8 @@ import type { WorkflowIR } from '../src/ir/models';
 import { AGENT_MODEL_FETCH } from '../src/providers/agent-model-call.provider';
 import { type AgentResult } from '../src/runtime/agent';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const CALLER_ID = '00000000-0000-0000-0000-000000000001'; // the run tenant (NOT the slot owner)
 const OWNER_ID = '00000000-0000-0000-0000-0000000000a2'; // the prod-slot connection's owner

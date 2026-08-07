@@ -12,9 +12,8 @@ import { AppModule } from '../src/app.module';
 import { REVIEW_ALREADY_OPEN } from '../src/reviews/reviews.service';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const FRONTEND_URL = 'https://app.orchestr.test';
 
 interface DiffSummary {

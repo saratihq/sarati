@@ -16,9 +16,8 @@ import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import type { DagPlan } from '../src/runtime/dag-plan';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import { listenOnLoopback } from './support/listen';
-import { createE2eDatabase } from './support/test-db';
+import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ADMIN_URL = process.env.DATABASE_URL ?? 'postgresql://orchestr:orchestr@localhost:5432/orchestr';
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 /** How long the stub server holds the "slow" response — comfortably past the bounded wait below. */
