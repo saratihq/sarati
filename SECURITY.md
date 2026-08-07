@@ -2,11 +2,8 @@
 
 ## Reporting a vulnerability
 
-**Do not open a public issue for a security problem.** Report it privately, either way:
-
-- **GitHub** — [open a private advisory](https://github.com/saratihq/sarati/security/advisories/new)
-  on this repository. Preferred: it keeps the report, the fix and the disclosure in one place.
-- **Email** — <security@sarati.io>.
+**Do not open a public issue for a security problem.** [Open a private advisory](https://github.com/saratihq/sarati/security/advisories/new)
+on this repository instead — it keeps the report, the fix and the disclosure in one place.
 
 Please include the version or commit you tested, what an attacker gains, and the smallest set of
 steps that reproduces it. A proof of concept helps; a working exploit is not required.

@@ -25,8 +25,9 @@ You need **Node 24** (see `.nvmrc`), **pnpm**, and **PostgreSQL 16+**.
 
 ```bash
 pnpm install                      # installs every package in the workspace
-cp apps/client/.env.example apps/client/.env.local
 cp apps/service/.env.example apps/service/.env
+cp apps/client/.env.example apps/client/.env
+cp apps/agent/.env.example apps/agent/.env    # only if you are working on the AI composer
 ```
 
 Copy those env files before anything else. `NEXT_PUBLIC_*` values are inlined by `next build`, so the
@@ -45,8 +46,12 @@ createdb --owner=orchestr orchestr_svc
 ```
 
 The role name is not cosmetic: `apps/service/db/schema.sql` assigns ownership to `orchestr`, so
-`db:init` fails against a database whose owner role does not exist. Using different credentials means
-changing `DATABASE_URL` in `apps/service/.env` **and** the two commands above to match.
+`db:init` fails against a database whose owner role does not exist.
+
+Using different credentials means changing the two commands above, `DATABASE_URL` in
+`apps/service/.env`, **and** exporting `DATABASE_URL` in your shell — the e2e suites read it from the
+environment only. Jest loads no env file, so they otherwise fall back to the same default the service
+uses.
 
 ### 3. Create the schema
 
