@@ -20,14 +20,15 @@ jobs:
         env:
           POSTGRES_USER: orchestr
           POSTGRES_PASSWORD: orchestr
-          POSTGRES_DB: orchestr
+          POSTGRES_DB: orchestr_svc
         ports:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U orchestr" --health-interval 5s
           --health-timeout 5s --health-retries 10
     env:
-      DATABASE_URL: postgresql://orchestr:orchestr@localhost:5432/orchestr
+      # DATABASE_URL is deliberately unset: the suites then resolve it exactly as a contributor's
+      # machine does, so a default that no documented setup creates fails here instead of only there.
       PGBOSS_ENABLED: 'false'
       # NEXT_PUBLIC_* are inlined by `next build` and the client refuses to build without them,
       # rather than silently baking in a dev host. `same-origin` is what the image ships.
