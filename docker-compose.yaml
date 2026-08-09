@@ -29,6 +29,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Every other documented setting — Composio, OIDC, BYO OAuth, the SSRF allowlist, limits —
+    # reaches the service by being in .env. `environment:` below still wins for what compose owns.
+    env_file: [.env]
     environment:
       DATABASE_URL: postgresql://sarati:${POSTGRES_PASSWORD}@db:5432/sarati
       # Both are generated once by the installer. Losing FERNET_KEY makes stored credentials
@@ -45,6 +48,7 @@ services:
   agent:
     image: ghcr.io/saratihq/sarati-agent:${SARATI_VERSION:-latest}
     restart: unless-stopped
+    env_file: [.env]
     environment:
       # Same SECRET_KEY as the service — that is what lets the composer verify a session the
       # service issued. Without it the composer reports itself unavailable instead of failing later.
