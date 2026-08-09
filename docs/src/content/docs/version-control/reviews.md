@@ -22,15 +22,32 @@ comment count and approvals.
   then each changed step with its old and new values. You do not have to leave for
   [Compare](/version-control/compare/).
 - **Test this branch** runs both versions for real — the target as the baseline, your branch as the
-  head — and compares their output field by field. A diff tells you what changed; this tells you
+  head — and compares their **output** field by field. A diff tells you what changed; this tells you
   what it does.
 - Comments are per review.
 
+Pick the environment to run against, and whether the trigger payload comes from the **latest run**
+or JSON you paste.
+
+The result is a pass/fail plus every output field that moved:
+
+```
+✓ Passed                          Tested just now
+fetch_top_stories · count         45 → 7
+fetch_top_stories · stories[7]    {…} → null
+fetch_top_stories · stories[8]    {…} → null
+```
+
 :::caution
-**Test this branch executes live steps.** It runs both versions against a real environment, so
-anything that sends, writes or charges will actually do it. Point it at a non-production
-environment unless you mean it.
+**This executes live steps.** Sarati asks first, in its own words:
+
+> Run a real test? … Live steps will execute. Real effects can fire: messages sent, data written,
+> external calls made. There is no dry-run yet.
+
+Point it at a non-production environment unless you mean it.
 :::
+
+An untested review says so — *"This review was never tested."*
 
 ## Approve
 
@@ -55,7 +72,5 @@ when you want it live — see [Save, version, publish](/version-control/save-ver
 
 ## Conflicts
 
-If both branches changed **the same field of the same step**, the merge stops and asks you to pick
-a side, field by field.
-
-Different fields on the same step are not a conflict — they merge.
+If both branches changed the same field of the same step, the merge stops and opens the resolver —
+see [Merge conflicts](/version-control/conflicts/).
