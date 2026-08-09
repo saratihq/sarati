@@ -15,7 +15,9 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  build:
+  # The job id is the status-check context branch protection matches on, so it is named for what
+  # it gates, not what it does — 'build' would collide with any future job of that name.
+  docs:
     runs-on: ubuntu-latest
     defaults:
       run:
