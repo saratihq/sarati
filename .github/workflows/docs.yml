@@ -1,0 +1,32 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', '.github/workflows/docs.yml']
+  # Deliberately unfiltered: a required check that is skipped never reports, and a PR that touches
+  # no docs would block forever waiting for it. Docs sit outside root `pnpm check`, so this is the
+  # only gate they have.
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The docs site carries its own lockfile: it is outside the pnpm workspace on purpose, so an
+      # Astro upgrade can never touch what the product installs.
+      - run: pnpm install --frozen-lockfile --ignore-workspace
+      - run: pnpm check
