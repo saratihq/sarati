@@ -17,7 +17,18 @@ A diff is a list of field changes, not a text comparison.
 | Fetch Top Stories | `parameters.limit` | `10` | `25` |
 
 The header counts them — `1 MODIFIED` — and the changed steps are highlighted on both canvases.
-Click a highlighted step to see its fields.
+
+Click a highlighted step and a drawer opens with its accounting and the values themselves:
+
+```
+Fetch Top Stories                 hackernews.fetch_top_stories
+~1 changed   +0 added   −0 removed
+
+PARAMETERS                                             1 change
+  parameters.limit
+    − 5
+    + 45
+```
 
 ## Why field-level matters
 

@@ -45,11 +45,23 @@ export default defineConfig({
             { label: 'Save, version, publish', slug: 'version-control/save-version-publish' },
             { label: 'Compare versions', slug: 'version-control/compare' },
             { label: 'Reviews', slug: 'version-control/reviews' },
+            { label: 'Merge conflicts', slug: 'version-control/conflicts' },
           ],
         },
         {
           label: 'Run',
-          items: [{ label: 'Runs', slug: 'run/runs' }],
+          items: [
+            { label: 'Environments', slug: 'run/environments' },
+            { label: 'Runs', slug: 'run/runs' },
+            { label: 'Approvals', slug: 'run/approvals' },
+          ],
+        },
+        {
+          label: 'Agents & API',
+          items: [
+            { label: 'MCP for agents', slug: 'agents/mcp' },
+            { label: 'API keys', slug: 'agents/api-keys' },
+          ],
         },
       ],
     }),

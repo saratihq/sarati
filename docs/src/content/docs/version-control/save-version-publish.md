@@ -57,8 +57,31 @@ until you move it.
 Nothing is copied and the version does not change — an environment is a pointer at a version. See
 [Runs](/run/runs/) for what happens to work already in flight.
 
-## Rolling back
+## Getting back to a known-good version
 
-Promote an older version. It is the same act in the other direction, and it is the documented
-recovery path — it works even on a protected branch, because restoring a version that already
-passed review is not a new change.
+Two different moves. Both work on a protected branch — protection must never leave you unable to
+recover.
+
+**Put an older version live.** Promote it. The pointer moves; history is untouched.
+
+```
+live_version: 7  →  promote v1  →  live_version: 1
+```
+
+**Bring an older version back as the current one.** Roll back. This writes a *new* version at the
+branch head carrying the old content — history moves forward, never backwards, and the live pointer
+does not move on its own.
+
+```
+POST /api/workflows/<id>/versions/1/rollback?branch=main
+{"status":"rolled_back","new_version_number":7,"rolled_back_to":1}
+```
+
+The `branch` matters: version numbers are per branch, so a bare number that exists on several
+branches is refused rather than guessed.
+
+> Version 1 is ambiguous: version numbers are per-branch and this one exists on
+> evening-recap, main, more-stories… Pass `branch`, or reference the version by id.
+
+After a rollback the head is the restored content but production is still where it was. Promote the
+new version when you want it live.
