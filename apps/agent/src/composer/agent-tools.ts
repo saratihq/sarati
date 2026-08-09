@@ -105,7 +105,8 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
       '{"op":"connect","source_node_id":"<id>","target_node_id":"<id>","source_port"?:0|1}\n' +
       '{"op":"remove_node","node_id":"<id>"}\n' +
       'node_type on update_node re-types the TRIGGER node ONLY (id "trigger") to set how the workflow ' +
-      'starts: "orchestr:webhook" (something sends a request), "orchestr:schedule" (parameters:{interval_minutes:N}), ' +
+      'starts: "orchestr:webhook" (something sends a request), "orchestr:schedule" (parameters: exactly one of ' +
+      '{interval_minutes:N} or {cron:"0 9 * * 1-5"}, plus optional {timezone:"Europe/Zurich"}), ' +
       "or an app trigger type from find_trigger. Re-typing replaces the trigger's parameters. Actions keep their type.\n" +
       'The batch is atomic — on rejection nothing changed; fix the reported op and retry.',
     {
@@ -256,7 +257,7 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
     'Find the exact trigger "type" for an app event ("a new row in the sheet", "a GitHub push"). ' +
       'Returns matching trigger types with their parameters. You do NOT need this for the two native ' +
       'kinds: "orchestr:webhook" (something sends us a request) and "orchestr:schedule" (every N ' +
-      'minutes) — use those directly. Once you have a type, SET THE TRIGGER by re-typing the canvas ' +
+      'minutes, or a cron time in a timezone) — use those directly. Once you have a type, SET THE TRIGGER by re-typing the canvas ' +
       'trigger node with apply_ops: {"op":"update_node","node_id":"trigger","node_type":"<type>", ' +
       '"parameters":{...}} — never a separate step.',
     {
