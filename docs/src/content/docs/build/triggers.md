@@ -51,6 +51,38 @@ Turn on **Verify signatures** in the trigger to reject requests that are not sig
 you expect. Do this before pointing a real service at the URL — without it, anyone who learns the
 URL can start runs.
 
+Presets cover the common senders (GitHub's `x-hub-signature-256`, Shopify's base64
+`x-shopify-hmac-sha256`, Stripe). The generic scheme lets you name the header, algorithm, encoding
+and prefix yourself; it defaults to `x-signature`, HMAC-SHA256, hex.
+
+The signing secret is set through its own endpoint, per environment, so it never enters a workflow
+version or a diff:
+
+```bash
+curl -X PUT http://localhost:8080/api/workflows/<id>/webhook-secret \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id":"trigger","secret":"whsec_…","environment":"production"}'
+```
+
+Reading it back tells you only whether one exists — `{"secret_present":true}`.
+
+Signing a delivery is an HMAC over the **exact bytes** you send:
+
+```bash
+BODY='{"event":"invoice.paid"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.*= //')
+curl -X POST "$URL" -H "x-signature: $SIG" -H 'Content-Type: application/json' -d "$BODY"
+```
+
+| Delivery | Result |
+|---|---|
+| No signature header | `401 Invalid webhook signature` |
+| Wrong signature | `401 Invalid webhook signature` |
+| Correct signature | `202` and the run starts |
+
+Comparison is constant-time, and an empty raw body fails closed rather than being signed over a
+re-serialized copy.
+
 ### Sample event
 
 **Send a test event — I'll catch it** waits for one real request and keeps the payload as a sample,

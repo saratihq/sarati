@@ -34,6 +34,7 @@ export default defineConfig({
             { label: 'The canvas', slug: 'build/canvas' },
             { label: 'Triggers', slug: 'build/triggers' },
             { label: 'Steps', slug: 'build/steps' },
+            { label: 'Connections', slug: 'build/connections' },
             { label: 'Data between steps', slug: 'build/data' },
             { label: 'Test as you build', slug: 'build/testing' },
           ],
@@ -60,6 +61,7 @@ export default defineConfig({
           label: 'Agents & API',
           items: [
             { label: 'MCP for agents', slug: 'agents/mcp' },
+            { label: 'The AI composer', slug: 'agents/ai-composer' },
             { label: 'API keys', slug: 'agents/api-keys' },
           ],
         },
