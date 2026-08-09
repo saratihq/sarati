@@ -1,0 +1,22 @@
+{
+  "name": "@sarati/docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "SEE LICENSE IN ../LICENSE.md",
+  "scripts": {
+    "dev": "astro dev --port 4321",
+    "build": "astro build",
+    "preview": "astro preview --port 4321",
+    "check": "astro check && astro build"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.41.7",
+    "astro": "7.2.0",
+    "sharp": "0.35.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.6",
+    "typescript": "5.9.3"
+  }
+}

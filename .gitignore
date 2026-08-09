@@ -42,3 +42,6 @@ dist/
 
 # Design-system sync — local tooling; its config carries an account-scoped project id.
 /apps/client/.design-sync/
+
+# Astro (docs/)
+.astro/

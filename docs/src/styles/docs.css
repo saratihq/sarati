@@ -1,0 +1,38 @@
+/* Sarati accent, matching the app's brand blue in both themes. */
+:root {
+  --sl-color-accent-low: #16233a;
+  --sl-color-accent: #3b6fd4;
+  --sl-color-accent-high: #b9ccf2;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d8e3f8;
+  --sl-color-accent: #2d5cba;
+  --sl-color-accent-high: #16294f;
+}
+
+/* Wide content scrolls inside itself; the page never scrolls sideways. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}
+
+/* Screenshots ship in both themes; Starlight's toggle stamps data-theme on :root. */
+.shot {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  border: 1px solid var(--sl-color-gray-5);
+}
+
+:root[data-theme='light'] .shot-dark,
+:root[data-theme='dark'] .shot-light {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  video.shot {
+    display: none;
+  }
+}
