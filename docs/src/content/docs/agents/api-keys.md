@@ -21,18 +21,25 @@ create it or mint a new one.
 
 ## Scopes
 
-Grant the fewest that work:
+Grant the fewest that work. The settings screen names them in plain English; the API uses the
+scope strings.
 
-| Scope | Allows |
+| In Settings | Scope |
 |---|---|
-| `workflow:read` | Read workflows, versions, diffs, runs |
-| `workflow:write` | Commit, branch, open reviews |
-| `workflow:deploy` | Promote, publish, merge, protect a branch |
-| `workflow:invoke` | Call a workflow as a tool |
-| `run:execute` | Start runs |
-| `run:dry` | Dry runs |
-| `connection:read` / `connection:write` | Read or change connections |
-| `org:manage` | Organization settings |
+| Read workflows | `workflow:read` |
+| Create and edit workflows | `workflow:write` |
+| Publish, promote and merge | `workflow:deploy` |
+| Preview runs — changes nothing outside | `run:dry` |
+| Run for real | `run:execute` |
+| Call published workflows | `workflow:invoke` |
+| See connected accounts | `connection:read` |
+| Manage connected accounts | `connection:write` |
+| Manage the organization | `org:manage` |
+
+<img class="shot shot-dark" src="/shots/api-keys-dark.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
+<img class="shot shot-light" src="/shots/api-keys-light.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
+
+The list shows each key's **prefix only** — never the key itself — with its scopes and last use.
 
 `key:manage` is deliberately **not grantable** — a key cannot mint another key. Listing keys with a
 key returns `403`.

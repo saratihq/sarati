@@ -30,6 +30,9 @@ PARAMETERS                                             1 change
     + 45
 ```
 
+<img class="shot shot-dark" src="/shots/compare-dark.webp" alt="Compare showing base and head side by side with one modified step." />
+<img class="shot shot-light" src="/shots/compare-light.webp" alt="Compare showing base and head side by side with one modified step." />
+
 ## Why field-level matters
 
 - Two people editing **different fields of the same step** merge cleanly. Text diffs cannot do

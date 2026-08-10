@@ -17,6 +17,9 @@ description: What ran, on which version, and what each step produced.
 Every run records the version it executed, so a run from last week is still explainable after the
 workflow has moved on.
 
+<img class="shot shot-dark" src="/shots/run-detail-dark.webp" alt="A completed run expanded to show its step log and output." />
+<img class="shot shot-light" src="/shots/run-detail-light.webp" alt="A completed run expanded to show its step log and output." />
+
 ## One run
 
 Click a row for its step log: each step, its status, how long it took, and its full output. The run
@@ -82,5 +85,4 @@ be older than the maximum duration. Set `RUN_MAX_DURATION_SECONDS=0` to turn it 
 ## Nothing here yet
 
 An empty list means nothing has fired. Check that a version is live in the environment you are
-firing at — a webhook URL for an environment with no live version accepts the request and reports
-`"fired": 0`.
+firing at — a webhook URL for an environment with nothing live answers `404 Webhook not found`.

@@ -28,7 +28,7 @@ The installer stops before doing anything if the port is already in use.
 ## Back up `.env`
 
 The installer writes `sarati/.env` and never overwrites it, so re-running the command is a safe
-upgrade.
+[upgrade](/operate/upgrades/) — stop the stack first, or the port check turns it away.
 
 Back that file up. **Losing `FERNET_KEY` makes stored credentials unrecoverable** — no reset, no
 recovery. Rotating `SECRET_KEY` signs everyone out.

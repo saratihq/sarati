@@ -8,6 +8,9 @@ The canvas is the editor. Open a workflow and click **Edit**, or create a new on
 Every new workflow starts with a **Trigger** step already placed. You cannot delete it — a workflow
 has exactly one way in. You can [change what kind it is](/build/triggers/).
 
+<img class="shot shot-dark" src="/shots/canvas-dark.webp" alt="The canvas with a trigger step wired to an action." />
+<img class="shot shot-light" src="/shots/canvas-light.webp" alt="The canvas with a trigger step wired to an action." />
+
 ## Add and wire
 
 **+ Add step** opens the catalog. Picking a step drops it on the canvas and wires it to the step

@@ -45,3 +45,6 @@ dist/
 
 # Astro (docs/)
 .astro/
+
+# Wrangler (docs/)
+.wrangler/

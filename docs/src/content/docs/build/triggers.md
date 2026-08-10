@@ -13,8 +13,12 @@ A workflow has exactly one trigger. Click the **Trigger** step, then **Change**.
 | Chat | A chat message arrives. |
 | Callable by an agent | An AI agent calls it as a tool. |
 
-Beyond these, the same picker searches 35+ app triggers — Slack, GitHub and others — which fire on
-events in a connected account.
+Beyond these, the same picker searches app triggers — Slack, GitHub and others — which fire on
+events in a connected account. The count depends on your instance: the built-in actions bring a few
+dozen, and configuring [managed connections](/build/connections/) takes it into the hundreds.
+
+<img class="shot shot-dark" src="/shots/trigger-picker-dark.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
+<img class="shot shot-light" src="/shots/trigger-picker-light.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
 
 ## Incoming webhook
 
@@ -42,8 +46,12 @@ curl -X POST http://localhost:8080/api/hooks/<workflow-id>/production \
 The response is an acknowledgement, not the workflow's output. `202` means the run started. To see
 what it produced, open [Runs](/run/runs/).
 
-`"fired": 0` is a real answer, not an error — it means nothing matched: a duplicate delivery, a
-handshake, or no live version in that environment.
+Two answers that are not `202`:
+
+| | |
+|---|---|
+| `404 Webhook not found` | No version carrying this trigger is live in that environment — or the id is wrong. |
+| `202` with `"fired": 0` | Accepted, but nothing ran: a duplicate delivery, or a handshake. Not an error. |
 
 ### Verify signatures
 
