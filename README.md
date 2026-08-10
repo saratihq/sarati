@@ -3,6 +3,8 @@
 Build automations on a canvas. Branch, review and merge them like code. Run them on an engine that
 survives a restart.
 
+![The composer planning a workflow, asking which email account to watch, then building a Gmail trigger and a Slack step with Connect buttons on both.](docs/public/shots/agent-at-work.gif)
+
 ```bash
 curl -fsSL https://get.sarati.io | sh
 ```
