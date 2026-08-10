@@ -12,7 +12,8 @@ curl -fsSL https://get.sarati.io | sh
 Open <http://localhost:8080> and create your account — the first one is the owner, everyone after joins
 by invite. Docker is the only requirement, and re-running the installer keeps your keys and your data.
 Rather read it first? It only fetches [`docker-compose.yaml`](docker-compose.yaml), generates this
-install's secrets, and starts it.
+install's secrets, and starts it. From there, [docs.sarati.io](https://docs.sarati.io) walks the
+first workflow end to end.
 
 ## Why
 
@@ -46,6 +47,9 @@ Licensed [fair-code](https://faircode.io) under the Sarati Sustainable Use Licen
 free to self-host, with limits on reselling it as a competing service. See [LICENSE.md](LICENSE.md).
 
 ## Docs
+
+**[docs.sarati.io](https://docs.sarati.io)** — install, first workflow, branching and reviews,
+triggers, connections, environments. Every instruction there was run against a live instance.
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — running it locally, the test gate, sending a change
 - [SECURITY.md](SECURITY.md) — reporting a vulnerability privately
