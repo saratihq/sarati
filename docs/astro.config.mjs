@@ -15,6 +15,18 @@ export default defineConfig({
         baseUrl: 'https://github.com/saratihq/sarati/edit/main/docs/',
       },
       customCss: ['./src/styles/docs.css'],
+      // Installed by hand: Cloudflare's automatic injection never reaches a Worker's responses,
+      // so the zone-level Web Analytics setting alone measures nothing here.
+      head: [
+        {
+          tag: 'script',
+          attrs: {
+            type: 'module',
+            src: 'https://static.cloudflareinsights.com/beacon.min.js',
+            'data-cf-beacon': '{"token": "599dff5b1fa943b9b2362cbe0c323b40"}',
+          },
+        },
+      ],
       components: {
         // The website's two-state sun/moon toggle, in place of the three-option select.
         ThemeSelect: './src/components/ThemeSelect.astro',

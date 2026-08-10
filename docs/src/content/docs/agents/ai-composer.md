@@ -79,8 +79,7 @@ Nothing reaches the server until you save.
 | | |
 |---|---|
 | **Save and turn on** | Creates the workflow and makes it live. |
-| **Save as a draft** | Keeps it in **this browser only** — no workflow is created, and it will not appear on your dashboard. Press **Save** in the header to actually store it. |
-| **Keep tweaking** | Carries on the conversation. |
+| **Keep tweaking** | Carries on the conversation. Nothing is stored until you save. |
 
 The composer commits versions. It never moves a live pointer on an existing workflow — see
 [Save, version, publish](/version-control/save-version-publish/).

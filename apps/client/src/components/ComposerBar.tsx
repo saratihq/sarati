@@ -73,7 +73,7 @@ export default function ComposerBar({
       // The exact callback ConnectAppButton fires on a completed sign-in.
       notifyConnected: (provider: string, providerLabel: string) =>
         useComposer.getState().notifyConnected(provider, providerLabel),
-      acceptOffer: (choice: "live" | "draft" | "tweak", wfId?: string) =>
+      acceptOffer: (choice: "live" | "tweak", wfId?: string) =>
         useComposer.getState().acceptOffer(choice, wfId),
     };
     return () => {
@@ -206,9 +206,6 @@ export default function ComposerBar({
           {/* The composer commits versions but never moves a live pointer (ADR 0032 B3). */}
           <Button size="sm" disabled={accepting} onClick={() => void acceptOffer("live", workflowId)} data-testid="offer-save-live">
             {accepting ? <SaratiLoader size={13} /> : null} {workflowId ? "Save" : "Save and turn on"}
-          </Button>
-          <Button size="sm" variant="secondary" disabled={accepting} onClick={() => void acceptOffer("draft", workflowId)} data-testid="offer-save-draft">
-            Save as a draft
           </Button>
           <Button
             size="sm"
