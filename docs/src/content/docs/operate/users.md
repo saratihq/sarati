@@ -35,6 +35,9 @@ password and land in the organization.
 An invite is **token-bound, not email-bound**: whoever holds the link joins. Treat it like a
 password, and delete one you did not mean to send.
 
+<img class="shot shot-dark" src="/shots/org-members-dark.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />
+<img class="shot shot-light" src="/shots/org-members-light.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />
+
 ## Roles
 
 Three: `owner`, `admin`, `member`.

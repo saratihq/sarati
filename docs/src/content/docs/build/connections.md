@@ -9,6 +9,11 @@ managed sign-in available**.
 When a step does need one, the workflow never holds the credential. It names the app; the
 [environment](/run/environments/) supplies the account.
 
+Connected accounts and the environments that use them live under **Integrations**:
+
+<img class="shot shot-dark" src="/shots/integrations-dark.webp" alt="The integrations screen listing connected accounts and per-environment assignments." />
+<img class="shot shot-light" src="/shots/integrations-light.webp" alt="The integrations screen listing connected accounts and per-environment assignments." />
+
 ## One-click sign-in
 
 With a Composio key on the instance, the catalog offers managed sign-in for a large set of apps —

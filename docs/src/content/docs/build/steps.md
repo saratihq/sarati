@@ -10,6 +10,9 @@ Each entry is badged:
 - **No account needed** — runs in-process, no credentials.
 - **One-click managed sign-in available** — sign into the app once, then use it anywhere.
 
+<img class="shot shot-dark" src="/shots/catalog-dark.webp" alt="The step catalog, each entry badged with whether it needs an account." />
+<img class="shot shot-light" src="/shots/catalog-light.webp" alt="The step catalog, each entry badged with whether it needs an account." />
+
 ## Control steps
 
 | Step | What it does |

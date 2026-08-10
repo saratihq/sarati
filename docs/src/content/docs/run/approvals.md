@@ -22,11 +22,18 @@ The run's status is `waiting`, and the waiting step shows in the run's step log.
 has executed.
 
 Every waiting run appears in the **Approvals inbox** in the header, org-wide — so an approval is not
-something one person has to remember.
+something one person has to remember. You can act on a teammate's run, not only your own.
+
+<img class="shot shot-dark" src="/shots/approvals-dark.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
+<img class="shot shot-light" src="/shots/approvals-light.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
+
+Each entry shows the workflow, the topic it is waiting on, who started it, how long it has waited
+and **how long is left** before the timeout. Expand it to see the payload the run started with.
 
 ## Deciding
 
-Approve from the inbox, or send the event:
+**Approve** or **Reject** from the inbox — both resume the run, carrying your decision into it. Or
+send the event yourself:
 
 ```bash
 curl -X POST http://localhost:8080/api/runs/<run-id>/events \
