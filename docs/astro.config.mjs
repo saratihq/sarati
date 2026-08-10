@@ -30,8 +30,8 @@ export default defineConfig({
       components: {
         // The website's two-state sun/moon toggle, in place of the three-option select.
         ThemeSelect: './src/components/ThemeSelect.astro',
-        // Adds the way back to the product site, which the default title has no room for.
-        SiteTitle: './src/components/SiteTitle.astro',
+        // Prepends the "Website" link to the header's right-hand group.
+        SocialIcons: './src/components/SocialIcons.astro',
       },
       sidebar: [
         {
