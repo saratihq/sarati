@@ -12,6 +12,9 @@ Click the branch selector on the workflow overview, type a name, **Create**.
 The branch starts from the current version of the branch you were on. Nothing is copied — the
 starting point is inherited.
 
+<img class="shot shot-dark" src="/shots/branch-selector-dark.webp" alt="The branch selector listing branches, with the protected default marked and a new-branch action." />
+<img class="shot shot-light" src="/shots/branch-selector-light.webp" alt="The branch selector listing branches, with the protected default marked and a new-branch action." />
+
 ## Version numbers are per branch
 
 Your branch's first save is **its v1**, while main still has its own v1.

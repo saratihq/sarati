@@ -13,8 +13,12 @@ A workflow has exactly one trigger. Click the **Trigger** step, then **Change**.
 | Chat | A chat message arrives. |
 | Callable by an agent | An AI agent calls it as a tool. |
 
-Beyond these, the same picker searches 35+ app triggers — Slack, GitHub and others — which fire on
-events in a connected account.
+Beyond these, the same picker searches app triggers — Slack, GitHub and others — which fire on
+events in a connected account. The count depends on your instance: the built-in actions bring a few
+dozen, and configuring [managed connections](/build/connections/) takes it into the hundreds.
+
+<img class="shot shot-dark" src="/shots/trigger-picker-dark.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
+<img class="shot shot-light" src="/shots/trigger-picker-light.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
 
 ## Incoming webhook
 

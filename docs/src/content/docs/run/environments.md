@@ -8,6 +8,12 @@ An environment is a **pointer at one version**. A fresh install has `production`
 
 `production` and `uat` cannot be renamed or deleted.
 
+The workflow overview shows which version each environment is on, and whether the branch head has
+moved past it:
+
+<img class="shot shot-dark" src="/shots/env-rail-dark.webp" alt="A workflow overview with the runtime rail showing the live version and trigger state." />
+<img class="shot shot-light" src="/shots/env-rail-light.webp" alt="A workflow overview with the runtime rail showing the live version and trigger state." />
+
 ## Promote
 
 Promoting moves the pointer. Nothing is copied, and the version being promoted does not change.

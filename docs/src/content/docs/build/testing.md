@@ -16,6 +16,9 @@ Two things follow:
 The inspector shows **Input** and **Output** tabs, so you can see what the step received as well as
 what it returned.
 
+<img class="shot shot-dark" src="/shots/step-inspector-dark.webp" alt="A step tested on its own, showing its real output." />
+<img class="shot shot-light" src="/shots/step-inspector-light.webp" alt="A step tested on its own, showing its real output." />
+
 ## The whole workflow
 
 **Run** executes the workflow you are editing, top to bottom.
