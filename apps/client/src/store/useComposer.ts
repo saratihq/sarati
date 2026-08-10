@@ -40,7 +40,7 @@ export type ThreadEntry =
   | { id: number; kind: "question"; questionId: string }
   | { id: number; kind: "run"; status: "passed" | "failed"; text: string };
 
-export type OfferChoice = "live" | "draft" | "tweak";
+export type OfferChoice = "live" | "tweak";
 
 interface ComposerStore {
   sessionId?: string;
@@ -399,11 +399,6 @@ export const useComposer = create<ComposerStore>((set, get) => {
     acceptOffer: async (choice: OfferChoice, workflowId?: string) => {
       set({ offerPending: false });
       if (choice === "tweak") return;
-      if (choice === "draft") {
-        // Drafts already autosave — just keep the conversation coherent.
-        await get().send("I'll keep it as a draft for now.", workflowId);
-        return;
-      }
       // Accept = SAVE only: the composer commits versions but NEVER moves a live pointer (ADR 0032).
       set({ accepting: true });
       try {
