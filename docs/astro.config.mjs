@@ -15,9 +15,13 @@ export default defineConfig({
         baseUrl: 'https://github.com/saratihq/sarati/edit/main/docs/',
       },
       customCss: ['./src/styles/docs.css'],
+      // The product's own mark, copied from apps/client/src/app/icon.svg.
+      favicon: '/favicon.svg',
       // Installed by hand: Cloudflare's automatic injection never reaches a Worker's responses,
       // so the zone-level Web Analytics setting alone measures nothing here.
       head: [
+        // Safari and older browsers ignore an SVG favicon; the .ico is the fallback for them.
+        { tag: 'link', attrs: { rel: 'icon', href: '/favicon.ico', sizes: '32x32' } },
         {
           tag: 'script',
           attrs: {
