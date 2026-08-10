@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sarati-docs",
+  "compatibility_date": "2026-08-11",
+  // Static only — no Worker script, so no `main` and no assets binding.
+  "assets": {
+    "directory": "./dist",
+    // Starlight emits a real 404 page; without this a bad URL would serve index.html.
+    "not_found_handling": "404-page"
+  }
+}
