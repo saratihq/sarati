@@ -20,13 +20,29 @@ Starting a connect creates a pending connection and hands back a hosted link:
 {"connection_id": "e5050a29-…", "redirect_url": "https://connect.composio.dev/link/lk_…"}
 ```
 
-You complete the sign-in there. The connection polls `pending` until you do, then `active`.
+You complete the sign-in there. The connection polls `pending` until you do, then `active`:
+
+```json
+{"id":"3207defd-…","provider":"slack","auth_type":"managed","status":"active"}
+```
 
 Set it up with:
 
 ```bash
 COMPOSIO_API_KEY=…
 ```
+
+## Using one in a step
+
+A step that needs an account names the connection. Without one it refuses up front rather than
+failing mid-run:
+
+```json
+{"detail":"Step \"slack.list_channels\" requires a slack connection — attach one to this step and retry"}
+```
+
+With the connection attached, the step runs against the real account and returns real data — a
+Slack `list_channels` comes back with the workspace's actual channels.
 
 ## Bring your own key
 
@@ -44,8 +60,12 @@ curl -X POST http://localhost:8080/api/connections \
 
 ## The credential never comes back
 
-No connections endpoint returns it — not the create response, not the list, not the references.
-What you get is the id, provider, display name, auth type and status.
+No connections endpoint returns it — not the create response, not the list, not the references, and
+not the output of a step that just used it. What you get is the id, provider, display name, auth
+type and status.
+
+That holds for both kinds. A managed Slack connection runs a real action against the workspace, and
+the OAuth token appears nowhere in the API surface.
 
 Testing a connection checks that the stored secret is readable, **not** that the provider accepts
 it:

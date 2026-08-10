@@ -34,20 +34,18 @@ waits:
 Answer, and it builds. It narrates as it goes, and it tests its own work when nothing is
 destructive:
 
-> Neither touches anything live — it just reads Hacker News — so I'll run the whole thing once to
-> make sure the fetch and filter work.
+> Let me run this fetch to make sure it returns real stories.
 >
-> ● Everything ran clean. It pulled 30 top stories and kept the popular ones — for example "How I
-> use LLMs to learn complex topics" at 249 points made the cut, while a 44-point story got dropped.
+> That works — it came back with the front-page stories filtered to over 100 points. The top one
+> right now is "Muse Glimmer: 30B-parameter model…" with 882 points.
 
 ## What it produces
 
 Ordinary steps. Nothing special, nothing hidden:
 
 ```
-orchestr:schedule            {"interval_minutes": 1440}
-hackernews.fetch_top_stories {"limit": 30}
-orchestr:code                {"language": "js", "code": "…"}
+orchestr:schedule   {"cron": "0 9 * * 1-5", "timezone": "UTC"}
+http.send_request   {"method": "GET", "url": "https://hn.algolia.com/api/v1/search", …}
 ```
 
 That is the same structure you get building by hand, so it diffs, reviews and merges like anything
@@ -55,17 +53,14 @@ else. A prompt change shows up as a field change.
 
 ## Check its work
 
-It is a drafting tool, not an oracle. Two things to check every time:
+It is a drafting tool, not an oracle.
 
-**It can be wrong about the product.** In the run above it claimed there is no weekday-at-9am timer
-and downgraded the schedule to a plain 24-hour interval — then wrote that caveat onto the node. The
-claim is false: schedules take a cron expression with a timezone.
+**It states its assumptions on the node, not just in chat.** The schedule above carries a small
+`assumed: UTC` label, because "9am" does not say whose 9am. Set the timezone you actually meant.
 
-```json
-{"cron": "0 9 * * 1-5", "timezone": "Europe/Zurich"}
-```
-
-Read what it built, not only what it said about what it built.
+**It may solve the same request differently each time.** One run fetched the stories and filtered
+them in a code step; another did both in a single HTTP call with a query filter. Both work — read
+what it built.
 
 **It does not name the workflow.** However descriptive its plan, the workflow saves as *Untitled
 workflow* until you rename it.
