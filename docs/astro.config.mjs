@@ -65,6 +65,15 @@ export default defineConfig({
             { label: 'API keys', slug: 'agents/api-keys' },
           ],
         },
+        {
+          label: 'Operate',
+          items: [
+            { label: 'Configuration', slug: 'operate/configuration' },
+            { label: 'Users and organizations', slug: 'operate/users' },
+            { label: 'Upgrades and backups', slug: 'operate/upgrades' },
+            { label: 'Troubleshooting', slug: 'operate/troubleshooting' },
+          ],
+        },
       ],
     }),
   ],
