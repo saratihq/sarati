@@ -23,7 +23,7 @@ alongside the canvas.
 ## What a real run looks like
 
 Asked to post to Slack when a new email arrives, it plans, asks which mail account to watch, builds
-both steps, and marks what still needs connecting — at double speed:
+both steps, and marks what still needs connecting — sped up 4×:
 
 <video class="shot" src="/shots/agent-at-work.mp4" poster="/shots/agent-at-work-poster.webp" width="1128" height="664" autoplay loop muted playsinline aria-label="The composer planning a workflow, asking which email account to watch, then building a Gmail trigger and a Slack step with Connect buttons on both."></video>
 
