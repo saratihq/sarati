@@ -82,5 +82,4 @@ be older than the maximum duration. Set `RUN_MAX_DURATION_SECONDS=0` to turn it 
 ## Nothing here yet
 
 An empty list means nothing has fired. Check that a version is live in the environment you are
-firing at — a webhook URL for an environment with no live version accepts the request and reports
-`"fired": 0`.
+firing at — a webhook URL for an environment with nothing live answers `404 Webhook not found`.

@@ -42,8 +42,12 @@ curl -X POST http://localhost:8080/api/hooks/<workflow-id>/production \
 The response is an acknowledgement, not the workflow's output. `202` means the run started. To see
 what it produced, open [Runs](/run/runs/).
 
-`"fired": 0` is a real answer, not an error — it means nothing matched: a duplicate delivery, a
-handshake, or no live version in that environment.
+Two answers that are not `202`:
+
+| | |
+|---|---|
+| `404 Webhook not found` | No version carrying this trigger is live in that environment — or the id is wrong. |
+| `202` with `"fired": 0` | Accepted, but nothing ran: a duplicate delivery, or a handshake. Not an error. |
 
 ### Verify signatures
 
