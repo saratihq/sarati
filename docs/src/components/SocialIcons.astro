@@ -1,0 +1,58 @@
+---
+/* Adds the way back to the product site, ahead of Starlight's configured social icons. */
+import config from 'virtual:starlight/user-config';
+import { Icon } from '@astrojs/starlight/components';
+
+const links = config.social || [];
+---
+
+<a href="https://sarati.io" class="website-link sl-flex">
+  Website
+  <svg
+    viewBox="0 0 24 24"
+    width="13"
+    height="13"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M8 16 16 8M9.5 8H16v6.5"></path>
+  </svg>
+</a>
+
+{
+  links.map(({ label, href, icon }) => (
+    <a href={href} rel="me" class="sl-flex">
+      <span class="sr-only">{label}</span>
+      <Icon name={icon} />
+    </a>
+  ))
+}
+
+<style>
+  @layer starlight.core {
+    a {
+      color: var(--sl-color-text-accent);
+      padding: 0.5em;
+      margin: -0.5em;
+    }
+    a:hover {
+      color: var(--sl-color-white);
+    }
+    .website-link {
+      align-items: center;
+      gap: 0.25rem;
+      font-size: var(--sl-text-sm);
+      font-weight: 500;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .website-link svg {
+      /* Optically aligned with the cap height rather than the text baseline. */
+      margin-top: -1px;
+    }
+  }
+</style>
