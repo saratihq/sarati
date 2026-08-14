@@ -94,6 +94,15 @@ const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='composio_trigger_instance_id'",
   },
+  {
+    migration: '021_run_step_ref_warnings.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_run_steps' AND column_name='warnings'",
+  },
+  {
+    migration: '022_composio_webhook_deliveries.sql',
+    probe: "SELECT 1 FROM information_schema.tables WHERE table_name='composio_webhook_deliveries'",
+  },
 ];
 
 @Injectable()
