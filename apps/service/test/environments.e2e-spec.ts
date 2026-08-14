@@ -12,6 +12,7 @@ import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
+import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -169,7 +170,6 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
-    process.env.COMPOSIO_API_KEY = 'test-composio-key';
     process.env.COMPOSIO_BASE_URL = `http://127.0.0.1:${(composioStub.address() as AddressInfo).port}`;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -177,7 +177,6 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     configureApp(app);
     await app.init();
     await listenOnLoopback(app);
-
     const org = await asA(http().post('/api/orgs').send({ name: 'Acme Envs' })).expect(201);
     orgId = org.body.id as string;
     await db.query(
@@ -185,6 +184,8 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
        VALUES (gen_random_uuid(), $1, $2, 'member', now())`,
       [orgId, userB],
     );
+    // The managed rail's key lives in the store, per scope — seeded AFTER the org exists.
+    await seedPlatformKeyEverywhere(app, 'composio_api_key', 'test-composio-key');
   }, 30_000);
 
   afterAll(async () => {
@@ -192,7 +193,6 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     await new Promise((resolve) => composioStub.close(resolve));
     await db.end();
     process.env.DATABASE_URL = ADMIN_URL;
-    delete process.env.COMPOSIO_API_KEY;
     delete process.env.COMPOSIO_BASE_URL;
   });
 

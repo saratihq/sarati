@@ -1,12 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
 import { ComposioProvider, type ComposioTriggerType } from '../connections/composio.provider';
 import { toOurSlug } from '../connections/managed-connections.service';
-import type { EnvConfig } from '../config/env.config';
 import { verifyComposioWebhook, type ComposioWebhookVerifyResult } from './composio-webhook-verify';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** The catalog cache TTL — the Composio trigger-type catalog is stable within a process. */
 const CATALOG_TTL_MS = 10 * 60_000;
@@ -37,52 +36,61 @@ interface CatalogCache {
  * reconciler/intake drive to make them fire. Owns projection, caching, verification, and public-type↔slug mapping;
  * HTTP lives once in {@link ComposioProvider}. Inert (empty catalog, no subscribe) when `COMPOSIO_API_KEY` is unset.
  */
+/** Cache partition per owning scope. */
+function cacheKeyOf(scope: PlatformKeyScope): string {
+  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
+}
+
 @Injectable()
 export class ComposioTriggerProvider {
   private readonly logger = new Logger(ComposioTriggerProvider.name);
-  private cache: CatalogCache | null = null;
+  // Per-scope: a Composio key addresses one project, so one scope's catalog is not another's.
+  private readonly cache = new Map<string, CatalogCache>();
 
   constructor(
     private readonly composio: ComposioProvider,
-    private readonly config: ConfigService<{ env: EnvConfig }, true>,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
-  /** Whether the managed trigger rail can run at all (COMPOSIO_API_KEY present). */
-  get configured(): boolean {
-    return this.composio.configured;
+  /** Whether the managed trigger rail can run for this scope (a Composio key is stored). */
+  async isConfigured(scope: PlatformKeyScope): Promise<boolean> {
+    return this.composio.isConfigured(scope);
   }
 
   /** The projected picker rows, lazily cached; a Composio hiccup serves the stale cache (or `[]`), never throws. */
-  async catalog(): Promise<ComposioProjectedCatalogEntry[]> {
-    if (!this.configured) return [];
-    if (this.cache && Date.now() - this.cache.at < this.cache.ttl) return this.cache.entries;
+  async catalog(scope: PlatformKeyScope): Promise<ComposioProjectedCatalogEntry[]> {
+    if (!(await this.isConfigured(scope))) return [];
+    const cached = this.cache.get(cacheKeyOf(scope));
+    if (cached && Date.now() - cached.at < cached.ttl) return cached.entries;
     try {
       const [types, managed] = await Promise.all([
-        this.composio.listTriggerTypes(),
-        this.managedToolkitSlugs(),
+        this.composio.listTriggerTypes(scope),
+        this.managedToolkitSlugs(scope),
       ]);
       const projected = this.project(types, managed);
       if (projected.entries.length > 0) {
-        this.cache = projected; // a good catalog — full TTL
+        this.cache.set(cacheKeyOf(scope), projected); // a good catalog — full TTL
         return projected.entries;
       }
       // An HTTP-200 with `items: []` is a transient blip — it must NOT overwrite a previously good cache.
-      return this.negativeCache();
+      return this.negativeCache(scope);
     } catch (err) {
       this.logger.warn(`Composio trigger catalog refresh failed: ${errorMessage(err)}`);
-      return this.negativeCache();
+      return this.negativeCache(scope);
     }
   }
 
   /** Keep the last-known entries/slugs but re-check soon (short TTL) — the failed/empty-refresh path. */
-  private negativeCache(): ComposioProjectedCatalogEntry[] {
-    const entries = this.cache?.entries ?? [];
-    this.cache = {
+  private negativeCache(scope: PlatformKeyScope): ComposioProjectedCatalogEntry[] {
+    const key = cacheKeyOf(scope);
+    const prev = this.cache.get(key);
+    const entries = prev?.entries ?? [];
+    this.cache.set(key, {
       at: Date.now(),
       ttl: CATALOG_NEGATIVE_TTL_MS,
       entries,
-      slugByType: this.cache?.slugByType ?? new Map<string, string>(),
-    };
+      slugByType: prev?.slugByType ?? new Map<string, string>(),
+    });
     return entries;
   }
 
@@ -93,46 +101,58 @@ export class ComposioTriggerProvider {
   slugForPublicType(publicType: string): string | null {
     const dot = publicType.indexOf('.');
     if (dot <= 0) return null;
-    const recorded = this.cache?.slugByType.get(publicType);
-    return recorded ?? publicType.slice(dot + 1).toUpperCase();
+    // Any warm scope's mapping is a valid hint — the slug is Composio's, not the project's —
+    // and the deterministic reversal below is the answer when none is warm.
+    for (const entry of this.cache.values()) {
+      const recorded = entry.slugByType.get(publicType);
+      if (recorded) return recorded;
+    }
+    return publicType.slice(dot + 1).toUpperCase();
   }
 
   /** Subscribe: create (idempotent upsert) the Composio trigger instance; returns its id. */
-  createTriggerInstance(params: {
-    slug: string;
-    connectedAccountId: string;
-    userId: string;
-    triggerConfig: Record<string, unknown>;
-  }): Promise<string> {
-    return this.composio.createTriggerInstance(params);
+  createTriggerInstance(
+    scope: PlatformKeyScope,
+    params: {
+      slug: string;
+      connectedAccountId: string;
+      userId: string;
+      triggerConfig: Record<string, unknown>;
+    },
+  ): Promise<string> {
+    return this.composio.createTriggerInstance(scope, params);
   }
 
   /** Unsubscribe: delete the Composio trigger instance (best-effort teardown). */
-  deleteTriggerInstance(triggerId: string): Promise<void> {
-    return this.composio.deleteTriggerInstance(triggerId);
+  deleteTriggerInstance(scope: PlatformKeyScope, triggerId: string): Promise<void> {
+    return this.composio.deleteTriggerInstance(scope, triggerId);
   }
 
   /**
    * Every LIVE Composio trigger-instance id — the truth the ADR 0046 reaper diffs against the activation rows.
    * A hiccup yields `[]` rather than throwing, so a transient failure can never read as "everything is orphaned".
    */
-  async listActiveInstanceIds(): Promise<string[]> {
-    if (!this.configured) return [];
+  async listActiveInstanceIds(scope: PlatformKeyScope): Promise<string[]> {
+    if (!(await this.isConfigured(scope))) return [];
     try {
-      return await this.composio.listActiveTriggerInstanceIds();
+      return await this.composio.listActiveTriggerInstanceIds(scope);
     } catch (err) {
       this.logger.warn(`Composio active trigger-instance listing failed: ${errorMessage(err)}`);
       return [];
     }
   }
 
-  /** Verify a delivery's signature against COMPOSIO_WEBHOOK_SECRET; fails CLOSED when unset — unverifiable never fires. */
-  verifyWebhook(rawBody: string, headers: Record<string, string>): ComposioWebhookVerifyResult {
-    return verifyComposioWebhook(rawBody, headers, this.webhookSecret());
-  }
-
-  private webhookSecret(): string {
-    return this.config.get('env', { infer: true }).composioWebhookSecret;
+  /**
+   * Verify a delivery against THIS scope's stored webhook secret. Fails CLOSED when the scope
+   * has none — an unverifiable delivery never fires, whichever scope it claims to be for.
+   */
+  async verifyWebhook(
+    scope: PlatformKeyScope,
+    rawBody: string,
+    headers: Record<string, string>,
+  ): Promise<ComposioWebhookVerifyResult> {
+    const secret = (await this.platformKeys.get(scope, 'composio_webhook_secret')) ?? '';
+    return verifyComposioWebhook(rawBody, headers, secret);
   }
 
   /**
@@ -140,9 +160,9 @@ export class ComposioTriggerProvider {
    * FAIL-OPEN: `null` (not an empty set) when undetermined, which {@link project} reads as "don't filter" —
    * a dead trigger offered is a papercut, an empty picker from an upstream hiccup is an outage.
    */
-  private async managedToolkitSlugs(): Promise<Set<string> | null> {
+  private async managedToolkitSlugs(scope: PlatformKeyScope): Promise<Set<string> | null> {
     try {
-      const toolkits = await this.composio.listManagedToolkits();
+      const toolkits = await this.composio.listManagedToolkits(scope);
       if (toolkits.length === 0) return null; // empty → treat as undetermined (fail open)
       return new Set(toolkits.map((t) => t.slug));
     } catch (err) {

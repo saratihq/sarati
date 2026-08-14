@@ -7,8 +7,11 @@ import { directOverride, type DirectToolOverride } from './composio-direct-overr
 import { requiredConstraintsFor } from './composio-required-constraints';
 import { matchTool, translateProps, type PropTranslation, type ToolMatch } from './composio-tool-mapping';
 import { toComposioSlug } from './managed-connections.service';
+import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 export interface ComposioExecuteInput {
+  /** Whose Composio key runs this — the scope owning the connection/workflow. */
+  scope: PlatformKeyScope;
   /** Our app slug, e.g. `trello`, `slack`. */
   appSlug: string;
   /** Our action name (the part after `<app>.`), e.g. `get_card`, `listUsers`. */
@@ -33,6 +36,11 @@ export interface ComposioExecuteInput {
  * `{successful,data,error}` envelope back to a `RunActionResult` — runs-but-fails is a step error, never a 500.
  * The managed-connection guard lives in the router; only managed rows reach here.
  */
+/** Cache partition per owning scope — one scope's tool matches must not serve another. */
+function scopeCacheKey(scope: PlatformKeyScope): string {
+  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
+}
+
 @Injectable()
 export class ComposioExecutionProvider {
   private readonly logger = new Logger(ComposioExecutionProvider.name);
@@ -41,9 +49,9 @@ export class ComposioExecutionProvider {
 
   constructor(private readonly composio: ComposioProvider) {}
 
-  /** Whether the fallback rail can run at all (COMPOSIO_API_KEY present). */
-  get configured(): boolean {
-    return this.composio.configured;
+  /** Whether the fallback rail can run at all for this scope (a Composio key is stored). */
+  async isConfigured(scope: PlatformKeyScope): Promise<boolean> {
+    return this.composio.isConfigured(scope);
   }
 
   async execute(input: ComposioExecuteInput): Promise<RunActionResult> {
@@ -58,7 +66,7 @@ export class ComposioExecutionProvider {
     if (override) return this.runOverride(publicType, override, input);
 
     // The router's exact catalog slug is the common path — no name matching, no misroute.
-    const tool = input.tool ?? (await this.matchToolFor(input.appSlug, input.actionName));
+    const tool = input.tool ?? (await this.matchToolFor(input.scope, input.appSlug, input.actionName));
     if (!tool) throw noEquivalent;
 
     const base = translateProps(input.props, tool.inputProperties, tool.inputTypes);
@@ -66,7 +74,7 @@ export class ComposioExecutionProvider {
     // Pre-flight so a missing required input is a clean 400 before we burn a Composio call.
     this.assertRequired(publicType, base.arguments, tool.required);
 
-    const data = await this.runTool(publicType, tool.slug, {
+    const data = await this.runTool(input.scope, publicType, tool.slug, {
       connectedAccountId: input.connectedAccountId,
       userId: input.userId,
       arguments: base.arguments,
@@ -99,7 +107,7 @@ export class ComposioExecutionProvider {
     // The tool's required flags apply only when the override targets that same tool; the one-of table always applies.
     this.assertRequired(publicType, args, sameTool?.required);
 
-    const data = await this.runTool(publicType, override.toolSlug, {
+    const data = await this.runTool(input.scope, publicType, override.toolSlug, {
       connectedAccountId: input.connectedAccountId,
       userId: input.userId,
       arguments: args,
@@ -156,19 +164,21 @@ export class ComposioExecutionProvider {
 
   /** Execute a KNOWN tool slug (the caller owns it — no name matching), with the same run-but-fails 422 mapping. */
   executeBySlug(
+    scope: PlatformKeyScope,
     toolSlug: string,
     params: { connectedAccountId: string; userId: string; arguments: Record<string, unknown> },
   ): Promise<unknown> {
-    return this.runTool(toolSlug, toolSlug, params);
+    return this.runTool(scope, toolSlug, toolSlug, params);
   }
 
   /** One tools/execute call: ran-but-failed becomes a structured 422 carrying the real message, never an opaque 500. */
   private async runTool(
+    scope: PlatformKeyScope,
     label: string,
     toolSlug: string,
     params: { connectedAccountId: string; userId: string; arguments: Record<string, unknown> },
   ): Promise<unknown> {
-    const result = await this.composio.executeTool(toolSlug, params);
+    const result = await this.composio.executeTool(scope, toolSlug, params);
     if (!result.successful) {
       throw new DomainError(`${label} failed: ${result.error ?? 'the managed action reported failure'}`, 422);
     }
@@ -176,12 +186,16 @@ export class ComposioExecutionProvider {
   }
 
   /** LAST-RESORT fuzzy matcher for an action NOT in the prebuilt catalog; returns `null` rather than guess. */
-  private async matchToolFor(appSlug: string, actionName: string): Promise<ToolMatch | null> {
+  private async matchToolFor(
+    scope: PlatformKeyScope,
+    appSlug: string,
+    actionName: string,
+  ): Promise<ToolMatch | null> {
     const toolkit = toComposioSlug(appSlug);
-    const key = `${toolkit}␟${actionName}`;
+    const key = `${scopeCacheKey(scope)}␟${toolkit}␟${actionName}`;
     const cached = this.toolCache.get(key);
     if (cached !== undefined) return cached;
-    const tools = await this.composio.listTools(toolkit);
+    const tools = await this.composio.listTools(scope, toolkit);
     const match = matchTool(actionName, toolkit, tools);
     if (!match) {
       this.logger.warn(`Composio fallback: no tool matches ${appSlug}.${actionName} in toolkit "${toolkit}"`);

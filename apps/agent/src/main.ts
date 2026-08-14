@@ -23,12 +23,12 @@ async function bootstrap(): Promise<void> {
     );
   }
 
-  // Booting disabled is intended for a keyless self-host, but it is also what a
-  // typo'd CLERK_ISSUER looks like on a deploy that meant to have a composer —
-  // so say it loudly at boot rather than leaving it to whoever reads the probe.
-  if (env.composerDisabledReason !== null) {
+  // A typo'd CLERK_ISSUER looks exactly like a deliberately keyless self-host, so say it
+  // loudly at boot rather than leaving it to whoever reads the probe. The Anthropic key is
+  // NOT checked here: it is set from Settings at runtime, so its absence is not a boot fact.
+  if (!env.callerAuthConfigured || !env.serviceSharedSecret) {
     logger.warn(
-      `The AI composer is DISABLED (${env.composerDisabledReason}) — /api/composer/* answers 503 and /api/composer/status reports why. Set the missing variable and restart to enable it.`,
+      'The AI composer is DISABLED (caller_auth_unconfigured) — /api/composer/* answers 503 and /api/composer/status reports why. Set SECRET_KEY (or CLERK_ISSUER) and restart.',
       'Bootstrap',
     );
   }

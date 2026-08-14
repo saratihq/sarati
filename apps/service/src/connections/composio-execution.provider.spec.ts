@@ -8,6 +8,10 @@ import { DomainError } from '../common/domain-error';
 import type { EnvConfig } from '../config/env.config';
 import { ComposioProvider } from './composio.provider';
 import { ComposioExecutionProvider } from './composio-execution.provider';
+import { PlatformKeysService } from '../platform/platform-keys.service';
+
+/** Any scope will do here — the tests are about behaviour, not about whose key it is. */
+const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
 /**
  * The Composio execution fallback against a STUBBED Composio (a local server via COMPOSIO_BASE_URL), proving the
@@ -74,9 +78,10 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
     const config = {
-      get: () => ({ composioApiKey: 'test-key', composioBaseUrl: baseUrl }) as Partial<EnvConfig>,
+      get: () => ({ composioBaseUrl: baseUrl }) as Partial<EnvConfig>,
     } as unknown as ConfigService<{ env: EnvConfig }, true>;
-    const composio = new ComposioProvider({} as DataSource, config);
+    const keys = { composioApiKey: () => Promise.resolve('test-key') } as unknown as PlatformKeysService;
+    const composio = new ComposioProvider({} as DataSource, config, keys);
     provider = new ComposioExecutionProvider(composio);
   });
 
@@ -97,6 +102,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     // The recorded tool is deliberately NOT what the name matcher would pick: it must win,
     // and the tool list must never be fetched.
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'slack',
       actionName: 'send_channel_message',
       props: { channel: 'C123', text: 'hi', threadTs: '1.2' },
@@ -114,6 +120,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('maps the action to a tool, translates props → snake_case args, returns the data', async () => {
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'slack',
       actionName: 'send_channel_message',
       props: { channel: 'C123', text: 'hello', threadTs: '1710304378.4', sendAsBot: true },
@@ -146,6 +153,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     };
     await expect(
       provider.execute({
+        scope: SCOPE,
         appSlug: 'slack',
         actionName: 'send_channel_message',
         props: { channel: 'bad', text: 'x' },
@@ -162,6 +170,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
   it('rejects an action with no equivalent managed tool as a 400 DomainError', async () => {
     await expect(
       provider.execute({
+        scope: SCOPE,
         appSlug: 'slack',
         actionName: 'teleport_widget',
         props: {},
@@ -184,6 +193,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('maps a Composio-NAME payload (recipient_email) straight through the base translation', async () => {
     await provider.execute({
+      scope: SCOPE,
       appSlug: 'gmail',
       actionName: 'send_email',
       props: { recipient_email: 'to@x.com', subject: 'hi', body: 'yo' },
@@ -197,6 +207,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('maps an SDK-NAME payload (to) via the override overlay to recipient_email', async () => {
     await provider.execute({
+      scope: SCOPE,
       appSlug: 'gmail',
       actionName: 'send_email',
       props: { to: 'to@x.com', subject: 'hi', body: 'yo' },
@@ -210,6 +221,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it("the override overlay wins on conflict — the SDK's cc array beats a raw base string", async () => {
     await provider.execute({
+      scope: SCOPE,
       appSlug: 'gmail',
       actionName: 'send_email',
       // `cc` supplied SDK-style as a comma string; the override's emailList splits it,
@@ -228,6 +240,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     // The override deliberately retargets PATCH_EVENT; merging a base built from UPDATE_EVENT's args
     // would smuggle the wrong tool's arguments, so only the overlay reaches Composio.
     await provider.execute({
+      scope: SCOPE,
       appSlug: 'calendar',
       actionName: 'update_event',
       props: {
@@ -261,6 +274,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
   it('throws a clean 400 listing the missing required inputs BEFORE calling Composio', async () => {
     await expect(
       provider.execute({
+        scope: SCOPE,
         appSlug: 'gmail',
         actionName: 'send_email',
         props: { subject: 'only a subject' }, // no recipient_email, no body
@@ -279,6 +293,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
   it('enforces the curated one-of table (asana team/workspace/user) with a clean 400', async () => {
     await expect(
       provider.execute({
+        scope: SCOPE,
         appSlug: 'asana',
         actionName: 'get_team_memberships',
         props: {}, // none of team/workspace/user → a bare call Composio under-declares
@@ -300,6 +315,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('passes the one-of pre-flight once any member is present, and coerces a JSON-string array param', async () => {
     await provider.execute({
+      scope: SCOPE,
       appSlug: 'asana',
       actionName: 'get_team_memberships',
       props: { team: 't1', opt_fields: '["name","email"]' },
@@ -321,6 +337,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
   // ── Warnings channel — non-fatal honesty notes ──
   it('surfaces a genuinely-unmapped prop as a warning (override path), but never a rescued SDK alias', async () => {
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'gmail',
       actionName: 'send_email',
       // `to` is rescued by the overlay (→ recipient_email); `bogusField` is genuinely unknown.
@@ -336,6 +353,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('surfaces a coercion skip as a soft warning (value left a string against a declared type)', async () => {
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'asana',
       actionName: 'get_team_memberships',
       props: { team: 't1', opt_fields: 'name' }, // not JSON → stays a string against declared array
@@ -353,6 +371,7 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
 
   it('a clean run carries no warnings field', async () => {
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'gmail',
       actionName: 'send_email',
       props: { recipient_email: 'to@x.com', body: 'yo' },

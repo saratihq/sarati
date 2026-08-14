@@ -5,6 +5,7 @@ import { DomainError } from '../common/domain-error';
 import type { ConnectionsService, ManagedConnectionRef } from '../connections/connections.service';
 import type { EnvConfig } from '../config/env.config';
 import { SdkActionsProvider } from './sdk-actions.provider';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 
 /** A one-shot fake `fetch` returning a canned JSON response and recording the last call. */
 function fakeFetch(
@@ -28,8 +29,16 @@ function fakeFetch(
 }
 
 function config(over: Partial<EnvConfig> = {}): ConfigService<{ env: EnvConfig }, true> {
-  const env = { composioApiKey: 'ak_test', composioBaseUrl: 'https://backend.composio.dev', ...over };
+  const env = { composioBaseUrl: 'https://backend.composio.dev', ...over };
   return { get: () => env } as unknown as ConfigService<{ env: EnvConfig }, true>;
+}
+
+/** The stored Composio key — the managed rail's only source now that it is not an env var. */
+function platformKeys(apiKey = 'ak_test'): PlatformKeysService {
+  return {
+    scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
+    composioApiKey: () => Promise.resolve(apiKey),
+  } as unknown as PlatformKeysService;
 }
 
 function connections(over: { ref?: ManagedConnectionRef | null; credential?: unknown }): ConnectionsService {
@@ -70,7 +79,7 @@ describe('SdkActionsProvider', () => {
       expect(url).toContain('/api/v3/tools/execute/proxy');
       return { status: 200, body: { data: GMAIL_PROFILE, status: 200, headers: {} } };
     });
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl);
+    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
 
     const result = await provider.runAction({
       externalUserId: 'user-1',
@@ -116,7 +125,7 @@ describe('SdkActionsProvider', () => {
       status: 200,
       body: { data: { error: 'Expected OAuth 2 access token' }, status: 401, headers: {} },
     }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl);
+    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
 
     const err = await provider
       .runAction({
@@ -174,7 +183,7 @@ describe('SdkActionsProvider', () => {
         headers: {},
       },
     }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl);
+    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
     const result = await provider.loadOptions('gmail.list_messages', 'labelIds', {
       externalUserId: 'user-1',
       connectionId: 'conn-1',
@@ -188,7 +197,7 @@ describe('SdkActionsProvider', () => {
 
   it('loadOptions degrades to a disabled result when the loader cannot run', async () => {
     const { impl } = fakeFetch(() => ({ status: 200, body: { data: {}, status: 500, headers: {} } }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl);
+    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
     const result = await provider.loadOptions('gmail.list_messages', 'labelIds', {
       externalUserId: 'user-1',
       connectionId: 'conn-1',

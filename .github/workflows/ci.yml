@@ -68,14 +68,14 @@ jobs:
           POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr '+/' '-_')
           SARATI_URL=http://localhost:8080
           SARATI_PORT=8080
-          COMPOSIO_API_KEY=ci-config-reachability-probe
+          LOG_LEVEL=ci-config-reachability-probe
           EOF
           docker compose up -d
       - name: A documented setting in .env must reach the service
         run: |
           # Booting proves the images run; it never proved configuration arrives. Without this,
           # a setting can be documented and unreachable at the same time.
-          got=$(docker compose exec -T service printenv COMPOSIO_API_KEY || true)
+          got=$(docker compose exec -T service printenv LOG_LEVEL || true)
           test "$got" = 'ci-config-reachability-probe' \
             || { echo "::error::.env settings do not reach the service (got '$got')"; exit 1; }
           docker compose exec -T service printenv DATABASE_URL | grep -q '@db:5432/sarati' \

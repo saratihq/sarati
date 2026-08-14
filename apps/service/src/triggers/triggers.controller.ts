@@ -7,6 +7,7 @@ import { requirePrincipal } from '../auth/principal';
 import { TriggersService } from './triggers.service';
 import { Scope } from '../auth/scope.decorator';
 import { isIdShape } from '../database/ids';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 
 /**
  * The trigger picker catalog + the per-workflow activation-health readout (ADR 0018). Triggers
@@ -15,13 +16,18 @@ import { isIdShape } from '../database/ids';
 @Controller('api/triggers')
 @UseGuards(AuthGuard)
 export class TriggersController {
-  constructor(private readonly triggers: TriggersService) {}
+  constructor(
+    private readonly triggers: TriggersService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
 
   /** The trigger picker catalog: the native webhook + schedule kinds, then every provider trigger. */
   @Scope('workflow:read')
   @Get('catalog')
-  async catalog(): Promise<Record<string, unknown>> {
-    return { triggers: await this.triggers.catalog() };
+  async catalog(@Req() req: Request): Promise<Record<string, unknown>> {
+    const principal = requirePrincipal(req);
+    const scope = await this.platformKeys.scopeFor(principal.user.id, principal.activeOrgId);
+    return { triggers: await this.triggers.catalog(scope) };
   }
 
   /**

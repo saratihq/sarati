@@ -12,6 +12,7 @@ import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provi
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
+import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A manual-trigger workflow: no desired composio activation, so a seeded row converges to a teardown (F2). */
@@ -171,14 +172,14 @@ describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', ()
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
-    // Rail configured (fake key) — subscribe/delete are spied, so no live call.
-    process.env.COMPOSIO_API_KEY = 'ck_e2e_fake_key';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
     await listenOnLoopback(app);
+    // The managed rail's key lives in the store, not the environment.
+    await seedPlatformKeyEverywhere(app, 'composio_api_key', 'ck_e2e_fake_key');
   }, 30_000);
 
   afterAll(async () => {
@@ -215,7 +216,7 @@ describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', ()
       // Last holder tears down — now the instance is deleted exactly once.
       await reconciler().reconcile(wf2);
       expect(deleteSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledWith(instance);
+      expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), instance);
       expect(await countActivations(instance)).toBe(0);
     });
 
@@ -228,7 +229,7 @@ describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', ()
       await Promise.all([reconciler().reconcile(wf1), reconciler().reconcile(wf2)]);
 
       expect(deleteSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledWith(instance);
+      expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), instance);
       expect(await countActivations(instance)).toBe(0);
     });
   });
@@ -321,7 +322,7 @@ describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', ()
 
       await reconciler().reconcile(wf, { selfHeal: true });
 
-      expect(deleteSpy).toHaveBeenCalledWith('ti_orphaned');
+      expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), 'ti_orphaned');
       deleteSpy.mockRestore();
     });
   });
@@ -357,8 +358,8 @@ describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', ()
       // Second pass: orphaned on both → deleted; ti_referenced is held by a live row → kept.
       await triggers().reapOrphanedComposioSubscriptions();
       expect(deleteSpy).toHaveBeenCalledTimes(1);
-      expect(deleteSpy).toHaveBeenCalledWith('ti_orphan');
-      expect(deleteSpy).not.toHaveBeenCalledWith('ti_referenced');
+      expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), 'ti_orphan');
+      expect(deleteSpy).not.toHaveBeenCalledWith(expect.any(Object), 'ti_referenced');
     });
   });
 });

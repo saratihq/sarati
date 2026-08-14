@@ -145,11 +145,7 @@ export class EnvConfig {
   @IsBoolean()
   mockAuth = false;
 
-  // ── Composio managed connections. Empty key = inert. ──
-  /** Composio project API key; empty disables the managed-connection endpoints. */
-  @IsString()
-  composioApiKey = '';
-
+  // ── Composio managed connections. The API key is set in Settings, not here. ──
   /** Composio API base URL — overridable so tests can point at a stub. */
   @IsString()
   composioBaseUrl = 'https://backend.composio.dev';
@@ -157,11 +153,6 @@ export class EnvConfig {
   /** Extra app slugs (comma/space list) forced onto the Composio execution fallback rail. */
   @IsString()
   composioFallbackApps = '';
-
-  /** Composio webhook signing secret (ADR 0046, Svix HMAC-SHA256); empty → `/api/hooks/composio`
-   *  fails CLOSED. Independent of COMPOSIO_API_KEY. */
-  @IsString()
-  composioWebhookSecret = '';
 
   /** Open-core edition flag (ADR 0004): gates ee-only wiring, never core logic. */
   @IsIn(['oss', 'cloud'])
@@ -225,10 +216,8 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       oidcJwksUrl: raw.OIDC_JWKS_URL ?? '',
       oidcAudience: raw.OIDC_AUDIENCE ?? '',
       mockAuth: asBool(raw.MOCK_AUTH, false),
-      composioApiKey: raw.COMPOSIO_API_KEY ?? '',
       composioBaseUrl: raw.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
       composioFallbackApps: raw.COMPOSIO_FALLBACK_APPS ?? '',
-      composioWebhookSecret: raw.COMPOSIO_WEBHOOK_SECRET ?? '',
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
       throttleLimit: asInt(raw.THROTTLE_LIMIT, 60),

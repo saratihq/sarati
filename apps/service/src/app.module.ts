@@ -31,6 +31,7 @@ import { ConnectionsModule } from './connections/connections.module';
 import { ComposeModule } from './compose/compose.module';
 import { SubWorkflowModule } from './sub-workflow/sub-workflow.module';
 import { McpModule } from './mcp/mcp.module';
+import { PlatformModule } from './platform/platform.module';
 
 @Module({
   imports: [
@@ -94,6 +95,8 @@ import { McpModule } from './mcp/mcp.module';
     SubWorkflowModule,
     // ADR 0052: the Platform MCP surface (`/mcp`).
     McpModule,
+    // The two optional platform API keys, set from Settings rather than the environment.
+    PlatformModule,
   ],
   controllers: [HealthController],
   providers: [

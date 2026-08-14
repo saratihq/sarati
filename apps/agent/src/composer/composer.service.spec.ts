@@ -28,6 +28,7 @@ import {
   MOCK_USER_KEY,
   type TokenVerifyFn,
 } from './composer-auth.guard';
+import { PlatformKeysClient } from '../config/platform-keys.client';
 import { ComposerService, QUERY_FN, type QueryFn } from './composer.service';
 import { EventChannel } from './event-channel';
 import { PendingAnswers } from './pending-answers';
@@ -49,7 +50,6 @@ const ENV = {
   corsOriginList: ['http://localhost:3100'],
   workflowServiceUrl: 'http://localhost:8001',
   workflowServiceApiKey: 'ork_test',
-  anthropicApiKey: 'sk-test',
   composerModel: 'claude-opus-4-8',
   paramModel: null,
   mockAuth: false,
@@ -90,6 +90,8 @@ async function makeService(
       { provide: WorkflowServiceClient, useValue: client },
       { provide: ThreadStore, useValue: threads },
       { provide: QUERY_FN, useValue: queryFn },
+      // The key comes from workflow-service's store now, not this process's env.
+      { provide: PlatformKeysClient, useValue: { anthropicApiKey: () => Promise.resolve('sk-test') } },
     ],
   }).compile();
   return {
@@ -152,6 +154,7 @@ function makeCtx(
     workflowId: null,
     threadId: null,
     userKey: null,
+    callerOrgId: null,
     persist: null,
     draftIr: { nodes: draftNodes, edges: [] },
     busy: true,
@@ -206,7 +209,7 @@ describe('ComposerService.stream', () => {
       ]),
     );
 
-    const events = await collect(service.stream({ message: 'build it' }, never, 'jwt-1'));
+    const events = await collect(service.stream({ message: 'build it' }, never, 'jwt-1', null));
     expect(events[0]!.event).toBe('session');
     expect(events.slice(1, 3).map((e) => ({ event: e.event, data: e.data }))).toEqual([
       { event: 'assistant_text', data: { text: 'Hello ' } },
@@ -244,7 +247,7 @@ describe('ComposerService.stream', () => {
         { type: 'result', subtype: 'success' },
       ]),
     );
-    const events = await collect(service.stream({ message: 'x' }, never, null));
+    const events = await collect(service.stream({ message: 'x' }, never, null, null));
     const texts = events.filter((e) => e.event === 'assistant_text').map((e) => e.data.text);
     expect(texts).toEqual(['First.', '\n\n', 'Second.']);
   });
@@ -261,9 +264,9 @@ describe('ComposerService.stream', () => {
     }) as unknown as QueryFn;
 
     const { service } = await makeService(spying);
-    const first = await collect(service.stream({ message: 'one' }, never, null));
+    const first = await collect(service.stream({ message: 'one' }, never, null, null));
     const sessionId = (first[0]!.data as { session_id: string }).session_id;
-    await collect(service.stream({ message: 'two', session_id: sessionId }, never, null));
+    await collect(service.stream({ message: 'two', session_id: sessionId }, never, null, null));
 
     expect(seenOptions[0]!.resume).toBeUndefined();
     expect(seenOptions[1]!.resume).toBe('sdk-abc');
@@ -301,10 +304,10 @@ describe('ComposerService.stream', () => {
 
   it('stores the freshest caller token on the session (tool calls run AS the user)', async () => {
     const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
-    const first = await collect(service.stream({ message: 'a' }, never, 'jwt-old'));
+    const first = await collect(service.stream({ message: 'a' }, never, 'jwt-old', null));
     const id = (first[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(id)!.callerToken).toBe('jwt-old');
-    await collect(service.stream({ message: 'b', session_id: id }, never, 'jwt-new'));
+    await collect(service.stream({ message: 'b', session_id: id }, never, 'jwt-new', null));
     expect(sessions.get(id)!.callerToken).toBe('jwt-new');
     // answerQuestion refreshes it too (long pauses outlive Clerk tokens).
     const { questionId } = (await makeService(scriptedQuery([]))).answers.create(id, 1000);
@@ -325,7 +328,7 @@ describe('ComposerService.stream', () => {
     }) as unknown as QueryFn;
 
     const { service, sessions } = await makeService(failing);
-    const events = await collect(service.stream({ message: 'x' }, never, null));
+    const events = await collect(service.stream({ message: 'x' }, never, null, null));
     expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
     const sessionId = (events[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(sessionId)!.busy).toBe(false);
@@ -334,22 +337,24 @@ describe('ComposerService.stream', () => {
   it('rejects an unknown session and a busy session with error events', async () => {
     const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
     const unknown = await collect(
-      service.stream({ message: 'x', session_id: crypto.randomUUID() }, never, null),
+      service.stream({ message: 'x', session_id: crypto.randomUUID() }, never, null, null),
     );
     expect(unknown[0]!.event).toBe('error');
 
     const s = sessions.create(null, null);
     s.busy = true;
-    const busy = await collect(service.stream({ message: 'x', session_id: s.id }, never, null));
+    const busy = await collect(service.stream({ message: 'x', session_id: s.id }, never, null, null));
     expect(busy[0]!.event).toBe('error');
   });
 
   it('refreshes the session draft from the message ir (user edits between turns win)', async () => {
     const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
-    const first = await collect(service.stream({ message: 'a', ir: { nodes: [], edges: [] } }, never, null));
+    const first = await collect(
+      service.stream({ message: 'a', ir: { nodes: [], edges: [] } }, never, null, null),
+    );
     const id = (first[0]!.data as { session_id: string }).session_id;
     const edited = { nodes: [{ id: 'n1' }], edges: [] };
-    await collect(service.stream({ message: 'b', session_id: id, ir: edited }, never, null));
+    await collect(service.stream({ message: 'b', session_id: id, ir: edited }, never, null, null));
     expect(sessions.get(id)!.draftIr).toEqual(edited);
   });
 });
@@ -473,7 +478,7 @@ describe('ComposerService orphan grace (disconnect ≠ abort)', () => {
     const gone = new AbortController();
     const received: string[] = [];
     const streamDone = (async () => {
-      for await (const e of service.stream({ message: 'x' }, gone.signal, null)) {
+      for await (const e of service.stream({ message: 'x' }, gone.signal, null, null)) {
         received.push(e.event);
       }
     })();
@@ -860,18 +865,19 @@ describe('workflow binding adoption (composer-first new build)', () => {
       readWorkflow: () => Promise.reject(new Error('not seeded in this test')),
     });
     const session = sessions.create(null, { nodes: [], edges: [] });
-    await collect(service.stream({ message: 'x', session_id: session.id }, never, null));
+    await collect(service.stream({ message: 'x', session_id: session.id }, never, null, null));
     expect(session.workflowId).toBeNull();
     await collect(
       service.stream(
         { message: 'Saved and turned on.', session_id: session.id, workflow_id: 'wf-9' },
         never,
         null,
+        null,
       ),
     );
     expect(session.workflowId).toBe('wf-9');
     await collect(
-      service.stream({ message: 'y', session_id: session.id, workflow_id: 'wf-other' }, never, null),
+      service.stream({ message: 'y', session_id: session.id, workflow_id: 'wf-other' }, never, null, null),
     );
     expect(session.workflowId).toBe('wf-9');
   });
@@ -1116,7 +1122,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('stream binds the (user, workflow) thread and write-throughs the transcript in order', async () => {
     const threads = fakeThreads({ id: 'thread-9', workflowId: 'wf-1' });
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    await collect(service.stream({ message: 'build it', workflow_id: 'wf-1' }, never, null, 'user_1'));
+    await collect(service.stream({ message: 'build it', workflow_id: 'wf-1' }, never, null, null, 'user_1'));
 
     expect(threads.resolve).toHaveBeenCalledWith('user_1', 'wf-1');
     const appended = threads.append.mock.calls.map((c) => c[1] as SequencedComposerEvent);
@@ -1130,7 +1136,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('a pre-existing thread sets the seq floor — new events continue the durable log', async () => {
     const threads = fakeThreads({ id: 'thread-9', lastSeq: 7 });
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    await collect(service.stream({ message: 'more' }, never, null, 'user_1'));
+    await collect(service.stream({ message: 'more' }, never, null, null, 'user_1'));
     const appended = threads.append.mock.calls.map((c) => c[1] as SequencedComposerEvent);
     expect(appended[0]).toMatchObject({ event: 'user_message', seq: 8 });
   });
@@ -1142,7 +1148,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       {},
       threads,
     );
-    const first = await collect(service.stream({ message: 'draft it' }, never, null, 'user_1'));
+    const first = await collect(service.stream({ message: 'draft it' }, never, null, null, 'user_1'));
     const sessionId = (first[0]!.data as { session_id: string }).session_id;
     expect(threads.resolve).toHaveBeenCalledWith('user_1', null);
 
@@ -1231,7 +1237,7 @@ describe('durable threads (write-through + rehydrate)', () => {
     const threads = fakeThreads();
     threads.resolve.mockRejectedValue(new Error('connection refused'));
     const { service, sessions } = await makeService(scriptedQuery(turn), {}, threads);
-    const events = await collect(service.stream({ message: 'x' }, never, null, 'user_1'));
+    const events = await collect(service.stream({ message: 'x' }, never, null, null, 'user_1'));
     expect(events.map((e) => e.event)).toEqual(['session', 'assistant_text', 'done']);
     const sessionId = (events[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(sessionId)!.threadId).toBeNull();
@@ -1241,7 +1247,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('user_message is transcript-only: buffered and persisted, never pushed to the live stream', async () => {
     const threads = fakeThreads();
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    const events = await collect(service.stream({ message: 'hello' }, never, null, 'user_1'));
+    const events = await collect(service.stream({ message: 'hello' }, never, null, null, 'user_1'));
     expect(events.some((e) => e.event === 'user_message')).toBe(false);
     const appended = threads.append.mock.calls.map((c) => (c[1] as SequencedComposerEvent).event);
     expect(appended).toContain('user_message');

@@ -108,6 +108,10 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '022_composio_webhook_deliveries.sql',
     probe: "SELECT 1 FROM information_schema.tables WHERE table_name='composio_webhook_deliveries'",
   },
+  {
+    migration: '023_platform_secrets.sql',
+    probe: "SELECT 1 FROM information_schema.tables WHERE table_name='platform_secrets'",
+  },
 ];
 
 /**

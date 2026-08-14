@@ -1,8 +1,10 @@
-import { Controller, Get } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Controller, Get, Req } from '@nestjs/common';
+import type { Request } from 'express';
 
-import type { ComposerDisabledReason, EnvConfig } from '../config/env.config';
-import { DISABLED_MESSAGE } from './composer-enabled.guard';
+import { callerOf } from './caller-context';
+
+import type { ComposerDisabledReason } from '../config/env.config';
+import { ComposerAvailability, DISABLED_MESSAGE } from './composer-availability.service';
 
 export interface ComposerStatus {
   status: 'ok' | 'disabled';
@@ -31,11 +33,11 @@ const DOCS_URL =
  */
 @Controller('api/composer')
 export class ComposerStatusController {
-  constructor(private readonly config: ConfigService<{ env: EnvConfig }, true>) {}
+  constructor(private readonly availability: ComposerAvailability) {}
 
   @Get('status')
-  status(): ComposerStatus {
-    const reason = this.config.get('env', { infer: true }).composerDisabledReason;
+  async status(@Req() req: Request): Promise<ComposerStatus> {
+    const reason = await this.availability.disabledReason(callerOf(req));
     if (reason === null) return { status: 'ok' };
     return { status: 'disabled', reason, message: DISABLED_MESSAGE[reason], docs: DOCS_URL };
   }

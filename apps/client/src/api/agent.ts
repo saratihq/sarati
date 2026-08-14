@@ -1,7 +1,7 @@
 // agent-service (:8010) client — the composer's SSE streams over fetch+ReadableStream, since EventSource
 // can't POST. Every request carries the Clerk JWT; every frame carries a seq (`id:` line) = the replay key.
 
-import { getAuthToken } from "@/api/client";
+import { getActiveOrgId, getAuthToken } from "@/api/client";
 import { agentBaseUrl } from "@/lib/config";
 
 // Resolved in @/lib/config, which fails a production build when NEXT_PUBLIC_AGENT_URL is unset.
@@ -29,11 +29,13 @@ const UNREACHABLE: ComposerAvailability = {
 /**
  * The capability probe, read once before any composer entry point renders.
  *
- * Deliberately unauthenticated and non-throwing: it runs before the app knows
- * whether it has a token, and EVERY failure mode means the same thing to the
- * UI — no composer. It also cannot reuse `/api/health`: behind the self-host
- * proxy only `/api/composer/*` routes to agent-service, so `/api/health` would
- * be answered by workflow-service with a confident, wrong "ok".
+ * Carries the caller's token and active org, because the Anthropic key belongs
+ * to a user or an organization — "is the composer available" is a question about
+ * YOU, not about the deployment. Non-throwing: EVERY failure mode, including no
+ * token at all, means the same thing to the UI — no composer. It also cannot
+ * reuse `/api/health`: behind the self-host proxy only `/api/composer/*` routes
+ * to agent-service, so `/api/health` would be answered by workflow-service with
+ * a confident, wrong "ok".
  *
  * Anything that isn't a 200 `{"status":"ok"}` counts as unavailable, which is
  * what lets the service be dropped from the stack entirely (proxy 502, HTML
@@ -42,7 +44,15 @@ const UNREACHABLE: ComposerAvailability = {
 export async function composerStatus(signal?: AbortSignal): Promise<ComposerAvailability> {
   let res: Response;
   try {
-    res = await fetch(`${AGENT_BASE}/composer/status`, { signal });
+    const token = await getAuthToken();
+    const orgId = getActiveOrgId();
+    res = await fetch(`${AGENT_BASE}/composer/status`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(orgId ? { "X-Org-Id": orgId } : {}),
+      },
+      signal,
+    });
   } catch {
     return UNREACHABLE;
   }

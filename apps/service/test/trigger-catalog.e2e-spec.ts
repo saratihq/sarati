@@ -19,7 +19,6 @@ describe('trigger catalog (e2e, isolated DB, mock auth)', () => {
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     // Composio projection OFF (ADR 0046) so the palette is deterministic and makes no live call.
-    process.env.COMPOSIO_API_KEY = '';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

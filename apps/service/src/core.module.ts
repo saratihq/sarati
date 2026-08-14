@@ -4,6 +4,7 @@ import { EncryptionService } from './common/crypto/encryption.service';
 import { ENTITLEMENTS_PROVIDER, UnlimitedEntitlements } from './entitlements/entitlements';
 import { EventsService } from './events/events.service';
 import { OrgsService } from './orgs/orgs.service';
+import { PlatformKeysService } from './platform/platform-keys.service';
 import { PolicyService } from './policy/policy.service';
 
 /**
@@ -18,8 +19,16 @@ import { PolicyService } from './policy/policy.service';
     EventsService,
     PolicyService,
     EncryptionService,
+    PlatformKeysService,
     { provide: ENTITLEMENTS_PROVIDER, useClass: UnlimitedEntitlements },
   ],
-  exports: [OrgsService, EventsService, PolicyService, EncryptionService, ENTITLEMENTS_PROVIDER],
+  exports: [
+    OrgsService,
+    EventsService,
+    PolicyService,
+    EncryptionService,
+    PlatformKeysService,
+    ENTITLEMENTS_PROVIDER,
+  ],
 })
 export class CoreModule {}

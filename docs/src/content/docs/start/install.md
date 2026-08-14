@@ -75,8 +75,8 @@ docker volume rm sarati_db-data
 | `agent` | The AI composer. Idle until you give it a key. |
 | `db` | Postgres 16. |
 
-The AI composer is off unless you set `ANTHROPIC_API_KEY` in `.env`. Everything else works without
-it.
+The AI composer is off until an owner or admin adds an Anthropic key in **Settings → Platform
+keys** — inside the running app, not in `.env`. Everything else works without it.
 
 ## Run it from source
 

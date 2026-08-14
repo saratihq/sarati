@@ -46,6 +46,8 @@ export interface ComposerSession {
    * surfaces as a friendly tool error; the next interaction refreshes it).
    */
   callerToken: string | null;
+  /** The org the caller is acting in — decides whose platform keys the turn resolves. */
+  callerOrgId: string | null;
   /** Aborts the RUNNING turn — fired only when the orphan grace period expires. */
   turnAbort: AbortController | null;
   /** Pending orphan-abort timer (armed on disconnect, cleared on reattach). */
@@ -190,6 +192,7 @@ export class SessionStore implements OnApplicationShutdown {
       buffer: [],
       subscriber: null,
       callerToken: null,
+      callerOrgId: null,
       turnAbort: null,
       orphanTimer: null,
       snapshot: {

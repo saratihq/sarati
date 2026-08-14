@@ -1,14 +1,15 @@
 import { createHmac } from 'node:crypto';
 
-import type { ConfigService } from '@nestjs/config';
-
 import type {
   ComposioProvider,
   ComposioToolkit,
   ComposioTriggerType,
 } from '../connections/composio.provider';
-import type { EnvConfig } from '../config/env.config';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 import { ComposioTriggerProvider } from './composio-trigger.provider';
+
+/** Any scope will do here — the tests are about behaviour, not about whose key it is. */
+const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
 /**
  * The Composio TRIGGER rail façade (ADR 0046): projection, public-type↔slug mapping, verify + subscribe delegation,
@@ -64,7 +65,7 @@ const SAMPLE_MANAGED_TOOLKITS: ComposioToolkit[] = [
 ];
 
 interface FakeComposio {
-  configured: boolean;
+  isConfigured: jest.Mock<Promise<boolean>, []>;
   listTriggerTypes: jest.Mock<Promise<ComposioTriggerType[]>, []>;
   listManagedToolkits: jest.Mock<Promise<ComposioToolkit[]>, []>;
   createTriggerInstance: jest.Mock;
@@ -81,7 +82,7 @@ function makeProvider(opts?: {
   const types = opts?.types ?? SAMPLE_TYPES;
   const managed = opts?.managed ?? SAMPLE_MANAGED_TOOLKITS;
   const fake: FakeComposio = {
-    configured: opts?.configured ?? true,
+    isConfigured: jest.fn(() => Promise.resolve(opts?.configured ?? true)),
     listTriggerTypes: jest.fn(() =>
       types instanceof Error ? Promise.reject(types) : Promise.resolve(types),
     ),
@@ -92,10 +93,12 @@ function makeProvider(opts?: {
     deleteTriggerInstance: jest.fn(() => Promise.resolve()),
     listActiveTriggerInstanceIds: jest.fn(() => Promise.resolve<string[]>(['ti_live'])),
   };
-  const config = {
-    get: () => ({ composioWebhookSecret: opts?.secret ?? '' }) as Partial<EnvConfig>,
-  } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const provider = new ComposioTriggerProvider(fake as unknown as ComposioProvider, config);
+  // The webhook secret is stored per scope now, not read from env.
+  const keys = {
+    get: (_scope: unknown, name: string) =>
+      Promise.resolve(name === 'composio_webhook_secret' ? (opts?.secret ?? '') : ''),
+  } as unknown as PlatformKeysService;
+  const provider = new ComposioTriggerProvider(fake as unknown as ComposioProvider, keys);
   return { provider, fake };
 }
 
@@ -103,7 +106,7 @@ describe('ComposioTriggerProvider', () => {
   describe('catalog projection', () => {
     it('maps a triggers_types response to picker rows (type, category, auth, parameters)', async () => {
       const { provider } = makeProvider();
-      const entries = await provider.catalog();
+      const entries = await provider.catalog(SCOPE);
       expect(entries).toHaveLength(3);
 
       const gmail = entries.find((e) => e.type === 'gmail.gmail_new_gmail_message');
@@ -123,7 +126,7 @@ describe('ComposioTriggerProvider', () => {
 
     it('carries required fields through from the config `required` array', async () => {
       const { provider } = makeProvider();
-      const github = (await provider.catalog()).find((e) => e.type === 'github.github_commit_event');
+      const github = (await provider.catalog(SCOPE)).find((e) => e.type === 'github.github_commit_event');
       expect(github?.parameters).toEqual({
         owner: { type: 'SHORT_TEXT', description: 'repo owner', required: true },
         repo: { type: 'SHORT_TEXT', description: 'repo name', required: true },
@@ -132,26 +135,26 @@ describe('ComposioTriggerProvider', () => {
 
     it('namespaces the public type under OUR app slug (googlecalendar → calendar)', async () => {
       const { provider } = makeProvider();
-      const cal = (await provider.catalog()).find((e) => e.category === 'calendar');
+      const cal = (await provider.catalog(SCOPE)).find((e) => e.category === 'calendar');
       expect(cal?.type).toBe('calendar.googlecalendar_event');
     });
 
     it('is inert (empty) when the key is unset — edition gate', async () => {
       const { provider, fake } = makeProvider({ configured: false });
-      expect(await provider.catalog()).toEqual([]);
+      expect(await provider.catalog(SCOPE)).toEqual([]);
       expect(fake.listTriggerTypes).not.toHaveBeenCalled();
     });
 
     it('caches — a second call does not re-list', async () => {
       const { provider, fake } = makeProvider();
-      await provider.catalog();
-      await provider.catalog();
+      await provider.catalog(SCOPE);
+      await provider.catalog(SCOPE);
       expect(fake.listTriggerTypes).toHaveBeenCalledTimes(1);
     });
 
     it('degrades to [] (never throws) when the catalog fetch fails', async () => {
       const { provider } = makeProvider({ types: new Error('composio 502') });
-      expect(await provider.catalog()).toEqual([]);
+      expect(await provider.catalog(SCOPE)).toEqual([]);
     });
   });
 
@@ -173,7 +176,7 @@ describe('ComposioTriggerProvider', () => {
         types: [...SAMPLE_TYPES, SPOTIFY_TRIGGER],
         managed: SAMPLE_MANAGED_TOOLKITS, // gmail + github + googlecalendar, NOT spotify
       });
-      const entries = await provider.catalog();
+      const entries = await provider.catalog(SCOPE);
       // The 3 managed-toolkit triggers survive; the spotify one is dropped.
       expect(entries).toHaveLength(3);
       expect(entries.some((e) => e.category === 'spotify')).toBe(false);
@@ -186,7 +189,7 @@ describe('ComposioTriggerProvider', () => {
         types: [...SAMPLE_TYPES, SPOTIFY_TRIGGER],
         managed: [], // undetermined → keep every trigger
       });
-      const entries = await provider.catalog();
+      const entries = await provider.catalog(SCOPE);
       expect(entries).toHaveLength(4); // all kept, spotify included
       expect(entries.some((e) => e.category === 'spotify')).toBe(true);
     });
@@ -196,7 +199,7 @@ describe('ComposioTriggerProvider', () => {
         types: [...SAMPLE_TYPES, SPOTIFY_TRIGGER],
         managed: new Error('composio 502'),
       });
-      const entries = await provider.catalog();
+      const entries = await provider.catalog(SCOPE);
       expect(entries).toHaveLength(4); // fail-open: every trigger kept
       expect(entries.some((e) => e.category === 'spotify')).toBe(true);
     });
@@ -210,20 +213,20 @@ describe('ComposioTriggerProvider', () => {
     it('an empty 200 refresh does NOT clobber a warm non-empty cache', async () => {
       const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
       const { provider, fake } = makeProvider();
-      expect(await provider.catalog()).toHaveLength(3); // warm from SAMPLE_TYPES
+      expect(await provider.catalog(SCOPE)).toHaveLength(3); // warm from SAMPLE_TYPES
       fake.listTriggerTypes.mockResolvedValueOnce([]); // upstream blips to empty
       nowSpy.mockReturnValue(1_000_000 + 11 * 60_000); // past the 10-min TTL → forces a refresh
-      expect(await provider.catalog()).toHaveLength(3); // prior good entries kept, not clobbered
+      expect(await provider.catalog(SCOPE)).toHaveLength(3); // prior good entries kept, not clobbered
     });
 
     it('negative-caches a failed refresh so it backs off (no re-pagination on every hit)', async () => {
       const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(2_000_000);
       const { provider, fake } = makeProvider({ types: new Error('composio down') });
-      expect(await provider.catalog()).toEqual([]); // fails → []
-      await provider.catalog(); // still inside the negative TTL → served from cache, no re-list
+      expect(await provider.catalog(SCOPE)).toEqual([]); // fails → []
+      await provider.catalog(SCOPE); // still inside the negative TTL → served from cache, no re-list
       expect(fake.listTriggerTypes).toHaveBeenCalledTimes(1);
       nowSpy.mockReturnValue(2_000_000 + 60_000); // past the ~45s negative TTL → retries once
-      await provider.catalog();
+      await provider.catalog(SCOPE);
       expect(fake.listTriggerTypes).toHaveBeenCalledTimes(2);
     });
   });
@@ -231,7 +234,7 @@ describe('ComposioTriggerProvider', () => {
   describe('slugForPublicType', () => {
     it('prefers the EXACT recorded slug once the catalog is warm', async () => {
       const { provider } = makeProvider();
-      await provider.catalog();
+      await provider.catalog(SCOPE);
       expect(provider.slugForPublicType('calendar.googlecalendar_event')).toBe('GOOGLECALENDAR_EVENT');
       expect(provider.slugForPublicType('gmail.gmail_new_gmail_message')).toBe('GMAIL_NEW_GMAIL_MESSAGE');
     });
@@ -252,14 +255,14 @@ describe('ComposioTriggerProvider', () => {
         userId: 'user-1',
         triggerConfig: { labelIds: 'INBOX' },
       };
-      await provider.createTriggerInstance(params);
-      expect(fake.createTriggerInstance).toHaveBeenCalledWith(params);
+      await provider.createTriggerInstance(SCOPE, params);
+      expect(fake.createTriggerInstance).toHaveBeenCalledWith(SCOPE, params);
     });
 
     it('delegates deleteTriggerInstance to the v3 client', async () => {
       const { provider, fake } = makeProvider();
-      await provider.deleteTriggerInstance('ti_xyz');
-      expect(fake.deleteTriggerInstance).toHaveBeenCalledWith('ti_xyz');
+      await provider.deleteTriggerInstance(SCOPE, 'ti_xyz');
+      expect(fake.deleteTriggerInstance).toHaveBeenCalledWith(SCOPE, 'ti_xyz');
     });
   });
 
@@ -267,31 +270,31 @@ describe('ComposioTriggerProvider', () => {
   describe('listActiveInstanceIds', () => {
     it('delegates to the v3 client when configured', async () => {
       const { provider, fake } = makeProvider();
-      expect(await provider.listActiveInstanceIds()).toEqual(['ti_live']);
+      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual(['ti_live']);
       expect(fake.listActiveTriggerInstanceIds).toHaveBeenCalledTimes(1);
     });
 
     it('is inert ([]) when the key is unset — never lists', async () => {
       const { provider, fake } = makeProvider({ configured: false });
-      expect(await provider.listActiveInstanceIds()).toEqual([]);
+      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual([]);
       expect(fake.listActiveTriggerInstanceIds).not.toHaveBeenCalled();
     });
 
     it('degrades to [] (never throws) on a listing failure — no false "all orphaned"', async () => {
       const { provider, fake } = makeProvider();
       fake.listActiveTriggerInstanceIds.mockRejectedValueOnce(new Error('composio 502'));
-      expect(await provider.listActiveInstanceIds()).toEqual([]);
+      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual([]);
     });
   });
 
   describe('verifyWebhook', () => {
-    it('verifies against the configured project webhook secret', () => {
+    it("verifies against the scope's stored project webhook secret", async () => {
       const secret = 'whsec_project_secret';
       const { provider } = makeProvider({ secret });
       const raw = JSON.stringify({ metadata: { trigger_id: 'ti_1' } });
       const ts = String(Math.floor(Date.now() / 1000));
       const sig = 'v1,' + createHmac('sha256', secret).update(`id1.${ts}.${raw}`).digest('base64');
-      const ok = provider.verifyWebhook(raw, {
+      const ok = await provider.verifyWebhook(SCOPE, raw, {
         'webhook-id': 'id1',
         'webhook-timestamp': ts,
         'webhook-signature': sig,
@@ -299,9 +302,9 @@ describe('ComposioTriggerProvider', () => {
       expect(ok.ok).toBe(true);
     });
 
-    it('fails closed when no secret is configured', () => {
+    it('fails closed when the scope has no secret stored', async () => {
       const { provider } = makeProvider({ secret: '' });
-      expect(provider.verifyWebhook('{}', {}).ok).toBe(false);
+      expect((await provider.verifyWebhook(SCOPE, '{}', {})).ok).toBe(false);
     });
   });
 });

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
@@ -10,6 +10,12 @@ import { isRecord } from '../common/json-util';
 import type { EnvConfig } from '../config/env.config';
 import { ComposioAuthConfigEntity } from '../database/entities/composio-auth-config.entity';
 import { now } from '../database/ids';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
+
+/** Cache partition per owning scope — never share one scope's Composio project data with another. */
+function scopeKey(scope: PlatformKeyScope): string {
+  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
+}
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const TOOLKIT_CACHE_TTL_MS = 10 * 60_000;
@@ -144,39 +150,48 @@ export class ComposioRequestError extends DomainError {
 
 /**
  * Thin client for Composio's v3 API — it only BROKERS auth (managed auth configs, connect links, account
- * status/deletion); execution goes through ComposioExecutionProvider. Inert when COMPOSIO_API_KEY is unset.
+ * status/deletion); execution goes through ComposioExecutionProvider. Inert until a Composio key is
+ * set in Settings; the key is read per request, never snapshotted, so it takes effect immediately.
  */
 @Injectable()
 export class ComposioProvider {
   private readonly logger = new Logger(ComposioProvider.name);
-  private readonly apiKey: string;
   private readonly baseUrl: string;
-  private toolkitCache: { at: number; items: ComposioToolkit[] } | null = null;
+  // Every cache is keyed by SCOPE: a Composio key addresses one project, so one scope's
+  // catalog or account metadata must never be served to another.
+  private readonly toolkitCache = new Map<string, { at: number; items: ComposioToolkit[] }>();
   private readonly metadataCache = new Map<string, { at: number; data: Record<string, unknown> }>();
   private readonly toolsCache = new Map<string, { at: number; items: ComposioToolDef[] }>();
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     config: ConfigService<{ env: EnvConfig }, true>,
+    // Optional so the provider stays `new`-able in unit tests without DI.
+    @Optional() private readonly platformKeys?: PlatformKeysService,
   ) {
     const env = config.get('env', { infer: true });
-    this.apiKey = env.composioApiKey;
     this.baseUrl = env.composioBaseUrl.replace(/\/+$/, '');
   }
 
-  get configured(): boolean {
-    return this.apiKey !== '';
+  /** Whether THIS scope has a Composio key — the managed rail's on/off signal, asked per call. */
+  async isConfigured(scope: PlatformKeyScope): Promise<boolean> {
+    return (await this.apiKey(scope)) !== '';
+  }
+
+  private async apiKey(scope: PlatformKeyScope): Promise<string> {
+    return (await this.platformKeys?.composioApiKey(scope)) ?? '';
   }
 
   /** Toolkits with a Composio-managed (shared) OAuth app, cached in-process. */
-  async listManagedToolkits(): Promise<ComposioToolkit[]> {
-    if (this.toolkitCache && Date.now() - this.toolkitCache.at < TOOLKIT_CACHE_TTL_MS) {
-      return this.toolkitCache.items;
-    }
+  async listManagedToolkits(scope: PlatformKeyScope): Promise<ComposioToolkit[]> {
+    const cacheKey = scopeKey(scope);
+    const cached = this.toolkitCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < TOOLKIT_CACHE_TTL_MS) return cached.items;
     const items: ComposioToolkit[] = [];
     let cursor: string | null = null;
     do {
       const page = await this.request(
+        scope,
         'GET',
         `/api/v3/toolkits?limit=${TOOLKIT_PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
       );
@@ -191,7 +206,7 @@ export class ComposioProvider {
       }
       cursor = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : null;
     } while (cursor);
-    this.toolkitCache = { at: Date.now(), items };
+    this.toolkitCache.set(cacheKey, { at: Date.now(), items });
     return items;
   }
 
@@ -199,14 +214,15 @@ export class ComposioProvider {
    * The managed auth-config id for a toolkit: from our table, else adopted from an existing Composio-managed
    * config, else created. The winner is persisted so restarts reuse it; a concurrent create leaves a harmless orphan.
    */
-  async ensureAuthConfig(toolkitSlug: string): Promise<string> {
+  async ensureAuthConfig(scope: PlatformKeyScope, toolkitSlug: string): Promise<string> {
     const existing = await this.dataSource.manager.findOne(ComposioAuthConfigEntity, {
       where: { toolkitSlug },
     });
     if (existing) return existing.authConfigId;
 
     const authConfigId =
-      (await this.findManagedAuthConfig(toolkitSlug)) ?? (await this.createManagedAuthConfig(toolkitSlug));
+      (await this.findManagedAuthConfig(scope, toolkitSlug)) ??
+      (await this.createManagedAuthConfig(scope, toolkitSlug));
 
     await this.dataSource
       .createQueryBuilder()
@@ -223,10 +239,11 @@ export class ComposioProvider {
 
   /** Mint a hosted Connect Link for the user (managed configs REQUIRE this flow). */
   async createLink(
+    scope: PlatformKeyScope,
     userId: string,
     authConfigId: string,
   ): Promise<{ redirectUrl: string; connectedAccountId: string }> {
-    const body = await this.request('POST', '/api/v3/connected_accounts/link', {
+    const body = await this.request(scope, 'POST', '/api/v3/connected_accounts/link', {
       auth_config_id: authConfigId,
       user_id: userId,
     });
@@ -241,8 +258,9 @@ export class ComposioProvider {
   }
 
   /** Poll a connected account: INITIALIZING/INITIATED/PENDING → pending, ACTIVE → active, EXPIRED → expired, else failed. */
-  async getAccountStatus(connectedAccountId: string): Promise<ManagedAccountStatus> {
+  async getAccountStatus(scope: PlatformKeyScope, connectedAccountId: string): Promise<ManagedAccountStatus> {
     const body = await this.request(
+      scope,
       'GET',
       `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
     );
@@ -254,31 +272,42 @@ export class ComposioProvider {
   }
 
   /** Delete the Composio connected account (revokes their custody of the grant). */
-  async deleteAccount(connectedAccountId: string): Promise<void> {
-    await this.request('DELETE', `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`);
+  async deleteAccount(scope: PlatformKeyScope, connectedAccountId: string): Promise<void> {
+    await this.request(
+      scope,
+      'DELETE',
+      `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
+    );
   }
 
   /** The connected account's non-secret metadata for `auth.data.*`, cached per account; raw tokens are never surfaced. */
-  async getAccountMetadata(connectedAccountId: string): Promise<Record<string, unknown>> {
-    const cached = this.metadataCache.get(connectedAccountId);
+  async getAccountMetadata(
+    scope: PlatformKeyScope,
+    connectedAccountId: string,
+  ): Promise<Record<string, unknown>> {
+    const cacheKey = `${scopeKey(scope)}:${connectedAccountId}`;
+    const cached = this.metadataCache.get(cacheKey);
     if (cached && Date.now() - cached.at < METADATA_CACHE_TTL_MS) return cached.data;
     const body = await this.request(
+      scope,
       'GET',
       `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
     );
     const data = extractAccountMetadata(body);
-    this.metadataCache.set(connectedAccountId, { at: Date.now(), data });
+    this.metadataCache.set(cacheKey, { at: Date.now(), data });
     return data;
   }
 
   /** A toolkit's executable tools, cached; deprecated tools are dropped so the matcher never resolves to a dead slug. */
-  async listTools(toolkitSlug: string): Promise<ComposioToolDef[]> {
-    const cached = this.toolsCache.get(toolkitSlug);
+  async listTools(scope: PlatformKeyScope, toolkitSlug: string): Promise<ComposioToolDef[]> {
+    const cacheKey = `${scopeKey(scope)}:${toolkitSlug}`;
+    const cached = this.toolsCache.get(cacheKey);
     if (cached && Date.now() - cached.at < TOOLKIT_CACHE_TTL_MS) return cached.items;
     const items: ComposioToolDef[] = [];
     let cursor: string | null = null;
     do {
       const page = await this.request(
+        scope,
         'GET',
         `/api/v3/tools?toolkit_slug=${encodeURIComponent(toolkitSlug)}&limit=${TOOL_PAGE_LIMIT}${
           cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
@@ -300,7 +329,7 @@ export class ComposioProvider {
       }
       cursor = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : null;
     } while (cursor);
-    this.toolsCache.set(toolkitSlug, { at: Date.now(), items });
+    this.toolsCache.set(cacheKey, { at: Date.now(), items });
     return items;
   }
 
@@ -309,10 +338,11 @@ export class ComposioProvider {
    * A tool that RAN but failed returns `{ successful: false, error }` on HTTP 200; transport/4xx/5xx raise via `request`.
    */
   async executeTool(
+    scope: PlatformKeyScope,
     toolSlug: string,
     params: { connectedAccountId: string; userId: string; arguments: Record<string, unknown> },
   ): Promise<ComposioExecuteResult> {
-    const body = await this.request('POST', `/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
+    const body = await this.request(scope, 'POST', `/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
       connected_account_id: params.connectedAccountId,
       user_id: params.userId,
       arguments: params.arguments,
@@ -333,11 +363,12 @@ export class ComposioProvider {
    * Every Composio trigger TYPE, malformed rows dropped — the FULL trigger universe.
    * The "offered = subscribable" filter lives in {@link ComposioTriggerProvider.project}, not here.
    */
-  async listTriggerTypes(): Promise<ComposioTriggerType[]> {
+  async listTriggerTypes(scope: PlatformKeyScope): Promise<ComposioTriggerType[]> {
     const items: ComposioTriggerType[] = [];
     let cursor: string | null = null;
     do {
       const page = await this.request(
+        scope,
         'GET',
         `/api/v3/triggers_types?limit=${TRIGGER_TYPE_PAGE_LIMIT}${
           cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
@@ -369,13 +400,17 @@ export class ComposioProvider {
    * Idempotent UPSERT of a Composio trigger INSTANCE (ADR 0046). Composio dedupes on
    * `(connected_account, slug, trigger_config)`, so identical activations SHARE an id — the caller must refcount teardown.
    */
-  async createTriggerInstance(params: {
-    slug: string;
-    connectedAccountId: string;
-    userId: string;
-    triggerConfig: Record<string, unknown>;
-  }): Promise<string> {
+  async createTriggerInstance(
+    scope: PlatformKeyScope,
+    params: {
+      slug: string;
+      connectedAccountId: string;
+      userId: string;
+      triggerConfig: Record<string, unknown>;
+    },
+  ): Promise<string> {
     const body = await this.request(
+      scope,
       'POST',
       `/api/v3/trigger_instances/${encodeURIComponent(params.slug)}/upsert`,
       {
@@ -391,11 +426,12 @@ export class ComposioProvider {
   }
 
   /** Every LIVE Composio trigger instance id on this project — the ADR 0046 orphan reaper diffs these against activation rows. */
-  async listActiveTriggerInstanceIds(): Promise<string[]> {
+  async listActiveTriggerInstanceIds(scope: PlatformKeyScope): Promise<string[]> {
     const ids: string[] = [];
     let cursor: string | null = null;
     do {
       const page = await this.request(
+        scope,
         'GET',
         `/api/v3/trigger_instances/active?limit=${TRIGGER_INSTANCE_PAGE_LIMIT}${
           cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
@@ -416,9 +452,13 @@ export class ComposioProvider {
   }
 
   /** Delete a trigger instance; an already-gone (404/410) one counts as success so a re-run can't wedge teardown. */
-  async deleteTriggerInstance(triggerId: string): Promise<void> {
+  async deleteTriggerInstance(scope: PlatformKeyScope, triggerId: string): Promise<void> {
     try {
-      await this.request('DELETE', `/api/v3/trigger_instances/manage/${encodeURIComponent(triggerId)}`);
+      await this.request(
+        scope,
+        'DELETE',
+        `/api/v3/trigger_instances/manage/${encodeURIComponent(triggerId)}`,
+      );
     } catch (err) {
       if (err instanceof ComposioRequestError && (err.upstreamStatus === 404 || err.upstreamStatus === 410)) {
         this.logger.log(
@@ -430,8 +470,9 @@ export class ComposioProvider {
     }
   }
 
-  private async findManagedAuthConfig(toolkitSlug: string): Promise<string | null> {
+  private async findManagedAuthConfig(scope: PlatformKeyScope, toolkitSlug: string): Promise<string | null> {
     const body = await this.request(
+      scope,
       'GET',
       `/api/v3/auth_configs?toolkit_slug=${encodeURIComponent(toolkitSlug)}&limit=100`,
     );
@@ -444,8 +485,8 @@ export class ComposioProvider {
     return null;
   }
 
-  private async createManagedAuthConfig(toolkitSlug: string): Promise<string> {
-    const body = await this.request('POST', '/api/v3/auth_configs', {
+  private async createManagedAuthConfig(scope: PlatformKeyScope, toolkitSlug: string): Promise<string> {
+    const body = await this.request(scope, 'POST', '/api/v3/auth_configs', {
       toolkit: { slug: toolkitSlug },
       auth_config: { type: 'use_composio_managed_auth' },
     });
@@ -458,9 +499,15 @@ export class ComposioProvider {
   }
 
   /** One request seam: auth, timeouts, JSON decode, and error mapping (4xx → DomainError 400, 5xx/network → 502). */
-  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<unknown> {
-    if (!this.configured) {
-      throw new DomainError('Managed connections are not configured (COMPOSIO_API_KEY is unset)');
+  private async request(
+    scope: PlatformKeyScope,
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
+    const apiKey = await this.apiKey(scope);
+    if (!apiKey) {
+      throw new DomainError('Managed connections are not configured — add a Composio API key in Settings');
     }
     let statusCode: number;
     let text: string;
@@ -468,7 +515,7 @@ export class ComposioProvider {
       const res = await request(`${this.baseUrl}${path}`, {
         method,
         headers: {
-          'x-api-key': this.apiKey,
+          'x-api-key': apiKey,
           accept: 'application/json',
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },

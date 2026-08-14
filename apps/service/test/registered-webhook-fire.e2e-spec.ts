@@ -137,7 +137,6 @@ describe('SDK registered-webhook fire path (e2e, stubbed provider fetch)', () =>
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
-    process.env.COMPOSIO_API_KEY = '';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(SDK_WEBHOOK_FETCH)

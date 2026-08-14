@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { type ApiKeyScheme, callAgentModel, type FetchLike, HttpClient } from '@sarati/actions-sdk';
 
 import { ConnectionsService } from '../connections/connections.service';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
 import type { EnvConfig } from '../config/env.config';
 import {
@@ -39,7 +40,6 @@ const PROVIDER_AUTH: Record<AgentProvider, ApiKeyScheme> = {
  */
 @Injectable()
 export class AgentModelCallProvider implements AgentModelPort {
-  private readonly composioApiKey: string;
   private readonly composioBaseUrl: string;
   private readonly http = new HttpClient();
 
@@ -48,10 +48,16 @@ export class AgentModelCallProvider implements AgentModelPort {
     // Optional so the provider stays `new`-able in unit tests without DI.
     @Optional() private readonly connections?: ConnectionsService,
     @Optional() @Inject(AGENT_MODEL_FETCH) private readonly fetchImpl?: FetchLike,
+    @Optional() private readonly platformKeys?: PlatformKeysService,
   ) {
-    const env = config.get('env', { infer: true });
-    this.composioApiKey = env.composioApiKey;
-    this.composioBaseUrl = env.composioBaseUrl;
+    this.composioBaseUrl = config.get('env', { infer: true }).composioBaseUrl;
+  }
+
+  /** Whose Composio key brokers the model connection — the run's own scope. */
+  private async composioKeyFor(auth: AgentModelAuth): Promise<string | undefined> {
+    if (!this.platformKeys) return undefined;
+    const scope = await this.platformKeys.scopeFor(auth.externalUserId, auth.orgId ?? null);
+    return this.platformKeys.composioApiKey(scope);
   }
 
   async call(req: ModelCallRequest, auth: AgentModelAuth): Promise<ModelTurn> {
@@ -66,7 +72,7 @@ export class AgentModelCallProvider implements AgentModelPort {
         externalUserId: resolved.externalUserId,
         auth: resolved.connection,
         ...(this.connections ? { connections: this.connections } : {}),
-        composioApiKey: this.composioApiKey,
+        composioApiKey: (await this.composioKeyFor(auth)) ?? '',
         composioBaseUrl: this.composioBaseUrl,
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
       },

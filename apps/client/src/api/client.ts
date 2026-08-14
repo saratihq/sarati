@@ -1658,6 +1658,41 @@ export async function listTriggerActivations(
   );
 }
 
+// ─── Platform API keys (per user, or per organization) ───
+// The two optional platform credentials for the ACTIVE context: a real org's keys when acting in
+// one, your own otherwise. Write-only: the API reports presence, never the value.
+
+/** The two names the server accepts; anything else is a 404 by design. */
+export type PlatformKeyName = "composio_api_key" | "composio_webhook_secret" | "anthropic_api_key";
+
+export interface PlatformKeyState {
+  present: boolean;
+  updated_at: string | null;
+}
+
+export interface PlatformKeysResponse {
+  keys: Record<PlatformKeyName, PlatformKeyState>;
+  /** Whose keys these are: the active organization's, or the caller's own. */
+  scope: "user" | "org";
+  /** Whether THIS caller may change them — false for a plain member of the active org. */
+  can_manage: boolean;
+}
+
+export async function listPlatformKeys(): Promise<PlatformKeysResponse> {
+  return request("/platform-keys");
+}
+
+export async function setPlatformKey(
+  name: PlatformKeyName,
+  value: string,
+): Promise<{ secret_present: boolean }> {
+  return request(`/platform-keys/${name}`, { method: "PUT", body: JSON.stringify({ value }) });
+}
+
+export async function clearPlatformKey(name: PlatformKeyName): Promise<{ secret_present: boolean }> {
+  return request(`/platform-keys/${name}`, { method: "DELETE" });
+}
+
 // ─── Webhook signing secret (native HMAC verification, ADR 0030) ───
 // Env-scoped and stored OUT of the version doc, so it never enters a save/diff/review. Write-only: no read-back.
 

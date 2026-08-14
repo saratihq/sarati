@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpException, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Post, Query, UseGuards, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Allow, IsArray, IsObject, IsOptional } from 'class-validator';
 
@@ -14,6 +15,8 @@ import {
 } from './compose-catalog.service';
 import { composerMerge, type ComposerMergeResult } from './compose-merge';
 import { Scope } from '../auth/scope.decorator';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
+import { requirePrincipal } from '../auth/principal';
 
 class MergeDto {
   /** The canvas at turn start. */
@@ -48,19 +51,28 @@ class ApplyOpsDto {
 @Controller('api/compose')
 @UseGuards(AuthGuard)
 export class ComposeController {
-  constructor(private readonly catalog: ComposeCatalogService) {}
+  constructor(
+    private readonly catalog: ComposeCatalogService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
+
+  /** Whose managed catalog this caller sees — their active context. */
+  private scope(req: Request): Promise<PlatformKeyScope> {
+    const principal = requirePrincipal(req);
+    return this.platformKeys.scopeFor(principal.user.id, principal.activeOrgId);
+  }
 
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
   @Scope('workflow:write')
   @Post('apply-ops')
-  async applyOps(@Body() body: ApplyOpsDto): Promise<{ ir: WorkflowIR }> {
+  async applyOps(@Req() req: Request, @Body() body: ApplyOpsDto): Promise<{ ir: WorkflowIR }> {
     if (body.ops.length === 0) {
       throw new HttpException({ detail: 'ops must be a non-empty array' }, 422);
     }
     if (body.ops.length > MAX_OPS_PER_BATCH) {
       throw new HttpException({ detail: `too many ops in one batch (max ${MAX_OPS_PER_BATCH})` }, 422);
     }
-    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes();
+    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes(await this.scope(req));
     try {
       const ops = body.ops.map((raw, i) => parseOp(raw, i));
       const ir = applyOps(irOrNull(body.ir), ops, this.catalog.allowedTypes(), allowedTriggerTypes);
@@ -92,6 +104,7 @@ export class ComposeController {
   @Scope('workflow:read')
   @Get('catalog')
   async search(
+    @Req() req: Request,
     @Query('q') q?: string,
     @Query('top_k') topK?: string,
     @Query('type') type?: string,
@@ -100,7 +113,7 @@ export class ComposeController {
   ): Promise<CatalogSearchPage | { entry: DetailedCatalogEntry }> {
     // Exact lookup: ?type= returns ONE action or trigger with its full parameter schema.
     if (type !== undefined && type !== '') {
-      const entry = await this.catalog.byType(type.trim());
+      const entry = await this.catalog.byType(await this.scope(req), type.trim());
       if (!entry) throw new HttpException({ detail: `Unknown action type '${type.trim()}'` }, 404);
       return { entry };
     }
@@ -111,6 +124,7 @@ export class ComposeController {
       throw new HttpException({ detail: 'top_k must be an integer between 1 and 25' }, 400);
     }
     return this.catalog.search({
+      scope: await this.scope(req),
       query,
       kind: parseKind(kind),
       limit: parsed,

@@ -10,6 +10,7 @@ import { ConnectionEntity } from '../database/entities/connection.entity';
 import { newId, now } from '../database/ids';
 import { ComposioProvider, ComposioUpstreamError } from './composio.provider';
 import { OAuthExchangeError, refreshAccessToken, type OAuthTokenSet } from './oauth-token';
+import type { PlatformKeyScope } from '../platform/platform-keys.service';
 import {
   byoClientToConfig,
   OAuthProvidersService,
@@ -103,6 +104,15 @@ export interface CreateConnectionInput {
 }
 
 /** Stores a provider credential (`token` or `oauth2`) Fernet-encrypted at rest and resolves it for the action auth seam. */
+/**
+ * The scope whose Composio key manages this account: the owning ORG when the row is an org's,
+ * otherwise the owning user. Null only for a row with neither, which cannot be managed.
+ */
+export function scopeOfConnection(row: ConnectionEntity): PlatformKeyScope | null {
+  if (row.orgId) return { kind: 'org', orgId: row.orgId };
+  return row.userId ? { kind: 'user', userId: row.userId } : null;
+}
+
 @Injectable()
 export class ConnectionsService {
   private readonly logger = new Logger(ConnectionsService.name);
@@ -116,9 +126,9 @@ export class ConnectionsService {
     @Optional() private readonly composio?: ComposioProvider,
   ) {}
 
-  /** Whether the managed rail (Composio) is configured — the client's managed-first vs BYO-only layout signal. */
-  get managedConfigured(): boolean {
-    return this.composio?.configured ?? false;
+  /** Whether the managed rail (Composio) is configured for this scope — the client's managed-first vs BYO-only signal. */
+  async managedConfigured(scope: PlatformKeyScope): Promise<boolean> {
+    return (await this.composio?.isConfigured(scope)) ?? false;
   }
 
   async createToken(userId: string, input: CreateConnectionInput): Promise<ConnectionSummary> {
@@ -431,11 +441,13 @@ export class ConnectionsService {
 
   /** Best-effort cascade revoking the Composio account; a failure must not resurrect the row — log and move on. */
   private async revokeComposioAccount(row: ConnectionEntity): Promise<void> {
-    if (row.authType !== 'managed' || !this.composio?.configured) return;
+    const composio = this.composio;
+    const scope = scopeOfConnection(row);
+    if (row.authType !== 'managed' || !composio || !scope || !(await composio.isConfigured(scope))) return;
     const accountId = this.connectedAccountIdOf(row);
     if (!accountId) return;
     try {
-      await this.composio.deleteAccount(accountId);
+      await composio.deleteAccount(scope, accountId);
     } catch (err) {
       const message = errorMessage(err);
       this.logger.warn(
@@ -482,9 +494,11 @@ export class ConnectionsService {
     const sentinel = `${MANAGED_TOKEN_PREFIX}${accountId}`;
     const credential: Record<string, unknown> = { access_token: sentinel, secret_text: sentinel };
 
-    if (this.composio?.configured) {
+    const composio = this.composio;
+    const scope = scopeOfConnection(row);
+    if (composio && scope && (await composio.isConfigured(scope))) {
       try {
-        const data = await this.composio.getAccountMetadata(accountId);
+        const data = await composio.getAccountMetadata(scope, accountId);
         if (Object.keys(data).length > 0) credential.data = data;
       } catch (err) {
         const message = errorMessage(err);
@@ -601,11 +615,13 @@ export class ConnectionsService {
 
   /** Managed rows: ask Composio for the connected account's current status. */
   private async probeManaged(row: ConnectionEntity): Promise<ConnectionTestResult> {
-    if (!this.composio?.configured) {
+    const composio = this.composio;
+    const scope = scopeOfConnection(row);
+    if (!composio || !scope || !(await composio.isConfigured(scope))) {
       return {
         ok: false,
         status: row.status,
-        detail: 'Managed connections are not configured on this server, so this account cannot be checked.',
+        detail: 'Managed connections are not configured for this account, so it cannot be checked.',
       };
     }
     const accountId = this.connectedAccountIdOf(row);
@@ -615,7 +631,7 @@ export class ConnectionsService {
     }
     let account: 'pending' | 'active' | 'expired' | 'failed';
     try {
-      account = await this.composio.getAccountStatus(accountId);
+      account = await composio.getAccountStatus(scope, accountId);
     } catch (err) {
       // 5xx/network and 4xx alike tell us nothing reliable about the grant, so the row keeps its status.
       const kind = err instanceof ComposioUpstreamError ? 'unreachable' : 'rejected the check';

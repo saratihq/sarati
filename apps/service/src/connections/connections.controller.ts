@@ -23,6 +23,7 @@ import { isIdShape } from '../database/ids';
 import { EnvironmentsService, type ConnectionReference } from '../environments/environments.service';
 import { ConnectionsService, type ConnectionSummary, type ConnectionTestResult } from './connections.service';
 import { Scope } from '../auth/scope.decorator';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 
 class RenameConnectionDto {
   @IsOptional()
@@ -51,6 +52,7 @@ export class ConnectionsController {
   constructor(
     private readonly connections: ConnectionsService,
     private readonly environments: EnvironmentsService,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
   private userId(req: Request): string {
@@ -60,8 +62,10 @@ export class ConnectionsController {
   /** Whether the managed rail is configured — the client keys its connect UI (managed-first vs BYO-only) off this. */
   @Scope('connection:read')
   @Get('capabilities')
-  capabilities(): { managed_available: boolean } {
-    return { managed_available: this.connections.managedConfigured };
+  async capabilities(@Req() req: Request): Promise<{ managed_available: boolean }> {
+    const principal = requirePrincipal(req);
+    const scope = await this.platformKeys.scopeFor(principal.user.id, principal.activeOrgId);
+    return { managed_available: await this.connections.managedConfigured(scope) };
   }
 
   /** Malformed ids can never match a row — 404 before any uuid-typed query 500s. */

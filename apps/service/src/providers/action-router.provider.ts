@@ -15,6 +15,7 @@ import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from '
 import { connectionIdOf } from './sdk-auth';
 import { composioToolFor, isRoutableActionType, validatedAppSlug } from './sdk-actions.registry';
 import { SdkActionsProvider } from './sdk-actions.provider';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 import type {
   ManagedIntegrationProvider,
   RunActionInput,
@@ -39,8 +40,14 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     private readonly composio: ComposioExecutionProvider,
     private readonly connections: ConnectionsService,
     config: ConfigService<{ env: EnvConfig }, true>,
+    private readonly platformKeys: PlatformKeysService,
   ) {
     this.fallbackOverride = parseFallbackOverride(config.get('env', { infer: true }).composioFallbackApps);
+  }
+
+  /** Whose key this run uses: `scopeFor` is the ONE rule, so a personal-org id resolves to the user. */
+  private scopeOf(input: { externalUserId: string; orgId?: string | null }): Promise<PlatformKeyScope> {
+    return this.platformKeys.scopeFor(input.externalUserId, input.orgId ?? null);
   }
 
   async runAction(input: RunActionInput): Promise<RunActionResult> {
@@ -112,9 +119,10 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
         `Connection ${connectionId} (${appSlug}) is not active yet — complete the connect flow, then retry`,
       );
     }
-    if (!this.composio.configured) {
+    const scope = await this.scopeOf(input);
+    if (!(await this.composio.isConfigured(scope))) {
       throw new DomainError(
-        `"${appSlug}" runs through a managed connection, but managed connections are not configured`,
+        `"${appSlug}" runs through a managed connection, but no Composio API key is set for this workspace`,
       );
     }
     this.logger.log(
@@ -123,6 +131,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     // `input.idempotencyKey` is DELIBERATELY not forwarded (ADR 0040): Composio's typed execute API has no
     // idempotency parameter, so this rail is an accepted at-least-once exception and must never error for lacking a key.
     return this.composio.execute({
+      scope,
       appSlug,
       actionName: this.actionNameOf(input.actionId),
       props: input.props,
@@ -186,13 +195,14 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
         `The ${triggerType} trigger's connection is not active — complete the connect flow, then retry`,
       );
     }
-    if (!this.composio.configured) {
+    const scope = await this.scopeOf(input);
+    if (!(await this.composio.isConfigured(scope))) {
       throw new DomainError(
-        `${triggerType} polls through a managed connection, but managed connections are not configured`,
+        `${triggerType} polls through a managed connection, but no Composio API key is set for this workspace`,
       );
     }
     const lastPoll = (await input.store.get<number>(POLL_CURSOR_KEY)) ?? 0;
-    const data = await this.composio.executeBySlug(spec.toolSlug, {
+    const data = await this.composio.executeBySlug(scope, spec.toolSlug, {
       connectedAccountId: ref.connectedAccountId,
       userId: input.externalUserId,
       arguments: spec.buildArguments(input.props, lastPoll),

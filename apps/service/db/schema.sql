@@ -468,6 +468,24 @@ CREATE TABLE public.webhook_trigger_secrets (
 
 
 --
+-- Name: platform_secrets; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.platform_secrets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    user_id uuid,
+    org_id uuid,
+    secret text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT platform_secrets_name_check CHECK ((name = ANY (ARRAY['composio_api_key'::text, 'composio_webhook_secret'::text, 'anthropic_api_key'::text]))),
+    CONSTRAINT platform_secrets_one_owner CHECK (((user_id IS NULL) <> (org_id IS NULL)))
+);
+
+
+
+--
 -- Name: workflow_branches; Type: TABLE; Schema: public; Owner: orchestr
 --
 
@@ -845,6 +863,44 @@ CREATE INDEX idx_composio_webhook_deliveries_received_at ON public.composio_webh
 
 ALTER TABLE ONLY public.webhook_trigger_secrets
     ADD CONSTRAINT webhook_trigger_secrets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: platform_secrets platform_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.platform_secrets
+    ADD CONSTRAINT platform_secrets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: uq_platform_secret_user; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE UNIQUE INDEX uq_platform_secret_user ON public.platform_secrets USING btree (name, user_id) WHERE (user_id IS NOT NULL);
+
+
+--
+-- Name: uq_platform_secret_org; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE UNIQUE INDEX uq_platform_secret_org ON public.platform_secrets USING btree (name, org_id) WHERE (org_id IS NOT NULL);
+
+
+--
+-- Name: platform_secrets platform_secrets_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.platform_secrets
+    ADD CONSTRAINT platform_secrets_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: platform_secrets platform_secrets_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.platform_secrets
+    ADD CONSTRAINT platform_secrets_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
 
 
 --

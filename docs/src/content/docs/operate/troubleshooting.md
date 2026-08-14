@@ -73,11 +73,17 @@ If the worker came back, it resumes on its own. If it never comes back, the reap
 
 ## The composer says it is unavailable
 
-No `ANTHROPIC_API_KEY` reached the agent. Put it in the install directory's `.env` and
-`docker compose up -d`. Check it landed:
+It tells you which of the two reasons it is.
+
+**"No Anthropic API key has been set"** — an owner or admin adds one in **Settings → Platform keys**.
+It takes effect immediately; reload the page if a tab was already open.
+
+**"Set SECRET_KEY to the same value the workflow service uses"** — the agent container is missing the
+shared secret, so it can neither verify your session nor read the stored key. `docker compose` passes
+it for you; a hand-rolled deployment has to. Check it landed:
 
 ```bash
-docker compose exec agent printenv ANTHROPIC_API_KEY
+docker compose exec agent printenv SECRET_KEY
 ```
 
 ## A step says it needs a connection
