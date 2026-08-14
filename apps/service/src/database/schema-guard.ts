@@ -7,11 +7,16 @@ import { PG_POOL } from './tokens';
  * Boot-time schema canaries so a database behind the code fails fast. Every new file in
  * db/migrations/ MUST add one canary here probing the artifact it creates.
  */
-const CANARIES: Array<{ migration: string; probe: string }> = [
+export const CANARIES: Array<{ migration: string; probe: string }> = [
   {
-    migration: '001-003 (env clusters)',
+    migration: '001_connection_env_clusters.sql',
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='connections' AND column_name='environment'",
+  },
+  {
+    migration: '002_run_environment.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='environment'",
   },
   {
     migration: '004_connection_health.sql',
@@ -104,6 +109,15 @@ const CANARIES: Array<{ migration: string; probe: string }> = [
     probe: "SELECT 1 FROM information_schema.tables WHERE table_name='composio_webhook_deliveries'",
   },
 ];
+
+/**
+ * Migrations that leave nothing on a current database to probe, so a canary is impossible rather
+ * than merely absent. Only ever add one whose artifact a LATER migration removes.
+ */
+export const NO_SURVIVING_ARTIFACT: ReadonlySet<string> = new Set([
+  // 003 alters `runtime_triggers`, which 014 drops; canary 014 asserts that end state instead.
+  '003_trigger_environment.sql',
+]);
 
 @Injectable()
 export class SchemaGuard implements OnApplicationBootstrap {
