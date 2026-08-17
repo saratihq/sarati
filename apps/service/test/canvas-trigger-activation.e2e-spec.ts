@@ -177,7 +177,9 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
 
     expect(deployed.body.activated).toBe(false);
     // Whichever leg refuses it — the SSRF guard, or the connection itself — the caller is told.
-    expect(String(deployed.body.activation_error)).toMatch(/private\/internal address|fetch failed/);
+    expect(String(deployed.body.activation_error)).toMatch(/private\/internal address|Couldn't reach it/);
+    // …in words, never as a JS error class: this string is shown to the user verbatim.
+    expect(String(deployed.body.activation_error)).not.toMatch(/^[A-Z]\w*Error:/);
   });
 
   it('the reconciler activates the webhook trigger for production (env pointer × trigger node)', async () => {
