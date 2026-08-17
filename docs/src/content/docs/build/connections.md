@@ -51,6 +51,18 @@ failing mid-run:
 With the connection attached, the step runs against the real account and returns real data — a
 Slack `list_channels` comes back with the workspace's actual channels.
 
+## The AI Agent step needs one too
+
+An **AI Agent** step calls a model, and that model call is a connection like any other: connect
+Claude (or OpenAI, Gemini, Mistral) under **Integrations → Use your own credentials**, then pick the
+account on the step's model. An [environment](/run/environments/) run resolves it from that
+environment's slot for the provider instead.
+
+The Anthropic key in **Settings → Platform keys** is a different credential: it powers the
+[AI composer](/agents/ai-composer/) — the thing that builds workflows for you — and is never used to
+run a step. Setting it does not give agent steps a model, which is why an agent step can fail for a
+missing Claude connection on an instance whose composer works.
+
 ## Bring your own key
 
 For an app you already have a token for, create the connection directly:

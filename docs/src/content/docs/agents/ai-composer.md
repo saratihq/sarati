@@ -9,6 +9,10 @@ Get a key from the [Anthropic Console](https://console.anthropic.com/settings/ke
 
 If you are not an owner or admin, Settings tells you so and names who can add it.
 
+That key powers the composer and nothing else. An **AI Agent** step runs on a Claude
+[connection](/build/connections/#the-ai-agent-step-needs-one-too) you pick on the step, which is a
+separate credential — setting one does not set the other.
+
 Without a key, **New workflow** opens a bare canvas. With one, the same entry point opens the
 composer alongside the canvas.
 

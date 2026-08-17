@@ -33,6 +33,30 @@ const PROVIDER_AUTH: Record<AgentProvider, ApiKeyScheme> = {
   gemini: { type: 'apiKey', in: 'query', name: 'key' },
 };
 
+/** How each provider is written to a person — the model call's error names the app, not the enum value. */
+const PROVIDER_LABEL: Record<AgentProvider, string> = {
+  claude: 'Claude',
+  openai: 'OpenAI',
+  mistral: 'Mistral',
+  gemini: 'Gemini',
+};
+
+/**
+ * Where the missing model credential goes. The platform Anthropic key (Settings) is the COMPOSER's
+ * and is deliberately not consulted here, so a Claude failure has to say that or it reads as a bug.
+ */
+function missingConnectionHelp(provider: AgentProvider): string {
+  const label = PROVIDER_LABEL[provider] ?? provider;
+  const composer =
+    provider === 'claude'
+      ? ' The Anthropic key in Settings → Platform keys powers the AI composer only, not agent steps.'
+      : '';
+  return (
+    `This agent step has no ${label} connection to call the model with. ` +
+    `Connect one under Integrations → "Use your own credentials" → ${label}, then pick it on the step's model.${composer}`
+  );
+}
+
 /**
  * The production {@link AgentModelPort} (ADR 0045) — binds the AI Agent node's model seam to the SDK's tool-aware
  * `callAgentModel`, resolving the connection through {@link resolveSdkAuthHandle} and returning the normalized turn.
@@ -76,7 +100,7 @@ export class AgentModelCallProvider implements AgentModelPort {
         composioBaseUrl: this.composioBaseUrl,
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
       },
-      `The ${req.provider} model call requires a ${req.provider} connection — attach one to the agent's model and retry`,
+      missingConnectionHelp(req.provider),
     );
     // ModelCallRequest and the SDK's AgentModelRequest are structurally identical by design — no remapping needed.
     const result = await callAgentModel(
