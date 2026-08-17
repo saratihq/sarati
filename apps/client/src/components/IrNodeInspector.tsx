@@ -104,6 +104,8 @@ const DROPDOWN_KINDS = new Set([
   "DYNAMIC",
 ]);
 const MULTI_KINDS = new Set(["MULTI_SELECT_DROPDOWN", "STATIC_MULTI_SELECT_DROPDOWN"]);
+// Multi-line prop kinds, in both catalog dialects: the SDK's LONG_TEXT and the control nodes' longText.
+const LONG_TEXT_KINDS = new Set(["LONG_TEXT", "LONGTEXT"]);
 
 interface IrNodeShape {
   id: string;
@@ -772,6 +774,7 @@ function ReferenceTextInput({
   upstream,
   samples,
   onTriggerSample,
+  multiline = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -779,8 +782,10 @@ function ReferenceTextInput({
   upstream: UpstreamStep[];
   samples: Record<string, unknown>;
   onTriggerSample: (payload: unknown) => void;
+  /** Long-text props: a textarea, because an `<input>` strips the newlines out of the value. */
+  multiline?: boolean;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const caretRef = useRef<number | null>(null);
   const [menu, setMenu] = useState<{ top: number; left: number; width: number } | null>(null);
@@ -833,15 +838,31 @@ function ReferenceTextInput({
   const preview = resolveRefsPreview(value, samples);
   return (
     <div className="flex flex-col gap-0.5">
-    <div className="flex items-center gap-1">
-      <input
-        ref={inputRef}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={ariaLabel}
-        className="flex-1 min-w-0 h-8 px-2 rounded-lg text-[12px] outline-none"
-        style={FIELD_STYLE}
-      />
+    <div className={`flex gap-1 ${multiline ? "items-start" : "items-center"}`}>
+      {multiline ? (
+        <textarea
+          ref={(el) => {
+            inputRef.current = el;
+          }}
+          value={value}
+          rows={5}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={ariaLabel}
+          className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-[12px] outline-none resize-y"
+          style={FIELD_STYLE}
+        />
+      ) : (
+        <input
+          ref={(el) => {
+            inputRef.current = el;
+          }}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={ariaLabel}
+          className="flex-1 min-w-0 h-8 px-2 rounded-lg text-[12px] outline-none"
+          style={FIELD_STYLE}
+        />
+      )}
       {upstream.length > 0 && (
         <button
           ref={btnRef}
@@ -3984,7 +4005,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
       : (upstream.find((u) => u.refKey === refKey)?.name ?? refKey);
 
   // The default control, the dropdown's degrade path, and the fx-mode widget; objects render as JSON.
-  const textInputFor = (key: string) => {
+  const textInputFor = (key: string, multiline = false) => {
     const value = params[key];
     const str =
       typeof value === "string"
@@ -4002,12 +4023,13 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
         upstream={upstream}
         samples={samples}
         onTriggerSample={(payload) => setSample(scopeKey, "trigger", payload)}
+        multiline={multiline}
       />
     );
   };
 
   // ONE decision for which control family a param renders as: the widget and the fx hatch both read it.
-  type FieldKind = "select" | "dropdown" | "checkbox" | "number" | "json" | "text";
+  type FieldKind = "select" | "dropdown" | "checkbox" | "number" | "json" | "longText" | "text";
   const fieldKindFor = (key: string): FieldKind => {
     const spec = schema?.parameters?.[key];
     // Two catalog dialects normalized once: SDK kind names (SHORT_TEXT, CHECKBOX…) and Composio's
@@ -4018,6 +4040,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     if (DROPDOWN_KINDS.has(kind) && node.node_type) return "dropdown";
     if (kind === "CHECKBOX" || kind === "BOOLEAN" || typeof value === "boolean") return "checkbox";
     if (kind === "NUMBER" || kind === "INTEGER" || typeof value === "number") return "number";
+    if (LONG_TEXT_KINDS.has(kind)) return "longText";
     const structured = kind === "ARRAY" || kind === "JSON" || kind === "OBJECT";
     if (structured || (value !== null && value !== undefined && typeof value === "object")) return "json";
     return "text";
@@ -4059,6 +4082,8 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
 
     // In expression mode the field carries a `{{…}}` mapping, so the typed widget can't render it.
     if (fxActive(key)) return textInputFor(key);
+
+    if (family === "longText") return textInputFor(key, true);
 
     const isMulti = MULTI_KINDS.has(kind);
     if (family === "select") {
