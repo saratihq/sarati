@@ -4,6 +4,7 @@ import { ComposioTriggerProvider } from '../providers/composio-trigger.provider'
 import { composioTriggerCatalog, composioTriggerTypes } from '../providers/composio-trigger.registry';
 import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
+import { AGENT_TOOL_PUBLIC } from '../runtime/workflow-tool-contract';
 
 import { ORCHESTR_SCHEDULE } from './schedule';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
@@ -13,8 +14,8 @@ export const INCOMING_WEBHOOK_PUBLIC = 'orchestr:webhook';
 /** The PUBLIC type of the native synchronous chat-intake trigger kind (ADR 0045 addendum). */
 export const INCOMING_CHAT_PUBLIC = 'orchestr:chat';
 
-/** A workflow with this trigger is offered as an agent-callable tool (ADR 0053). */
-export const AGENT_TOOL_PUBLIC = 'orchestr:tool_trigger';
+// Re-exported so existing importers keep one source; it is declared with the contract it carries.
+export { AGENT_TOOL_PUBLIC };
 /** The manual trigger — fires ONLY via a manual Run, so it has NO runtime activation. */
 export const MANUAL_TRIGGER = 'orchestr:trigger';
 
@@ -87,11 +88,11 @@ const NATIVE_TRIGGERS: ReadonlyArray<Record<string, unknown>> = [
     auth: 'none',
   },
   {
-    name: 'Callable by an agent',
+    name: 'Called by another workflow',
     type: AGENT_TOOL_PUBLIC,
     category: 'control',
     description:
-      'Publishes this workflow as a tool an AI agent can call (ADR 0053). Only the version live in production is callable, so publishing is what exposes it; the call arguments arrive as {{trigger.<input name>}}.',
+      "Lets other workflows and AI agents run this one and use its result — it never fires on its own. Only the version live in production is callable, so publishing is what exposes it; the caller's arguments arrive as {{trigger.<input name>}}.",
     parameters: {
       tool_name: {
         type: 'SHORT_TEXT',

@@ -14,7 +14,7 @@ import { errorMessage } from '../common/error-message';
 import { MCP_TOOLS, type McpTool } from './mcp-tool';
 import { toToolError, toToolResult } from './presentation/result';
 import { WorkflowInvokeTool } from './workflow-invoke.tool';
-import { WorkflowToolsService, type WorkflowTool } from './workflow-tools.service';
+import { CallableWorkflowsService, type WorkflowTool } from '../workflows/callable-workflows.service';
 
 const SERVER_INFO = { name: 'orchestr', version: '1.0.0' };
 
@@ -48,7 +48,7 @@ export class McpHandlerService implements OnModuleDestroy {
 
   constructor(
     @Inject(MCP_TOOLS) private readonly tools: readonly McpTool[],
-    private readonly workflowTools: WorkflowToolsService,
+    private readonly workflowTools: CallableWorkflowsService,
     private readonly invoker: WorkflowInvokeTool,
   ) {
     this.handler = createMcpHandler((ctx) => this.buildServer(ctx.requestInfo), {

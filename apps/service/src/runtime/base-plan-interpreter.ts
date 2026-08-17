@@ -12,7 +12,6 @@ import {
   type AgentResult,
   type AgentStep,
   type AgentStepSink,
-  type AgentSubWorkflowRunner,
   type AgentToolCatalog,
   type AgentWorkflowCatalog,
   type DagAgentTool,
@@ -24,8 +23,10 @@ import type { BlobStore } from './blob-store';
 import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
+import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
 import type { RunResult, TraceEntry } from './run-plan';
+import type { SubWorkflowRunner } from './sub-workflow-runner';
 
 export interface RunOptions {
   /** Our end-user identity — scopes connections/accounts per tenant. */
@@ -123,7 +124,15 @@ export interface ExecutableAgent {
   tools: DagAgentTool[];
 }
 
-/** The per-node failure-policy fields shared by every leaf (action, code, agent). */
+/** The call-workflow fields the executor needs — the subset `DagCallWorkflowNode` carries. */
+export interface ExecutableCallWorkflow {
+  id: string;
+  workflowId: string;
+  input: Record<string, unknown>;
+  onError?: 'continue';
+}
+
+/** The per-node failure-policy fields shared by every leaf (action, code, agent, call-workflow). */
 interface LeafPolicy {
   id: string;
   onError?: 'continue';
@@ -191,8 +200,9 @@ export abstract class BasePlanInterpreter {
   protected readonly agentToolCatalog?: AgentToolCatalog;
   /** Live step-stream sink for `orchestr:agent` (ADR 0045 §9); unbound → the loop streams nothing. */
   protected readonly agentStepSink?: AgentStepSink;
-  /** Sub-workflow tool runner (ADR 0045 §3); setter-injected because a constructor dep would be a module cycle. */
-  protected agentSubWorkflowRunner?: AgentSubWorkflowRunner;
+  /** Sub-workflow runner, shared by the agent tool and the authored step (ADR 0062); setter-injected
+   *  because a constructor dep would be a module cycle. */
+  protected subWorkflowRunner?: SubWorkflowRunner;
   /** Declared contract for a sub-workflow tool (ADR 0053 §1); setter-injected for the same cycle. */
   protected agentWorkflowCatalog?: AgentWorkflowCatalog;
 
@@ -211,9 +221,9 @@ export abstract class BasePlanInterpreter {
     this.agentStepSink = agentStepSink;
   }
 
-  /** Bind the sub-workflow tool runner (ADR 0045 §3) — called once by `RunsService`. */
-  setAgentSubWorkflowRunner(runner: AgentSubWorkflowRunner): void {
-    this.agentSubWorkflowRunner = runner;
+  /** Bind the sub-workflow runner (ADR 0045 §3, ADR 0062) — called once by `RunsService`. */
+  setSubWorkflowRunner(runner: SubWorkflowRunner): void {
+    this.subWorkflowRunner = runner;
   }
 
   /** Bind the sub-workflow tool contract source (ADR 0053 §1) — called once by `RunsService`. */
@@ -324,6 +334,54 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
+   * Execute ONE call-workflow leaf (ADR 0062) — run the child nested and write its terminal output
+   * to scope, so `{{<node id>}}` reads it exactly like any other step's result.
+   */
+  protected executeCallWorkflow(
+    node: ExecutableCallWorkflow,
+    scope: Record<string, unknown>,
+    path: string,
+    ctx: RunContext,
+    runErrorLane: (() => Promise<void>) | null,
+  ): Promise<void> {
+    return this.executeLeaf(node, scope, path, ctx, 'callWorkflow', runErrorLane, (stepKey) =>
+      this.runSubWorkflow(node, scope, stepKey, ctx),
+    );
+  }
+
+  /**
+   * Run ONE sub-workflow as the parent's single durable checkpoint. No invocation budget is passed:
+   * an authored step's fan-out is bounded by the loop the author wrote, unlike an agent's, which is
+   * the model's choice (ADR 0062). Depth still applies, and is what bounds an indirect cycle.
+   */
+  private runSubWorkflow(
+    node: ExecutableCallWorkflow,
+    scope: Record<string, unknown>,
+    stepKey: string,
+    ctx: RunContext,
+  ): Promise<unknown> {
+    const runner = this.subWorkflowRunner;
+    if (!runner) throw new Error('Sub-workflow steps are not available in this runtime');
+    const input = resolveReferences(node.input, scope);
+    return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
+      runner.run(
+        { workflowId: node.workflowId, input },
+        {
+          externalUserId: ctx.externalUserId,
+          environment: ctx.environment,
+          environmentId: ctx.environmentId,
+          orgId: ctx.orgId,
+          parentRunId: ctx.runId,
+          callKey: stepKey,
+          depth: ctx.subWorkflowDepth,
+          budget: ctx.subWorkflowBudget,
+          dryRun: ctx.dryRun,
+        },
+      ),
+    );
+  }
+
+  /**
    * The shared leaf execution core for every work-bearing leaf: duplicate-id guard, pin replay
    * (ADR 0021), recording, and the ADR 0020 failure policy (error lane > `onError` > halt).
    */
@@ -332,7 +390,7 @@ export abstract class BasePlanInterpreter {
     scope: Record<string, unknown>,
     path: string,
     ctx: RunContext,
-    kind: 'action' | 'code' | 'agent',
+    kind: 'action' | 'code' | 'agent' | 'callWorkflow',
     runErrorLane: (() => Promise<void>) | null,
     run: (stepKey: string) => Promise<unknown>,
   ): Promise<void> {
@@ -530,7 +588,7 @@ export abstract class BasePlanInterpreter {
     ctx: RunContext,
     stepKey: string,
     nodeId: string,
-    kind: 'action' | 'code' | 'delay' | 'waitForEvent' | 'agent',
+    kind: RuntimeStepKind,
     fn: () => Promise<T>,
     pinned = false,
   ): Promise<T> {
@@ -626,7 +684,7 @@ export abstract class BasePlanInterpreter {
     if (!model) {
       throw new Error(`Agent "${node.id}" cannot run: no tool-aware model call is configured`);
     }
-    const tools = await this.buildToolSchemas(node.tools);
+    const tools = await this.buildToolSchemas(node.tools, ctx);
     const buffer: AgentMessage[] = [];
     // First user message: the `input` expression resolved against scope, else the trigger
     // payload; `inputLiteral` (test runs) passes verbatim — a typed task is not an expression.
@@ -758,8 +816,17 @@ export abstract class BasePlanInterpreter {
     const stepKey = `${roundKey}:tool:${call.id}`;
 
     if (tool.kind === 'workflow') {
-      const runner = this.agentSubWorkflowRunner;
+      const runner = this.subWorkflowRunner;
       if (!runner) throw new Error('sub-workflow tools are not available in this runtime');
+      // BREADTH guard (ADR 0062): charged HERE because this is where unbounded fan-out can come
+      // from — how often a MODEL calls is its own choice. One counter for the whole run tree;
+      // check-then-decrement with NO await between, so concurrent tool calls can't both slip past.
+      if (ctx.subWorkflowBudget.remaining <= 0) {
+        throw new Error(
+          `Sub-workflow invocation budget (${MAX_SUB_WORKFLOW_INVOCATIONS}) exhausted for this run — too many sub-workflow calls in one run. Reduce how often the agents call sub-workflows.`,
+        );
+      }
+      ctx.subWorkflowBudget.remaining -= 1;
       // The whole sub-run is the parent's single checkpoint and runs AS the caller (same tenant +
       // env scope). `callKey` + `parentRunId` seed a deterministic sub-run id so a crash re-run
       // re-issues the SAME step idempotency keys — the SDK rail dedupes on them (ADR 0040), but the
@@ -811,13 +878,16 @@ export abstract class BasePlanInterpreter {
    * Build the tool schemas the model call receives (ADR 0045 §4): an action tool's is derived from
    * its prop schema via the optional catalog, a sub-workflow tool's is declared. Author text wins.
    */
-  private async buildToolSchemas(tools: DagAgentTool[]): Promise<ToolSchema[]> {
+  private async buildToolSchemas(tools: DagAgentTool[], ctx: RunContext): Promise<ToolSchema[]> {
     return Promise.all(
       tools.map(async (tool) => {
         if (tool.kind === 'workflow') {
           // What the sub-workflow DECLARES about being called; never inferred from its expressions,
           // which would publish a contract nobody wrote down (ADR 0053 §1).
-          const declared = await this.agentWorkflowCatalog?.describeWorkflow(tool.workflowId);
+          const declared = await this.agentWorkflowCatalog?.describeWorkflow(
+            tool.workflowId,
+            ctx.environmentId,
+          );
           // Never emit an empty description — it is the top degrader of model tool selection.
           return {
             name: tool.name,

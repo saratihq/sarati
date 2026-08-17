@@ -11,7 +11,7 @@ import type { WorkflowIR } from '../ir/models';
 import { RunsService } from '../runs/runs.service';
 import type { RunOutcome } from '../runtime/run-plan';
 import { extractChatReply } from '../runtime/terminal-output';
-import { AGENT_TOOL_PUBLIC } from '../triggers/trigger-catalog.service';
+import { AGENT_TOOL_PUBLIC, contractOfDocument } from '../runtime/workflow-tool-contract';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { WorkflowAccessService } from './workflow-access.service';
@@ -134,10 +134,13 @@ export class WorkflowInvokeService {
         code: 'no_document',
       });
     }
-    if (!ir.nodes.some((node) => node.node_type === AGENT_TOOL_PUBLIC)) {
+    // The full contract, not just the trigger's presence: an undescribed tool is withheld from the
+    // tool LIST (ADR 0053 §1), so accepting it here would publish a call nobody could discover.
+    if (!contractOfDocument(ir, wf.name)) {
       throw new DomainError(
         `Workflow "${wf.name}" isn't callable as a tool — the version live in production has no ` +
-          `"Callable by an agent" trigger (${AGENT_TOOL_PUBLIC}). Add that trigger, then publish.`,
+          `"Called by another workflow" trigger (${AGENT_TOOL_PUBLIC}) declaring a name and description. ` +
+          'Add that trigger, describe it, then publish.',
         400,
         { code: 'not_invocable' },
       );

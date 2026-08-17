@@ -15,6 +15,7 @@ export function findTriggerNode(
         type === "orchestr:webhook" ||
         type === "orchestr:schedule" ||
         type === "orchestr:chat" ||
+        type === "orchestr:tool_trigger" ||
         meta?.trigger === true
       );
     }) ?? null
@@ -26,6 +27,7 @@ export function triggerKindLabel(nodeType: string | undefined): string {
   if (nodeType === "orchestr:webhook") return "Webhook";
   if (nodeType === "orchestr:schedule") return "Schedule";
   if (nodeType === "orchestr:chat") return "Chat";
+  if (nodeType === "orchestr:tool_trigger") return "Called by another workflow";
   if (!nodeType || nodeType === "orchestr:trigger" || !nodeType.includes(".")) return "Manual start";
   return getNodeTypeLabel(nodeType);
 }

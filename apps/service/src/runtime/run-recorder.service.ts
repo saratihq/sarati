@@ -52,6 +52,10 @@ export interface RunStartMeta {
   reviewId?: string | null;
   /** Dry run (preview): no state-changing external call fired (ADR 0041). */
   dryRun?: boolean;
+  /** The run that called this one (ADR 0062); null for a top-level run. */
+  parentRunId?: string | null;
+  /** The calling step's `step_key` in the parent run. */
+  parentStepKey?: string | null;
 }
 
 /**
@@ -107,8 +111,8 @@ export class RunRecorderService implements RunRecorder {
     meta?: RunStartMeta,
   ): Promise<void> {
     await this.write('runStarted', scopedRunId, [
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run)
-       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key)
+       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO NOTHING`,
       [
         scopedRunId,
@@ -123,6 +127,8 @@ export class RunRecorderService implements RunRecorder {
         meta?.workflowVersionId ?? null,
         meta?.reviewId ?? null,
         meta?.dryRun ?? false,
+        meta?.parentRunId ?? null,
+        meta?.parentStepKey ?? null,
       ],
     ]);
   }

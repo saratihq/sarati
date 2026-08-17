@@ -108,47 +108,15 @@ export interface AgentToolCatalog {
  * published version, which the pure runtime must not do itself. `undefined` = nothing declared.
  */
 export interface AgentWorkflowCatalog {
-  describeWorkflow(workflowId: string): Promise<{ description: string; parameters: JsonSchema } | undefined>;
+  describeWorkflow(
+    workflowId: string,
+    /** The caller's environment — the tool described must be the version that would run (ADR 0062). */
+    environmentId: string | null,
+  ): Promise<{ description: string; parameters: JsonSchema } | undefined>;
 }
 
 /** DI token for the action-tool describer. Optional. */
 export const AGENT_TOOL_CATALOG = Symbol('AGENT_TOOL_CATALOG');
-
-/** A resolved sub-workflow tool invocation — the input the model produced for it. */
-export interface SubWorkflowToolCall {
-  /** The bound `orchestr:call_workflow` node's referenced workflow id. */
-  workflowId: string;
-  /** The arguments the model produced (seeded as the sub-run's initial scope). */
-  input: unknown;
-}
-
-/**
- * Optional seam resolving a SUB-WORKFLOW tool through the engine's durable front door (ADR 0045 §3).
- * A port, not a direct import, because the runner sits above the interpreter — importing it would be
- * a module cycle. Unbound → the tool call returns a normalized error the agent can route around.
- */
-export interface AgentSubWorkflowRunner {
-  run(call: SubWorkflowToolCall, ctx: AgentSubWorkflowContext): Promise<unknown>;
-}
-
-/** The run identity a sub-workflow tool call inherits (tenant + env scoping). */
-export interface AgentSubWorkflowContext {
-  externalUserId: string;
-  environment: string | null;
-  environmentId: string | null;
-  orgId: string | null;
-  /** Parent run id — with `callKey`, the deterministic seed for the sub-run's id, so a crash-replay
-   *  re-issues the SAME step idempotency keys (the SDK rail dedupes on them; Composio does not). */
-  parentRunId: string;
-  /** Run-stable per-tool-call key (the parent's durable tool step key). */
-  callKey: string;
-  /** The PARENT's call depth; the runner enters at `depth + 1` and rejects beyond the fixed cap. */
-  depth: number;
-  /** Shared mutable tree-wide invocation counter — bounds total fan-out breadth, which depth can't. */
-  budget: { remaining: number };
-  /** Parent-run dry-run flag (ADR 0041) — a preview parent runs the sub-workflow dry too. */
-  dryRun: boolean;
-}
 
 // ─── Compiled tool descriptors (the compiler attaches these to a DagAgentNode) ───
 

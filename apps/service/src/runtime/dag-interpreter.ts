@@ -268,6 +268,18 @@ export class DagInterpreter extends BasePlanInterpreter {
             ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
             : null,
         );
+      case 'callWorkflow':
+        // ADR 0062: the child runs nested through the same seam an agent's sub-workflow tool uses,
+        // and a failure inside it routes into this node's error lane like any other.
+        return this.executeCallWorkflow(
+          node,
+          scope,
+          path,
+          ctx,
+          node.onErrorBranch && node.onErrorBranch.nodes.length > 0
+            ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
+            : null,
+        );
       case 'delay':
         return this.executeDelay(node, scope, path, ctx);
       case 'waitForEvent':

@@ -31,7 +31,12 @@ import {
 } from '../../providers/sdk-webhook.provider';
 import { activationError } from '../activation-error';
 import { DbActivationStore } from '../activation-store';
-import { INCOMING_CHAT_PUBLIC, INCOMING_WEBHOOK_PUBLIC, MANUAL_TRIGGER } from '../trigger-catalog.service';
+import {
+  AGENT_TOOL_PUBLIC,
+  INCOMING_CHAT_PUBLIC,
+  INCOMING_WEBHOOK_PUBLIC,
+  MANUAL_TRIGGER,
+} from '../trigger-catalog.service';
 import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { webhookUrlFor } from './webhook-url';
@@ -532,7 +537,10 @@ export class TriggerReconcilerService {
    * activation — the manual trigger must never become a pollable one.
    */
   private kindOf(node: IRNode): ActivationKind | null {
-    if (node.node_type === MANUAL_TRIGGER) return null;
+    // Neither fires on its own: the manual trigger waits for a Run, the tool trigger for a caller
+    // (ADR 0062). Without this a tool trigger falls through to the Composio rail and asks for a
+    // connection slot it can never have.
+    if (node.node_type === MANUAL_TRIGGER || node.node_type === AGENT_TOOL_PUBLIC) return null;
     if (node.node_type === INCOMING_WEBHOOK_PUBLIC) {
       return 'webhook';
     }

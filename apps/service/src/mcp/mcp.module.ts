@@ -10,7 +10,6 @@ import { WorkflowsModule } from '../workflows/workflows.module';
 import { McpController } from './mcp.controller';
 import { LiveRunConsentService } from './live-run-consent.service';
 import { WorkflowInvokeTool } from './workflow-invoke.tool';
-import { WorkflowToolsService } from './workflow-tools.service';
 import { McpHandlerService } from './mcp-handler.service';
 import { MCP_TOOLS, type McpTool } from './mcp-tool';
 import { CommitTool } from './tools/commit.tool';
@@ -62,7 +61,6 @@ const TOOLS = [
   providers: [
     ...TOOLS,
     LiveRunConsentService,
-    WorkflowToolsService,
     WorkflowInvokeTool,
     { provide: MCP_TOOLS, useFactory: (...tools: McpTool[]) => tools, inject: [...TOOLS] },
     McpHandlerService,

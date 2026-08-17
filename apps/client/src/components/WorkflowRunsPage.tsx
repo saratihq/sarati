@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, User, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, CornerDownRight, CornerUpLeft, User, X } from "lucide-react";
 import * as api from "@/api/client";
 import type { RunDetail, RunStepInfo, RunSummary } from "@/api/client";
 import { formatDuration, timeAgo } from "@/lib/format";
@@ -150,6 +150,56 @@ function StepRow({ step }: { step: RunStepInfo }) {
   );
 }
 
+/**
+ * Both ends of a sub-workflow call (ADR 0062). A nested run lives under the workflow that ran, so
+ * this is the only path between them — without it "why did that step fail?" has nowhere to go.
+ */
+function SubWorkflowLinks({ detail }: { detail: RunDetail }) {
+  const calls = detail.calls ?? [];
+  const calledBy = detail.called_by ?? null;
+  if (!calledBy && calls.length === 0) return null;
+
+  const linkStyle = { color: "var(--orchestr-accent)" };
+  return (
+    <div className="mt-2 space-y-1" data-testid="sub-workflow-links">
+      {calledBy && (
+        <p className="text-[11px] m-0 inline-flex items-center gap-1" style={{ color: "var(--orchestr-ink-subtle)" }}>
+          <CornerUpLeft size={11} />
+          Run by{" "}
+          {calledBy.workflow_id ? (
+            <Link href={`/workflows/${calledBy.workflow_id}/runs`} style={linkStyle}>
+              {calledBy.workflow_name ?? "another workflow"}
+            </Link>
+          ) : (
+            (calledBy.workflow_name ?? "another workflow")
+          )}
+          {calledBy.step_key ? ` · step "${calledBy.step_key}"` : ""}
+        </p>
+      )}
+      {calls.map((call) => (
+        <p
+          key={call.run_id}
+          className="text-[11px] m-0 flex items-center gap-1"
+          style={{ color: "var(--orchestr-ink-subtle)" }}
+        >
+          <CornerDownRight size={11} className="shrink-0" />
+          {call.step_key ? `"${call.step_key}" ran ` : "Ran "}
+          {call.workflow_id ? (
+            <Link href={`/workflows/${call.workflow_id}/runs`} style={linkStyle}>
+              {call.workflow_name ?? "a workflow"}
+            </Link>
+          ) : (
+            (call.workflow_name ?? "a workflow")
+          )}
+          <span style={{ color: call.status === "error" ? "var(--orchestr-danger)" : undefined }}>
+            · {call.status}
+          </span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
 // The expanded panel under a clicked run — its step log.
 function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: string | null }) {
   if (error) {
@@ -202,6 +252,7 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
             {detail.decided_at ? ` · ${timeAgo(detail.decided_at)}` : ""}
           </p>
         )}
+        <SubWorkflowLinks detail={detail} />
         <p className="text-[10px] m-0 mt-2 break-all" style={{ color: "var(--orchestr-ink-faint)" }}>
           Run ID: {detail.run_id}
         </p>

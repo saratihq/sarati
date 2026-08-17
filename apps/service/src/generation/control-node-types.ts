@@ -148,7 +148,7 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     type: 'orchestr:agent',
     category: 'control',
     description:
-      'A durable tool-calling agent (ADR 0045): it runs a model in a loop, calling the tools wired to its "tools" handle (port_type "tool") until it produces a final answer — that answer becomes this node\'s output. Give it tools by wiring action nodes (or an orchestr:call_workflow node) to its tools port. Parameters: system_prompt (how it should behave), input (the task/user message it works on — defaults to the whole trigger payload if empty), model ({ provider, model }, provider one of openai|claude|gemini|mistral), connectionId (OPTIONAL — a promoted/environment run resolves the model from that environment\'s connection slot for the provider; set it only to run the agent by hand on a Default/test run), max_steps (the hard cap on model + tool rounds before it must answer).',
+      'A durable tool-calling agent: it runs a model in a loop, calling the tools wired to its "tools" handle (port_type "tool") until it produces a final answer — that answer becomes this node\'s output. Give it tools by wiring action nodes (or an orchestr:call_workflow node) to its tools port. Parameters: system_prompt (how it should behave), input (the task/user message it works on — defaults to the whole trigger payload if empty), model ({ provider, model }, provider one of openai|claude|gemini|mistral), connectionId (OPTIONAL — a promoted/environment run resolves the model from that environment\'s connection slot for the provider; set it only to run the agent by hand on a Default/test run), max_steps (the hard cap on model + tool rounds before it must answer).',
     auth: 'none',
     parameters: {
       system_prompt: {
@@ -189,13 +189,19 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     type: 'orchestr:call_workflow',
     category: 'control',
     description:
-      'Call another workflow as an AI Agent\'s tool (ADR 0045): wire this node to an agent\'s "tools" handle (port_type "tool") and the agent can invoke the target workflow, hand it structured input, and use its output. The target runs its LIVE version for the CURRENT environment (a promoted/environment run uses that env\'s promoted version; a Default/manual run uses production), executes AS the caller (same user + environment, so its steps resolve connections through the same environment slots), and its terminal step\'s output is returned to the agent. Bounded: a workflow can\'t call itself, and nesting is capped. Set the model-facing tool name/description on the "Used as an agent tool" fields once it\'s wired.',
+      'Run another workflow and use its result — later steps read it as {{<node id>}}. Wire it to an agent\'s tools handle instead, and the agent decides when to call it. The target must declare itself callable with a "Called by another workflow" trigger; it runs its live version for the current environment, on your accounts.',
     auth: 'none',
     parameters: {
       workflow_id: {
         type: 'string',
-        description: 'The workflow this tool calls (its id). Cannot be the workflow you are editing.',
+        description: 'The workflow this step runs (its id). Cannot be the workflow you are editing.',
         required: true,
+      },
+      input: {
+        type: 'object',
+        description:
+          "What the target workflow receives as its firing event — an object whose keys are the inputs it declares, read inside it as {{trigger.<key>}}. Values may reference this workflow's steps (e.g. {{trigger.email}}). Ignored when the node is wired as an agent tool: the model produces the input then.",
+        required: false,
       },
     },
   },

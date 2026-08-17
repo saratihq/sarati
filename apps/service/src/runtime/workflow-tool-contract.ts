@@ -1,6 +1,12 @@
 import { isRecord } from '../common/json-util';
 import type { JsonSchema } from './agent';
 
+/**
+ * The trigger node type that declares a workflow callable — persisted in every saved document, so
+ * renaming it is a data migration. It lives here, with the contract it declares.
+ */
+export const AGENT_TOOL_PUBLIC = 'orchestr:tool_trigger';
+
 /** Platform tools own this prefix, so a workflow can never shadow one. */
 const RESERVED_PREFIX = 'orchestr_';
 
@@ -73,6 +79,17 @@ export function contractOf(triggerParameters: unknown, fallbackName: string): Wo
   const description = typeof parameters.description === 'string' ? parameters.description.trim() : '';
   if (!name || !description) return null;
   return { name, description, inputs: inputsOf(parameters.inputs) };
+}
+
+/**
+ * The contract a workflow DOCUMENT declares — the one place that answers "is this workflow callable,
+ * and how?", so every caller (an in-workflow agent, an authored step, MCP) asks it the same way and
+ * of the same document. Null = not callable, whether the trigger is absent or declares too little.
+ */
+export function contractOfDocument(document: unknown, fallbackName: string): WorkflowToolContract | null {
+  const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
+  const trigger = nodes.filter(isRecord).find((node) => node.node_type === AGENT_TOOL_PUBLIC);
+  return trigger ? contractOf(trigger.parameters, fallbackName) : null;
 }
 
 /** The declared inputs as the JSON schema a model call is handed. */
