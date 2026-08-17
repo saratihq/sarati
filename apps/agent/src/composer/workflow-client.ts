@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import type { EnvConfig } from '../config/env.config';
+import type { DropdownOption } from './dropdown-values';
 import type { ComposeOp, WorkflowIr } from './protocol';
 
 /**
@@ -224,6 +225,31 @@ export class WorkflowServiceClient {
           started_at: typeof r.started_at === 'string' ? r.started_at : null,
         }))
       : [];
+  }
+
+  /**
+   * The live options behind one DROPDOWN prop — the same loader the editor's picker calls, so the
+   * agent writes the option VALUES a human would have picked. Null when the loader cannot run
+   * (no account, not an option prop), which callers treat as "leave the value alone".
+   */
+  async loadOptions(
+    nodeType: string,
+    prop: string,
+    connectionId: string | null,
+    token: string | null,
+  ): Promise<DropdownOption[] | null> {
+    const { status, body } = await this.request(
+      'POST',
+      `/api/node-types/${encodeURIComponent(nodeType)}/options`,
+      token,
+      { prop, ...(connectionId ? { connection_id: connectionId } : {}) },
+    );
+    if (status !== 200 && status !== 201) return null;
+    const result = body as { options?: unknown; disabled?: unknown };
+    if (result.disabled === true || !Array.isArray(result.options)) return null;
+    return result.options
+      .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === 'object')
+      .map((o) => ({ label: typeof o.label === 'string' ? o.label : String(o.value), value: o.value }));
   }
 
   /** The caller's connections (provider + status) — read-only credential awareness. */

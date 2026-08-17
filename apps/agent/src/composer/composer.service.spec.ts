@@ -519,6 +519,50 @@ describe('tool handlers (workflow-service wrappers)', () => {
     expect(applyOps).toHaveBeenCalledWith(expect.anything(), ops, 'caller-jwt');
   });
 
+  /**
+   * The composer hears "#social" and must store the channel ID, or the editor's picker shows the
+   * stored label beside the real option and a human cannot tell them apart.
+   */
+  it('runApplyOps: a dropdown LABEL the agent wrote is stored as the option value', async () => {
+    const applyOps = jest.fn().mockResolvedValue({ ok: true, ir: { nodes: [], edges: [] } });
+    const { context } = makeCtx({
+      applyOps,
+      getActionSchema: jest.fn().mockResolvedValue({
+        type: 'slack.send_channel_message',
+        parameters: { channel: { type: 'DROPDOWN' }, text: { type: 'LONG_TEXT' } },
+      }),
+      listConnections: jest
+        .fn()
+        .mockResolvedValue([{ id: 'conn-1', provider: 'slack', status: 'active', display_name: null }]),
+      loadOptions: jest.fn().mockResolvedValue([{ label: '#social', value: 'C0BFN9NKRUH' }]),
+    });
+
+    const result = await runApplyOps(context, [
+      {
+        op: 'add_node',
+        node: {
+          id: 'post_story',
+          node_type: 'slack.send_channel_message',
+          parameters: { channel: '#social', text: 'hi' },
+        },
+      },
+    ]);
+
+    expect(result.isError).toBeUndefined();
+    const [, sentOps] = applyOps.mock.calls[0] as [unknown, Array<Record<string, unknown>>];
+    expect((sentOps[0]!.node as Record<string, unknown>).parameters).toEqual({
+      channel: 'C0BFN9NKRUH',
+      text: 'hi',
+    });
+    // The step's own account is absent, so the picker is loaded with the caller's Slack connection.
+    expect(context.client.loadOptions).toHaveBeenCalledWith(
+      'slack.send_channel_message',
+      'channel',
+      'conn-1',
+      'caller-jwt',
+    );
+  });
+
   it('runApplyOps: rejection → isError with detail, draft untouched, nothing emitted', async () => {
     const { context, session, emitted } = makeCtx({
       applyOps: () =>
