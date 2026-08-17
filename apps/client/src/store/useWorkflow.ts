@@ -196,6 +196,15 @@ function warnBrokenRefs(warnings: string[] | undefined): void {
   );
 }
 
+/** The workflow was created — but its trigger never came up, so nothing will fire it yet. */
+function warnInactiveTrigger(result: api.DeployResult): void {
+  if (result.activated !== false) return;
+  toast.warning(
+    "Created, but the trigger is not live yet",
+    result.activation_error ?? undefined,
+  );
+}
+
 /** Node count on an IR document. */
 function workflowNodeCount(workflow: Record<string, unknown>): number {
   return Array.isArray(workflow.nodes)
@@ -502,6 +511,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
         `"${deployResult.name}" is under version control — v1 on main`,
       );
       warnBrokenRefs(deployResult.ref_warnings);
+      warnInactiveTrigger(deployResult);
     } catch (e) {
       // Restore the strip so Deploy stays reachable after a failure.
       set({

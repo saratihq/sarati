@@ -20,6 +20,7 @@ import { WorkflowVersionEntity } from '../database/entities/workflow-version.ent
 import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
 import type { IRNode, WorkflowIR } from '../ir/models';
+import { activationError } from './activation-error';
 import { DbActivationStore } from './activation-store';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -458,11 +459,10 @@ export class TriggersService {
       );
       return 1;
     } catch (err) {
-      const msg = errorMessage(err).slice(0, 1000);
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
-        { lastPolledAt: now(), lastError: msg },
+        { lastPolledAt: now(), lastError: activationError(err) },
       );
       return 0;
     }
@@ -599,11 +599,10 @@ export class TriggersService {
       );
       return events.length;
     } catch (err) {
-      const msg = errorMessage(err).slice(0, 1000);
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
-        { lastPolledAt: now(), lastError: msg },
+        { lastPolledAt: now(), lastError: activationError(err) },
       );
       return 0;
     }

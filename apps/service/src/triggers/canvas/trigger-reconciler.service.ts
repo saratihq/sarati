@@ -29,6 +29,7 @@ import {
   WEBHOOK_REGISTRATION_KEY,
   WEBHOOK_SECRET_KEY,
 } from '../../providers/sdk-webhook.provider';
+import { activationError } from '../activation-error';
 import { DbActivationStore } from '../activation-store';
 import { INCOMING_CHAT_PUBLIC, INCOMING_WEBHOOK_PUBLIC, MANUAL_TRIGGER } from '../trigger-catalog.service';
 import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
@@ -614,10 +615,10 @@ export class TriggerReconcilerService {
   }
 
   private async recordError(activationId: string, err: unknown): Promise<void> {
-    const msg = errorMessage(err).slice(0, 1000);
-    this.logger.warn(`activation ${activationId}: ${msg}`);
+    // The operator gets the error as thrown; the row carries the copy the user reads.
+    this.logger.warn(`activation ${activationId}: ${errorMessage(err)}`);
     await this.dataSource.manager
-      .update(RuntimeTriggerActivationEntity, { id: activationId }, { lastError: msg })
+      .update(RuntimeTriggerActivationEntity, { id: activationId }, { lastError: activationError(err) })
       .catch(() => undefined);
   }
 
