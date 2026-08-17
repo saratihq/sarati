@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { createDirectAuth } from '@sarati/actions-sdk';
 import type { AuthHandle } from '@sarati/actions-sdk';
 
-import { DryRunHttpClient } from './dry-run-http-client';
+import { DryRunHttpClient, DryRunSkipped } from './dry-run-http-client';
 
 /** Records every request that actually reaches the server. */
 function captureServer(): Promise<{ url: string; hits: Array<{ method: string }>; close: () => void }> {
@@ -28,14 +28,21 @@ function captureServer(): Promise<{ url: string; hits: Array<{ method: string }>
 const noneAuth = (): AuthHandle => createDirectAuth({ type: 'none' }, { type: 'none' });
 
 describe('DryRunHttpClient (ADR 0041 — preview without firing side effects)', () => {
-  it('does NOT send a mutating request — returns a dry_run stub, server never hit', async () => {
+  it('does NOT send a mutating request — it refuses at the seam, server never hit', async () => {
     const srv = await captureServer();
     try {
       const client = new DryRunHttpClient();
-      const post = await client.post(`${srv.url}/write`, { auth: noneAuth(), body: { x: 1 } });
-      const put = await client.put(`${srv.url}/write`, { auth: noneAuth(), body: {} });
-      expect(post.data).toMatchObject({ dry_run: true, method: 'POST' });
-      expect(put.data).toMatchObject({ dry_run: true, method: 'PUT' });
+      // Refused, not stubbed: a synthetic body would fail the action's own response validation.
+      await expect(client.post(`${srv.url}/write`, { auth: noneAuth(), body: { x: 1 } })).rejects.toThrow(
+        DryRunSkipped,
+      );
+      await expect(client.put(`${srv.url}/write`, { auth: noneAuth(), body: {} })).rejects.toThrow(
+        DryRunSkipped,
+      );
+      expect(client.skipped).toEqual([
+        { method: 'POST', url: `${srv.url}/write` },
+        { method: 'PUT', url: `${srv.url}/write` },
+      ]);
       expect(srv.hits).toEqual([]); // no write ever reached the server
     } finally {
       srv.close();

@@ -48,16 +48,16 @@ export class SdkActionsProvider {
       throw new Error(`SdkActionsProvider has no action for "${input.actionId}"`);
     }
     const auth = await this.authFor(input, input.actionId, input.auth, action.auth);
-    // A dry run stubs mutating requests; otherwise a deterministic Idempotency-Key stops a crash-replay double-firing.
-    const http = input.dryRun
-      ? new DryRunHttpClient()
-      : input.idempotencyKey
-        ? new IdempotencyHttpClient(input.idempotencyKey)
-        : undefined;
+    // A dry run refuses mutating requests; otherwise a deterministic Idempotency-Key stops a crash-replay double-firing.
+    const dryRun = input.dryRun ? new DryRunHttpClient() : null;
+    const http =
+      dryRun ?? (input.idempotencyKey ? new IdempotencyHttpClient(input.idempotencyKey) : undefined);
     try {
       const output = await action.execute({ auth, props: input.props, ...(http ? { http } : {}) });
-      return { output };
+      // Anything the action returned about a refused write is fabricated — report the skip instead.
+      return dryRun && dryRun.skipped.length > 0 ? skippedResult(dryRun) : { output };
     } catch (err) {
+      if (dryRun && dryRun.skipped.length > 0) return skippedResult(dryRun);
       throw this.toStepError(input.actionId, err);
     }
   }
@@ -129,4 +129,15 @@ export class SdkActionsProvider {
     this.logger.warn(`SDK action ${actionId} failed: ${message}`);
     return new DomainError(`${actionId} failed: ${message}`, 422);
   }
+}
+
+/** A step that stopped at a state-changing request: a real outcome (ADR 0041), never a failure. */
+function skippedResult(dryRun: DryRunHttpClient): RunActionResult {
+  return {
+    output: {
+      dry_run: true,
+      skipped: 'state-changing request (not sent in a dry run)',
+      would_call: dryRun.skipped.map(({ method, url }) => ({ method, url })),
+    },
+  };
 }
