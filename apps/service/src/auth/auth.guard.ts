@@ -45,7 +45,8 @@ export class AuthGuard implements CanActivate {
     const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : undefined;
     if (!token) {
       context.switchToHttp().getResponse<Response>().setHeader('WWW-Authenticate', 'Bearer');
-      throw new UnauthorizedException({ detail: 'Not authenticated' });
+      // `no_credentials` says the CLIENT sent nothing — not that a stored session is dead.
+      throw new UnauthorizedException({ detail: 'Not authenticated', code: 'no_credentials' });
     }
 
     try {
@@ -77,10 +78,10 @@ export class AuthGuard implements CanActivate {
         this.logger.warn(`Token rejected: ${err.message}`);
       }
       if (err instanceof TokenExpiredError) {
-        throw new UnauthorizedException({ detail: 'Token expired' });
+        throw new UnauthorizedException({ detail: 'Token expired', code: 'token_expired' });
       }
       if (err instanceof InvalidTokenError) {
-        throw new UnauthorizedException({ detail: 'Invalid token' });
+        throw new UnauthorizedException({ detail: 'Invalid token', code: 'token_rejected' });
       }
       throw err;
     }

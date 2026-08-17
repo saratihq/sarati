@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createRemoteJWKSet, errors as joseErrors, jwtVerify } from 'jose';
+import { createRemoteJWKSet, decodeJwt, errors as joseErrors, jwtVerify } from 'jose';
 
 import type { EnvConfig } from '../config/env.config';
 import { InvalidTokenError, TokenExpiredError } from './auth.errors';
@@ -11,17 +11,23 @@ import type { TokenVerifier, VerifiedIdentity } from './token-verifier';
 export class ClerkVerifier implements TokenVerifier {
   readonly name = 'clerk';
 
-  private readonly logger = new Logger(ClerkVerifier.name);
   private jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
   constructor(private readonly config: ConfigService<{ env: EnvConfig }, true>) {}
 
   async verify(token: string): Promise<VerifiedIdentity | null> {
     const env = this.config.get('env', { infer: true });
-    if (!env.clerkIssuer) {
-      this.logger.warn('CLERK_ISSUER is not configured — rejecting bearer token');
-      throw new InvalidTokenError('CLERK_ISSUER is not configured');
+    if (!env.clerkIssuer) return null; // Clerk not configured — inert, like OIDC.
+
+    // Leave another issuer's token — and a malformed one — for the next verifier rather than
+    // rejecting it: throwing here would reject tokens this verifier does not own.
+    let unverifiedIss: string | undefined;
+    try {
+      unverifiedIss = decodeJwt(token).iss;
+    } catch {
+      return null;
     }
+    if (unverifiedIss !== env.clerkIssuer) return null;
 
     if (this.jwks === null) {
       const url = new URL(`${env.clerkIssuer.replace(/\/+$/, '')}/.well-known/jwks.json`);

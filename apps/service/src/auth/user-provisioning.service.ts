@@ -104,7 +104,7 @@ export class UserProvisioningService {
       if (this.isUniqueViolation(err)) {
         const winner = await this.findByClerkId(clerkUserId);
         if (winner) return winner;
-        throw new UnauthorizedException({ detail: 'User provisioning failed' });
+        throw new UnauthorizedException({ detail: 'User provisioning failed', code: 'provisioning_failed' });
       }
       throw err;
     }
@@ -162,7 +162,8 @@ export class UserProvisioningService {
 
   private async reload(id: string): Promise<UserEntity> {
     const user = await this.findById(id);
-    if (!user) throw new UnauthorizedException({ detail: 'User provisioning failed' });
+    if (!user)
+      throw new UnauthorizedException({ detail: 'User provisioning failed', code: 'provisioning_failed' });
     return user;
   }
 

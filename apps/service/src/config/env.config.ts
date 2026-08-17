@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsString, Min, validateSync } from 'class-validator';
 
@@ -268,6 +269,23 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
         'run development mode against a remote database — set ENVIRONMENT=production for a real ' +
         'deployment, or point DATABASE_URL at a local database for development.',
     );
+  }
+
+  // Outside production the insecure default is deliberate — a fresh clone must boot with no .env —
+  // but it is also what makes two builds on one port silently reject each other's sessions, which
+  // presents as being logged out mid-task rather than as a configuration problem. Say so at boot.
+  if (cfg.environment !== 'production' && cfg.secretKey === INSECURE_SECRET_KEY) {
+    const logger = new Logger('EnvConfig');
+    if (cfg.localAuthEnabled) {
+      logger.warn(
+        `SECRET_KEY is the built-in default (${INSECURE_SECRET_KEY}) and local auth is ON, so sessions ` +
+          'are signed with a value every checkout shares. Any other build started on this port with a ' +
+          'real SECRET_KEY will reject them and sign you out mid-task. Set SECRET_KEY in .env — a git ' +
+          'worktree does not inherit one, because .env is gitignored.',
+      );
+    } else {
+      logger.warn(`SECRET_KEY is the built-in default (${INSECURE_SECRET_KEY}) — set it in .env.`);
+    }
   }
 
   // Validate eagerly so a typo fails at startup, not in the browser.
