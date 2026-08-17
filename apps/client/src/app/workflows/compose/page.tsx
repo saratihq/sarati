@@ -42,10 +42,13 @@ export default function ComposeNewWorkflowPage() {
   const error = useWorkflow((s) => s.error);
   const streaming = useComposer((s) => s.streaming);
   const clearThread = useComposer((s) => s.clearThread);
+  const suggestedName = useComposer((s) => s.suggestedName);
   const userId = useSessionUserId();
   useDocumentTitle("New workflow");
 
   const [name, setName] = useState("");
+  // A person's own rename is final: the composer may re-plan, but it never renames over them.
+  const renamedByHand = useRef(false);
   // Collapsed, never unmounted — unmounting would kill the composer's SSE stream and thread.
   const [panelOpen, setPanelOpen] = useState(true);
   // Assume present while the probe is out: this page opens with the panel expanded, and flashing it
@@ -57,6 +60,13 @@ export default function ComposeNewWorkflowPage() {
     return () => reset();
   }, [startScratch, reset]);
   const seeded = workflowJson !== null;
+
+  // The composer names the plan it just described, so a save never files it as "Untitled workflow".
+  useEffect(() => {
+    if (!suggestedName || renamedByHand.current || !seeded) return;
+    setName(suggestedName);
+    setWorkflowDocName(suggestedName);
+  }, [suggestedName, seeded, setWorkflowDocName]);
 
   const nodeCount = Array.isArray(workflowJson?.nodes) ? (workflowJson.nodes as unknown[]).length : 0;
   const hasSteps = nodeCount > 1; // more than the trigger
@@ -138,6 +148,7 @@ export default function ComposeNewWorkflowPage() {
             <InlineRename
               name={name || "Untitled workflow"}
               onRenamed={(next) => {
+                renamedByHand.current = true;
                 setName(next);
                 setWorkflowDocName(next);
               }}

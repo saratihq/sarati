@@ -57,6 +57,8 @@ interface ComposerStore {
   connectionNeeds: Record<string, ConnectionNeed>;
   /** A canvas badge tap lands here; ComposerBar consumes it into the input. */
   prefill: string | null;
+  /** The name the composer gave the plan — the pre-save workflow's name until a person renames it. */
+  suggestedName: string | null;
   /** The agent offered to save (A3) — render the accept chips. */
   offerPending: boolean;
   /** An accept-offer save (existing) or create (new) is in flight. */
@@ -161,6 +163,8 @@ export const useComposer = create<ComposerStore>((set, get) => {
         return { thread: [...s.thread, { id: nextEntryId++, kind: "text", text }] };
       });
     } else if (evt.event === "brief") {
+      // The plan card carries the name the workflow saves under until a person renames it.
+      if (evt.data.name) set({ suggestedName: evt.data.name });
       // A re-emitted brief REPLACES the card (the plan evolved).
       set((s) => {
         let idx = -1;
@@ -284,7 +288,10 @@ export const useComposer = create<ComposerStore>((set, get) => {
       const snap = evt.data;
       const thread: ThreadEntry[] = [];
       const questions: Record<string, QuestionState> = {};
-      if (snap.brief) thread.push({ id: nextEntryId++, kind: "brief", brief: snap.brief });
+      if (snap.brief) {
+        thread.push({ id: nextEntryId++, kind: "brief", brief: snap.brief });
+        if (snap.brief.name) set({ suggestedName: snap.brief.name });
+      }
       for (const q of snap.questions) {
         questions[q.question_id] = {
           questionId: q.question_id,
@@ -358,6 +365,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
     stepResults: {},
     connectionNeeds: {},
     prefill: null,
+    suggestedName: null,
     offerPending: false,
     accepting: false,
 
@@ -574,6 +582,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
         stepResults: {},
         connectionNeeds: {},
         prefill: null,
+        suggestedName: null,
         offerPending: false,
         accepting: false,
       });

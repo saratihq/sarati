@@ -364,7 +364,10 @@ describe('ComposerService.attach (refresh replay)', () => {
     const { service, sessions } = await makeService(scriptedQuery([]));
     const session = sessions.create(null, null);
     emitToSession(session, { event: 'assistant_text', data: { text: 'one' } }); // seq 1
-    emitToSession(session, { event: 'brief', data: { goal: 'g', trigger: 't', steps: ['s'], needs: [] } }); // 2
+    emitToSession(session, {
+      event: 'brief',
+      data: { name: 'n', goal: 'g', trigger: 't', steps: ['s'], needs: [] },
+    }); // 2
     emitToSession(session, { event: 'done', data: { session_id: session.id, duration_ms: 1 } }); // 3
 
     // Fresh page: state snapshot, not history.
@@ -941,13 +944,16 @@ describe('A1 conversation tools', () => {
   it('post_brief emits the card and tells the agent to wait when needs are open', () => {
     const { context, emitted } = makeCtx();
     const brief = {
+      name: 'Big expenses → Slack',
       goal: 'Route big expenses to Slack',
       trigger: 'A form is submitted',
       steps: ['Check the amount'],
       needs: ['Which channel?'],
     };
     const waiting = runPostBrief(context, brief);
+    // The card carries the name the workflow saves under — the client's default until it is renamed.
     expect(emitted).toEqual([{ event: 'brief', data: brief }]);
+    expect((emitted[0]!.data as { name: string }).name).toBe('Big expenses → Slack');
     expect(waiting.content[0]!.text).toContain('END your turn');
     const ready = runPostBrief(context, { ...brief, needs: [] });
     expect(ready.content[0]!.text).toContain('go ahead and build');
@@ -1211,7 +1217,7 @@ describe('durable threads (write-through + rehydrate)', () => {
     const log: SequencedComposerEvent[] = [
       { event: 'user_message', data: { text: 'build it' }, seq: 1 },
       { event: 'assistant_text', data: { text: 'On it.' }, seq: 2 },
-      { event: 'brief', data: { goal: 'g', trigger: 't', steps: ['s'], needs: [] }, seq: 3 },
+      { event: 'brief', data: { name: 'n', goal: 'g', trigger: 't', steps: ['s'], needs: [] }, seq: 3 },
       { event: 'op_applied', data: { ops: [], ir: { nodes: [{ id: 'n1' }], edges: [] } }, seq: 4 },
       { event: 'done', data: { session_id: 'old-session', duration_ms: 5 }, seq: 5 },
     ];

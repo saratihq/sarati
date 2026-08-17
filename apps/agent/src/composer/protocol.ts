@@ -15,6 +15,8 @@ export type ComposeOp = Record<string, unknown>;
 
 /** The agent's plan card (A1) — re-emitted when the plan evolves; the client replaces the card. */
 export interface BriefData {
+  /** A short list-friendly workflow name ("Hacker News mentions → Slack") — the unrenamed default. */
+  name: string;
   goal: string;
   trigger: string;
   steps: string[];

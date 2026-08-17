@@ -132,9 +132,19 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
 
   const postBrief = tool(
     'post_brief',
-    'Show (or update) the plan card the person sees: goal, trigger, steps, and what you still need. ' +
-      'Post it BEFORE building anything new, and re-post it whenever the plan changes — the card is replaced.',
+    'Show (or update) the plan card the person sees: name, goal, trigger, steps, and what you still ' +
+      'need. Post it BEFORE building anything new, and re-post it whenever the plan changes — the card ' +
+      'is replaced. The name you give here becomes the workflow name unless they rename it themselves, ' +
+      'so a new workflow is never filed as "Untitled workflow".',
     {
+      name: z
+        .string()
+        .min(1)
+        .max(60)
+        .describe(
+          'A short list-friendly name for the workflow, as a person would title it in a list — ' +
+            '"Hacker News mentions → Slack", not a sentence',
+        ),
       goal: z.string().min(1).max(300).describe('What the workflow achieves, in one plain sentence'),
       trigger: z.string().min(1).max(200).describe('What starts it, in plain words ("A form is submitted")'),
       steps: z.array(z.string().min(1).max(200)).min(1).max(12).describe('The steps, one plain phrase each'),

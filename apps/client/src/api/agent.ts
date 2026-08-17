@@ -75,6 +75,8 @@ export async function composerStatus(signal?: AbortSignal): Promise<ComposerAvai
 }
 
 export interface BriefData {
+  /** The list-friendly workflow name the composer chose; absent on a pre-naming session's replay. */
+  name?: string;
   goal: string;
   trigger: string;
   steps: string[];
