@@ -1225,6 +1225,8 @@ export interface RunStepInfo {
   finished_at?: string | null;
   /** Truncated step output — string preview or a small JSON value. */
   output_preview?: unknown;
+  /** Set when the output was too large to store whole: `output_preview` is its head. */
+  output_truncated?: { size_chars: number; max_chars: number } | null;
   error?: string | null;
   /** Non-fatal honesty warnings: inputs the action ignored, or `{{refs}}` that resolved to nothing. */
   warnings?: string[] | null;

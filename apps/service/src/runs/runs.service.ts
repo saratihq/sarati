@@ -19,7 +19,7 @@ import type { AgentSubWorkflowRunner, AgentWorkflowCatalog } from '../runtime/ag
 import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
-import { RunRecorderService } from '../runtime/run-recorder.service';
+import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.service';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
 import type { RunAccess } from './run-access';
@@ -830,7 +830,14 @@ function stepLog(s: RuntimeRunStepEntity, includeOutputs: boolean): Record<strin
     continued: s.continued,
     // How many provider calls this step took (retry-on-fail, ADR 0020) — 1 unless retried.
     attempts: s.attempts,
-    ...(includeOutputs ? { output: s.output ?? null, output_preview: previewOf(s.output) } : {}),
+    ...(includeOutputs
+      ? {
+          output: s.output ?? null,
+          output_preview: previewOf(s.output),
+          // Too large to store whole: `output_preview` is the head, and this says what was cut.
+          output_truncated: truncationOf(s.output),
+        }
+      : {}),
     error: s.error,
     // Non-fatal reference warnings: full-string `{{ref}}`s that resolved to nothing on this step.
     warnings: s.warnings ?? null,
@@ -842,6 +849,14 @@ function stepLog(s: RuntimeRunStepEntity, includeOutputs: boolean): Record<strin
 /** The stored step output, serialized and capped (~2KB) for list/detail rendering. */
 function previewOf(output: unknown): string | null {
   if (output === null || output === undefined) return null;
-  const raw = JSON.stringify(output);
+  // An oversized value was stored as its head — preview THAT, not the marker wrapping it.
+  const stored = truncatedValueOf(output);
+  const raw = stored ? stored.preview : JSON.stringify(output);
   return raw.length > OUTPUT_PREVIEW_CHARS ? `${raw.slice(0, OUTPUT_PREVIEW_CHARS)}…` : raw;
+}
+
+/** What was cut from an oversized step output, or null when the value was stored whole. */
+function truncationOf(output: unknown): { size_chars: number; max_chars: number } | null {
+  const stored = truncatedValueOf(output);
+  return stored ? { size_chars: stored.size_chars, max_chars: stored.max_chars } : null;
 }
