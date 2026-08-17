@@ -21,6 +21,7 @@ import {
   type ModelTurn,
 } from '../src/runtime/agent';
 import { MAX_SUB_WORKFLOW_DEPTH, MAX_SUB_WORKFLOW_INVOCATIONS } from '../src/runtime/base-plan-interpreter';
+import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -94,6 +95,13 @@ const wfNode = (id: string, node_type: string, parameters: Record<string, unknow
   position: { x: 0, y: 0 },
   metadata: {},
 });
+/** A trigger DECLARING the workflow callable — what a caller now requires of a target (ADR 0062). */
+const toolTrigger = (tool_name: string, description: string) =>
+  wfNode('trigger', 'orchestr:tool_trigger', {
+    tool_name,
+    description,
+    inputs: [{ name: 'q', type: 'string', description: 'the question', required: false }],
+  });
 const wfEdge = (id: string, from: string, to: string, port_type: string) => ({
   id,
   source_node_id: from,
@@ -109,7 +117,7 @@ const echoDoc = (): Record<string, unknown> => ({
   name: 'sub echo',
   description: '',
   nodes: [
-    wfNode('trigger', 'orchestr:trigger'),
+    toolTrigger('sub_echo', 'Echoes its input back'),
     wfNode('concat', 'text.concat', { texts: ['SUB_RESULT:', '{{trigger.q}}'], separator: '' }),
   ],
   edges: [wfEdge('e', 'trigger', 'concat', 'main')],
@@ -123,7 +131,7 @@ const stripeDoc = (): Record<string, unknown> => ({
   name: 'sub stripe',
   description: '',
   nodes: [
-    wfNode('trigger', 'orchestr:trigger'),
+    toolTrigger('sub_stripe', 'Reads the Stripe balance'),
     wfNode('balance', 'stripe.get_balance', { connectionId: 'dummy-node-conn' }),
   ],
   edges: [wfEdge('e', 'trigger', 'balance', 'main')],
@@ -136,7 +144,10 @@ const ownedStripeDoc = (connectionId: string): Record<string, unknown> => ({
   version: '1.0',
   name: 'sub stripe (owned)',
   description: '',
-  nodes: [wfNode('trigger', 'orchestr:trigger'), wfNode('balance', 'stripe.get_balance', { connectionId })],
+  nodes: [
+    toolTrigger('sub_owned', 'Reads the owner Stripe balance'),
+    wfNode('balance', 'stripe.get_balance', { connectionId }),
+  ],
   edges: [wfEdge('e', 'trigger', 'balance', 'main')],
   settings: { execution_order: 'v1', extra: {} },
   metadata: { engine: 'orchestr' },
@@ -148,7 +159,7 @@ const waitDoc = (): Record<string, unknown> => ({
   name: 'sub wait',
   description: '',
   nodes: [
-    wfNode('trigger', 'orchestr:trigger'),
+    toolTrigger('sub_wait', 'Pauses for a human'),
     wfNode('hold', 'orchestr:wait_for_event', { topic: 'approval', timeout_ms: 1000 }),
     wfNode('done', 'text.concat', { texts: ['done'], separator: '' }),
   ],
@@ -163,7 +174,7 @@ const midAgentDoc = (subInnerId: string): Record<string, unknown> => ({
   name: 'sub mid',
   description: '',
   nodes: [
-    wfNode('trigger', 'orchestr:trigger'),
+    toolTrigger('sub_mid', 'Runs an agent that calls another workflow'),
     wfNode('agent', 'orchestr:agent', {
       model: { provider: 'claude', model: 'claude-opus-4-8' },
       system_prompt: 'Use the tool then answer.',
@@ -194,6 +205,38 @@ const parentDoc = (subWorkflowId: string, agentParams: Record<string, unknown> =
     wfNode('callwf', 'orchestr:call_workflow', { workflow_id: subWorkflowId }),
   ],
   edges: [wfEdge('e-in', 'chat', 'agent', 'main'), wfEdge('e-tool', 'agent', 'callwf', 'tool')],
+  settings: { execution_order: 'v1', extra: {} },
+  metadata: { engine: 'orchestr' },
+});
+
+/** A sub-workflow that never declared itself callable — a plain manual trigger (ADR 0062 refusal). */
+const undeclaredDoc = (): Record<string, unknown> => ({
+  version: '1.0',
+  name: 'sub undeclared',
+  description: '',
+  nodes: [
+    wfNode('trigger', 'orchestr:trigger'),
+    wfNode('concat', 'text.concat', { texts: ['NOPE'], separator: '' }),
+  ],
+  edges: [wfEdge('e', 'trigger', 'concat', 'main')],
+  settings: { execution_order: 'v1', extra: {} },
+  metadata: { engine: 'orchestr' },
+});
+
+/** A parent calling a workflow as an ordinary STEP (ADR 0062): trigger → call_workflow → concat. */
+const stepParentDoc = (
+  subWorkflowId: string,
+  input: Record<string, unknown> = { q: 'hello' },
+): WorkflowIR => ({
+  version: '1.0',
+  name: 'step parent',
+  description: '',
+  nodes: [
+    wfNode('trigger', 'orchestr:trigger'),
+    wfNode('callwf', 'orchestr:call_workflow', { workflow_id: subWorkflowId, input }),
+    wfNode('after', 'text.concat', { texts: ['GOT:', '{{callwf}}'], separator: '' }),
+  ],
+  edges: [wfEdge('e1', 'trigger', 'callwf', 'main'), wfEdge('e2', 'callwf', 'after', 'main')],
   settings: { execution_order: 'v1', extra: {} },
   metadata: { engine: 'orchestr' },
 });
@@ -237,6 +280,7 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
   let ownedStripeWfId = ''; // owned by subOwnerId (a different user), in the caller's org
   let subInnerWfId = '';
   let subMidWfId = '';
+  let undeclaredWfId = ''; // never declared callable → refused on both call paths
   const crossOrgWfId = randomUUID();
   const otherOrgId = randomUUID();
 
@@ -288,6 +332,7 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
     waitWfId = await deploy(waitDoc()); // L3: contains a wait_for_event → rejected as a tool
     subInnerWfId = await deploy(echoDoc()); // L4b: the leaf of a real 2-level chain
     subMidWfId = await deploy(midAgentDoc(subInnerWfId)); // L4b: an agent that calls subInner
+    undeclaredWfId = await deploy(undeclaredDoc()); // S4: no tool_trigger → not callable
 
     // The production env row was created by the first promote — grab its id.
     prodEnvId = (
@@ -511,4 +556,116 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
     // subInner echoed at depth 2 and rode subMid's answer back to the parent's model.
     expect(JSON.stringify(step?.output)).toContain('SUB_RESULT:hello');
   }, 15_000);
+
+  // ── ADR 0062: the same runner reached from an ORDINARY STEP, no agent involved ──
+
+  const runStep = (ir: WorkflowIR, extra: Record<string, unknown> = {}) =>
+    app.get(DagInterpreter).run(compileWorkflowIrDag(ir), {
+      externalUserId: callerId,
+      environment: 'production',
+      environmentId: prodEnvId,
+      orgId,
+      initialScope: { trigger: { topic: 'from-the-parent' } },
+      ...extra,
+    });
+
+  it('(S1) a call_workflow STEP runs the child and its output is readable downstream', async () => {
+    // The input carries a {{ref}}, so this also proves the step's input is resolved against the
+    // parent's scope before it becomes the child's firing event.
+    const result = await runStep(stepParentDoc(echoWfId, { q: '{{trigger.topic}}' }));
+
+    expect(result.outputs.callwf).toBe('SUB_RESULT:from-the-parent');
+    // A later step reads it exactly like any other step's result.
+    expect(result.outputs.after).toBe('GOT:SUB_RESULT:from-the-parent');
+  });
+
+  it('(S2) the child is recorded as a run of its OWN workflow, pointing back at the calling step', async () => {
+    const { run_id: parentRunId } = await app
+      .get(RunsService)
+      .runExecutable(compileWorkflowIrDag(stepParentDoc(echoWfId)), {
+        externalUserId: callerId,
+        environment: 'production',
+        environmentId: prodEnvId,
+        orgId,
+        source: 'manual',
+        initialScope: { trigger: {} },
+      });
+
+    const child = await db.query(
+      `SELECT id, run_id, workflow_id, source, parent_run_id, parent_step_key, status
+         FROM runtime_runs WHERE parent_run_id = $1`,
+      [`${callerId}:${parentRunId}`],
+    );
+    expect(child.rowCount).toBe(1);
+    expect(child.rows[0]).toMatchObject({
+      workflow_id: echoWfId, // the CHILD's workflow, not the caller's
+      source: 'sub_workflow',
+      parent_step_key: 'callwf',
+      status: 'completed',
+    });
+
+    // Its steps are recorded too — the whole point: a failure inside is readable.
+    const steps = await db.query(`SELECT node_id, status FROM runtime_run_steps WHERE run_id = $1`, [
+      child.rows[0].id,
+    ]);
+    expect(steps.rows.map((r) => r.node_id)).toContain('concat');
+
+    // And the calling step is recorded in the PARENT with its own kind.
+    const callStep = await db.query(
+      `SELECT kind, status FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'callwf'`,
+      [`${callerId}:${parentRunId}`],
+    );
+    expect(callStep.rows[0]).toMatchObject({ kind: 'callWorkflow', status: 'completed' });
+
+    // Both ends resolve over HTTP — the link is only real if it survives the controller.
+    const parentBody = (await asA(http().get(`/api/runs/${parentRunId}`)).expect(200)).body;
+    expect(parentBody.called_by).toBeNull();
+    expect(parentBody.calls).toEqual([
+      expect.objectContaining({
+        run_id: child.rows[0].run_id,
+        step_key: 'callwf',
+        workflow_id: echoWfId,
+        status: 'completed',
+      }),
+    ]);
+
+    const childBody = (await asA(http().get(`/api/runs/${child.rows[0].run_id}`)).expect(200)).body;
+    expect(childBody.called_by).toMatchObject({ run_id: parentRunId, step_key: 'callwf' });
+    expect(childBody.calls).toEqual([]);
+  });
+
+  it('(S3) a STEP that calls its own workflow is an author-time compile error', () => {
+    const selfId = randomUUID();
+    const ir = stepParentDoc(selfId);
+    // The guard used to live inside the agent-tool peel, which a main-path node never reached.
+    expect(() => compileWorkflowIrDag(ir, selfId)).toThrow(/call its own workflow/i);
+    expect(() => compileWorkflowIrDag(ir, randomUUID())).not.toThrow();
+  });
+
+  it('(S4) a target that never declared itself callable is refused, with a message saying how', async () => {
+    await expect(runStep(stepParentDoc(undeclaredWfId))).rejects.toThrow(/doesn't declare itself callable/i);
+    // The SAME refusal on the agent path — one rule, both callers.
+    const viaAgent = await runParent(undeclaredWfId);
+    expect(toolStep(viaAgent)?.output).toMatchObject({
+      error: { message: expect.stringMatching(/doesn't declare itself callable/i) },
+    });
+  });
+
+  it("(S5) the agent's fan-out budget does not bind an authored step", async () => {
+    // Seeded exhausted: the agent path refuses here, and the step path must not even consult it —
+    // how often an authored step runs is the loop the author wrote, not a model's choice.
+    const viaStep = await runStep(stepParentDoc(echoWfId), { subWorkflowBudget: { remaining: 0 } });
+    expect(viaStep.outputs.callwf).toBe('SUB_RESULT:hello');
+
+    const viaAgent = await runParent(echoWfId, { subWorkflowBudget: { remaining: 0 } });
+    expect(toolStep(viaAgent)?.output).toMatchObject({
+      error: { message: expect.stringMatching(/invocation budget/i) },
+    });
+  });
+
+  it('(S6) the depth cap still bounds a step chain', async () => {
+    await expect(
+      runStep(stepParentDoc(echoWfId), { subWorkflowDepth: MAX_SUB_WORKFLOW_DEPTH }),
+    ).rejects.toThrow(/maximum sub-workflow call depth/i);
+  });
 });

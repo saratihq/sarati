@@ -3,6 +3,7 @@ import type { AgentProvider, DagAgentTool } from '../runtime/agent';
 import { edgePortType, MAIN_PORT_TYPE, type IREdge, type IRNode, type WorkflowIR } from '../ir/models';
 import type {
   DagAgentNode,
+  DagCallWorkflowNode,
   DagForEachNode,
   DagNode,
   DagPlan,
@@ -10,6 +11,7 @@ import type {
   DagWhileNode,
   Guard,
 } from '../runtime/dag-plan';
+import { isRecord } from '../common/json-util';
 import { toDagCodeNode } from './code-node';
 import {
   INTERNAL_ACTION_TYPE,
@@ -332,7 +334,15 @@ function buildScopedDag(
   const structuralEdges = structuralMain.filter(
     (e) => structuralIds.has(e.source_node_id) && structuralIds.has(e.target_node_id),
   );
-  const dag = flattenDag(id, structuralNodes, structuralEdges, byId, irIndex, translatorFor);
+  const dag = flattenDag(
+    id,
+    structuralNodes,
+    structuralEdges,
+    byId,
+    irIndex,
+    translatorFor,
+    enclosingWorkflowId,
+  );
   const nodeById = new Map(dag.nodes.map((n) => [n.id, n]));
 
   // ── Attach each loop's body sub-plan (recursively compiled; its roots ungated) ───
@@ -386,7 +396,13 @@ function buildScopedDag(
     );
 
     const target = nodeById.get(srcId);
-    if (!target || (target.kind !== 'action' && target.kind !== 'code' && target.kind !== 'agent')) {
+    if (
+      !target ||
+      (target.kind !== 'action' &&
+        target.kind !== 'code' &&
+        target.kind !== 'agent' &&
+        target.kind !== 'callWorkflow')
+    ) {
       throw new Error(
         `Error output leaves "${byId.get(srcId)?.name ?? srcId}", which isn't a step in the main flow`,
       );
@@ -408,6 +424,7 @@ function flattenDag(
   byId: Map<string, IRNode>,
   irIndex: Map<string, number>,
   translatorFor: (nodeId: string) => (value: unknown) => unknown,
+  enclosingWorkflowId: string | undefined,
 ): DagPlan {
   const present = new Set(nodes.map((n) => n.id));
   const guardsByTarget = new Map<string, Guard[]>();
@@ -447,13 +464,21 @@ function flattenDag(
   }
 
   const dagNodes = order.map((node) =>
-    buildDagNode(node, translatorFor(node.id), guardsByTarget.get(node.id) ?? []),
+    buildDagNode(node, translatorFor(node.id), guardsByTarget.get(node.id) ?? [], enclosingWorkflowId),
   );
   return { id, nodes: dagNodes };
 }
 
 /** One IR node → one flat `DagNode`, reusing compile-ir.ts's per-node mapping. */
-function buildDagNode(node: IRNode, translate: (value: unknown) => unknown, guards: Guard[]): DagNode {
+function buildDagNode(
+  node: IRNode,
+  translate: (value: unknown) => unknown,
+  guards: Guard[],
+  enclosingWorkflowId: string | undefined,
+): DagNode {
+  if (node.node_type === ORCHESTR_CALL_WORKFLOW) {
+    return buildCallWorkflowNode(node, translate, guards, enclosingWorkflowId);
+  }
   if (isLoopNode(node)) {
     return loopModeOf(node) === 'while'
       ? buildWhileNode(node, translate, guards)
@@ -658,6 +683,48 @@ function dedupeToolNames(tools: DagAgentTool[]): void {
 }
 
 /**
+ * The workflow an `orchestr:call_workflow` node targets — the ONE definition site of both target
+ * guards, so the agent-tool path and the authored-step path can never disagree (ADR 0062). Calling
+ * ITSELF is an immediate infinite loop; the run-time depth guard is the backstop that also bounds
+ * an indirect cycle (A→B→A).
+ */
+function calledWorkflowId(node: IRNode, enclosingWorkflowId: string | undefined): string {
+  const raw = node.parameters.workflow_id;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new DomainError(`Call workflow "${node.name}" needs a workflow to call — pick one.`);
+  }
+  const workflowId = raw.trim();
+  if (enclosingWorkflowId !== undefined && workflowId === enclosingWorkflowId) {
+    throw new DomainError(
+      `Call workflow "${node.name}" can't call its own workflow — that is an infinite loop. Point it at a different workflow.`,
+    );
+  }
+  return workflowId;
+}
+
+/**
+ * Lower a main-path `orchestr:call_workflow` to a runnable step (ADR 0062). Its `input` parameters
+ * become the child's firing event, so `{{trigger.<field>}}` inside the child reads them.
+ */
+function buildCallWorkflowNode(
+  node: IRNode,
+  translate: (value: unknown) => unknown,
+  guards: Guard[],
+  enclosingWorkflowId: string | undefined,
+): DagCallWorkflowNode {
+  const rawInput = node.parameters.input;
+  const input = isRecord(rawInput) ? (translate(rawInput) as Record<string, unknown>) : {};
+  return {
+    kind: 'callWorkflow',
+    id: node.id,
+    workflowId: calledWorkflowId(node, enclosingWorkflowId),
+    input,
+    ...(node.parameters.onError === 'continue' ? { onError: 'continue' as const } : {}),
+    guards,
+  };
+}
+
+/**
  * Lower ONE bound tool node to a `DagAgentTool` descriptor (ADR 0045 §3/§4): `orchestr:call_workflow`
  * becomes a sub-workflow tool, anything else an action tool whose params become the call's base props.
  */
@@ -671,17 +738,7 @@ function buildAgentTool(
     typeof node.parameters.tool_description === 'string' ? node.parameters.tool_description : undefined;
 
   if (node.node_type === ORCHESTR_CALL_WORKFLOW) {
-    const workflowId = node.parameters.workflow_id;
-    if (typeof workflowId !== 'string' || workflowId.trim() === '') {
-      throw new Error(`Sub-workflow tool "${node.name}" needs a "workflow_id" to call`);
-    }
-    // A workflow calling ITSELF is an immediate infinite loop (ADR 0045 §3); the run-time
-    // depth guard is the backstop that also bounds indirect cycles (A→B→A).
-    if (enclosingWorkflowId !== undefined && workflowId.trim() === enclosingWorkflowId) {
-      throw new DomainError(
-        `Sub-workflow tool "${node.name}" can't call its own workflow — that is an infinite loop. Wire it to a different workflow.`,
-      );
-    }
+    const workflowId = calledWorkflowId(node, enclosingWorkflowId);
     return {
       kind: 'workflow',
       name: sanitizeToolName(alias || node.name || workflowId),

@@ -122,6 +122,24 @@ export interface DagAgentNode {
   guards: Guard[];
 }
 
+/**
+ * Call another workflow as an ordinary STEP (ADR 0062) — a work-bearing leaf producing `scope[id]`
+ * (the child's terminal output), run through the same seam that backs an agent's sub-workflow tool.
+ * Only who decides to call differs: here the author wired it, so nothing bounds how often.
+ */
+export interface DagCallWorkflowNode {
+  kind: 'callWorkflow';
+  id: string;
+  /** The workflow this step runs. */
+  workflowId: string;
+  /** The child's firing event (`{{trigger.<field>}}` inside it), resolved against the run scope. */
+  input: Record<string, unknown>;
+  onError?: 'continue';
+  /** ADR 0020 error lane, compiled as a nested sub-plan (empty guards at its roots). */
+  onErrorBranch?: DagPlan;
+  guards: Guard[];
+}
+
 /** Durable delay (reuses `DelayNode`), flattened with guards. */
 export type DagDelayNode = DelayNode & { guards: Guard[] };
 
@@ -137,6 +155,7 @@ export type DagNode =
   | DagWhileNode
   | DagParallelNode
   | DagAgentNode
+  | DagCallWorkflowNode
   | DagDelayNode
   | DagWaitForEventNode;
 

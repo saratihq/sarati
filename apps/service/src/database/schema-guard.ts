@@ -112,6 +112,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '023_platform_secrets.sql',
     probe: "SELECT 1 FROM information_schema.tables WHERE table_name='platform_secrets'",
   },
+  {
+    migration: '024_sub_workflow_runs.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='parent_run_id'",
+  },
 ];
 
 /**

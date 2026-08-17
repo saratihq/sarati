@@ -8,7 +8,7 @@ import { errorMessage } from '../common/error-message';
 import { LiveRunConsentService } from './live-run-consent.service';
 import { toToolError, toToolResult } from './presentation/result';
 import { WorkflowInvokeService } from '../workflows/workflow-invoke.service';
-import type { WorkflowTool, WorkflowToolInput } from './workflow-tools.service';
+import type { WorkflowTool, WorkflowToolInput } from '../workflows/callable-workflows.service';
 
 /** Long enough for a real automation to answer, short enough that the agent is not left hanging. */
 const DEFAULT_AWAIT_MS = 15_000;

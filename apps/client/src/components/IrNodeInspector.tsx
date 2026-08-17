@@ -4,9 +4,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { AlertTriangle, Braces, Check, Clock, Copy, MessageCircle, Pin, Play, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Webhook, Wrench, X, Zap } from "lucide-react";
+import { AlertTriangle, Braces, Check, Clock, Copy, MessageCircle, Pin, Play, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Webhook, Workflow, Wrench, X, Zap } from "lucide-react";
 import * as api from "@/api/client";
-import type { AgentStep, Connection, DropdownOption, NodeParamSchema, NodeTypeEntry, TriggerCatalogEntry, WorkflowSummary } from "@/api/client";
+import type { AgentStep, CallableWorkflow, Connection, DropdownOption, NodeParamSchema, NodeTypeEntry, TriggerCatalogEntry } from "@/api/client";
 import { apiBaseUrl } from "@/lib/config";
 import { useWorkflow } from "@/store/useWorkflow";
 import { useStepSamples } from "@/store/useStepSamples";
@@ -997,6 +997,7 @@ const MANUAL_TRIGGER = "orchestr:trigger";
 const WEBHOOK_TRIGGER = "orchestr:webhook";
 const SCHEDULE_TRIGGER = "orchestr:schedule";
 const CHAT_TRIGGER = "orchestr:chat";
+const TOOL_TRIGGER = "orchestr:tool_trigger";
 // Unconfigured, the webhook/chat endpoints below are a GUESS and the copy has to say so.
 const API_URL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_API_URL);
 // The browser's own origin is the fallback (correct behind a same-origin proxy), never a
@@ -1010,11 +1011,12 @@ function apiOrigin(): string {
 // The chat endpoint is env-scoped: it goes live once a version carrying the trigger is promoted here.
 const CHAT_ENV = "production";
 
-type TriggerKind = "manual" | "webhook" | "schedule" | "chat" | "app";
+type TriggerKind = "manual" | "webhook" | "schedule" | "chat" | "tool" | "app";
 function kindOf(nodeType?: string): TriggerKind {
   if (nodeType === WEBHOOK_TRIGGER) return "webhook";
   if (nodeType === SCHEDULE_TRIGGER) return "schedule";
   if (nodeType === CHAT_TRIGGER) return "chat";
+  if (nodeType === TOOL_TRIGGER) return "tool";
   // An app trigger's type is "<app>.<trigger>" (e.g. gmail.gmail_new_email_received).
   if (nodeType && nodeType.includes(".")) return "app";
   return "manual";
@@ -1461,7 +1463,10 @@ function TriggerTypeConfig({
   const pick = (entry: TriggerCatalogEntry) => {
     // Native control triggers carry no connection and no marker; the service knows them by node_type.
     const native =
-      entry.type === WEBHOOK_TRIGGER || entry.type === SCHEDULE_TRIGGER || entry.type === CHAT_TRIGGER;
+      entry.type === WEBHOOK_TRIGGER ||
+      entry.type === SCHEDULE_TRIGGER ||
+      entry.type === CHAT_TRIGGER ||
+      entry.type === TOOL_TRIGGER;
     updateIrNode(node.id, {
       node_type: entry.type,
       parameters:
@@ -1500,9 +1505,19 @@ function TriggerTypeConfig({
           ? "Schedule"
           : kind === "chat"
             ? "Chat"
-            : (current?.name ?? getNodeTypeLabel(type));
+            : kind === "tool"
+              ? "Called by another workflow"
+              : (current?.name ?? getNodeTypeLabel(type));
   const HeadIcon =
-    kind === "webhook" ? Webhook : kind === "schedule" ? Clock : kind === "chat" ? MessageCircle : Zap;
+    kind === "webhook"
+      ? Webhook
+      : kind === "schedule"
+        ? Clock
+        : kind === "chat"
+          ? MessageCircle
+          : kind === "tool"
+            ? Workflow
+            : Zap;
 
   const query = q.trim().toLowerCase();
   const TRIGGER_CAP = 60;
@@ -1769,6 +1784,10 @@ function TriggerTypeConfig({
             updateIrNode(node.id, { parameters: { ...next, ...patch } });
           }}
         />
+      )}
+
+      {kind === "tool" && (
+        <ToolTriggerConfig params={params} setParam={setParam} fallbackName={node.name ?? ""} />
       )}
 
       {kind === "app" && <AppTriggerConfig entry={current} params={params} setParam={setParam} />}
@@ -2171,6 +2190,190 @@ function timezoneChoices(): string[] {
  * Schedule trigger config. The engine takes exactly one of `interval_minutes` | `cron` plus an IANA
  * `timezone`, so the mode select keeps exactly-one-of true by dropping the other mode's params.
  */
+/** A parameter value read back as an object map, never an array or a scalar. */
+function paramsObject(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** One argument this workflow declares; the shape the service's `inputsOf` parses. */
+interface ToolInputRow {
+  name: string;
+  type: "string" | "number" | "boolean" | "object";
+  description: string;
+  required: boolean;
+}
+
+function toolInputRows(raw: unknown): ToolInputRow[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (entry === null || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    const type = typeof row.type === "string" ? row.type : "string";
+    return [
+      {
+        name: typeof row.name === "string" ? row.name : "",
+        type: (["string", "number", "boolean", "object"].includes(type) ? type : "string") as ToolInputRow["type"],
+        description: typeof row.description === "string" ? row.description : "",
+        required: row.required === true,
+      },
+    ];
+  });
+}
+
+/**
+ * What this workflow tells callers about running it (ADR 0053 §1, ADR 0062). Name and description
+ * are load-bearing, not decoration: a caller picks this workflow on the description alone, and one
+ * without both is withheld rather than offered — so the panel says so instead of failing later.
+ */
+function ToolTriggerConfig({
+  params,
+  setParam,
+  fallbackName,
+}: {
+  params: Record<string, unknown>;
+  setParam: (key: string, value: unknown) => void;
+  fallbackName: string;
+}) {
+  const toolName = typeof params.tool_name === "string" ? params.tool_name : "";
+  const description = typeof params.description === "string" ? params.description : "";
+  const inputs = toolInputRows(params.inputs);
+  const setInputs = (next: ToolInputRow[]) => setParam("inputs", next);
+  const patchInput = (index: number, patch: Partial<ToolInputRow>) =>
+    setInputs(inputs.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+
+  const fieldStyle = {
+    background: "var(--orchestr-surface-raised)",
+    border: "1px solid var(--orchestr-line-strong)",
+    color: "var(--orchestr-ink)",
+  };
+
+  return (
+    <div className="space-y-2.5" data-testid="tool-trigger-config">
+      <p className="text-[11px] m-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+        Other workflows and AI agents can run this one and use its result. It never fires on its own.
+      </p>
+
+      <div>
+        <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
+          Name callers see
+        </label>
+        <input
+          value={toolName}
+          onChange={(e) => setParam("tool_name", e.target.value)}
+          placeholder={fallbackName || "summarize_ticket"}
+          aria-label="Name callers see"
+          className="w-full rounded-md px-2 py-1.5 text-[12px] outline-none"
+          style={fieldStyle}
+          data-testid="tool-trigger-name"
+        />
+      </div>
+
+      <div>
+        <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
+          What it does
+        </label>
+        <textarea
+          value={description}
+          onChange={(e) => setParam("description", e.target.value)}
+          rows={2}
+          placeholder="Summarizes a support ticket and returns the key points."
+          aria-label="What it does"
+          className="w-full rounded-md px-2 py-1.5 text-[12px] outline-none resize-y"
+          style={fieldStyle}
+          data-testid="tool-trigger-description"
+        />
+        {!description.trim() && (
+          <p className="text-[11px] mt-1 m-0" style={{ color: "var(--orchestr-warning)" }}>
+            Needed before anything can call this workflow — it is how a caller knows what it&apos;s for.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-[11px]" style={{ color: "var(--orchestr-ink-muted)" }}>
+            What callers send
+          </label>
+          <button
+            onClick={() => setInputs([...inputs, { name: "", type: "string", description: "", required: false }])}
+            className="flex items-center gap-1 text-[11px] bg-transparent border-none cursor-pointer p-0"
+            style={{ color: "var(--orchestr-accent)" }}
+            data-testid="tool-trigger-add-input"
+          >
+            <Plus size={11} /> Add
+          </button>
+        </div>
+
+        {inputs.length === 0 ? (
+          <p className="text-[11px] m-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+            Nothing declared — callers may send anything, and this workflow reads it as{" "}
+            <code>{"{{trigger.<field>}}"}</code>.
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {inputs.map((row, i) => (
+              <div
+                key={i}
+                className="rounded-md border p-1.5 space-y-1.5"
+                style={{ borderColor: "var(--orchestr-line)" }}
+              >
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={row.name}
+                    onChange={(e) => patchInput(i, { name: e.target.value })}
+                    placeholder="field name"
+                    aria-label={`Input ${i + 1} name`}
+                    className="flex-1 min-w-0 rounded px-2 py-1 text-[12px] outline-none font-mono"
+                    style={fieldStyle}
+                  />
+                  <select
+                    value={row.type}
+                    onChange={(e) => patchInput(i, { type: e.target.value as ToolInputRow["type"] })}
+                    aria-label={`Input ${i + 1} type`}
+                    className="rounded px-1.5 py-1 text-[12px] outline-none"
+                    style={fieldStyle}
+                  >
+                    <option value="string">Text</option>
+                    <option value="number">Number</option>
+                    <option value="boolean">Yes / no</option>
+                    <option value="object">Object</option>
+                  </select>
+                  <button
+                    onClick={() => setInputs(inputs.filter((_, j) => j !== i))}
+                    aria-label={`Remove input ${i + 1}`}
+                    className="bg-transparent border-none cursor-pointer p-1 shrink-0"
+                    style={{ color: "var(--orchestr-ink-subtle)" }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+                <input
+                  value={row.description}
+                  onChange={(e) => patchInput(i, { description: e.target.value })}
+                  placeholder="what this field is for"
+                  aria-label={`Input ${i + 1} description`}
+                  className="w-full rounded px-2 py-1 text-[12px] outline-none"
+                  style={fieldStyle}
+                />
+                <label className="flex items-center gap-1.5 text-[11px]" style={{ color: "var(--orchestr-ink-muted)" }}>
+                  <input
+                    type="checkbox"
+                    checked={row.required}
+                    onChange={(e) => patchInput(i, { required: e.target.checked })}
+                  />
+                  Required
+                </label>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ScheduleTriggerConfig({
   params,
   setParams,
@@ -3654,25 +3857,37 @@ function AgentTestPanel({
  * workflow because a workflow can't call itself. Its tool name/description live in the shared
  * "Used as an agent tool" fields, never redefined here.
  */
+/**
+ * Pick the workflow this step runs, and fill what it declared it needs (ADR 0062). The list is the
+ * CALLABLE ones only — a workflow that never declared itself would be refused at run time, so
+ * offering it here would just move the discovery later.
+ */
 function CallWorkflowEditor({
   value,
+  input,
   currentWorkflowId,
+  isAgentTool,
   onChange,
+  onInputChange,
 }: {
   value: string;
+  input: Record<string, unknown>;
   currentWorkflowId: string | null;
+  /** Wired to an agent's tools handle — the MODEL produces the input then, so the fields are moot. */
+  isAgentTool: boolean;
   onChange: (workflowId: string) => void;
+  onInputChange: (input: Record<string, unknown>) => void;
 }) {
-  const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
+  const [callable, setCallable] = useState<CallableWorkflow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [epoch, setEpoch] = useState(0);
   useEffect(() => {
     let cancelled = false;
     api
-      .listWorkflows({ limit: 200 })
+      .listCallableWorkflows()
       .then(({ workflows: rows }) => {
         if (cancelled) return;
-        setWorkflows(rows);
+        setCallable(rows);
         setError(null);
       })
       .catch((e: unknown) => {
@@ -3683,52 +3898,109 @@ function CallWorkflowEditor({
     };
   }, [epoch]);
 
-  // Every workflow EXCEPT this one — a workflow can't call itself.
-  const options = (workflows ?? []).filter((w) => w.id !== currentWorkflowId);
+  // Every callable workflow EXCEPT this one — a workflow can't call itself.
+  const options = (callable ?? []).filter((w) => w.workflow_id !== currentWorkflowId);
   // An unknown current id stays selectable, shown raw, rather than being silently dropped.
-  const known = value === "" || options.some((w) => w.id === value);
+  const known = value === "" || options.some((w) => w.workflow_id === value);
+  const target = options.find((w) => w.workflow_id === value) ?? null;
 
   return (
-    <div data-testid="call-workflow-editor">
-      <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
-        Workflow to call
-      </label>
-      <select
-        value={value}
-        aria-label="Workflow to call"
-        onChange={(e) => onChange(e.target.value)}
-        className={FIELD_CLASS}
-        style={FIELD_STYLE}
-        disabled={workflows === null}
-        data-testid="call-workflow-picker"
-      >
-        <option value="">{workflows === null ? "Loading workflows…" : "Select a workflow…"}</option>
-        {!known && value !== "" && <option value={value}>{value}</option>}
-        {options.map((w) => (
-          <option key={w.id} value={w.id} style={OPTION_STYLE}>
-            {w.name}
-          </option>
-        ))}
-      </select>
+    <div data-testid="call-workflow-editor" className="space-y-2">
+      <div>
+        <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
+          Workflow to run
+        </label>
+        <select
+          value={value}
+          aria-label="Workflow to run"
+          onChange={(e) => onChange(e.target.value)}
+          className={FIELD_CLASS}
+          style={FIELD_STYLE}
+          disabled={callable === null}
+          data-testid="call-workflow-picker"
+        >
+          <option value="">{callable === null ? "Loading workflows…" : "Select a workflow…"}</option>
+          {!known && value !== "" && <option value={value}>{value}</option>}
+          {options.map((w) => (
+            <option key={w.workflow_id} value={w.workflow_id} style={OPTION_STYLE}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+        {target?.description && (
+          <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
+            {target.description}
+          </p>
+        )}
+        {!known && value !== "" && callable !== null && (
+          <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-warning)" }}>
+            This workflow isn&apos;t callable: its live version needs a &quot;Called by another
+            workflow&quot; trigger with a name and description, published to production.
+          </p>
+        )}
+      </div>
+
       {error && (
-        <div className="mt-1">
-          <InlineError
-            message={error}
-            onRetry={() => {
-              setError(null);
-              setEpoch((n) => n + 1);
-            }}
-          />
-        </div>
+        <InlineError
+          message={error}
+          onRetry={() => {
+            setError(null);
+            setEpoch((n) => n + 1);
+          }}
+        />
       )}
-      {!error && workflows !== null && options.length === 0 && (
-        <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
-          No other workflows yet — create one to call it from here.
+      {!error && callable !== null && options.length === 0 && (
+        <p className="text-[10px] m-0 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
+          No workflow has declared itself callable yet. Open one, set its trigger to &quot;Called by
+          another workflow&quot;, then publish it.
         </p>
       )}
-      <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
-        The agent runs this workflow&apos;s live version in the current environment and uses its
-        output. A workflow can&apos;t call itself.
+
+      {/* What the target receives — a field per input it declared. */}
+      {target && !isAgentTool && (
+        <div className="space-y-1.5">
+          <label className="block text-[11px]" style={{ color: "var(--orchestr-ink-muted)" }}>
+            What to send it
+          </label>
+          {target.inputs.length === 0 ? (
+            <p className="text-[10px] m-0 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              It declares no fields, so it runs on whatever you send — or on nothing.
+            </p>
+          ) : (
+            target.inputs.map((field) => (
+              <div key={field.name}>
+                <label
+                  className="block text-[11px] mb-1"
+                  style={{ color: "var(--orchestr-ink-muted)" }}
+                  htmlFor={`call-input-${field.name}`}
+                >
+                  {field.name}
+                  {field.required && <span style={{ color: "var(--orchestr-danger)" }}> *</span>}
+                </label>
+                <input
+                  id={`call-input-${field.name}`}
+                  value={typeof input[field.name] === "string" ? (input[field.name] as string) : ""}
+                  onChange={(e) => onInputChange({ ...input, [field.name]: e.target.value })}
+                  placeholder={field.description || `{{trigger.${field.name}}}`}
+                  className={FIELD_CLASS}
+                  style={FIELD_STYLE}
+                  data-testid={`call-input-${field.name}`}
+                />
+                {field.description && (
+                  <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                    {field.description}
+                  </p>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      <p className="text-[10px] m-0 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
+        {isAgentTool
+          ? "The agent decides when to run this workflow and fills its input itself."
+          : "Runs this workflow's live version in the current environment, on your accounts, and its last step's output becomes this step's result."}
       </p>
     </div>
   );
@@ -4463,14 +4735,19 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
         {isCallWorkflow && (
           <CallWorkflowEditor
             value={typeof params.workflow_id === "string" ? params.workflow_id : ""}
+            input={paramsObject(params.input)}
             currentWorkflowId={workflowId}
+            isAgentTool={isAgentTool}
             onChange={(id) => {
               // Empty clears the key, or an empty string reads as "configured" to the deploy gate.
+              // Retargeting drops the old input: its field names belonged to the old workflow.
               const next = { ...params };
+              delete next.input;
               if (id === "") delete next.workflow_id;
               else next.workflow_id = id;
               updateIrNode(node.id, { parameters: next });
             }}
+            onInputChange={(input) => updateIrNode(node.id, { parameters: { ...params, input } })}
           />
         )}
         {!isBroken &&

@@ -379,7 +379,9 @@ CREATE TABLE public.runtime_runs (
     workflow_version_id uuid,
     environment_id uuid,
     review_id uuid,
-    dry_run boolean DEFAULT false NOT NULL
+    dry_run boolean DEFAULT false NOT NULL,
+    parent_run_id character varying(200),
+    parent_step_key character varying(500)
 );
 
 
@@ -1054,6 +1056,13 @@ CREATE INDEX ix_review_approvals_review ON public.review_approvals USING btree (
 --
 
 CREATE INDEX ix_runtime_blobs_run ON public.runtime_blobs USING btree (run_id);
+
+
+--
+-- Name: ix_runtime_runs_parent; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_runs_parent ON public.runtime_runs USING btree (parent_run_id) WHERE (parent_run_id IS NOT NULL);
 
 
 --

@@ -8,6 +8,7 @@ import { DomainError } from '../common/domain-error';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import type { EnvConfig } from '../config/env.config';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
+import { CallableWorkflowsService } from './callable-workflows.service';
 import { DiffService } from './diff.service';
 import { VersionsReadService, type VersionRef } from './versions-read.service';
 import { WorkflowsReadService } from './workflows-read.service';
@@ -23,6 +24,7 @@ export class WorkflowsController {
     private readonly versions: VersionsReadService,
     private readonly diffs: DiffService,
     private readonly access: WorkflowAccessService,
+    private readonly callableWorkflows: CallableWorkflowsService,
     private readonly envConfig: ConfigService<{ env: EnvConfig }, true>,
     private readonly encryption: EncryptionService,
   ) {}
@@ -41,6 +43,22 @@ export class WorkflowsController {
       parseIntOr(limit, 50),
       parseIntOr(offset, 0),
     );
+  }
+
+  /** Declared BEFORE `:workflowId`, which would otherwise capture "callable" as an id. */
+  @Scope('workflow:read')
+  @Get('callable')
+  async callable(@Req() req: Request): Promise<Record<string, unknown>> {
+    const principal = requirePrincipal(req);
+    const workflows = await this.callableWorkflows.listFor(principal.activeOrgId);
+    return {
+      workflows: workflows.map((w) => ({
+        workflow_id: w.workflowId,
+        name: w.name,
+        description: w.description,
+        inputs: w.inputs,
+      })),
+    };
   }
 
   @Scope('workflow:read')

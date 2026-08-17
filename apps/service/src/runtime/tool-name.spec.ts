@@ -1,4 +1,4 @@
-import { toolNameOf } from './workflow-tools.service';
+import { toolNameOf } from './workflow-tool-contract';
 
 describe('workflow tool names', () => {
   it('turns a declared name into something an agent can call', () => {

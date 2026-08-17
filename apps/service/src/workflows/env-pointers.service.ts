@@ -65,6 +65,21 @@ export class EnvPointersService {
     return env === PROD_ENV ? wf.activeVersionId : null;
   }
 
+  /**
+   * The version a CALLER's environment runs — the one answer for calling a workflow from anywhere
+   * (ADR 0062), so what an agent is offered and what actually executes can never be two versions.
+   * `null` environmentId = Default, which runs production, exactly like a Default trigger fire.
+   */
+  async resolveVersionIdForCaller(
+    em: EntityManager,
+    wf: WorkflowEntity,
+    environmentId: string | null,
+  ): Promise<string | null> {
+    if (!environmentId) return this.resolveVersionId(em, wf, null);
+    const env = await em.findOne(EnvironmentEntity, { where: { id: environmentId } });
+    return env ? this.resolveVersionIdForEnv(em, wf, env) : null;
+  }
+
   /** The version an ENV ROW runs (ADR 0014): prefers `environment_id`, falls back to a name-only pointer, then the prod alias. */
   async resolveVersionIdForEnv(
     em: EntityManager,

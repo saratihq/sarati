@@ -189,13 +189,19 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     type: 'orchestr:call_workflow',
     category: 'control',
     description:
-      'Call another workflow as an AI Agent\'s tool (ADR 0045): wire this node to an agent\'s "tools" handle (port_type "tool") and the agent can invoke the target workflow, hand it structured input, and use its output. The target runs its LIVE version for the CURRENT environment (a promoted/environment run uses that env\'s promoted version; a Default/manual run uses production), executes AS the caller (same user + environment, so its steps resolve connections through the same environment slots), and its terminal step\'s output is returned to the agent. Bounded: a workflow can\'t call itself, and nesting is capped. Set the model-facing tool name/description on the "Used as an agent tool" fields once it\'s wired.',
+      'Run another workflow and use its result (ADR 0062). Two ways, same behaviour: place it in the flow as an ordinary step — later steps read the result as {{<node id>}} — or wire it to an agent\'s "tools" handle (port_type "tool") so the agent decides when to call it. The target must DECLARE itself callable with a "Called by another workflow" trigger; it runs its LIVE version for the CURRENT environment (a promoted/environment run uses that env\'s promoted version; a Default/manual run uses production), executes AS the caller (same user + environment, so its steps resolve connections through the same environment slots), and its terminal step\'s output is the result. Bounded: a workflow can\'t call itself, and nesting depth is capped. Parameters: workflow_id (required), input (what the target receives as its trigger event). Set tool_name / tool_description only when wired to an agent, to control how the model sees it.',
     auth: 'none',
     parameters: {
       workflow_id: {
         type: 'string',
-        description: 'The workflow this tool calls (its id). Cannot be the workflow you are editing.',
+        description: 'The workflow this step runs (its id). Cannot be the workflow you are editing.',
         required: true,
+      },
+      input: {
+        type: 'object',
+        description:
+          "What the target workflow receives as its firing event — an object whose keys are the inputs it declares, read inside it as {{trigger.<key>}}. Values may reference this workflow's steps (e.g. {{trigger.email}}). Ignored when the node is wired as an agent tool: the model produces the input then.",
+        required: false,
       },
     },
   },

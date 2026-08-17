@@ -374,6 +374,10 @@ export class RunsController {
       duration_ms: s.duration_ms,
       decided_by: s.decided_by,
       decided_at: s.decided_at,
+      // Both ends of a sub-workflow call (ADR 0062) — a nested run is recorded under the workflow
+      // that ran it, so these are the only path between the two.
+      called_by: s.called_by,
+      calls: s.calls,
     };
   }
 

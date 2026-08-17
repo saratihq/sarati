@@ -2,9 +2,12 @@ import { Column, Entity, Index, PrimaryColumn, Unique } from 'typeorm';
 
 export type RuntimeRunStatus = 'running' | 'waiting' | 'completed' | 'error' | 'cancelled';
 export type RuntimeStepStatus = 'running' | 'completed' | 'error';
-export type RuntimeStepKind = 'action' | 'code' | 'delay' | 'waitForEvent' | 'agent';
-/** What started the run (best-effort provenance for the runs panel); `mcp` = an agent invoked a published workflow (ADR 0053). */
-export type RunSource = 'manual' | 'trigger' | 'webhook' | 'api' | 'review_test' | 'mcp';
+export type RuntimeStepKind = 'action' | 'code' | 'delay' | 'waitForEvent' | 'agent' | 'callWorkflow';
+/**
+ * What started the run (best-effort provenance for the runs panel); `mcp` = an agent invoked a
+ * published workflow (ADR 0053), `sub_workflow` = another workflow called it (ADR 0062).
+ */
+export type RunSource = 'manual' | 'trigger' | 'webhook' | 'api' | 'review_test' | 'mcp' | 'sub_workflow';
 
 /** One runtime run; `id` is the user-scoped run id (`<user_id>:<run_id>`) == the DBOS workflow id. */
 @Entity('runtime_runs')
@@ -47,6 +50,14 @@ export class RuntimeRunEntity {
 
   @Column({ type: 'varchar', length: 20, nullable: true })
   source!: RunSource | null;
+
+  /** The run that called this one (ADR 0062); null for a top-level run. */
+  @Column({ name: 'parent_run_id', type: 'varchar', length: 200, nullable: true })
+  parentRunId!: string | null;
+
+  /** The calling step's `step_key` in the parent run — what links the two in both directions. */
+  @Column({ name: 'parent_step_key', type: 'varchar', length: 500, nullable: true })
+  parentStepKey!: string | null;
 
   /** The review this run tested, when `source = 'review_test'` (ADR 0015). */
   @Column({ name: 'review_id', type: 'uuid', nullable: true })

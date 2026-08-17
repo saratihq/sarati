@@ -353,7 +353,9 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
     const res = await invoke(webhookId, { arguments: {} }).expect(400);
     expect(res.body.code).toBe('not_invocable');
     expect(String(res.body.detail)).toContain('orchestr:tool_trigger');
-    expect(String(res.body.detail)).toMatch(/add that trigger, then publish/i);
+    // The full contract is the bar, not the node's presence — an undescribed tool is withheld from
+    // the tool list, so the message names describing it as part of the fix (ADR 0062).
+    expect(String(res.body.detail)).toMatch(/add that trigger, describe it, then publish/i);
   });
 
   it("another org's workflow is indistinguishable from a missing one", async () => {

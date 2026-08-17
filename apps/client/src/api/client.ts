@@ -611,6 +611,27 @@ export async function listWorkflows(params?: {
   return request(`/workflows?limit=${limit}&offset=${offset}`);
 }
 
+/** One argument a callable workflow declares. */
+export interface CallableWorkflowInput {
+  name: string;
+  type: "string" | "number" | "boolean" | "object";
+  description: string;
+  required: boolean;
+}
+
+/** A workflow that declared itself callable, with what it expects to be sent. */
+export interface CallableWorkflow {
+  workflow_id: string;
+  name: string;
+  description: string;
+  inputs: CallableWorkflowInput[];
+}
+
+/** The workflows another workflow may call — those whose production-live version declares a contract. */
+export async function listCallableWorkflows(): Promise<{ workflows: CallableWorkflow[] }> {
+  return request(`/workflows/callable`);
+}
+
 export async function getWorkflow(id: string): Promise<WorkflowDetailResponse> {
   return request(`/workflows/${id}`);
 }
@@ -1234,12 +1255,26 @@ export interface RunStepInfo {
   warnings?: string[] | null;
 }
 
+/** One end of a sub-workflow call — the run that called this one, or one it called. */
+export interface SubWorkflowRunLink {
+  run_id: string;
+  /** The calling step's key in the parent run. */
+  step_key: string | null;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  status: string;
+}
+
 export interface RunDetail extends RunSummary {
   steps: RunStepInfo[];
   outputs?: Record<string, unknown> | null;
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
   decided_by?: { id: string; name: string | null; email: string | null } | null;
   decided_at?: string | null;
+  /** The run that called this one, when another workflow started it. */
+  called_by?: SubWorkflowRunLink | null;
+  /** The runs this one started by calling other workflows. */
+  calls?: SubWorkflowRunLink[];
 }
 
 export interface WaitingRun {

@@ -19,6 +19,7 @@ import { WorkflowInvokeService } from './workflow-invoke.service';
 import { WorkflowLifecycleService } from './workflow-lifecycle.service';
 import { WorkflowsController } from './workflows.controller';
 import { WorkflowAccessService } from './workflow-access.service';
+import { CallableWorkflowsService } from './callable-workflows.service';
 import { WorkflowToolContractService } from './workflow-tool-contract.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { WorkflowsWriteController } from './workflows-write.controller';
@@ -44,6 +45,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
   ],
   providers: [
     WorkflowAccessService,
+    CallableWorkflowsService,
     WorkflowToolContractService,
     WorkflowsReadService,
     VersionsReadService,
@@ -57,6 +59,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
   ],
   exports: [
     WorkflowAccessService,
+    CallableWorkflowsService,
     WorkflowToolContractService,
     WorkflowsReadService,
     VersionsReadService,

@@ -15,11 +15,13 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { DbosRuntime } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
 import { PassThroughDurableStep } from '../providers/durable-step';
-import type { AgentSubWorkflowRunner, AgentWorkflowCatalog } from '../runtime/agent';
+import type { AgentWorkflowCatalog } from '../runtime/agent';
 import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
+import { rawQuery } from '../database/raw-query';
 import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.service';
+import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
 import type { RunAccess } from './run-access';
@@ -61,8 +63,40 @@ export interface GetRunOptions {
   includeStepOutputs?: boolean;
 }
 
+/** One end of a sub-workflow call, as run detail reports it (ADR 0062). */
+export interface SubWorkflowRunLink {
+  run_id: string;
+  /** The calling step's key — always the CHILD's, whichever end this link is. */
+  step_key: string | null;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  status: string;
+}
+
+interface SubWorkflowRunRow {
+  run_id: string;
+  parent_step_key: string | null;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  status: string;
+}
+
+function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
+  return {
+    run_id: row.run_id,
+    step_key: row.parent_step_key,
+    workflow_id: row.workflow_id,
+    workflow_name: row.workflow_name,
+    status: row.status,
+  };
+}
+
 /** A run's detail shape: status + provenance + the per-step log. */
 export type RunDetail = RunStatus & {
+  /** The run that called this one, when a sub-workflow call started it (ADR 0062). */
+  called_by: SubWorkflowRunLink | null;
+  /** The runs this one started by calling other workflows. */
+  calls: SubWorkflowRunLink[];
   workflow_id: string | null;
   workflow_name: string | null;
   /** The exact version this run executed (env-pointer resolution) — null for raw plans. */
@@ -192,9 +226,9 @@ export class RunsService {
     }
   }
 
-  /** Bind the sub-workflow-as-tool runner onto the ONE interpreter (ADR 0045 §3) — a setter, since the runner sits above us and a constructor dep would cycle. */
-  bindSubWorkflowRunner(runner: AgentSubWorkflowRunner): void {
-    this.interpreter.setAgentSubWorkflowRunner(runner);
+  /** Bind the sub-workflow runner onto the ONE interpreter (ADR 0062) — a setter, since the runner sits above us and a constructor dep would cycle. */
+  bindSubWorkflowRunner(runner: SubWorkflowRunner): void {
+    this.interpreter.setSubWorkflowRunner(runner);
   }
 
   /** Bind the sub-workflow tool CONTRACT source onto the same interpreter (ADR 0053 §1). */
@@ -206,11 +240,17 @@ export class RunsService {
    * Run a COMPILED sub-workflow NESTED inside the caller's durable run (ADR 0045 §3): one parent
    * checkpoint, so inner steps get no per-step memoization — a mid-run crash re-runs the whole sub-workflow.
    */
-  runSubWorkflowNested(
+  async runSubWorkflowNested(
     plan: DagPlan,
     opts: {
       externalUserId: string;
+      /** Deterministic child run id — stable across a crash-replay, so step idempotency keys repeat. */
       runId: string;
+      /** The CHILD's workflow and version: the run is recorded under what actually executed (ADR 0062). */
+      workflowId: string;
+      workflowVersionId: string;
+      parentRunId: string;
+      parentStepKey: string;
       initialScope?: Record<string, unknown>;
       environment?: string | null;
       environmentId?: string | null;
@@ -220,9 +260,23 @@ export class RunsService {
       subWorkflowBudget: { remaining: number };
     },
   ): Promise<RunResult> {
+    const scoped = this.scopedRunId(opts.externalUserId, opts.runId);
+    await this.recorder?.runStarted(scoped, opts.runId, opts.externalUserId, plan, {
+      workflowId: opts.workflowId,
+      workflowVersionId: opts.workflowVersionId,
+      source: 'sub_workflow',
+      environment: opts.environment ?? null,
+      environmentId: opts.environmentId ?? null,
+      dryRun: opts.dryRun ?? false,
+      parentRunId: opts.parentRunId,
+      parentStepKey: opts.parentStepKey,
+    });
     return this.interpreter.run(plan, {
       externalUserId: opts.externalUserId,
-      runId: opts.runId,
+      runId: scoped,
+      // The child's steps land in ITS run, so a failure inside is readable instead of showing
+      // only as whatever the call returned to the caller.
+      recorder: this.recorder,
       durable: new PassThroughDurableStep(),
       initialScope: opts.initialScope,
       environment: opts.environment,
@@ -490,6 +544,8 @@ export class RunsService {
         duration_ms: null,
         decided_by: null,
         decided_at: null,
+        called_by: null,
+        calls: [],
       };
     }
 
@@ -522,6 +578,7 @@ export class RunsService {
       decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
       decided_at: row.decidedAt?.toISOString() ?? null,
       steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false)),
+      ...(em ? await this.subWorkflowLinks(em, row, scoped) : { called_by: null, calls: [] }),
       started_at: row.startedAt?.toISOString() ?? null,
       finished_at: row.finishedAt?.toISOString() ?? null,
       workflow_id: row.workflowId,
@@ -532,6 +589,32 @@ export class RunsService {
       source: row.source,
       dry_run: row.dryRun,
       duration_ms: durationMs(row.startedAt, row.finishedAt),
+    };
+  }
+
+  /**
+   * Both ends of a sub-workflow call (ADR 0062): the run that called this one, and the runs it
+   * called. Without them a nested failure is only readable if you already know where to look.
+   */
+  private async subWorkflowLinks(
+    em: EntityManager,
+    run: { parentRunId: string | null; parentStepKey: string | null },
+    scoped: string,
+  ): Promise<{ called_by: SubWorkflowRunLink | null; calls: SubWorkflowRunLink[] }> {
+    const select = `SELECT r.run_id, r.parent_step_key, r.workflow_id, r.status, w.name AS workflow_name
+                      FROM runtime_runs r LEFT JOIN workflows w ON w.id = r.workflow_id`;
+    const [parents, children] = await Promise.all([
+      run.parentRunId
+        ? rawQuery<SubWorkflowRunRow>(em, `${select} WHERE r.id = $1`, [run.parentRunId])
+        : Promise.resolve([]),
+      rawQuery<SubWorkflowRunRow>(em, `${select} WHERE r.parent_run_id = $1 ORDER BY r.started_at`, [scoped]),
+    ]);
+    const parentRow = parents[0];
+    return {
+      // The linking step key is recorded on the CHILD, so looking UP it comes from this run's own
+      // row — the parent's would be its own caller's, or null.
+      called_by: parentRow ? { ...runLink(parentRow), step_key: run.parentStepKey } : null,
+      calls: children.map(runLink),
     };
   }
 

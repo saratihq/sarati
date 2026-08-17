@@ -2,16 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
-import { isRecord } from '../common/json-util';
-import { contractOf } from '../runtime/workflow-tool-contract';
-import type { WorkflowToolInput } from '../runtime/workflow-tool-contract';
 import { rawQuery } from '../database/raw-query';
-import { AGENT_TOOL_PUBLIC } from '../triggers/trigger-catalog.service';
+import { contractOfDocument } from '../runtime/workflow-tool-contract';
+import type { WorkflowToolInput } from '../runtime/workflow-tool-contract';
 
-export { toolNameOf } from '../runtime/workflow-tool-contract';
 export type { WorkflowToolInput };
 
-/** One published workflow, as an agent sees it. */
+/** One workflow that DECLARES itself callable, as a caller sees it. */
 export interface WorkflowTool {
   workflowId: string;
   name: string;
@@ -26,12 +23,15 @@ interface PublishedRow {
 }
 
 /**
- * Which of an org's workflows are callable as tools (ADR 0053): the ones whose PRODUCTION-live
- * version carries an `orchestr:tool_trigger`. Built from environment pointers, so committing never
- * changes what an agent can call — only publishing does.
+ * Which of an org's workflows can be called (ADR 0053, ADR 0062): the ones whose PRODUCTION-live
+ * version carries an `orchestr:tool_trigger` declaring a name and description. Built from
+ * environment pointers, so committing never changes what is callable — only publishing does.
+ *
+ * One answer for every caller that needs it: the MCP tool list, and the editor's picker, which
+ * must offer what will actually work rather than let an author discover the refusal at run time.
  */
 @Injectable()
-export class WorkflowToolsService {
+export class CallableWorkflowsService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
   async listFor(orgId: string | null): Promise<WorkflowTool[]> {
@@ -53,13 +53,7 @@ export class WorkflowToolsService {
   }
 
   private toolOf(row: PublishedRow): WorkflowTool | null {
-    const nodes = Array.isArray(row.document?.nodes) ? row.document.nodes : [];
-    const trigger = nodes.filter(isRecord).find((node) => node.node_type === AGENT_TOOL_PUBLIC);
-    if (!trigger) return null;
-
-    const contract = contractOf(trigger.parameters, row.workflow_name);
-    if (!contract) return null;
-
-    return { workflowId: row.workflow_id, ...contract };
+    const contract = contractOfDocument(row.document, row.workflow_name);
+    return contract ? { workflowId: row.workflow_id, ...contract } : null;
   }
 }

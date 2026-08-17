@@ -4,6 +4,7 @@ import { ComposioTriggerProvider } from '../providers/composio-trigger.provider'
 import { composioTriggerCatalog, composioTriggerTypes } from '../providers/composio-trigger.registry';
 import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
+import { AGENT_TOOL_PUBLIC } from '../runtime/workflow-tool-contract';
 
 import { ORCHESTR_SCHEDULE } from './schedule';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
@@ -13,8 +14,8 @@ export const INCOMING_WEBHOOK_PUBLIC = 'orchestr:webhook';
 /** The PUBLIC type of the native synchronous chat-intake trigger kind (ADR 0045 addendum). */
 export const INCOMING_CHAT_PUBLIC = 'orchestr:chat';
 
-/** A workflow with this trigger is offered as an agent-callable tool (ADR 0053). */
-export const AGENT_TOOL_PUBLIC = 'orchestr:tool_trigger';
+// Re-exported so existing importers keep one source; it is declared with the contract it carries.
+export { AGENT_TOOL_PUBLIC };
 /** The manual trigger — fires ONLY via a manual Run, so it has NO runtime activation. */
 export const MANUAL_TRIGGER = 'orchestr:trigger';
 
