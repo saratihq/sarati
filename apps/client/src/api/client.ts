@@ -112,9 +112,24 @@ export class ApiError extends Error {
   }
 }
 
-// 401 = the backend rejected the token. Drop a local session first, or /login would re-authenticate
-// with the dead token and bounce straight back; Clerk's own state decides that for the Clerk path.
-function handleUnauthorized(): void {
+/**
+ * A 401 answers "this request was not authenticated" — which is not the same as "your session is
+ * dead". Signing the user out is destructive and unrecoverable-in-place, so it is reserved for the
+ * codes that actually say the stored credential will never work again. A 401 we caused (no token
+ * attached) or the server caused (provisioning race, misconfiguration) must leave the session alone:
+ * clearing it would destroy a working credential, and /login could not sign them back in anyway.
+ *
+ * When the credential IS dead the session is dropped BEFORE the redirect, or /login re-authenticates
+ * with the dead token and bounces straight back; Clerk's own state decides that for the Clerk path.
+ */
+function handleUnauthorized(code: string | undefined): void {
+  // `no_credentials` with a session in hand means we failed to attach it — our bug, not their
+  // session's. With no session in hand the user simply is not signed in, so /login is the answer.
+  if (code === "no_credentials") {
+    if (readLocalSession()) return;
+  } else if (code === "provisioning_failed") {
+    return;
+  }
   clearLocalSession();
   if (typeof window !== "undefined") {
     window.location.assign("/login");
@@ -163,7 +178,7 @@ export async function request<T>(
         : undefined;
     const code = typeof rawCode === "string" ? rawCode : undefined;
     if (res.status === 401 && config?.redirectOn401 !== false) {
-      handleUnauthorized();
+      handleUnauthorized(code);
     }
     throw new ApiError(
       extractErrorMessage(body, `API error ${res.status}`),

@@ -202,6 +202,40 @@ describe("request: 401 handling", () => {
     expect(navigatedTo).toEqual([]);
     expect(document.cookie).toContain("live");
   });
+
+  // A 401 says the REQUEST was not authenticated; only these two say the stored credential is dead.
+  it.each(["token_expired", "token_rejected"])(
+    "drops the session on %s — the credential will never work again",
+    async (code) => {
+      document.cookie = `${LOCAL_SESSION_COOKIE}=dead; Path=/`;
+      mockFetch(jsonResponse(401, { detail: "nope", code }));
+      await expect(request("/x")).rejects.toThrow("nope");
+      expect(document.cookie).not.toContain("dead");
+      expect(navigatedTo).toEqual(["/login"]);
+    },
+  );
+
+  it("keeps a live session when WE failed to attach it — clearing it would destroy a good credential", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    mockFetch(jsonResponse(401, { detail: "Not authenticated", code: "no_credentials" }));
+    await expect(request("/x")).rejects.toThrow("Not authenticated");
+    expect(document.cookie).toContain("live");
+    expect(navigatedTo).toEqual([]);
+  });
+
+  it("still sends a genuinely signed-out caller to /login", async () => {
+    mockFetch(jsonResponse(401, { detail: "Not authenticated", code: "no_credentials" }));
+    await expect(request("/x")).rejects.toThrow("Not authenticated");
+    expect(navigatedTo).toEqual(["/login"]);
+  });
+
+  it("keeps the session when the SERVER failed, not the credential", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    mockFetch(jsonResponse(401, { detail: "User provisioning failed", code: "provisioning_failed" }));
+    await expect(request("/x")).rejects.toThrow("User provisioning failed");
+    expect(document.cookie).toContain("live");
+    expect(navigatedTo).toEqual([]);
+  });
 });
 
 describe("asBranchMoved", () => {

@@ -1,4 +1,4 @@
-import { SignJWT, jwtVerify } from 'jose';
+import { SignJWT, errors as joseErrors, jwtVerify } from 'jose';
 
 /** Only this verifier accepts this issuer, so a local session can never be mistaken for a Clerk/OIDC one. */
 export const LOCAL_ISSUER = 'orchestr:local';
@@ -26,7 +26,11 @@ export async function mintSession(
   return { token, expiresAt: new Date(expires * 1000).toISOString() };
 }
 
-/** The user id this session names, or null when it is not a valid local session. */
+/**
+ * The user id this session names, or null when it is not a local session at all (wrong issuer,
+ * wrong signature, not a JWT). An EXPIRED session is ours and is rethrown, so it can be reported
+ * as expired rather than folded into the generic rejection.
+ */
 export async function readSession(token: string, secret: string): Promise<string | null> {
   try {
     const { payload } = await jwtVerify(token, keyOf(secret), {
@@ -34,7 +38,8 @@ export async function readSession(token: string, secret: string): Promise<string
       algorithms: ['HS256'],
     });
     return typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof joseErrors.JWTExpired) throw err;
     return null;
   }
 }
