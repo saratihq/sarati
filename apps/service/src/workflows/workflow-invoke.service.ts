@@ -139,7 +139,7 @@ export class WorkflowInvokeService {
     if (!contractOfDocument(ir, wf.name)) {
       throw new DomainError(
         `Workflow "${wf.name}" isn't callable as a tool — the version live in production has no ` +
-          `"Callable by an agent" trigger (${AGENT_TOOL_PUBLIC}) declaring a name and description. ` +
+          `"Called by another workflow" trigger (${AGENT_TOOL_PUBLIC}) declaring a name and description. ` +
           'Add that trigger, describe it, then publish.',
         400,
         { code: 'not_invocable' },

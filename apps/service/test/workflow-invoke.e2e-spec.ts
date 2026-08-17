@@ -18,7 +18,7 @@ const BOUNDED_WAIT_MS = 150;
 
 const toolTrigger = {
   id: 'tool',
-  name: 'Callable by an agent',
+  name: 'Called by another workflow',
   node_type: 'orchestr:tool_trigger',
   type_version: 1,
   parameters: {

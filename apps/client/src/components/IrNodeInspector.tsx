@@ -4154,7 +4154,9 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
           !(isLoop && LOOP_PARAM_KEYS.has(k)) &&
           !(isAgent && AGENT_PARAM_KEYS.has(k)) &&
           !(isIf && (k === "left" || k === "op" || k === "right")) &&
-          !(isCallWorkflow && k === "workflow_id"),
+          // Both belong to CallWorkflowEditor: `input` renders there as a field per declared
+          // input, so leaving it here too would show the same value twice, once as raw JSON.
+          !(isCallWorkflow && (k === "workflow_id" || k === "input")),
       );
 
   // The same per-field rule the inline "Required" markers use, feeding the Test-button gate.

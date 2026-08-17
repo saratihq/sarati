@@ -11,7 +11,7 @@ A workflow has exactly one trigger. Click the **Trigger** step, then **Change**.
 | Incoming webhook | A request arrives at its URL. |
 | Schedule | A timer fires. |
 | Chat | A chat message arrives. |
-| Callable by an agent | An AI agent calls it as a tool. |
+| Called by another workflow | Another workflow's step, or an AI agent, runs it and uses its result. |
 
 Beyond these, the same picker searches app triggers — Slack, GitHub and others — which fire on
 events in a connected account. The count depends on your instance: the built-in actions bring a few

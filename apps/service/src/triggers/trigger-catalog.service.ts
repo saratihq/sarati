@@ -88,11 +88,11 @@ const NATIVE_TRIGGERS: ReadonlyArray<Record<string, unknown>> = [
     auth: 'none',
   },
   {
-    name: 'Callable by an agent',
+    name: 'Called by another workflow',
     type: AGENT_TOOL_PUBLIC,
     category: 'control',
     description:
-      'Publishes this workflow as a tool an AI agent can call (ADR 0053). Only the version live in production is callable, so publishing is what exposes it; the call arguments arrive as {{trigger.<input name>}}.',
+      "Lets other workflows and AI agents run this one and use its result — it never fires on its own. Only the version live in production is callable, so publishing is what exposes it; the caller's arguments arrive as {{trigger.<input name>}}.",
     parameters: {
       tool_name: {
         type: 'SHORT_TEXT',

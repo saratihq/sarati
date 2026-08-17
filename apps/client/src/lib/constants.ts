@@ -48,7 +48,8 @@ export function getNodeCategory(nodeType: string): string {
     nodeType === "orchestr:schedule" ||
     nodeType === "orchestr:chat" ||
     nodeType === "orchestr:webhook" ||
-    nodeType === "orchestr:webhook_trigger"
+    nodeType === "orchestr:webhook_trigger" ||
+    nodeType === "orchestr:tool_trigger"
   )
     return "trigger";
   // The AI Agent is action-like; named explicitly so it's never taken for a trigger or router.
