@@ -31,6 +31,34 @@ describe('diffRunOutputs', () => {
     ]);
   });
 
+  it('collapses a dropped array tail into ONE row carrying its size', () => {
+    const base = { fetch: { count: 45, stories: Array.from({ length: 45 }, (_, i) => ({ id: i })) } };
+    const head = { fetch: { count: 7, stories: Array.from({ length: 7 }, (_, i) => ({ id: i })) } };
+    const { changed } = diffRunOutputs(base, head);
+
+    expect(changed).toHaveLength(2);
+    expect(changed[0]).toEqual({ node_id: 'fetch', path: 'count', before: 45, after: 7 });
+    expect(changed[1]).toMatchObject({ node_id: 'fetch', path: 'stories[7…44]', after: null, count: 38 });
+  });
+
+  it('collapses an appended array tail the same way', () => {
+    const base = { fetch: { rows: [1, 2] } };
+    const head = { fetch: { rows: [1, 2, 3, 4, 5] } };
+    const { changed } = diffRunOutputs(base, head);
+    expect(changed).toEqual([
+      { node_id: 'fetch', path: 'rows[2…4]', before: null, after: [3, 4, 5], count: 3 },
+    ]);
+  });
+
+  it('keeps a single added/removed element as its own indexed row', () => {
+    const base = { fetch: { rows: [1, 2, 3] } };
+    const head = { fetch: { rows: [1, 2] } };
+    const { changed } = diffRunOutputs(base, head);
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({ path: 'rows[2]', before: 3 });
+    expect(changed[0]).not.toHaveProperty('count');
+  });
+
   it('reports added and removed nodes', () => {
     const base = { a: 1, b: 2 };
     const head = { a: 1, c: 3 };

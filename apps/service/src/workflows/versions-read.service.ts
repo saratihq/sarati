@@ -11,9 +11,11 @@ import { EnvPointersService } from './env-pointers.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { versionResponse } from './workflow-responses';
 
-/** How a caller names a version: an id, or a per-branch number that needs its branch (invariant #1). */
+/** How a caller names a version: an id, a per-branch number that needs its branch, or a branch HEAD (invariant #1). */
 export type VersionRef =
-  { readonly id: string } | { readonly number: number; readonly branch: string | null };
+  | { readonly id: string }
+  | { readonly number: number; readonly branch: string | null }
+  | { readonly head: string };
 
 /** Distinct branch ids carried by a set of versions, in first-seen order. */
 export function branchIdsOf(versions: readonly WorkflowVersionEntity[]): string[] {
@@ -119,11 +121,19 @@ export class VersionsReadService {
     return versionResponse(version);
   }
 
-  /** The ONE version-resolution site — an id, or a number the caller must disambiguate. */
+  /** The ONE version-resolution site — an id, a branch head, or a number the caller must disambiguate. */
   async resolveVersion(workflowId: string, ref: VersionRef): Promise<WorkflowVersionEntity | null> {
-    return 'id' in ref
-      ? this.findVersionById(workflowId, ref.id)
-      : this.findVersion(workflowId, ref.number, ref.branch);
+    if ('id' in ref) return this.findVersionById(workflowId, ref.id);
+    if ('head' in ref) return this.findBranchHead(workflowId, ref.head);
+    return this.findVersion(workflowId, ref.number, ref.branch);
+  }
+
+  /** A branch's current head version; an unresolvable branch name RAISES, as a numbered ref does. */
+  async findBranchHead(workflowId: string, branchName: string): Promise<WorkflowVersionEntity | null> {
+    const branch = await this.getBranchByName(workflowId, branchName);
+    if (!branch) throw new DomainError(`Branch not found: ${branchName}`, 404);
+    if (!branch.headVersionId) return null;
+    return this.findVersionById(workflowId, branch.headVersionId);
   }
 
   /** A version id resolves only inside its own workflow — a foreign id is not found, never read. */

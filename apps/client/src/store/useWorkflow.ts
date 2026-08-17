@@ -13,6 +13,9 @@ import type {
   ConfigurationResponse,
 } from "@/api/client";
 
+/** The unnamed workflow's name — the ONE place it is spelled, so "was it renamed?" has one answer. */
+export const UNTITLED_WORKFLOW = "Untitled workflow";
+
 export type View = "dashboard" | "pipeline";
 
 export type Step =
@@ -603,7 +606,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     };
     const doc: Record<string, unknown> = {
       version: "1",
-      name: "Untitled workflow",
+      name: UNTITLED_WORKFLOW,
       description: "",
       nodes: [trigger],
       edges: [],

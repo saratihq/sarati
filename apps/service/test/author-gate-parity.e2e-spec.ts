@@ -150,6 +150,30 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
     await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
+  it('a catalog trigger authored as a step is refused for its MISSING MARKER, not as an unknown type', async () => {
+    const nodes = [
+      { ...node('trigger', 'rss.new_item', { url: 'https://example.com/feed.xml' }) },
+      node('step', 'text.concat', { texts: ['hi'], separator: '' }),
+    ];
+    const unmarked = doc('marker diagnosis', nodes, [laneless('trigger', 'step')]);
+
+    const refused = await http().post('/api/deploy').send({ workflow_json: unmarked }).expect(422);
+    expect(refused.body.code).toBe('trigger_not_marked');
+    expect(String(refused.body.detail)).toContain('"metadata": {"trigger": true}');
+    expect(String(refused.body.detail)).not.toContain("isn't in the catalog");
+
+    // The document the message asks for is the document that deploys.
+    const marked = doc(
+      'marker diagnosis',
+      [{ ...nodes[0], metadata: { trigger: true } }, nodes[1]] as Array<Record<string, unknown>>,
+      [laneless('trigger', 'step')],
+    );
+    const deployed = await http().post('/api/deploy').send({ workflow_json: marked }).expect(201);
+    await http()
+      .delete(`/api/workflows/${deployed.body.workflow_id as string}`)
+      .expect(200);
+  });
+
   it('a stored version with no node positions still diffs, and re-committing it mints nothing', async () => {
     const seed = doc(
       'legacy layout',

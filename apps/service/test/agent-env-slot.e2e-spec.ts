@@ -176,7 +176,7 @@ describe('AI agent model call — env-slot connection fallback (ADR 0014 × 0045
       app
         .get(DagInterpreter)
         .run(plan, { externalUserId: CALLER_ID, initialScope: { trigger: { chatInput: 'hi' } } }),
-    ).rejects.toThrow(/requires a claude connection/i);
+    ).rejects.toThrow(/no Claude connection.*Integrations/is);
     expect(calls).toHaveLength(0); // never reached the provider
   });
 

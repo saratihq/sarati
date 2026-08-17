@@ -95,6 +95,16 @@ docker compose exec agent printenv SECRET_KEY
 Connect the app, then name that connection on the step. See
 [Connections](/build/connections/).
 
+## An AI Agent step says it has no Claude connection
+
+```json
+{"detail":"This agent step has no Claude connection to call the model with. Connect one under Integrations → \"Use your own credentials\" → Claude, then pick it on the step's model. The Anthropic key in Settings → Platform keys powers the AI composer only, not agent steps."}
+```
+
+The two Anthropic credentials are separate on purpose: the Settings key builds workflows, a
+connection runs them. See
+[Connections](/build/connections/#the-ai-agent-step-needs-one-too).
+
 ## An API call returns 403 naming a scope
 
 ```json

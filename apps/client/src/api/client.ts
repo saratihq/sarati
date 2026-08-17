@@ -965,6 +965,8 @@ export interface ReviewTestChange {
   path: string;
   before: unknown;
   after: unknown;
+  /** Set when the row collapses a contiguous run of added/removed array entries: how many. */
+  count?: number;
 }
 
 /** Field-level output delta head-vs-baseline (node ids for whole add/remove). */

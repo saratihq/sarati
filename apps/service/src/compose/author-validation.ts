@@ -69,6 +69,8 @@ export interface CatalogFacts {
   controlTypes: ReadonlySet<string>;
   /** The auth requirement declared for a type — `'none'` when it needs no credential. */
   authOf(nodeType: string): string;
+  /** Whether the type is a TRIGGER in this instance's catalog — the diagnosis for an unmarked one. */
+  isTriggerType(nodeType: string): boolean;
 }
 
 interface DocNode {
@@ -148,6 +150,16 @@ function checkNodes(
       continue;
     }
     if (isTriggerNode(node) || facts.controlTypes.has(node.node_type)) continue;
+    if (facts.isTriggerType(node.node_type)) {
+      errors.push({
+        code: 'trigger_not_marked',
+        node_id: node.id,
+        node_name: node.name,
+        node_type: node.node_type,
+        message: `Node "${node.id}" has the trigger type "${node.node_type}", but nothing marks it as this workflow's trigger — add "metadata": {"trigger": true} to the node. Without the marker it is treated as a step, and no step runs "${node.node_type}".`,
+      });
+      continue;
+    }
     if (!isRoutableActionType(node.node_type)) {
       errors.push({
         code: 'unresolvable_node_type',

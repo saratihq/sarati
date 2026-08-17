@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
-import { composioTriggerCatalog } from '../providers/composio-trigger.registry';
+import { composioTriggerCatalog, composioTriggerTypes } from '../providers/composio-trigger.registry';
 import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
 
@@ -127,6 +127,20 @@ export class TriggerCatalogService {
     private readonly sdkPolling: SdkPollingProvider,
     private readonly composioTriggers: ComposioTriggerProvider,
   ) {}
+
+  /**
+   * Whether `type` names a trigger, answered WITHOUT the live Composio projection — every rail but
+   * that projection is in-process, so this is exact for native/SDK types and covers the shipped
+   * Composio registry. Used where the answer must be synchronous (the author gate's diagnosis).
+   */
+  isKnownTriggerType(type: string): boolean {
+    return (
+      NATIVE_TRIGGERS.some((entry) => entry.type === type) ||
+      this.sdkWebhooks.isRegisteredWebhook(type) ||
+      this.sdkPolling.isPollingTrigger(type) ||
+      composioTriggerTypes().has(type)
+    );
+  }
 
   /** Native + SDK + Composio triggers; a first-party entry wins any public-type overlap. */
   async list(scope: PlatformKeyScope): Promise<TriggerCatalogRow[]> {

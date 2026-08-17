@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { ConfigService } from '@nestjs/config';
+import { DomainError } from '../common/domain-error';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import type { EnvConfig } from '../config/env.config';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
@@ -87,8 +88,8 @@ export class WorkflowsController {
   async diff(
     @Req() req: Request,
     @Param('workflowId') workflowId: string,
-    @Query('from_version') fromVersion = '0',
-    @Query('to_version') toVersion = '0',
+    @Query('from_version') fromVersion?: string,
+    @Query('to_version') toVersion?: string,
     @Query('from_version_id') fromVersionId?: string,
     @Query('to_version_id') toVersionId?: string,
     @Query('branch') branch?: string,
@@ -115,7 +116,20 @@ function parseIntOr(raw: string, fallback: number): number {
   return Number.isInteger(n) ? n : fallback;
 }
 
-/** A version id wins outright; a bare number is per-branch and carries whichever branch was named. */
-function versionRef(id: string | undefined, number: string, branch: string | undefined): VersionRef {
-  return id ? { id } : { number: parseIntOr(number, 0), branch: branch ?? null };
+/**
+ * A version id wins outright; a bare number is per-branch and carries whichever branch was named;
+ * a branch named with no number means that branch's HEAD, which is the only thing it can mean.
+ */
+function versionRef(
+  id: string | undefined,
+  number: string | undefined,
+  branch: string | undefined,
+): VersionRef {
+  if (id) return { id };
+  if (number !== undefined && number !== '') return { number: parseIntOr(number, 0), branch: branch ?? null };
+  if (branch) return { head: branch };
+  throw new DomainError(
+    'Name what to diff: from_version_id/to_version_id, from_branch/to_branch (their heads), or from_version/to_version with a branch.',
+    400,
+  );
 }

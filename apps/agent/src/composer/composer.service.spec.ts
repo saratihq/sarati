@@ -364,7 +364,10 @@ describe('ComposerService.attach (refresh replay)', () => {
     const { service, sessions } = await makeService(scriptedQuery([]));
     const session = sessions.create(null, null);
     emitToSession(session, { event: 'assistant_text', data: { text: 'one' } }); // seq 1
-    emitToSession(session, { event: 'brief', data: { goal: 'g', trigger: 't', steps: ['s'], needs: [] } }); // 2
+    emitToSession(session, {
+      event: 'brief',
+      data: { name: 'n', goal: 'g', trigger: 't', steps: ['s'], needs: [] },
+    }); // 2
     emitToSession(session, { event: 'done', data: { session_id: session.id, duration_ms: 1 } }); // 3
 
     // Fresh page: state snapshot, not history.
@@ -517,6 +520,50 @@ describe('tool handlers (workflow-service wrappers)', () => {
     expect(session.draftIr).toBe(ir);
     expect(emitted).toEqual([{ event: 'op_applied', data: { ops, ir } }]);
     expect(applyOps).toHaveBeenCalledWith(expect.anything(), ops, 'caller-jwt');
+  });
+
+  /**
+   * The composer hears "#social" and must store the channel ID, or the editor's picker shows the
+   * stored label beside the real option and a human cannot tell them apart.
+   */
+  it('runApplyOps: a dropdown LABEL the agent wrote is stored as the option value', async () => {
+    const applyOps = jest.fn().mockResolvedValue({ ok: true, ir: { nodes: [], edges: [] } });
+    const { context } = makeCtx({
+      applyOps,
+      getActionSchema: jest.fn().mockResolvedValue({
+        type: 'slack.send_channel_message',
+        parameters: { channel: { type: 'DROPDOWN' }, text: { type: 'LONG_TEXT' } },
+      }),
+      listConnections: jest
+        .fn()
+        .mockResolvedValue([{ id: 'conn-1', provider: 'slack', status: 'active', display_name: null }]),
+      loadOptions: jest.fn().mockResolvedValue([{ label: '#social', value: 'C0BFN9NKRUH' }]),
+    });
+
+    const result = await runApplyOps(context, [
+      {
+        op: 'add_node',
+        node: {
+          id: 'post_story',
+          node_type: 'slack.send_channel_message',
+          parameters: { channel: '#social', text: 'hi' },
+        },
+      },
+    ]);
+
+    expect(result.isError).toBeUndefined();
+    const [, sentOps] = applyOps.mock.calls[0] as [unknown, Array<Record<string, unknown>>];
+    expect((sentOps[0]!.node as Record<string, unknown>).parameters).toEqual({
+      channel: 'C0BFN9NKRUH',
+      text: 'hi',
+    });
+    // The step's own account is absent, so the picker is loaded with the caller's Slack connection.
+    expect(context.client.loadOptions).toHaveBeenCalledWith(
+      'slack.send_channel_message',
+      'channel',
+      'conn-1',
+      'caller-jwt',
+    );
   });
 
   it('runApplyOps: rejection → isError with detail, draft untouched, nothing emitted', async () => {
@@ -897,13 +944,16 @@ describe('A1 conversation tools', () => {
   it('post_brief emits the card and tells the agent to wait when needs are open', () => {
     const { context, emitted } = makeCtx();
     const brief = {
+      name: 'Big expenses → Slack',
       goal: 'Route big expenses to Slack',
       trigger: 'A form is submitted',
       steps: ['Check the amount'],
       needs: ['Which channel?'],
     };
     const waiting = runPostBrief(context, brief);
+    // The card carries the name the workflow saves under — the client's default until it is renamed.
     expect(emitted).toEqual([{ event: 'brief', data: brief }]);
+    expect((emitted[0]!.data as { name: string }).name).toBe('Big expenses → Slack');
     expect(waiting.content[0]!.text).toContain('END your turn');
     const ready = runPostBrief(context, { ...brief, needs: [] });
     expect(ready.content[0]!.text).toContain('go ahead and build');
@@ -1167,7 +1217,7 @@ describe('durable threads (write-through + rehydrate)', () => {
     const log: SequencedComposerEvent[] = [
       { event: 'user_message', data: { text: 'build it' }, seq: 1 },
       { event: 'assistant_text', data: { text: 'On it.' }, seq: 2 },
-      { event: 'brief', data: { goal: 'g', trigger: 't', steps: ['s'], needs: [] }, seq: 3 },
+      { event: 'brief', data: { name: 'n', goal: 'g', trigger: 't', steps: ['s'], needs: [] }, seq: 3 },
       { event: 'op_applied', data: { ops: [], ir: { nodes: [{ id: 'n1' }], edges: [] } }, seq: 4 },
       { event: 'done', data: { session_id: 'old-session', duration_ms: 5 }, seq: 5 },
     ];

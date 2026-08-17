@@ -134,14 +134,26 @@ describe('AgentModelCallProvider', () => {
     expect(calls[0]!.body).toMatchObject({ connected_account_id: 'ca__test' });
   });
 
-  it('fails with NO connection as a 422 naming the provider', async () => {
+  it('fails with NO connection as a 422 naming the provider AND where the credential goes', async () => {
     const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
     const err = await provider
       .call(req('claude', 'claude-opus-4-8'), authFor(undefined))
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DomainError);
     expect((err as DomainError).status).toBe(422);
-    expect((err as DomainError).message).toContain('requires a claude connection');
+    const message = (err as DomainError).message;
+    expect(message).toContain('no Claude connection');
+    // The reason the platform key does not cover this is part of the message, or it reads as a bug.
+    expect(message).toContain('Integrations');
+    expect(message).toContain('AI composer only');
+  });
+
+  it("names the right app for a provider whose platform key isn't ours to explain", async () => {
+    const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
+    const err = await provider.call(req('openai', 'gpt-5'), authFor(undefined)).catch((e: unknown) => e);
+    const message = (err as DomainError).message;
+    expect(message).toContain('no OpenAI connection');
+    expect(message).not.toContain('AI composer');
   });
 
   it('throws on an unsupported provider', async () => {

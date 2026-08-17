@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
+import { resolveDropdownParams } from './dropdown-values';
 import { fillParams, type ParamCompleteFn } from './param-filler';
 import type { PendingAnswers } from './pending-answers';
 import type { BriefData, ComposerEvent, ComposeOp } from './protocol';
@@ -131,9 +132,19 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
 
   const postBrief = tool(
     'post_brief',
-    'Show (or update) the plan card the person sees: goal, trigger, steps, and what you still need. ' +
-      'Post it BEFORE building anything new, and re-post it whenever the plan changes — the card is replaced.',
+    'Show (or update) the plan card the person sees: name, goal, trigger, steps, and what you still ' +
+      'need. Post it BEFORE building anything new, and re-post it whenever the plan changes — the card ' +
+      'is replaced. The name you give here becomes the workflow name unless they rename it themselves, ' +
+      'so a new workflow is never filed as "Untitled workflow".',
     {
+      name: z
+        .string()
+        .min(1)
+        .max(60)
+        .describe(
+          'A short list-friendly name for the workflow, as a person would title it in a list — ' +
+            '"Hacker News mentions → Slack", not a sentence',
+        ),
       goal: z.string().min(1).max(300).describe('What the workflow achieves, in one plain sentence'),
       trigger: z.string().min(1).max(200).describe('What starts it, in plain words ("A form is submitted")'),
       steps: z.array(z.string().min(1).max(200)).min(1).max(12).describe('The steps, one plain phrase each'),
@@ -340,16 +351,84 @@ interface ToolResult {
  */
 export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<ToolResult> {
   try {
-    const result = await ctx.client.applyOps(ctx.session.draftIr, ops, ctx.session.callerToken);
+    const { ops: settled, notes } = await settleDropdownValues(ctx, ops);
+    const result = await ctx.client.applyOps(ctx.session.draftIr, settled, ctx.session.callerToken);
     if (!result.ok) {
       return { content: [{ type: 'text', text: `Batch rejected: ${result.detail}` }], isError: true };
     }
     ctx.session.draftIr = result.ir;
-    ctx.emit({ event: 'op_applied', data: { ops, ir: result.ir } });
-    return { content: [{ type: 'text', text: summarizeDraft(result.ir) }] };
+    ctx.emit({ event: 'op_applied', data: { ops: settled, ir: result.ir } });
+    const summary = summarizeDraft(result.ir);
+    return {
+      content: [{ type: 'text', text: notes.length > 0 ? `${summary}\n${notes.join('\n')}` : summary }],
+    };
   } catch (err) {
     return toolError(err);
   }
+}
+
+/** The node type an op writes parameters on — its own for an add, the draft's for an update. */
+function opNodeType(ctx: ToolContext, op: ComposeOp): string | null {
+  const node = op.node;
+  if (op.op === 'add_node' && node && typeof node === 'object') {
+    const type = (node as Record<string, unknown>).node_type;
+    return typeof type === 'string' ? type : null;
+  }
+  if (op.op !== 'update_node') return null;
+  if (typeof op.node_type === 'string') return op.node_type;
+  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
+    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
+    : [];
+  const current = nodes.find((n) => n.id === op.node_id);
+  return typeof current?.node_type === 'string' ? current.node_type : null;
+}
+
+/** The account a live option loader fetches with: the step's own, else the caller's for that app. */
+async function connectionForNode(
+  ctx: ToolContext,
+  nodeType: string,
+  parameters: Record<string, unknown>,
+): Promise<string | null> {
+  const own = parameters.connectionId;
+  if (typeof own === 'string' && own) return own;
+  const provider = nodeType.split('.')[0] ?? '';
+  const connections = await ctx.client.listConnections(ctx.session.callerToken);
+  return connections.find((c) => c.provider === provider && c.status === 'active')?.id ?? null;
+}
+
+/** Resolve every option-backed parameter in the batch to a stored VALUE before it is applied. */
+async function settleDropdownValues(
+  ctx: ToolContext,
+  ops: ComposeOp[],
+): Promise<{ ops: ComposeOp[]; notes: string[] }> {
+  const settled: ComposeOp[] = [];
+  const notes: string[] = [];
+  for (const op of ops) {
+    const parameters = op.parameters ?? (op.node as Record<string, unknown> | undefined)?.parameters;
+    const nodeType = opNodeType(ctx, op);
+    if (!nodeType || !parameters || typeof parameters !== 'object') {
+      settled.push(op);
+      continue;
+    }
+    const params = parameters as Record<string, unknown>;
+    const entry = await ctx.client.getActionSchema(nodeType, ctx.session.callerToken);
+    if (!entry) {
+      settled.push(op);
+      continue;
+    }
+    let connectionId: string | null | undefined;
+    const resolution = await resolveDropdownParams(entry.parameters ?? {}, params, async (prop) => {
+      connectionId ??= await connectionForNode(ctx, nodeType, params);
+      return ctx.client.loadOptions(nodeType, prop, connectionId, ctx.session.callerToken);
+    });
+    notes.push(...resolution.notes);
+    settled.push(
+      op.op === 'add_node'
+        ? { ...op, node: { ...(op.node as Record<string, unknown>), parameters: resolution.parameters } }
+        : { ...op, parameters: resolution.parameters },
+    );
+  }
+  return { ops: settled, notes };
 }
 
 /** The post_brief handler: emit the (replacing) plan card; chat stays primary, so keep talking too. */

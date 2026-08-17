@@ -56,6 +56,22 @@ function ValueCell({ value, side }: { value: unknown; side: "before" | "after" }
   );
 }
 
+// A collapsed run of array entries — one row instead of one per index.
+function EntryCountCell({ count, added, sample }: { count: number; added: boolean; sample: unknown }) {
+  return (
+    <span
+      className="inline-block py-0.5 px-1.5 rounded text-[10px] align-middle"
+      title={formatValue(sample)}
+      style={{
+        background: added ? "var(--orchestr-success-tint)" : "var(--orchestr-danger-tint)",
+        color: added ? "var(--orchestr-success)" : "var(--orchestr-danger)",
+      }}
+    >
+      {count} {count === 1 ? "entry" : "entries"} {added ? "added" : "removed"}
+    </span>
+  );
+}
+
 // One node-id chip for whole outputs that appeared / disappeared head-vs-baseline.
 function NodeChip({ id, tone }: { id: string; tone: "added" | "removed" }) {
   const added = tone === "added";
@@ -164,9 +180,19 @@ function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflo
               <span className="font-mono" style={{ color: "var(--orchestr-ink-subtle)" }}>
                 {c.path}
               </span>
-              <ValueCell value={c.before} side="before" />
-              <ArrowRight size={11} style={{ color: "var(--orchestr-ink-subtle)" }} />
-              <ValueCell value={c.after} side="after" />
+              {c.count === undefined ? (
+                <>
+                  <ValueCell value={c.before} side="before" />
+                  <ArrowRight size={11} style={{ color: "var(--orchestr-ink-subtle)" }} />
+                  <ValueCell value={c.after} side="after" />
+                </>
+              ) : (
+                <EntryCountCell
+                  count={c.count}
+                  added={c.before === null}
+                  sample={c.before === null ? c.after : c.before}
+                />
+              )}
             </div>
           ))}
           {added.length > 0 && (
