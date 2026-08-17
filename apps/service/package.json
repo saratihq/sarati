@@ -41,7 +41,7 @@
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/throttler": "^6.3.0",
     "@nestjs/typeorm": "^11.0.3",
-    "@sarati/actions-sdk": "^0.1.2",
+    "@sarati/actions-sdk": "^0.1.4",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "cron-parser": "5.6.1",
