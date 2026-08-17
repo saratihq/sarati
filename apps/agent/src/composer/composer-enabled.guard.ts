@@ -1,7 +1,9 @@
 import { CanActivate, ExecutionContext, HttpException, Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 
-import type { EnvConfig } from '../config/env.config';
+import type { Request } from 'express';
+
+import { ComposerAvailability, DISABLED_MESSAGE } from './composer-availability.service';
+import { callerOf } from './caller-context';
 
 /**
  * Gates the composer's functional endpoints on it actually being configured.
@@ -12,19 +14,15 @@ import type { EnvConfig } from '../config/env.config';
  */
 @Injectable()
 export class ComposerEnabledGuard implements CanActivate {
-  constructor(private readonly config: ConfigService<{ env: EnvConfig }, true>) {}
+  constructor(private readonly availability: ComposerAvailability) {}
 
-  canActivate(_context: ExecutionContext): boolean {
-    const reason = this.config.get('env', { infer: true }).composerDisabledReason;
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest<Request>();
+    const caller = callerOf(req);
+    // No bearer at all: whose key would we even look for? Let ComposerAuthGuard answer 401
+    // rather than reporting "no key" at someone who has not identified themselves.
+    const reason = await this.availability.disabledReason(caller, { keyless: caller.token === null });
     if (reason === null) return true;
     throw new HttpException({ message: DISABLED_MESSAGE[reason], reason }, 503);
   }
 }
-
-/** One actionable sentence per reason — surfaced verbatim by the client. */
-export const DISABLED_MESSAGE = {
-  anthropic_api_key_missing:
-    'The AI composer is not configured on this instance: ANTHROPIC_API_KEY is unset. Set it on the agent service and restart to enable it.',
-  caller_auth_unconfigured:
-    'The AI composer is not configured on this instance: composer callers cannot be authenticated. Set SECRET_KEY to the same value the workflow service uses (this enables local email + password sign-in), or CLERK_ISSUER for a Clerk deployment, then restart to enable it.',
-} as const;

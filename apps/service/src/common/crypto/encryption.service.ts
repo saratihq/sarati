@@ -15,6 +15,11 @@ export class EncryptionService {
 
   constructor(private readonly config: ConfigService<{ env: EnvConfig }, true>) {}
 
+  /** Whether a value stored now would actually be encrypted — a caller that must not fail open asks first. */
+  canEncrypt(): boolean {
+    return this.key() !== null;
+  }
+
   encryptToken(plaintext: string): string {
     const key = this.key();
     if (!key) return plaintext;

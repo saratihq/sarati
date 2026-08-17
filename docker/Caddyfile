@@ -9,6 +9,12 @@
 		reverse_proxy agent:8010
 	}
 
+	# Service-to-service only: this is how agent-service reads the stored Anthropic key. It
+	# authenticates its caller, but there is no reason for it to be reachable from a browser.
+	handle /api/internal/* {
+		respond 404
+	}
+
 	handle /api/* {
 		reverse_proxy service:8001
 	}

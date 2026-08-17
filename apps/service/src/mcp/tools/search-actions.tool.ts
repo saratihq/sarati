@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 import type { ApiScope } from '../../auth/scopes';
 import { ComposeCatalogService } from '../../compose/compose-catalog.service';
-import type { McpTool } from '../mcp-tool';
+import type { McpCallContext, McpTool } from '../mcp-tool';
+import { PlatformKeysService } from '../../platform/platform-keys.service';
 
 const DEFAULT_LIMIT = 8;
 
@@ -48,11 +49,15 @@ export class SearchActionsTool implements McpTool {
     openWorldHint: false,
   };
 
-  constructor(private readonly catalog: ComposeCatalogService) {}
+  constructor(
+    private readonly catalog: ComposeCatalogService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
 
-  async run(input: unknown): Promise<z.infer<typeof Output>> {
+  async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { query, kind, limit, cursor } = Input.parse(input);
     const page = await this.catalog.search({
+      scope: await this.platformKeys.scopeFor(ctx.principal.user.id, ctx.principal.activeOrgId),
       query,
       kind,
       limit,

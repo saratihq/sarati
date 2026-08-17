@@ -2,6 +2,9 @@ import type { ComposioProvider } from './composio.provider';
 import type { ConnectionsService } from './connections.service';
 import { ManagedConnectionsService, toComposioSlug, toOurSlug } from './managed-connections.service';
 
+/** Any scope will do here — the tests are about behaviour, not about whose key it is. */
+const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
+
 describe('COMPOSIO_TOOLKIT_ALIASES', () => {
   // Each pair must name a real toolkit with a non-empty composio_managed_auth_schemes.
   it.each([
@@ -74,7 +77,7 @@ describe('ManagedConnectionsService.listApps', () => {
   const service = new ManagedConnectionsService(composio, {} as ConnectionsService);
 
   it('offers every managed toolkit under OUR slug (aliases resolved), with no manifest gate', async () => {
-    const apps = await service.listApps();
+    const apps = await service.listApps(SCOPE);
     // Sorted by display name; `notion` is offered purely because Composio brokers a managed connection for it.
     expect(apps).toEqual([
       { slug: 'discord', name: 'Discord', executable: true },
@@ -87,7 +90,7 @@ describe('ManagedConnectionsService.listApps', () => {
   });
 
   it('offers formerly-blocked Discord and Supabase (NON_EXECUTABLE_MANAGED_APPS is now empty)', async () => {
-    const apps = await service.listApps();
+    const apps = await service.listApps(SCOPE);
     const bySlug = Object.fromEntries(apps.map((a) => [a.slug, a.executable]));
     expect(bySlug.discord).toBe(true);
     expect(bySlug.supabase).toBe(true);
@@ -96,19 +99,19 @@ describe('ManagedConnectionsService.listApps', () => {
   });
 
   it('skips toolkits whose slug is not addressable as a public action type', async () => {
-    const apps = await service.listApps();
+    const apps = await service.listApps(SCOPE);
     expect(apps.map((a) => a.slug)).not.toContain('9bad');
   });
 
   it('never leaks a raw aliased toolkit slug — googlesheets surfaces as sheets', async () => {
-    const apps = await service.listApps();
+    const apps = await service.listApps(SCOPE);
     expect(apps.map((a) => a.slug)).not.toContain('googlesheets');
     expect(apps.map((a) => a.slug)).toContain('sheets');
   });
 
   it('filters by query against slug or display name', async () => {
-    expect((await service.listApps('sheet')).map((a) => a.slug)).toEqual(['sheets']);
-    expect((await service.listApps('discord')).map((a) => a.slug)).toEqual(['discord']);
-    expect(await service.listApps('no-such-app')).toEqual([]);
+    expect((await service.listApps(SCOPE, 'sheet')).map((a) => a.slug)).toEqual(['sheets']);
+    expect((await service.listApps(SCOPE, 'discord')).map((a) => a.slug)).toEqual(['discord']);
+    expect(await service.listApps(SCOPE, 'no-such-app')).toEqual([]);
   });
 });

@@ -9,6 +9,7 @@ import type { EnvConfig } from '../config/env.config';
 import { sdkAction, isSdkActionType } from './sdk-actions.registry';
 import { IdempotencyHttpClient } from './idempotency-http-client';
 import { DryRunHttpClient } from './dry-run-http-client';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 import { resolveSdkAuthHandle } from './sdk-auth';
 import type { RunActionInput, RunActionResult } from './managed-integration-provider';
 
@@ -23,7 +24,6 @@ export const SDK_ACTIONS_FETCH = Symbol('SDK_ACTIONS_FETCH');
 @Injectable()
 export class SdkActionsProvider {
   private readonly logger = new Logger(SdkActionsProvider.name);
-  private readonly composioApiKey: string;
   private readonly composioBaseUrl: string;
 
   constructor(
@@ -31,10 +31,9 @@ export class SdkActionsProvider {
     // Optional so the provider stays `new`-able in unit tests without DI.
     @Optional() private readonly connections?: ConnectionsService,
     @Optional() @Inject(SDK_ACTIONS_FETCH) private readonly fetchImpl?: FetchLike,
+    @Optional() private readonly platformKeys?: PlatformKeysService,
   ) {
-    const env = config.get('env', { infer: true });
-    this.composioApiKey = env.composioApiKey;
-    this.composioBaseUrl = env.composioBaseUrl;
+    this.composioBaseUrl = config.get('env', { infer: true }).composioBaseUrl;
   }
 
   /** Whether `type` is one of OUR actions — the router's ours-first gate. */
@@ -48,7 +47,7 @@ export class SdkActionsProvider {
       // A miss is a wiring bug, not a user error, so it stays a 500 (unlike the run-but-fails 422 below).
       throw new Error(`SdkActionsProvider has no action for "${input.actionId}"`);
     }
-    const auth = await this.authFor(input.actionId, input.externalUserId, input.auth, action.auth);
+    const auth = await this.authFor(input, input.actionId, input.auth, action.auth);
     // A dry run stubs mutating requests; otherwise a deterministic Idempotency-Key stops a crash-replay double-firing.
     const http = input.dryRun
       ? new DryRunHttpClient()
@@ -67,13 +66,13 @@ export class SdkActionsProvider {
   async loadOptions(
     type: string,
     propName: string,
-    ctx: { externalUserId: string; connectionId?: string; search?: string },
+    ctx: { externalUserId: string; orgId?: string | null; connectionId?: string; search?: string },
   ): Promise<DropdownResult<unknown>> {
     const action = sdkAction(type);
     if (!action) throw new DomainError(`Unknown action "${type}"`, 404);
     let auth: AuthHandle | undefined;
     if (ctx.connectionId) {
-      auth = await this.authFor(type, ctx.externalUserId, { connectionId: ctx.connectionId }, action.auth);
+      auth = await this.authFor(ctx, type, { connectionId: ctx.connectionId }, action.auth);
     }
     try {
       return await action.loadOptions(propName, {
@@ -88,19 +87,29 @@ export class SdkActionsProvider {
   }
 
   /** The opaque {@link AuthHandle} the action runs on — the shared credential path, {@link resolveSdkAuthHandle}. */
-  private authFor(
+  /** Whose Composio key this action runs on — the run's own scope, never a shared one. */
+  private async composioKeyFor(input: {
+    externalUserId: string;
+    orgId?: string | null;
+  }): Promise<string | undefined> {
+    if (!this.platformKeys) return undefined;
+    const scope = await this.platformKeys.scopeFor(input.externalUserId, input.orgId ?? null);
+    return this.platformKeys.composioApiKey(scope);
+  }
+
+  private async authFor(
+    owner: { externalUserId: string; orgId?: string | null },
     actionId: string,
-    externalUserId: string,
     auth: unknown,
     scheme: AuthScheme,
   ): Promise<AuthHandle> {
     return resolveSdkAuthHandle(
       scheme,
       {
-        externalUserId,
+        externalUserId: owner.externalUserId,
         auth,
         ...(this.connections ? { connections: this.connections } : {}),
-        composioApiKey: this.composioApiKey,
+        composioApiKey: (await this.composioKeyFor(owner)) ?? '',
         composioBaseUrl: this.composioBaseUrl,
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
       },

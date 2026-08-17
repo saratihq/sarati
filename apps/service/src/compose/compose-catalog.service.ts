@@ -5,6 +5,7 @@ import type { CatalogFacts } from './author-validation';
 import { CONTROL_NODE_SCHEMAS } from '../generation/control-node-types';
 import { VectorStore } from '../generation/vector-store';
 import { MANUAL_TRIGGER, TriggerCatalogService } from '../triggers/trigger-catalog.service';
+import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 import {
   toCatalogEntry,
@@ -107,6 +108,7 @@ export class ComposeCatalogService {
 
   /** Paged retrieval over actions, triggers, or both — the composer's and MCP's one search. */
   async search(input: {
+    scope: PlatformKeyScope;
     query: string;
     kind: CatalogSearchKind;
     limit: number;
@@ -116,7 +118,7 @@ export class ComposeCatalogService {
     // One past the page tells us whether another page exists without a second ranking pass.
     const want = offset + input.limit + 1;
     const actions = input.kind === 'trigger' ? [] : this.rankedActions(input.query, want);
-    const triggers = input.kind === 'action' ? [] : await this.rankedTriggers(input.query, want);
+    const triggers = input.kind === 'action' ? [] : await this.rankedTriggers(input.scope, input.query, want);
     const ranked =
       input.kind === 'any' ? interleave(actions, triggers) : [...actions, ...triggers].slice(0, want);
     const results = ranked.slice(offset, offset + input.limit);
@@ -128,12 +130,12 @@ export class ComposeCatalogService {
   }
 
   /** Exact-type lookup with the FULL parameter schema and auth detail — search results are trimmed. */
-  async byType(type: string): Promise<DetailedCatalogEntry | null> {
+  async byType(scope: PlatformKeyScope, type: string): Promise<DetailedCatalogEntry | null> {
     const control = CONTROL_TYPES.find((c) => c.type === type);
     if (control) return toDetailedEntry(control, 'control');
     const action = this.vectorStore.entries(COLLECTION).find((e) => e.type === type);
     if (action) return toDetailedEntry(action, 'action');
-    const trigger = (await this.triggerCatalog.list()).find((row) => row.entry.type === type);
+    const trigger = (await this.triggerCatalog.list(scope)).find((row) => row.entry.type === type);
     return trigger ? toDetailedEntry(trigger.entry, 'trigger', trigger.rail) : null;
   }
 
@@ -154,8 +156,8 @@ export class ComposeCatalogService {
    * picker offers, so a trigger a human can place is a trigger an agent can author. Uncached: the
    * Composio projection behind it refreshes on its own TTL.
    */
-  async allowedTriggerTypes(): Promise<ReadonlySet<string>> {
-    const rows = await this.triggerCatalog.list();
+  async allowedTriggerTypes(scope: PlatformKeyScope): Promise<ReadonlySet<string>> {
+    const rows = await this.triggerCatalog.list(scope);
     return new Set([MANUAL_TRIGGER, ...rows.map((row) => String(row.entry.type))]);
   }
 
@@ -168,8 +170,12 @@ export class ComposeCatalogService {
   }
 
   /** Trigger rows scored lexically — they come from a live async catalog, not the static index. */
-  private async rankedTriggers(query: string, want: number): Promise<CatalogEntry[]> {
-    const rows = (await this.triggerCatalog.list()).map((row) =>
+  private async rankedTriggers(
+    scope: PlatformKeyScope,
+    query: string,
+    want: number,
+  ): Promise<CatalogEntry[]> {
+    const rows = (await this.triggerCatalog.list(scope)).map((row) =>
       toCatalogEntry(row.entry, 'trigger', row.rail),
     );
     const terms = searchTerms(query);

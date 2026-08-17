@@ -43,6 +43,7 @@ import {
   type DesiredActivation,
 } from './trigger-activation';
 import { triggerConfigChangedAcrossVersions } from './trigger-config-diff';
+import { PlatformKeysService, type PlatformKeyScope } from '../../platform/platform-keys.service';
 import {
   deriveDesiredActivations,
   reconcileActivations,
@@ -79,6 +80,7 @@ export class TriggerReconcilerService {
     private readonly connections: ConnectionsService,
     private readonly signals: TriggerSignalsService,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
   /** Wire the inline reconcile path so pointer/slot moves converge even when pg-boss is off. */
@@ -377,7 +379,7 @@ export class TriggerReconcilerService {
           });
         }
       } else if (kind === 'composio_subscription') {
-        await this.unsubscribeComposio(activationId);
+        await this.unsubscribeComposio(activationId, desired.key.workflowId);
       } else if (kind === 'schedule') {
         await store.delete(SCHEDULE_CURSOR_KEY);
       }
@@ -412,9 +414,10 @@ export class TriggerReconcilerService {
    * on the row — the intake maps deliveries back through it and teardown deletes it.
    */
   private async subscribeComposio(activationId: string, desired: DesiredActivation): Promise<void> {
-    if (!this.composioTriggers.configured) {
+    const scope = await this.platformKeys.scopeForWorkflow(desired.key.workflowId);
+    if (!scope || !(await this.composioTriggers.isConfigured(scope))) {
       throw new Error(
-        'This trigger runs on a managed (Composio) connection, but managed connections are not configured (COMPOSIO_API_KEY is unset)',
+        'This trigger runs on a managed (Composio) connection, but no Composio API key is set for this workspace — add one in Settings',
       );
     }
     const conn = desired.connection;
@@ -432,7 +435,7 @@ export class TriggerReconcilerService {
     const slug = this.composioTriggers.slugForPublicType(desired.triggerType);
     if (!slug) throw new Error(`Malformed Composio trigger type "${desired.triggerType}"`);
 
-    const instanceId = await this.composioTriggers.createTriggerInstance({
+    const instanceId = await this.composioTriggers.createTriggerInstance(scope, {
       slug,
       connectedAccountId: ref.connectedAccountId,
       userId: conn.ownerUserId,
@@ -443,7 +446,7 @@ export class TriggerReconcilerService {
       { id: activationId },
       { composioTriggerInstanceId: instanceId },
     );
-    await this.compensateIfOrphaned(activationId, instanceId, affected ?? 0);
+    await this.compensateIfOrphaned(scope, activationId, instanceId, affected ?? 0);
   }
 
   /**
@@ -452,6 +455,7 @@ export class TriggerReconcilerService {
    * dedupes on account+slug+config, so deleting a referenced instance breaks the sibling).
    */
   private async compensateIfOrphaned(
+    scope: PlatformKeyScope,
     activationId: string,
     instanceId: string,
     affected: number,
@@ -477,7 +481,7 @@ export class TriggerReconcilerService {
     });
     if (otherLiveHolders > 0) return; // a live sibling still needs this shared instance
     await this.composioTriggers
-      .deleteTriggerInstance(instanceId)
+      .deleteTriggerInstance(scope, instanceId)
       .catch((err) => this.logger.warn(`compensating delete of ${instanceId} failed: ${errorMessage(err)}`));
   }
 
@@ -486,7 +490,7 @@ export class TriggerReconcilerService {
    * share a `ti_…`, so delete the instance only when no other activation references it;
    * always clear this row's id (non-null means "holds a live subscription").
    */
-  private async unsubscribeComposio(activationId: string): Promise<void> {
+  private async unsubscribeComposio(activationId: string, workflowId: string): Promise<void> {
     // The refcount decision must be ATOMIC across co-subscribers, or two concurrent
     // teardowns each count the other and both skip the delete → the instance leaks. The
     // Composio DELETE stays outside the tx (no network under a lock).
@@ -511,8 +515,12 @@ export class TriggerReconcilerService {
       const othersRemain = holders.some((h) => h.id !== activationId);
       return othersRemain ? null : instanceId; // delete only when we were the last holder
     });
-    if (instanceToDelete && this.composioTriggers.configured) {
-      await this.composioTriggers.deleteTriggerInstance(instanceToDelete);
+    if (!instanceToDelete) return;
+    const scope = await this.platformKeys.scopeForWorkflow(workflowId);
+    // Without the owning scope's key we cannot delete it, and we do not try — the reaper
+    // reports it instead. Dropping our reference above already stopped it firing here.
+    if (scope && (await this.composioTriggers.isConfigured(scope))) {
+      await this.composioTriggers.deleteTriggerInstance(scope, instanceToDelete);
     }
   }
 

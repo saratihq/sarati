@@ -8,6 +8,15 @@ import type { EnvConfig } from '../config/env.config';
 import { ActionRouterProvider } from './action-router.provider';
 import type { SdkActionsProvider } from './sdk-actions.provider';
 import { isSdkActionType } from './sdk-actions.registry';
+import { PlatformKeysService } from '../platform/platform-keys.service';
+
+/** Scope resolution in these tests is fixed — they exercise routing, not key ownership. */
+function platformKeysStub(): PlatformKeysService {
+  return {
+    scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
+    composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? 'ak_test'),
+  } as unknown as PlatformKeysService;
+}
 
 /**
  * LIVE proof of the universal Composio fallback: a real action our SDK doesn't cover, driven through the REAL
@@ -28,13 +37,16 @@ const ACTION_ID = 'asana.get_current_user';
   const config = {
     get: () =>
       ({
-        composioApiKey: process.env.COMPOSIO_API_KEY ?? '',
         composioBaseUrl: process.env.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
         composioFallbackApps: '',
       }) as Partial<EnvConfig>,
   } as unknown as ConfigService<{ env: EnvConfig }, true>;
+  // The key is stored, not env-supplied — a manual live run hands it over the same seam.
+  const keys = {
+    composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? ''),
+  } as unknown as PlatformKeysService;
 
-  const composio = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config));
+  const composio = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config, keys));
   // Only the DB lookup is stubbed — everything else is the production class.
   const managedRef: ManagedConnectionRef = {
     id: 'conn-live',
@@ -50,7 +62,7 @@ const ACTION_ID = 'asana.get_current_user';
     has: (type: string) => isSdkActionType(type),
   } as unknown as SdkActionsProvider;
 
-  const router = new ActionRouterProvider(orchestrActions, composio, connections, config);
+  const router = new ActionRouterProvider(orchestrActions, composio, connections, config, platformKeysStub());
 
   it('routes a Composio-only action through the router and returns real data', async () => {
     // Precondition that makes this rail (c) and not (a)/(b).

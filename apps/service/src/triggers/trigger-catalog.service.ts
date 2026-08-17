@@ -6,6 +6,7 @@ import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
 
 import { ORCHESTR_SCHEDULE } from './schedule';
+import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** The PUBLIC type of the native inbound-webhook trigger kind (catalog + version-doc node_type). */
 export const INCOMING_WEBHOOK_PUBLIC = 'orchestr:webhook';
@@ -128,7 +129,7 @@ export class TriggerCatalogService {
   ) {}
 
   /** Native + SDK + Composio triggers; a first-party entry wins any public-type overlap. */
-  async list(): Promise<TriggerCatalogRow[]> {
+  async list(scope: PlatformKeyScope): Promise<TriggerCatalogRow[]> {
     const rows: TriggerCatalogRow[] = [
       ...NATIVE_TRIGGERS.map((entry) => ({ entry, rail: 'native' as const })),
       ...this.sdkWebhooks.catalog().map((entry) => ({ entry, rail: 'sdk' as const })),
@@ -139,7 +140,7 @@ export class TriggerCatalogService {
       })),
     ];
     const seen = new Set(rows.map((row) => String(row.entry.type)));
-    for (const entry of await this.composioTriggers.catalog()) {
+    for (const entry of await this.composioTriggers.catalog(scope)) {
       if (seen.has(entry.type)) continue;
       seen.add(entry.type);
       rows.push({ entry: entry as unknown as Record<string, unknown>, rail: 'composio' });

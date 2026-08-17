@@ -4,6 +4,7 @@ import { DomainError } from '../common/domain-error';
 import { ComposioProvider } from './composio.provider';
 import { ConnectionsService } from './connections.service';
 import { isExecutableApp } from './managed-app-rails';
+import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** An app offered for one-click managed connect. */
 export interface ManagedApp {
@@ -71,8 +72,8 @@ export class ManagedConnectionsService {
   ) {}
 
   /** Every brokerable app — managed-auth toolkits mapped to OUR slug, deduped, addressable only; `q` filters slug/name. */
-  async listApps(q?: string): Promise<ManagedApp[]> {
-    const toolkits = await this.composio.listManagedToolkits();
+  async listApps(scope: PlatformKeyScope, q?: string): Promise<ManagedApp[]> {
+    const toolkits = await this.composio.listManagedToolkits(scope);
     const needle = (q ?? '').trim().toLowerCase();
     const bySlug = new Map<string, ManagedApp>();
     for (const t of toolkits) {
@@ -88,13 +89,17 @@ export class ManagedConnectionsService {
   }
 
   /** Start a managed connect: ensure the auth config, mint the hosted link, record a PENDING row (no secret). */
-  async createLink(userId: string, app: string): Promise<{ connectionId: string; redirectUrl: string }> {
-    const apps = await this.listApps();
+  async createLink(
+    scope: PlatformKeyScope,
+    userId: string,
+    app: string,
+  ): Promise<{ connectionId: string; redirectUrl: string }> {
+    const apps = await this.listApps(scope);
     if (!apps.some((a) => a.slug === app)) {
       throw new DomainError(`App "${app}" is not available for managed connections`);
     }
-    const authConfigId = await this.composio.ensureAuthConfig(toComposioSlug(app));
-    const { redirectUrl, connectedAccountId } = await this.composio.createLink(userId, authConfigId);
+    const authConfigId = await this.composio.ensureAuthConfig(scope, toComposioSlug(app));
+    const { redirectUrl, connectedAccountId } = await this.composio.createLink(scope, userId, authConfigId);
     const connection = await this.connections.createManaged(userId, app, connectedAccountId);
     this.logger.log(`Managed connect started: ${app} → connection ${connection.id} (user ${userId})`);
     return { connectionId: connection.id, redirectUrl };
@@ -107,12 +112,18 @@ export class ManagedConnectionsService {
     environment: string,
     app: string,
   ): Promise<{ connectionId: string; redirectUrl: string }> {
-    const apps = await this.listApps();
+    // A cluster connection belongs to the ORG by construction, so its key does too.
+    const scope: PlatformKeyScope = { kind: 'org', orgId };
+    const apps = await this.listApps(scope);
     if (!apps.some((a) => a.slug === app)) {
       throw new DomainError(`App "${app}" is not available for managed connections`);
     }
-    const authConfigId = await this.composio.ensureAuthConfig(toComposioSlug(app));
-    const { redirectUrl, connectedAccountId } = await this.composio.createLink(ownerUserId, authConfigId);
+    const authConfigId = await this.composio.ensureAuthConfig(scope, toComposioSlug(app));
+    const { redirectUrl, connectedAccountId } = await this.composio.createLink(
+      scope,
+      ownerUserId,
+      authConfigId,
+    );
     const connection = await this.connections.createManaged(ownerUserId, app, connectedAccountId, {
       orgId,
       environment,
@@ -127,7 +138,11 @@ export class ManagedConnectionsService {
    * The connection's lifecycle status; a pending managed row is polled against Composio and flipped persistently.
    * Three-valued by contract: an EXPIRED during connect persists as `expired` but reports as `failed`.
    */
-  async status(userId: string, id: string): Promise<'pending' | 'active' | 'failed'> {
+  async status(
+    scope: PlatformKeyScope,
+    userId: string,
+    id: string,
+  ): Promise<'pending' | 'active' | 'failed'> {
     const ref = await this.connections.managedRef(userId, id);
     if (!ref) throw new DomainError('Connection not found', 404);
     if (ref.authType !== 'managed') return 'active';
@@ -141,7 +156,7 @@ export class ManagedConnectionsService {
       );
       return 'failed';
     }
-    const status = await this.composio.getAccountStatus(ref.connectedAccountId);
+    const status = await this.composio.getAccountStatus(scope, ref.connectedAccountId);
     if (status === 'pending') return 'pending';
     if (status === 'active') {
       await this.connections.setStatus(id, 'active');

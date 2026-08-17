@@ -31,11 +31,13 @@ You complete the sign-in there. The connection polls `pending` until you do, the
 {"id":"3207defd-…","provider":"slack","auth_type":"managed","status":"active"}
 ```
 
-Set it up with:
+Set it up by adding a Composio API key in **Settings → Platform keys**. Working inside an
+organization that is the organization's key, set by an owner or admin and used by every member;
+working outside one it is your own. Managed connections turn on the moment it is saved. Get a key
+from the [Composio dashboard](https://app.composio.dev/developers).
 
-```bash
-COMPOSIO_API_KEY=…
-```
+Without a key, managed connections are simply absent: built-in actions and bring-your-own auth work
+exactly as before.
 
 ## Using one in a step
 
@@ -92,9 +94,13 @@ back up your `.env`. See [Install](/start/install/#back-up-env).
 A webhook from a third-party app is a **push**. Nothing on the internet can reach `localhost`, so
 app triggers do not fire on a laptop instance without a tunnel.
 
-To receive them, expose the instance (`cloudflared` needs no signup), point `PUBLIC_BASE_URL` at
-the public URL, set `COMPOSIO_WEBHOOK_SECRET`, and register the same URL in the Composio dashboard
-under **Settings → Webhooks**.
+To receive them, expose the instance (`cloudflared` needs no signup) and point `PUBLIC_BASE_URL` at
+the public URL — that one is the instance's address, so it stays in `.env`. Then add your **Composio
+webhook secret** in **Settings → Platform keys**, beside the API key and scoped the same way, and
+register the public URL in the Composio dashboard under **Settings → Webhooks**.
+
+A delivery is verified against the secret of whichever user or organization owns the workflow it is
+for. Without that secret stored, deliveries are rejected rather than run.
 
 Polling triggers need none of this — they reach out rather than being pushed to. Your own `curl` to
 a [webhook trigger](/build/triggers/) also works without a tunnel, because it is on the same

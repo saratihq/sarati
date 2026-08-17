@@ -20,8 +20,6 @@ export interface EnvConfig {
    * caller's own bearer token (runs are attributed to the person).
    */
   readonly workflowServiceApiKey: string | null;
-  /** Claude Agent SDK credential. Null disables the composer — the service still boots. */
-  readonly anthropicApiKey: string | null;
   /** Model the composer sessions run on. */
   readonly composerModel: string;
   /** Model for the focused param-filling sub-chain — unset disables fill_params entirely. */
@@ -51,11 +49,13 @@ export interface EnvConfig {
    */
   readonly localSessionSecret: string | null;
   /**
-   * Null when the composer is fully configured. An install missing both
-   * credentials reports the Anthropic key first — it is the documented opt-in,
-   * and the auth wall is not something an operator can act on before it.
+   * workflow-service's SECRET_KEY as held, independent of whether local sessions
+   * are accepted here: it also authenticates this process when it reads the
+   * stored Anthropic key. Clerk deployments have it too (compose passes it).
    */
-  readonly composerDisabledReason: ComposerDisabledReason | null;
+  readonly serviceSharedSecret: string | null;
+  /** Whether ANY caller-auth path is configured — a boot fact, unlike the Anthropic key. */
+  readonly callerAuthConfigured: boolean;
 }
 
 function asBool(value: string | undefined, fallback: boolean): boolean {
@@ -75,8 +75,6 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
   if (workflowServiceApiKey && !workflowServiceApiKey.startsWith('ork_')) {
     errors.push('WORKFLOW_SERVICE_API_KEY must be an ork_ API key (create one via POST /api/api-keys)');
   }
-  const anthropicApiKey = raw.ANTHROPIC_API_KEY?.trim() || null;
-
   const mockAuth = (raw.MOCK_AUTH ?? '').trim().toLowerCase() === 'true';
   const clerkIssuer = raw.CLERK_ISSUER?.trim().replace(/\/+$/, '') || null;
   if (mockAuth && environment === 'production') {
@@ -91,12 +89,6 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
   const localAuthEnabled = asBool(raw.LOCAL_AUTH_ENABLED, !clerkIssuer);
   const localSessionSecret = localAuthEnabled ? raw.SECRET_KEY?.trim() || null : null;
 
-  const composerDisabledReason: ComposerDisabledReason | null = !anthropicApiKey
-    ? 'anthropic_api_key_missing'
-    : !mockAuth && !clerkIssuer && !localSessionSecret
-      ? 'caller_auth_unconfigured'
-      : null;
-
   if (errors.length > 0) {
     throw new Error(`Invalid environment:\n  - ${errors.join('\n  - ')}`);
   }
@@ -110,7 +102,6 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
       .filter(Boolean),
     workflowServiceUrl,
     workflowServiceApiKey,
-    anthropicApiKey,
     composerModel: raw.COMPOSER_MODEL ?? 'claude-opus-4-8',
     paramModel: raw.PARAM_MODEL?.trim() || null,
     databaseUrl: raw.DATABASE_URL?.trim() || null,
@@ -118,6 +109,7 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
     clerkIssuer,
     clerkAuthorizedParties: raw.CLERK_AUTHORIZED_PARTIES ?? '',
     localSessionSecret,
-    composerDisabledReason,
+    serviceSharedSecret: raw.SECRET_KEY?.trim() || null,
+    callerAuthConfigured: mockAuth || Boolean(clerkIssuer) || Boolean(localSessionSecret),
   };
 }

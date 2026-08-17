@@ -13,6 +13,7 @@ import {
 import { ComposeCatalogService } from '../../compose/compose-catalog.service';
 import type { WorkflowIR } from '../../ir/models';
 import type { McpCallContext, McpTool } from '../mcp-tool';
+import { PlatformKeysService } from '../../platform/platform-keys.service';
 
 /**
  * The vocabulary lives in the description, not in the input schema: the MCP runtime rejects a
@@ -76,9 +77,12 @@ export class EditWorkflowTool implements McpTool {
     openWorldHint: false,
   };
 
-  constructor(private readonly catalog: ComposeCatalogService) {}
+  constructor(
+    private readonly catalog: ComposeCatalogService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
 
-  async run(input: unknown, _ctx: McpCallContext): Promise<z.infer<typeof Output>> {
+  async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { workflow_ir: raw, ops: rawOps } = Input.parse(input);
     if (rawOps.length === 0) throw new DomainError('ops must contain at least one operation.', 422);
     if (rawOps.length > MAX_OPS_PER_BATCH) {
@@ -88,7 +92,9 @@ export class EditWorkflowTool implements McpTool {
       );
     }
     const document = toDocument(raw);
-    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes();
+    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes(
+      await this.platformKeys.scopeFor(ctx.principal.user.id, ctx.principal.activeOrgId),
+    );
     try {
       const ops = rawOps.map((op, index) => parseOp(op, index));
       const { ir, applied } = applyOpsDetailed(

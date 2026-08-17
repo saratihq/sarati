@@ -30,30 +30,33 @@ describe('local session auth derivation', () => {
   });
 });
 
-describe('composerDisabledReason', () => {
-  it('names the Anthropic key first when nothing is configured', () => {
-    expect(env({}).composerDisabledReason).toBe('anthropic_api_key_missing');
+describe('callerAuthConfigured', () => {
+  it('is false when no caller path is configured', () => {
+    expect(env({}).callerAuthConfigured).toBe(false);
   });
 
-  it('is caller_auth_unconfigured when the key is present but no caller path is', () => {
-    expect(env({ ANTHROPIC_API_KEY: 'sk' }).composerDisabledReason).toBe('caller_auth_unconfigured');
+  it('a local session secret is the self-host unlock', () => {
+    expect(env({ SECRET_KEY: 's' }).callerAuthConfigured).toBe(true);
   });
 
-  it('clears once a local session secret is available — the self-host unlock', () => {
-    expect(env({ ANTHROPIC_API_KEY: 'sk', SECRET_KEY: 's' }).composerDisabledReason).toBeNull();
+  it('Clerk and MOCK_AUTH count too', () => {
+    expect(env({ CLERK_ISSUER: 'https://c.example' }).callerAuthConfigured).toBe(true);
+    expect(env({ MOCK_AUTH: 'true', WORKFLOW_SERVICE_API_KEY: 'ork_x' }).callerAuthConfigured).toBe(true);
   });
 
-  it('clears for Clerk and for MOCK_AUTH too', () => {
-    expect(
-      env({ ANTHROPIC_API_KEY: 'sk', CLERK_ISSUER: 'https://c.example' }).composerDisabledReason,
-    ).toBeNull();
-    expect(
-      env({ ANTHROPIC_API_KEY: 'sk', MOCK_AUTH: 'true', WORKFLOW_SERVICE_API_KEY: 'ork_x' })
-        .composerDisabledReason,
-    ).toBeNull();
+  it('does not depend on an Anthropic key — that is set at runtime, not at boot', () => {
+    expect(env({ SECRET_KEY: 's', ANTHROPIC_API_KEY: 'sk' }).callerAuthConfigured).toBe(true);
+  });
+});
+
+describe('serviceSharedSecret', () => {
+  it('holds SECRET_KEY even where local sessions are off — it also authenticates the key read', () => {
+    const cfg = env({ SECRET_KEY: 's', LOCAL_AUTH_ENABLED: 'false' });
+    expect(cfg.localSessionSecret).toBeNull();
+    expect(cfg.serviceSharedSecret).toBe('s');
   });
 
-  it('a secret alone still reports the missing Anthropic key', () => {
-    expect(env({ SECRET_KEY: 's' }).composerDisabledReason).toBe('anthropic_api_key_missing');
+  it('is null when the stack shares no secret', () => {
+    expect(env({}).serviceSharedSecret).toBeNull();
   });
 });

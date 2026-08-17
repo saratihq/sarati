@@ -7,6 +7,7 @@ import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { ManagedConnectionsService, type ManagedApp } from './managed-connections.service';
 import { Scope } from '../auth/scope.decorator';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 class ManagedLinkDto {
   /** App slug from GET /api/connections/managed/apps, e.g. `slack`. */
@@ -19,17 +20,26 @@ class ManagedLinkDto {
 @Controller('api/connections')
 @UseGuards(AuthGuard)
 export class ManagedConnectionsController {
-  constructor(private readonly managed: ManagedConnectionsService) {}
+  constructor(
+    private readonly managed: ManagedConnectionsService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
 
   private userId(req: Request): string {
     return requirePrincipal(req).user.id;
   }
 
+  /** Whose Composio key brokers this request — the caller's active context. */
+  private scope(req: Request): Promise<PlatformKeyScope> {
+    const principal = requirePrincipal(req);
+    return this.platformKeys.scopeFor(principal.user.id, principal.activeOrgId);
+  }
+
   /** Apps offered for one-click connect (app catalog ∩ Composio managed toolkits). */
   @Scope('connection:read')
   @Get('managed/apps')
-  async listApps(@Query('q') q?: string): Promise<{ apps: ManagedApp[] }> {
-    return { apps: await this.managed.listApps(q) };
+  async listApps(@Req() req: Request, @Query('q') q?: string): Promise<{ apps: ManagedApp[] }> {
+    return { apps: await this.managed.listApps(await this.scope(req), q) };
   }
 
   /** Start a connect: a PENDING connection + the hosted link the client opens. */
@@ -40,7 +50,11 @@ export class ManagedConnectionsController {
     @Req() req: Request,
     @Body() body: ManagedLinkDto,
   ): Promise<{ connection_id: string; redirect_url: string }> {
-    const { connectionId, redirectUrl } = await this.managed.createLink(this.userId(req), body.app);
+    const { connectionId, redirectUrl } = await this.managed.createLink(
+      await this.scope(req),
+      this.userId(req),
+      body.app,
+    );
     return { connection_id: connectionId, redirect_url: redirectUrl };
   }
 
@@ -51,6 +65,6 @@ export class ManagedConnectionsController {
     @Req() req: Request,
     @Param('id') id: string,
   ): Promise<{ status: 'pending' | 'active' | 'failed' }> {
-    return { status: await this.managed.status(this.userId(req), id) };
+    return { status: await this.managed.status(await this.scope(req), this.userId(req), id) };
   }
 }

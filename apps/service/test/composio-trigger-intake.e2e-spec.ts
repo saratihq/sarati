@@ -8,8 +8,8 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
-import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { listenOnLoopback } from './support/listen';
+import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const WEBHOOK_SECRET = 'whsec_e2e_composio_secret';
@@ -114,16 +114,16 @@ describe('Composio trigger intake (ADR 0046, e2e, isolated DB)', () => {
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
-    // The project webhook secret — set BEFORE module init so the validated env carries it.
-    process.env.COMPOSIO_WEBHOOK_SECRET = WEBHOOK_SECRET;
-    // A fake key is enough: the rail must read `configured` or F5 makes the intake inert.
-    process.env.COMPOSIO_API_KEY = 'ck_e2e_fake_key';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
     await listenOnLoopback(app);
+    // The managed rail's key lives in the store, not the environment.
+    await seedPlatformKeyEverywhere(app, 'composio_api_key', 'ck_e2e_fake_key');
+    // The signing secret is the same Composio project's credential, so it is scoped too.
+    await seedPlatformKeyEverywhere(app, 'composio_webhook_secret', WEBHOOK_SECRET);
 
     const deployed = await asA(
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: workflowDoc() }),
@@ -236,18 +236,72 @@ describe('Composio trigger intake (ADR 0046, e2e, isolated DB)', () => {
     expect(await runCount()).toBe(before);
   });
 
-  // F5: with the rail unconfigured the intake is inert — a lingering secret must not let stale rows fire.
-  it('is INERT (fired: 0) when the Composio rail is unconfigured', async () => {
-    const spy = jest.spyOn(app.get(ComposioTriggerProvider), 'configured', 'get').mockReturnValue(false);
-    try {
+  // F5: an unverifiable delivery never fires, whatever rows exist for the instance.
+  describe('per-scope signature verification (fails closed)', () => {
+    const sign = (secret: string, raw: string, webhookId: string, ts: string): string =>
+      'v1,' + createHmac('sha256', secret).update(`${webhookId}.${ts}.${raw}`).digest('base64');
+
+    const deliverSignedWith = (secret: string): request.Test => {
+      const raw = JSON.stringify({ metadata: { trigger_id: INSTANCE }, data: { action: 'push' } });
+      const id = nextId();
+      const ts = String(Math.floor(Date.now() / 1000));
+      return http()
+        .post('/api/hooks/composio')
+        .set('Content-Type', 'application/json')
+        .set('webhook-id', id)
+        .set('webhook-timestamp', ts)
+        .set('webhook-signature', sign(secret, raw, id, ts))
+        .send(raw);
+    };
+
+    it("accepts a delivery signed with the OWNING scope's secret", async () => {
+      const before = await runCount();
+      const res = await deliverSignedWith(WEBHOOK_SECRET).expect(202);
+      expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
+      expect(await runCount()).toBe(before + 1);
+    });
+
+    it("rejects a delivery signed with a DIFFERENT scope's secret", async () => {
+      const before = await runCount();
+      await deliverSignedWith('whsec_some_other_tenants_secret').expect(401);
+      expect(await runCount()).toBe(before);
+    });
+
+    it('rejects an unsigned delivery', async () => {
       const before = await runCount();
       const raw = JSON.stringify({ metadata: { trigger_id: INSTANCE }, data: { action: 'push' } });
-      const res = await deliver(raw, 'auto').expect(202);
-      expect(res.body).toMatchObject({ status: 'accepted', fired: 0 });
+      await http()
+        .post('/api/hooks/composio')
+        .set('Content-Type', 'application/json')
+        .set('webhook-id', nextId())
+        .send(raw)
+        .expect(401);
       expect(await runCount()).toBe(before);
-    } finally {
-      spy.mockRestore();
-    }
+    });
+
+    it('a rejected delivery does not burn its id — the genuine retry still fires', async () => {
+      const raw = JSON.stringify({ metadata: { trigger_id: INSTANCE }, data: { action: 'push' } });
+      const id = nextId();
+      const ts = String(Math.floor(Date.now() / 1000));
+      const post = (secret: string): request.Test =>
+        http()
+          .post('/api/hooks/composio')
+          .set('Content-Type', 'application/json')
+          .set('webhook-id', id)
+          .set('webhook-timestamp', ts)
+          .set('webhook-signature', sign(secret, raw, id, ts))
+          .send(raw);
+
+      await post('whsec_wrong').expect(401);
+      const before = await runCount();
+      const ok = await post(WEBHOOK_SECRET).expect(202);
+      expect(ok.body).toMatchObject({ fired: 1 });
+      expect(await runCount()).toBe(before + 1);
+
+      // ...and the SAME id a second time is still deduped (migration 022 behaviour intact).
+      const dup = await post(WEBHOOK_SECRET).expect(202);
+      expect(dup.body).toMatchObject({ fired: 0, duplicate: true });
+    });
   });
 
   // F7: an activation resolving a different account than the delivery names must be skipped, not fired.

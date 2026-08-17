@@ -4,6 +4,9 @@ import type { TriggerCatalogService } from '../triggers/trigger-catalog.service'
 
 import { ComposeCatalogService } from './compose-catalog.service';
 
+/** Any scope will do here — the tests are about behaviour, not about whose key it is. */
+const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
+
 /**
  * Drift guard: the palette (`CONTROL_NODE_SCHEMAS`, served verbatim) and the composer
  * (`ComposeCatalogService.byType`) must expose IDENTICAL control-node schema data. The parameter
@@ -56,7 +59,7 @@ describe('control-node schema parity — palette (node-types controller) vs comp
 
   it.each(SHARED_CONTROL_TYPES)('%s exposes identical schema data on both surfaces', async (type) => {
     const palette = CONTROL_NODE_SCHEMAS.find((s) => s.type === type);
-    const composer = await catalog.byType(type);
+    const composer = await catalog.byType(SCOPE, type);
     expect(palette).toBeDefined();
     expect(composer).not.toBeNull();
     // Deep-equal the parameter schema (and name/type/category/auth) — the node
@@ -65,7 +68,7 @@ describe('control-node schema parity — palette (node-types controller) vs comp
   });
 
   it('the agent carries an OPTIONAL connectionId on both surfaces (ADR 0014 env-slot fallback)', async () => {
-    const agent = await catalog.byType('orchestr:agent');
+    const agent = await catalog.byType(SCOPE, 'orchestr:agent');
     const params = agent?.parameters as Record<string, { type: string; required: boolean }>;
     expect(params.connectionId).toBeDefined();
     expect(params.connectionId?.type).toBe('string');
@@ -73,13 +76,13 @@ describe('control-node schema parity — palette (node-types controller) vs comp
   });
 
   it("the IF op seeds a default of 'eq' on both surfaces", async () => {
-    const ifNode = await catalog.byType('orchestr:if');
+    const ifNode = await catalog.byType(SCOPE, 'orchestr:if');
     const params = ifNode?.parameters as Record<string, { defaultValue?: unknown }>;
     expect(params.op?.defaultValue).toBe('eq');
   });
 
   it('the composer-only trigger head exists on the composer surface but not the palette', async () => {
-    expect(await catalog.byType('orchestr:trigger')).not.toBeNull();
+    expect(await catalog.byType(SCOPE, 'orchestr:trigger')).not.toBeNull();
     expect(CONTROL_NODE_SCHEMAS.find((s) => s.type === 'orchestr:trigger')).toBeUndefined();
   });
 });

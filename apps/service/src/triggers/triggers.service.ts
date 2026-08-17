@@ -47,6 +47,7 @@ import {
 import { WebhookSecretsService } from './webhook-secrets.service';
 import { verifyWebhookSignature, type WebhookVerification } from './webhook-verify';
 import { WorkflowAccessService } from '../workflows/workflow-access.service';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** One inbound delivery as the public intake sees it (raw bytes + headers required for HMAC verify). */
 export interface InboundWebhook {
@@ -119,6 +120,7 @@ export class TriggersService {
   private lastComposioReapAt = 0;
   /** Two-strike grace: instance ids seen orphaned on the PREVIOUS reap pass (see the reaper). */
   private composioOrphanCandidates = new Set<string>();
+  private nextComposioOrphanCandidates = new Set<string>();
   /** Delivery-ledger prune throttle: last wall-clock ms the TTL delete ran (0 = never). */
   private lastComposioDeliveryPruneAt = 0;
 
@@ -137,11 +139,12 @@ export class TriggersService {
     private readonly connections: ConnectionsService,
     private readonly agentStepBus: AgentStepBus,
     private readonly triggerCatalog: TriggerCatalogService,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
   /** The trigger palette for the client's canvas picker — served verbatim from the one trigger source. */
-  async catalog(): Promise<Array<Record<string, unknown>>> {
-    return (await this.triggerCatalog.list()).map((row) => row.entry);
+  async catalog(scope: PlatformKeyScope): Promise<Array<Record<string, unknown>>> {
+    return (await this.triggerCatalog.list(scope)).map((row) => row.entry);
   }
 
   /**
@@ -310,37 +313,66 @@ export class TriggersService {
    * subscribed to that instance, and fire each one (Composio shares a `ti_…` across holders).
    */
   async fireComposioDelivery(inbound: InboundWebhook): Promise<{ fired: number; duplicate?: boolean }> {
-    // Edition gate (ADR 0046) must come BEFORE verify: with the rail unconfigured a stale
-    // webhook secret could still verify a delivery that nothing is subscribed to.
-    if (!this.composioTriggers.configured) return { fired: 0 };
-
-    const verified = this.composioTriggers.verifyWebhook(inbound.rawBody, inbound.headers);
-    if (!verified.ok) {
-      this.logger.warn(`composio intake: rejected a delivery — ${verified.reason ?? 'unverified'}`);
-      throw new DomainError('Invalid webhook signature', 401);
-    }
     const triggerId = composioDeliveryTriggerId(inbound.body);
     if (!triggerId) throw new DomainError('Composio delivery is missing metadata.trigger_id', 400);
 
+    // Who this delivery is FOR has to be decided before it can be verified, because the secret
+    // is per scope now. Reading the (still unverified) trigger id only NARROWS which secrets are
+    // tried — a forged id cannot produce a valid signature, so this weakens nothing.
+    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity, {
+      where: { composioTriggerInstanceId: triggerId, paused: false },
+    });
+    if (rows.length === 0) {
+      // A subscription with no live holder (stale delivery / pre-persist race) — ack, don't fire.
+      // This also subsumes the old edition gate: nothing subscribed can never fire.
+      this.logger.warn(`composio intake: no live activation for trigger instance ${triggerId}`);
+      return { fired: 0 };
+    }
+
+    // Composio shares a `ti_…` across holders, so candidates can span scopes. Each scope is
+    // verified against ITS OWN secret and only the ones that verify may fire — an unmatched or
+    // secret-less scope is dropped, never processed on the assumption it is probably fine.
+    const verifiedRows = await this.verifiedComposioHolders(inbound, rows);
+    if (verifiedRows.length === 0) {
+      this.logger.warn(`composio intake: rejected a delivery for ${triggerId} — unverified`);
+      throw new DomainError('Invalid webhook signature', 401);
+    }
+
     // Inbound idempotency (ADR 0050): delivery is at-least-once, so claim the id before firing.
+    // Deliberately AFTER verification — an unverified delivery must not burn a genuine one's id.
     if (!(await this.claimComposioDelivery(inbound.headers['webhook-id'], triggerId))) {
       return { fired: 0, duplicate: true };
     }
 
     const payload = composioDeliveryPayload(inbound.body);
     const deliveryAccountId = composioDeliveryAccountId(inbound.body);
-
-    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity, {
-      where: { composioTriggerInstanceId: triggerId, paused: false },
-    });
-    if (rows.length === 0) {
-      // A subscription with no live holder (stale delivery / pre-persist race) — ack, don't fire.
-      this.logger.warn(`composio intake: no live activation for trigger instance ${triggerId}`);
-      return { fired: 0 };
-    }
     let fired = 0;
-    for (const row of rows) fired += await this.fireComposioActivation(row, payload, deliveryAccountId);
+    for (const row of verifiedRows) {
+      fired += await this.fireComposioActivation(row, payload, deliveryAccountId);
+    }
     return { fired };
+  }
+
+  /** The candidate activations whose OWN scope verifies this delivery; fails closed per scope. */
+  private async verifiedComposioHolders(
+    inbound: InboundWebhook,
+    rows: RuntimeTriggerActivationEntity[],
+  ): Promise<RuntimeTriggerActivationEntity[]> {
+    const decided = new Map<string, boolean>();
+    const verified: RuntimeTriggerActivationEntity[] = [];
+    for (const row of rows) {
+      const scope = await this.platformKeys.scopeForWorkflow(row.workflowId);
+      if (!scope) continue;
+      const key = scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
+      let ok = decided.get(key);
+      if (ok === undefined) {
+        const result = await this.composioTriggers.verifyWebhook(scope, inbound.rawBody, inbound.headers);
+        ok = result.ok;
+        decided.set(key, ok);
+      }
+      if (ok) verified.push(row);
+    }
+    return verified;
   }
 
   /** Claim a delivery id — the insert IS the lock. No id → fires anyway (fail open). */
@@ -471,10 +503,7 @@ export class TriggersService {
       this.logger.error(`activation poll cycle failed: ${errorMessage(err)}`);
     }
     // Orphan reaper (ADR 0046) — throttled to the sweep cadence, never throws.
-    if (
-      this.composioTriggers.configured &&
-      Date.now() - this.lastComposioReapAt >= COMPOSIO_REAP_INTERVAL_MS
-    ) {
+    if (Date.now() - this.lastComposioReapAt >= COMPOSIO_REAP_INTERVAL_MS) {
       this.lastComposioReapAt = Date.now();
       await this.reapOrphanedComposioSubscriptions().catch((err) =>
         this.logger.warn(`composio orphan reaper failed: ${errorMessage(err)}`),
@@ -488,11 +517,34 @@ export class TriggersService {
    * too, so an in-flight subscribe (instance created, row not yet committed) is never killed.
    */
   async reapOrphanedComposioSubscriptions(): Promise<void> {
-    const live = await this.composioTriggers.listActiveInstanceIds();
-    if (live.length === 0) {
-      this.composioOrphanCandidates = new Set(); // nothing live upstream → clear the grace set
-      return;
+    // Per SCOPE: each Composio project is addressed by its own key, and we never try to delete
+    // an instance we do not hold the key for.
+    this.nextComposioOrphanCandidates = new Set();
+    for (const scope of await this.composioScopes()) {
+      await this.reapScope(scope);
     }
+    this.composioOrphanCandidates = this.nextComposioOrphanCandidates;
+  }
+
+  /** Every scope that owns a live Composio subscription — the reaper's unit of work. */
+  private async composioScopes(): Promise<PlatformKeyScope[]> {
+    const rows: Array<{ user_id: string | null; org_id: string | null }> = await this.dataSource.query(
+      `SELECT DISTINCT w.user_id, w.org_id
+         FROM runtime_trigger_activations a
+         JOIN workflows w ON w.id = a.workflow_id
+        WHERE a.composio_trigger_instance_id IS NOT NULL AND a.paused = false`,
+    );
+    const scopes: PlatformKeyScope[] = [];
+    for (const row of rows) {
+      if (row.org_id) scopes.push({ kind: 'org', orgId: row.org_id });
+      else if (row.user_id) scopes.push({ kind: 'user', userId: row.user_id });
+    }
+    return scopes;
+  }
+
+  private async reapScope(scope: PlatformKeyScope): Promise<void> {
+    const live = await this.composioTriggers.listActiveInstanceIds(scope);
+    if (live.length === 0) return;
     const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity, {
       where: { composioTriggerInstanceId: In(live), paused: false },
     });
@@ -500,13 +552,13 @@ export class TriggersService {
     for (const row of rows) if (row.composioTriggerInstanceId) referenced.add(row.composioTriggerInstanceId);
     const orphans = live.filter((id) => !referenced.has(id));
     const priorCandidates = this.composioOrphanCandidates;
-    this.composioOrphanCandidates = new Set(orphans);
+    for (const id of orphans) this.nextComposioOrphanCandidates.add(id);
     const toReap = orphans.filter((id) => priorCandidates.has(id));
     if (toReap.length === 0) return;
     let reaped = 0;
     await runBounded(toReap, COMPOSIO_REAP_CONCURRENCY, async (id) => {
       try {
-        await this.composioTriggers.deleteTriggerInstance(id);
+        await this.composioTriggers.deleteTriggerInstance(scope, id);
         reaped += 1;
       } catch (err) {
         this.logger.warn(`composio orphan reaper: delete ${id} failed: ${errorMessage(err)}`);

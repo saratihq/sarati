@@ -50,16 +50,23 @@ TRUST_PROXY_HEADERS=false
 MAX_REQUEST_BODY_BYTES=2097152
 ```
 
+## Not here: the two platform API keys
+
+Three settings are **not** environment variables — the Composio API key and its webhook signing
+secret (managed connections), and the Anthropic key (the AI composer). They belong to a **user or an
+organization**, not to the instance, and are set in **Settings → Platform keys** in the running app,
+where each takes effect immediately — no restart, no redeploy.
+
+Working inside an organization, you use that organization's keys and its owners and admins set them.
+Working outside one, you use your own. They are encrypted at rest with `FERNET_KEY`, like every stored
+credential, and the API never reads any of them back.
+
+Setting `COMPOSIO_API_KEY`, `COMPOSIO_WEBHOOK_SECRET` or `ANTHROPIC_API_KEY` in `.env` does nothing.
+If you are upgrading and had them there, enter them once in Settings and delete the lines.
+
 ## Integrations and auth
 
 ```bash
-# Managed connections. Empty is inert — built-in actions and bring-your-own auth still work.
-COMPOSIO_API_KEY=
-COMPOSIO_WEBHOOK_SECRET=
-
-# The AI composer. Empty → it reports itself unavailable and everything else works.
-ANTHROPIC_API_KEY=
-
 # Hosts the SSRF guard lets back in. It blocks private, loopback, link-local and
 # cloud-metadata targets by default.
 ORCHESTR_HTTP_ALLOWED_HOSTS=

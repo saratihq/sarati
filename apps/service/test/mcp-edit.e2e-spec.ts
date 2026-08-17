@@ -156,7 +156,6 @@ describe('Platform MCP workflow editing (e2e, real client, isolated DB)', () => 
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     // Composio projection OFF (ADR 0046): the trigger half of the vocabulary makes no live call.
-    process.env.COMPOSIO_API_KEY = '';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

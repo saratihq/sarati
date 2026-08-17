@@ -19,6 +19,7 @@ import {
 import { composerSystemPrompt } from './system-prompt';
 import { ThreadStore, type ThreadRecord } from './thread-store';
 import { WorkflowServiceClient } from './workflow-client';
+import { PlatformKeysClient } from '../config/platform-keys.client';
 
 /**
  * One composer turn: user message in, protocol events out. The SDK loop and
@@ -67,8 +68,6 @@ const GENERIC_ERROR = 'The composer hit a problem — please try again.';
 export class ComposerService {
   private readonly logger = new Logger(ComposerService.name);
   private readonly env: EnvConfig;
-  /** Non-null only when PARAM_MODEL is set — gates the fill_params tool AND its prompt section. */
-  private readonly paramCompleter: ParamCompleteFn | null;
 
   constructor(
     @Inject(ConfigService) config: ConfigService<{ env: EnvConfig }, true>,
@@ -77,12 +76,14 @@ export class ComposerService {
     private readonly workflowService: WorkflowServiceClient,
     private readonly answers: PendingAnswers,
     @Inject(QUERY_FN) private readonly queryFn: QueryFn,
+    private readonly platformKeys: PlatformKeysClient,
   ) {
     this.env = config.get('env', { infer: true });
-    this.paramCompleter =
-      this.env.paramModel && this.env.anthropicApiKey
-        ? anthropicParamCompleter(this.env.anthropicApiKey, this.env.paramModel)
-        : null;
+  }
+
+  /** Non-null only when PARAM_MODEL is set — gates the fill_params tool AND its prompt section. */
+  private paramCompleterFor(anthropicApiKey: string): ParamCompleteFn | null {
+    return this.env.paramModel ? anthropicParamCompleter(anthropicApiKey, this.env.paramModel) : null;
   }
 
   /**
@@ -95,6 +96,7 @@ export class ComposerService {
     request: StreamRequest,
     clientGone: AbortSignal,
     callerToken: string | null,
+    callerOrgId: string | null,
     userKey: string | null = null,
   ): AsyncGenerator<SequencedComposerEvent> {
     const session = request.session_id
@@ -113,6 +115,7 @@ export class ComposerService {
     try {
       // Freshest caller credentials win — tool calls run AS the user.
       if (callerToken) session.callerToken = callerToken;
+      session.callerOrgId = callerOrgId;
       // A session that started before its workflow existed (composer-first new
       // build) binds to it on the first message carrying the id — never
       // rebinds. Its durable thread moves with it (scratch → the created
@@ -399,24 +402,28 @@ export class ComposerService {
     session.turnAbort = new AbortController();
     const abort = AbortSignal.any([session.turnAbort.signal, AbortSignal.timeout(TURN_TIMEOUT_MS)]);
     const emit = (event: ComposerEvent): void => emitToSession(session, event);
-    // ComposerEnabledGuard already 503s every route into here without a key;
-    // reaching this without one is a wiring bug, and spawning a keyless
-    // subprocess would surface it as an opaque SDK failure instead.
-    const anthropicApiKey = this.env.anthropicApiKey;
-    if (!anthropicApiKey) throw new Error('ANTHROPIC_API_KEY is not configured — the composer is disabled.');
+    // ComposerEnabledGuard already 503s every route into here without a key; reaching this
+    // without one means it was cleared mid-turn, and a keyless subprocess would surface that
+    // as an opaque SDK failure instead.
+    const anthropicApiKey = await this.platformKeys.anthropicApiKey({
+      token: session.callerToken,
+      orgId: session.callerOrgId,
+    });
+    if (!anthropicApiKey) throw new Error('No Anthropic API key is configured — the composer is disabled.');
+    const paramCompleter = this.paramCompleterFor(anthropicApiKey);
     const server = buildComposerServer({
       session,
       client: this.workflowService,
       emit,
       answers: this.answers,
-      paramCompleter: this.paramCompleter,
+      paramCompleter,
     });
 
     const q = this.queryFn({
       prompt: this.buildPrompt(session, message),
       options: {
         model: this.env.composerModel,
-        systemPrompt: composerSystemPrompt(this.paramCompleter !== null),
+        systemPrompt: composerSystemPrompt(paramCompleter !== null),
         mcpServers: { composer: server },
         // Custom-tools-only: no built-in file/bash tools in context at all.
         tools: [],

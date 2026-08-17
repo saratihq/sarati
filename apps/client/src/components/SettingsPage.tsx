@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import ApiKeysSettings from "./ApiKeysSettings";
+import PlatformKeysSettings from "./PlatformKeysSettings";
 import { ThemePicker } from "./ThemePicker";
 
 export default function SettingsPage() {
@@ -179,6 +180,9 @@ export default function SettingsPage() {
         </section>
 
         <CreateOrgModal open={showCreateOrg} onClose={() => setShowCreateOrg(false)} />
+
+        {/* Instance-wide platform credentials (Composio / Anthropic) — owner and admin only */}
+        <PlatformKeysSettings />
 
         {/* Personal API keys (ork_) — create / list / revoke */}
         <ApiKeysSettings />

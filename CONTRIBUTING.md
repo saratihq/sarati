@@ -49,9 +49,14 @@ The role name is not cosmetic: `apps/service/db/schema.sql` assigns ownership to
 `db:init` fails against a database whose owner role does not exist.
 
 Using different credentials means changing the two commands above, `DATABASE_URL` in
-`apps/service/.env`, **and** exporting `DATABASE_URL` in your shell — the e2e suites read it from the
-environment only. Jest loads no env file, so they otherwise fall back to the same default the service
-uses.
+`apps/service/.env`, **and** exporting `DATABASE_URL` in your shell. The e2e suites pick their admin
+database before Nest starts, so they read the environment only and otherwise fall back to the same
+default the service uses.
+
+Once the app is running, `ConfigModule` does load `apps/service/.env` — so a setting you leave out of
+the environment can still reach the code under test from that file, and pass on your machine while
+failing in CI, which has no such file. Anything a suite depends on belongs in
+`test/support/test-env.ts`, not in your `.env`.
 
 ### 3. Create the schema
 

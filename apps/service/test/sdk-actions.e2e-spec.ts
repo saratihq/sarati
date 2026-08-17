@@ -9,6 +9,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
+import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -93,7 +94,6 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
       });
     });
     await new Promise<void>((resolve) => composioStub.listen(0, '127.0.0.1', resolve));
-    process.env.COMPOSIO_API_KEY = 'test-composio-key';
     process.env.COMPOSIO_BASE_URL = `http://127.0.0.1:${(composioStub.address() as AddressInfo).port}`;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -101,6 +101,8 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     configureApp(app);
     await app.init();
     await listenOnLoopback(app);
+    // The managed rail's key lives in the store, not the environment.
+    await seedPlatformKeyEverywhere(app, 'composio_api_key', 'test-composio-key');
   }, 30_000);
 
   afterAll(async () => {
@@ -108,7 +110,6 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     await new Promise((resolve) => composioStub.close(resolve));
     process.env.DATABASE_URL = ADMIN_URL;
     process.env.MOCK_AUTH = 'false';
-    delete process.env.COMPOSIO_API_KEY;
     delete process.env.COMPOSIO_BASE_URL;
   });
 

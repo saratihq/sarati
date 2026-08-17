@@ -16,6 +16,7 @@ import { callerSubOf, callerTokenOf, ComposerAuthGuard } from './composer-auth.g
 import { ComposerEnabledGuard } from './composer-enabled.guard';
 import { ComposerService } from './composer.service';
 import type { AttachEvent, WorkflowIr } from './protocol';
+import { callerOf } from './caller-context';
 
 class StreamDto {
   @IsString()
@@ -101,7 +102,13 @@ export class ComposerController {
     await this.pipe(
       req,
       res,
-      this.composer.stream(body, this.gone(req).signal, callerTokenOf(req), callerSubOf(req)),
+      this.composer.stream(
+        body,
+        this.gone(req).signal,
+        callerTokenOf(req),
+        callerOf(req).orgId ?? null,
+        callerSubOf(req),
+      ),
     );
   }
 

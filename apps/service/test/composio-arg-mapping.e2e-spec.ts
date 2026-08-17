@@ -11,6 +11,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
+import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -97,7 +98,6 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
-    process.env.COMPOSIO_API_KEY = 'test-composio-key';
     process.env.COMPOSIO_BASE_URL = `http://127.0.0.1:${(composioStub.address() as AddressInfo).port}`;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -105,6 +105,8 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
     configureApp(app);
     await app.init();
     await listenOnLoopback(app);
+    // The managed rail's key lives in the store, not the environment.
+    await seedPlatformKeyEverywhere(app, 'composio_api_key', 'test-composio-key');
 
     const connections = app.get(ConnectionsService);
     gmailConnId = (await connections.createManaged(userA, 'gmail', CA_GMAIL)).id;
@@ -118,7 +120,6 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
     await new Promise((resolve) => composioStub.close(resolve));
     await db.end();
     process.env.DATABASE_URL = ADMIN_URL;
-    delete process.env.COMPOSIO_API_KEY;
     delete process.env.COMPOSIO_BASE_URL;
   });
 

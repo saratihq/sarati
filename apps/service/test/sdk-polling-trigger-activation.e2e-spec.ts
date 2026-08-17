@@ -180,7 +180,7 @@ describe('SDK polling-trigger activation (e2e, stubbed fetch)', () => {
   }
 
   it('the catalog surfaces the four SDK polling triggers (OSS rail — no Composio key)', async () => {
-    const catalog = await app.get(TriggersService).catalog();
+    const catalog = await app.get(TriggersService).catalog({ kind: 'user', userId: randomUUID() });
     const byType = new Map(catalog.map((e) => [e.type as string, e]));
     expect(byType.get('rss.new_item')).toMatchObject({ auth: 'none' });
     expect(byType.get('hackernews.new_story')).toMatchObject({ auth: 'none' });

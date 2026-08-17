@@ -11,6 +11,18 @@ import { composioToolFor } from './sdk-actions.registry';
 import { composioTriggerTypes, POLL_CURSOR_KEY } from './composio-trigger.registry';
 import type { RunActionInput, TriggerInput } from './managed-integration-provider';
 import type { SdkActionsProvider } from './sdk-actions.provider';
+import { PlatformKeysService } from '../platform/platform-keys.service';
+
+/** The router resolves a personal scope from the run's own externalUserId. */
+const SCOPE = { kind: 'user', userId: 'user-1' } as const;
+
+/** Scope resolution in these tests is fixed — they exercise routing, not key ownership. */
+function platformKeysStub(): PlatformKeysService {
+  return {
+    scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
+    composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? 'ak_test'),
+  } as unknown as PlatformKeysService;
+}
 
 // There are exactly two rails: our SDK actions and Composio, else an honest error.
 function build(opts: {
@@ -38,7 +50,7 @@ function build(opts: {
     runAction: runOurs,
   } as unknown as SdkActionsProvider;
   const composio = {
-    configured: opts.composioConfigured ?? true,
+    isConfigured: () => Promise.resolve(opts.composioConfigured ?? true),
     execute,
     executeBySlug,
   } as unknown as ComposioExecutionProvider;
@@ -50,7 +62,7 @@ function build(opts: {
   const config = {
     get: () => ({ composioFallbackApps: opts.fallbackApps ?? '' }) as Partial<EnvConfig>,
   } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const router = new ActionRouterProvider(orchestrActions, composio, connections, config);
+  const router = new ActionRouterProvider(orchestrActions, composio, connections, config, platformKeysStub());
   return {
     router,
     execute,
@@ -110,6 +122,7 @@ describe('ActionRouterProvider', () => {
       const out = await router.runAction(input(`${slug}.get_thing`, 'conn-1'));
       expect(out).toEqual({ output: { via: 'composio' } });
       expect(execute).toHaveBeenCalledWith({
+        scope: SCOPE,
         appSlug: slug,
         actionName: 'get_thing',
         props: { foo: 'bar' },
@@ -160,6 +173,7 @@ describe('ActionRouterProvider', () => {
     const out = await router.runAction(input('jira.search_issues', 'conn-1'));
     expect(out).toEqual({ output: { via: 'composio' } });
     expect(execute).toHaveBeenCalledWith({
+      scope: SCOPE,
       appSlug: 'jira',
       actionName: 'search_issues',
       props: { foo: 'bar' },
@@ -224,6 +238,7 @@ describe('ActionRouterProvider', () => {
     expect(out).toEqual({ output: { via: 'composio' } });
     expect(runOurs).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledWith({
+      scope: SCOPE,
       appSlug: 'asana',
       actionName: 'get_current_user',
       props: { foo: 'bar' },
@@ -448,7 +463,7 @@ describe('ActionRouterProvider trigger routing', () => {
     });
     const events = await router.pollTrigger(inp);
 
-    expect(executeBySlug).toHaveBeenCalledWith('GMAIL_FETCH_EMAILS', {
+    expect(executeBySlug).toHaveBeenCalledWith(SCOPE, 'GMAIL_FETCH_EMAILS', {
       connectedAccountId: 'ca__1',
       userId: 'user-1',
       arguments: {
@@ -497,7 +512,7 @@ describe('ActionRouterProvider trigger routing', () => {
     });
     const events = await router.pollTrigger(inp);
     // No cursor and no props → no query at all, and a small first window.
-    expect(executeBySlug).toHaveBeenCalledWith('GMAIL_FETCH_EMAILS', {
+    expect(executeBySlug).toHaveBeenCalledWith(SCOPE, 'GMAIL_FETCH_EMAILS', {
       connectedAccountId: 'ca__1',
       userId: 'user-1',
       arguments: { max_results: 5 },
@@ -520,7 +535,7 @@ describe('ActionRouterProvider trigger routing', () => {
 
   it('an unconfigured Composio is an honest poll error for a managed registry trigger', async () => {
     const { router, executeBySlug } = build({ managedRef: managed(), composioConfigured: false });
-    await expect(router.pollTrigger(triggerInput())).rejects.toThrow(/not configured/i);
+    await expect(router.pollTrigger(triggerInput())).rejects.toThrow(/no Composio API key is set/i);
     expect(executeBySlug).not.toHaveBeenCalled();
   });
 });

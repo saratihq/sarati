@@ -5,7 +5,9 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Pool } from 'pg';
 
 import type { EnvConfig } from '../config/env.config';
+import { PlatformKeysClient } from '../config/platform-keys.client';
 import { ComposerAuthGuard } from './composer-auth.guard';
+import { ComposerAvailability } from './composer-availability.service';
 import { ComposerEnabledGuard } from './composer-enabled.guard';
 import { ComposerStatusController } from './composer-status.controller';
 import { ComposerController } from './composer.controller';
@@ -21,6 +23,8 @@ import { WorkflowServiceClient } from './workflow-client';
     ComposerService,
     ComposerAuthGuard,
     ComposerEnabledGuard,
+    ComposerAvailability,
+    PlatformKeysClient,
     SessionStore,
     PendingAnswers,
     WorkflowServiceClient,

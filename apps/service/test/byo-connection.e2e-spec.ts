@@ -20,7 +20,6 @@ describe('BYO connection (A1, e2e, isolated DB, mock auth)', () => {
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
-    process.env.COMPOSIO_API_KEY = ''; // managed rail off → BYO-only
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

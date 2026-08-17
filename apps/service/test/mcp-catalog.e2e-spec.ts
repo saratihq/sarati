@@ -90,7 +90,6 @@ describe('Platform MCP catalog tools (e2e, real client, isolated DB)', () => {
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     // Composio trigger projection OFF (ADR 0046): the catalog stays deterministic and makes no live call.
-    process.env.COMPOSIO_API_KEY = '';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

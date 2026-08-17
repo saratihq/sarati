@@ -56,7 +56,6 @@ POSTGRES_PASSWORD=$(rand 32)
 SARATI_URL=http://localhost:${PORT}
 SARATI_PORT=${PORT}
 SARATI_VERSION=${SARATI_VERSION:-latest}
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 EOF
   chmod 600 .env
   say "Wrote $(pwd)/.env — back it up. Losing FERNET_KEY makes stored credentials unrecoverable."

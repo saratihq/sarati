@@ -3,19 +3,14 @@ title: The AI composer
 description: Describe a workflow and it builds one on the canvas. What it does well, and where to check it.
 ---
 
-The composer is off until the instance has an Anthropic key. Add it to your install's `.env` and
-restart:
+The composer is off until the instance has an Anthropic key. An owner or admin adds one in
+**Settings → Platform keys**, and it takes effect immediately — nothing to edit, nothing to restart.
+Get a key from the [Anthropic Console](https://console.anthropic.com/settings/keys).
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-…
-```
+If you are not an owner or admin, Settings tells you so and names who can add it.
 
-```bash
-docker compose up -d
-```
-
-Without it, **New workflow** opens a bare canvas. With it, the same entry point opens the composer
-alongside the canvas.
+Without a key, **New workflow** opens a bare canvas. With one, the same entry point opens the
+composer alongside the canvas.
 
 <img class="shot shot-dark" src="/shots/composer-dark.webp" alt="The composer panel beside an empty canvas, offering starting points and a prompt box." />
 <img class="shot shot-light" src="/shots/composer-light.webp" alt="The composer panel beside an empty canvas, offering starting points and a prompt box." />

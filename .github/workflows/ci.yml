@@ -68,15 +68,17 @@ jobs:
           POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr '+/' '-_')
           SARATI_URL=http://localhost:8080
           SARATI_PORT=8080
-          COMPOSIO_API_KEY=ci-config-reachability-probe
+          LOG_LEVEL=debug
           EOF
           docker compose up -d
       - name: A documented setting in .env must reach the service
         run: |
           # Booting proves the images run; it never proved configuration arrives. Without this,
           # a setting can be documented and unreachable at the same time.
-          got=$(docker compose exec -T service printenv COMPOSIO_API_KEY || true)
-          test "$got" = 'ci-config-reachability-probe' \
+          # A REAL value, not a sentinel: LOG_LEVEL is validated, so a junk probe crashed the
+          # service at boot and proved nothing. `debug` differs from the default and still runs.
+          got=$(docker compose exec -T service printenv LOG_LEVEL || true)
+          test "$got" = 'debug' \
             || { echo "::error::.env settings do not reach the service (got '$got')"; exit 1; }
           docker compose exec -T service printenv DATABASE_URL | grep -q '@db:5432/sarati' \
             || { echo "::error::compose environment: no longer overrides .env"; exit 1; }

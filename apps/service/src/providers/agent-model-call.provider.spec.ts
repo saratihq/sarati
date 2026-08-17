@@ -6,6 +6,7 @@ import type { ConnectionsService, ManagedConnectionRef } from '../connections/co
 import type { EnvConfig } from '../config/env.config';
 import type { AgentModelAuth, AgentProvider } from '../runtime/agent';
 import { AgentModelCallProvider } from './agent-model-call.provider';
+import { PlatformKeysService } from '../platform/platform-keys.service';
 
 /** A fake `fetch` returning a canned JSON response and recording each call's url/headers/body. */
 function fakeFetch(handler: (url: string) => { status: number; body: unknown }): {
@@ -33,8 +34,16 @@ function fakeFetch(handler: (url: string) => { status: number; body: unknown }):
 }
 
 function config(): ConfigService<{ env: EnvConfig }, true> {
-  const env = { composioApiKey: 'ak_test', composioBaseUrl: 'https://backend.composio.dev' };
+  const env = { composioBaseUrl: 'https://backend.composio.dev' };
   return { get: () => env } as unknown as ConfigService<{ env: EnvConfig }, true>;
+}
+
+/** The stored Composio key — the managed rail's only source now that it is not an env var. */
+function platformKeys(apiKey = 'ak_test'): PlatformKeysService {
+  return {
+    scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
+    composioApiKey: () => Promise.resolve(apiKey),
+  } as unknown as PlatformKeysService;
 }
 
 function connections(over: { ref?: ManagedConnectionRef | null; credential?: unknown }): ConnectionsService {
@@ -111,7 +120,12 @@ describe('AgentModelCallProvider', () => {
         body: { data: { content: [{ type: 'text', text: 'ok' }] }, status: 200, headers: {} },
       };
     });
-    const provider = new AgentModelCallProvider(config(), connections({ ref: managedRef }), impl);
+    const provider = new AgentModelCallProvider(
+      config(),
+      connections({ ref: managedRef }),
+      impl,
+      platformKeys(),
+    );
 
     const turn = await provider.call(req('claude', 'claude-opus-4-8'), authFor({ connectionId: 'c1' }));
 

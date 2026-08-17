@@ -4,6 +4,10 @@ import type { DataSource } from 'typeorm';
 import type { EnvConfig } from '../config/env.config';
 import { ComposioProvider } from './composio.provider';
 import { ComposioExecutionProvider } from './composio-execution.provider';
+import { PlatformKeysService } from '../platform/platform-keys.service';
+
+/** Any scope will do here — the tests are about behaviour, not about whose key it is. */
+const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
 /**
  * LIVE proof of the Composio execution fallback through the SAME production classes the runtime uses.
@@ -23,14 +27,18 @@ const SLACK_USER = process.env.COMPOSIO_LIVE_SLACK_USER ?? '';
   const config = {
     get: () =>
       ({
-        composioApiKey: process.env.COMPOSIO_API_KEY ?? '',
         composioBaseUrl: process.env.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
       }) as Partial<EnvConfig>,
   } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const provider = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config));
+  // The key is stored, not env-supplied — a manual live run hands it over the same seam.
+  const keys = {
+    composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? ''),
+  } as unknown as PlatformKeysService;
+  const provider = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config, keys));
 
   it('runs slack.listUsers through the fallback and returns real members', async () => {
     const result = await provider.execute({
+      scope: SCOPE,
       appSlug: 'slack',
       actionName: 'listUsers',
       props: {},

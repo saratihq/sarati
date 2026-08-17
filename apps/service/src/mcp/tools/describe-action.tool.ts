@@ -5,6 +5,8 @@ import type { ApiScope } from '../../auth/scopes';
 import { ComposeCatalogService } from '../../compose/compose-catalog.service';
 import { DomainError } from '../../common/domain-error';
 import type { McpTool } from '../mcp-tool';
+import { PlatformKeysService } from '../../platform/platform-keys.service';
+import type { McpCallContext } from '../mcp-tool';
 
 /** Parameter-schema budget, well under the 15 KB result cap so the envelope never trims a list. */
 const SCHEMA_BUDGET_BYTES = 6_000;
@@ -83,11 +85,15 @@ export class DescribeActionTool implements McpTool {
     openWorldHint: false,
   };
 
-  constructor(private readonly catalog: ComposeCatalogService) {}
+  constructor(
+    private readonly catalog: ComposeCatalogService,
+    private readonly platformKeys: PlatformKeysService,
+  ) {}
 
-  async run(input: unknown): Promise<z.infer<typeof Output>> {
+  async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { type, include_properties: requested } = Input.parse(input);
-    const entry = await this.catalog.byType(type.trim());
+    const scope = await this.platformKeys.scopeFor(ctx.principal.user.id, ctx.principal.activeOrgId);
+    const entry = await this.catalog.byType(scope, type.trim());
     if (!entry) {
       throw new DomainError(
         `Unknown type '${type.trim()}' — call orchestr_search_actions and copy an exact \`type\` value`,
