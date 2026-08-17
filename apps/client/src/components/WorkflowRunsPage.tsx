@@ -55,6 +55,14 @@ function previewText(value: unknown): string | null {
   }
 }
 
+// An output too large to store is kept as its head — say so, in the unit the cap is counted in.
+function truncationNote(step: RunStepInfo): string | null {
+  const cut = step.output_truncated;
+  if (!cut) return null;
+  const n = (chars: number) => chars.toLocaleString("en-US");
+  return `Output too large to store — ${n(cut.size_chars)} characters, cap ${n(cut.max_chars)}. Showing the start of it.`;
+}
+
 function stepDuration(step: RunStepInfo): string | null {
   if (!step.started_at || !step.finished_at) return null;
   const ms = new Date(step.finished_at).getTime() - new Date(step.started_at).getTime();
@@ -65,6 +73,7 @@ function StepRow({ step }: { step: RunStepInfo }) {
   const failed = step.status === "failed" || step.status === "error" || step.status === "crashed";
   const succeeded = step.status === "completed" || step.status === "success";
   const output = previewText(step.output_preview);
+  const truncated = truncationNote(step);
   const duration = stepDuration(step);
 
   return (
@@ -118,6 +127,15 @@ function StepRow({ step }: { step: RunStepInfo }) {
               ))}
             </div>
           </div>
+        )}
+        {truncated && (
+          <p
+            className="text-[11px] m-0 mt-1.5 break-words"
+            style={{ color: "var(--orchestr-warning)" }}
+            data-testid="run-step-output-truncated"
+          >
+            {truncated}
+          </p>
         )}
         {output && (
           <pre

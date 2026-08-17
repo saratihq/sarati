@@ -150,6 +150,36 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
     expect(rows.rows).toEqual([{ environment: 'production', version_id: v1Id }]);
   });
 
+  it('deploy: `activated: true` is only said once the activation is materialized — no sweep wait', async () => {
+    // Nothing is reconciled by hand here: the deploy above is the only thing that has run.
+    const rows = await db.query(
+      `SELECT kind, trigger_node_id FROM runtime_trigger_activations WHERE workflow_id = $1`,
+      [wfId],
+    );
+    expect(rows.rows).toEqual([{ kind: 'webhook', trigger_node_id: 'trigger' }]);
+  });
+
+  it('deploy: a trigger that cannot be stood up reports activated:false and says why', async () => {
+    const doc = webhookDoc();
+    // A feed nothing serves: the seed poll fails, so the activation cannot be stood up.
+    (doc.nodes as Array<Record<string, unknown>>)[0] = {
+      id: 'trigger',
+      name: 'When an item is published',
+      node_type: 'rss.new_item',
+      type_version: 1,
+      parameters: { url: 'http://127.0.0.1:9/feed.xml' },
+      position: { x: 0, y: 0 },
+      metadata: { trigger: true },
+    };
+    const deployed = await asA(
+      http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: doc }),
+    ).expect(201);
+
+    expect(deployed.body.activated).toBe(false);
+    // Whichever leg refuses it — the SSRF guard, or the connection itself — the caller is told.
+    expect(String(deployed.body.activation_error)).toMatch(/private\/internal address|fetch failed/);
+  });
+
   it('the reconciler activates the webhook trigger for production (env pointer × trigger node)', async () => {
     // Pointer moves reconcile inline when pg-boss is off; call again — idempotent — to be deterministic.
     await app.get(TriggerReconcilerService).reconcile(wfId);
