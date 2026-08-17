@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
 import { EncryptionService } from '../common/crypto/encryption.service';
+import { DomainError } from '../common/domain-error';
 
 /** The two optional platform credentials, set from Settings. Widening this set is a migration. */
 export const PLATFORM_KEY_NAMES = [
@@ -54,6 +55,14 @@ export class PlatformKeysService {
 
   /** Upsert the key for this scope. Encrypted at rest; never read back over the API. */
   async set(scope: PlatformKeyScope, name: PlatformKeyName, plaintext: string): Promise<void> {
+    // Encryption fails OPEN elsewhere for credentials stored before it existed; a key typed in
+    // today has no such history, so storing it in the clear is refused rather than done quietly.
+    if (!this.encryption.canEncrypt()) {
+      throw new DomainError(
+        'This instance has no FERNET_KEY, so the key would be stored unencrypted. Set FERNET_KEY and restart, then add it again.',
+        503,
+      );
+    }
     const enc = this.encryption.encryptToken(plaintext);
     // Index INFERENCE, not a constraint name: the uniqueness is a PARTIAL index (the unused
     // owner column is NULL), and `ON CONFLICT ON CONSTRAINT` cannot target one.
