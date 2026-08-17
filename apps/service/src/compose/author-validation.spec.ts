@@ -13,6 +13,7 @@ import {
 const FACTS: CatalogFacts = {
   controlTypes: new Set(['orchestr:if', 'orchestr:agent', 'orchestr:loop']),
   authOf: (type) => (type === 'slack.send_channel_message' ? 'oauth2' : 'none'),
+  isTriggerType: (type) => type === 'rss.new_item',
 };
 
 const node = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -59,6 +60,22 @@ describe('the one author-time gate', () => {
     expect(codesOf(doc({ nodes: [node({ node_type: 'ghost.vanished' })] }))).toContain(
       'unresolvable_node_type',
     );
+  });
+
+  /** A catalog trigger authored as a step is a MISSING MARKER, never an unknown type. */
+  it('names the missing trigger marker instead of calling a catalog trigger unrecognized', () => {
+    const report = validateAuthoredIr(doc({ nodes: [node({ node_type: 'rss.new_item' })] }), FACTS);
+    const [first] = report.errors;
+    expect(first?.code).toBe('trigger_not_marked');
+    expect(first?.message).toContain('"metadata": {"trigger": true}');
+    expect(report.errors.map((e) => e.code)).not.toContain('unresolvable_node_type');
+  });
+
+  it('accepts the same node once it carries the trigger marker', () => {
+    const marked = doc({
+      nodes: [node({ node_type: 'rss.new_item', metadata: { trigger: true } })],
+    });
+    expect(validateAuthoredIr(marked, FACTS).valid).toBe(true);
   });
 
   /** The compiler peels every trigger, so a second one would silently never fire. */

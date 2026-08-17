@@ -103,6 +103,7 @@ export class ComposeCatalogService {
     return {
       controlTypes: this.controlTypes(),
       authOf: (nodeType: string) => auth.get(nodeType) ?? 'none',
+      isTriggerType: (nodeType: string) => this.triggerCatalog.isKnownTriggerType(nodeType),
     };
   }
 
