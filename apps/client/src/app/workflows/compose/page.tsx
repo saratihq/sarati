@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Rocket } from "lucide-react";
 import { useComposer } from "@/store/useComposer";
-import { useWorkflow } from "@/store/useWorkflow";
+import { UNTITLED_WORKFLOW, useWorkflow } from "@/store/useWorkflow";
 import { adoptSessionForWorkflow } from "@/store/useComposer";
 import { Button } from "@/components/ui/button";
 import ComposerBar from "@/components/ComposerBar";
@@ -63,10 +63,17 @@ export default function ComposeNewWorkflowPage() {
 
   // The composer names the plan it just described, so a save never files it as "Untitled workflow".
   useEffect(() => {
-    if (!suggestedName || renamedByHand.current || !seeded) return;
+    if (!suggestedName || renamedByHand.current) return;
     setName(suggestedName);
-    setWorkflowDocName(suggestedName);
-  }, [suggestedName, seeded, setWorkflowDocName]);
+  }, [suggestedName]);
+
+  // Every op_applied replaces the canvas document with the agent's, which carries the seeded name —
+  // so the chosen name is re-asserted onto it rather than set once.
+  const docName = typeof workflowJson?.name === "string" ? workflowJson.name : "";
+  useEffect(() => {
+    if (!seeded || !name || docName === name) return;
+    setWorkflowDocName(name);
+  }, [seeded, name, docName, setWorkflowDocName]);
 
   const nodeCount = Array.isArray(workflowJson?.nodes) ? (workflowJson.nodes as unknown[]).length : 0;
   const hasSteps = nodeCount > 1; // more than the trigger
@@ -114,7 +121,7 @@ export default function ComposeNewWorkflowPage() {
       return;
     }
     manualNav.current = true;
-    setWorkflowDocName(name.trim() || "Untitled workflow");
+    setWorkflowDocName(name.trim() || UNTITLED_WORKFLOW);
     await deploy();
     const created = useWorkflow.getState().workflowId;
     if (created) {
@@ -146,7 +153,7 @@ export default function ComposeNewWorkflowPage() {
           <div className="flex items-center gap-2 min-w-0">
             {/* Local-only until the first Save creates the workflow row. */}
             <InlineRename
-              name={name || "Untitled workflow"}
+              name={name || UNTITLED_WORKFLOW}
               onRenamed={(next) => {
                 renamedByHand.current = true;
                 setName(next);

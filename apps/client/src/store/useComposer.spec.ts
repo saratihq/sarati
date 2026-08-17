@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "@/api/agent";
 import { useComposer } from "@/store/useComposer";
+import { UNTITLED_WORKFLOW, useWorkflow } from "@/store/useWorkflow";
 
 vi.mock("@/api/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof agent>()),
@@ -71,6 +72,35 @@ describe("useComposer suggestedName", () => {
     );
     await useComposer.getState().attach();
     expect(useComposer.getState().suggestedName).toBe("Hacker News mentions → Slack");
+  });
+
+  /**
+   * The agent's own document carries the seeded name and every op_applied replaces the canvas with
+   * it, so the create path stamps the plan's name rather than trusting an earlier one to survive.
+   */
+  it("stamps the plan's name on the document the save chip creates", async () => {
+    const deploy = vi.fn().mockResolvedValue(undefined);
+    useWorkflow.setState({ workflowJson: { name: UNTITLED_WORKFLOW, nodes: [], edges: [] }, deploy });
+    composerAttach.mockImplementation(scripted([{ event: "brief", data: brief(), seq: 1 }]));
+    await useComposer.getState().attach();
+
+    await useComposer.getState().acceptOffer("live");
+
+    expect(deploy).toHaveBeenCalled();
+    expect((useWorkflow.getState().workflowJson as { name: string }).name).toBe(
+      "Hacker News mentions → Slack",
+    );
+  });
+
+  it("never renames a workflow a person already named", async () => {
+    const deploy = vi.fn().mockResolvedValue(undefined);
+    useWorkflow.setState({ workflowJson: { name: "My own name", nodes: [], edges: [] }, deploy });
+    composerAttach.mockImplementation(scripted([{ event: "brief", data: brief(), seq: 1 }]));
+    await useComposer.getState().attach();
+
+    await useComposer.getState().acceptOffer("live");
+
+    expect((useWorkflow.getState().workflowJson as { name: string }).name).toBe("My own name");
   });
 
   it("starts with no name, and forgets it on reset", async () => {
