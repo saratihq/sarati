@@ -237,6 +237,33 @@ describe('workflows read slice (e2e, isolated DB, mock auth)', () => {
     expect(missing.body.detail).toContain('Branch not found');
   });
 
+  it('GET diff — branch names with no version numbers diff the two HEADS', async () => {
+    const heads = await request(app.getHttpServer())
+      .get(`/api/workflows/${wfId}/diff?from_branch=main&to_branch=feature-x`)
+      .expect(200);
+    // main's head is v2, feature-x's head is its own v1 — resolved without either being named.
+    expect(heads.body.from_version_id).toBe(v2Id);
+    expect(heads.body.to_version_id).toBe(f1Id);
+    expect(heads.body.from_branch).toBe('main');
+    expect(heads.body.to_branch).toBe('feature-x');
+
+    // A single `branch` names both sides — the same-branch degenerate case is an empty diff.
+    const sameHead = await request(app.getHttpServer())
+      .get(`/api/workflows/${wfId}/diff?branch=main`)
+      .expect(200);
+    expect(sameHead.body.from_version_id).toBe(v2Id);
+    expect(sameHead.body.to_version_id).toBe(v2Id);
+
+    const unknown = await request(app.getHttpServer())
+      .get(`/api/workflows/${wfId}/diff?from_branch=main&to_branch=nope`)
+      .expect(404);
+    expect(unknown.body.detail).toContain('Branch not found');
+
+    // Naming nothing at all can no longer invent version 0.
+    const unnamed = await request(app.getHttpServer()).get(`/api/workflows/${wfId}/diff`).expect(400);
+    expect(unnamed.body.detail).toContain('Name what to diff');
+  });
+
   it('E2 authz: a foreign workflow, a NULL-owner one and an unknown id are all the same 404', async () => {
     const foreign = await request(app.getHttpServer()).get(`/api/workflows/${foreignWfId}`).expect(404);
     expect(foreign.body.detail).toContain('not found');

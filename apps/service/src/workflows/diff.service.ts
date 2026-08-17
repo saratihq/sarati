@@ -186,9 +186,13 @@ function side(version: WorkflowVersionEntity, branches: Map<string, string>): Di
 }
 
 function notFound(workflowId: string, ref: VersionRef): DomainError {
-  const named =
-    'id' in ref ? `id ${ref.id}` : `number ${ref.number}${ref.branch ? ` on branch ${ref.branch}` : ''}`;
-  return new DomainError(`Version ${named} not found in workflow ${workflowId}`, 404);
+  return new DomainError(`Version ${namedRef(ref)} not found in workflow ${workflowId}`, 404);
+}
+
+function namedRef(ref: VersionRef): string {
+  if ('id' in ref) return `id ${ref.id}`;
+  if ('head' in ref) return `head of branch ${ref.head}`;
+  return `number ${ref.number}${ref.branch ? ` on branch ${ref.branch}` : ''}`;
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {
