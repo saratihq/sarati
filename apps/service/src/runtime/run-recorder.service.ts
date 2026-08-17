@@ -6,8 +6,35 @@ import { errorMessage } from '../common/error-message';
 import { newId } from '../database/ids';
 import type { RunSource, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
-/** Outputs larger than this are stored as a truncation marker, not dropped. */
+/** Per-VALUE storage cap: a value whose JSON is longer is stored as a {@link TruncatedValue}. */
 const MAX_STORED_JSON_CHARS = 16_000;
+
+/** How much of an oversized value's JSON is kept as a readable head. */
+const TRUNCATED_HEAD_CHARS = 2_000;
+
+/** An oversized stored value: the head of its JSON, plus the size it actually had. */
+export interface TruncatedValue {
+  truncated: true;
+  /** The value's real JSON length, before truncation. */
+  size_chars: number;
+  /** The cap it exceeded. */
+  max_chars: number;
+  /** The first {@link TRUNCATED_HEAD_CHARS} characters of its JSON. */
+  preview: string;
+}
+
+/** Read a stored output back as a {@link TruncatedValue}, or null when it was stored whole. */
+export function truncatedValueOf(stored: unknown): TruncatedValue | null {
+  if (stored === null || typeof stored !== 'object') return null;
+  // EVERY field must match, so a provider payload that happens to carry `truncated` isn't mistaken for one.
+  const marker = stored as Partial<TruncatedValue>;
+  const shaped =
+    marker.truncated === true &&
+    typeof marker.size_chars === 'number' &&
+    typeof marker.max_chars === 'number' &&
+    typeof marker.preview === 'string';
+  return shaped ? (marker as TruncatedValue) : null;
+}
 
 /** Provenance a run record carries beyond the plan itself. */
 export interface RunStartMeta {
@@ -183,7 +210,7 @@ export class RunRecorderService implements RunRecorder {
           SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(),
               waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
         WHERE id = $1`,
-      [scopedRunId, error === null ? 'completed' : 'error', cappedJson(outputs), error],
+      [scopedRunId, error === null ? 'completed' : 'error', cappedOutputsJson(outputs), error],
     ]);
   }
 
@@ -212,10 +239,28 @@ function planIdOf(plan: unknown): string {
   return (typeof id === 'string' && id ? id : 'plan').slice(0, 200);
 }
 
-/** JSON for storage, size-capped — an oversized payload becomes a marker, never a failed write. */
-function cappedJson(value: unknown): string {
+/** A value as it is stored: itself when it fits the cap, else a {@link TruncatedValue} keeping its head. */
+function cappedValue(value: unknown): unknown {
   const raw = JSON.stringify(value ?? null);
-  if (raw === undefined) return 'null';
-  if (raw.length <= MAX_STORED_JSON_CHARS) return raw;
-  return JSON.stringify({ truncated: true, size_chars: raw.length });
+  if (raw === undefined) return null;
+  if (raw.length <= MAX_STORED_JSON_CHARS) return value ?? null;
+  return {
+    truncated: true,
+    size_chars: raw.length,
+    max_chars: MAX_STORED_JSON_CHARS,
+    preview: raw.slice(0, TRUNCATED_HEAD_CHARS),
+  } satisfies TruncatedValue;
+}
+
+/** JSON for storage, size-capped — an oversized payload keeps a head, never a failed write. */
+function cappedJson(value: unknown): string {
+  return JSON.stringify(cappedValue(value)) ?? 'null';
+}
+
+/** The run's outputs map, capped PER STEP — one oversized value must never take the whole map down. */
+function cappedOutputsJson(outputs: unknown): string {
+  if (outputs === null || typeof outputs !== 'object' || Array.isArray(outputs)) return cappedJson(outputs);
+  const capped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(outputs)) capped[key] = cappedValue(value);
+  return JSON.stringify(capped) ?? 'null';
 }

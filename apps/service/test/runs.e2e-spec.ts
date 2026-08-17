@@ -168,6 +168,43 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(mine?.version_number).toBeNull(); // direct runs carry no workflow version
   });
 
+  it('run history: an oversized step output is capped ALONE — the rest of the map survives, with a head', async () => {
+    const big = 'x'.repeat(20_000);
+    const plan = {
+      id: 'cap',
+      nodes: [
+        { kind: 'action', id: 'huge', actionId: 'text.concat', props: { texts: [big], separator: '' } },
+        {
+          kind: 'action',
+          id: 'small',
+          actionId: 'text.concat',
+          props: { texts: ['still', 'here'], separator: '-' },
+        },
+      ],
+    };
+    await request(app.getHttpServer()).post('/api/runs').send({ plan, run_id: 'cap-run-1' }).expect(201);
+
+    const detail = await request(app.getHttpServer()).get('/api/runs/cap-run-1').expect(200);
+    // The small step is still readable: one oversized value must not blind the whole run.
+    expect(detail.body.outputs.small).toBe('still-here');
+    // The oversized one is marked with its real size and keeps a head, rather than being dropped.
+    expect(detail.body.outputs.huge).toMatchObject({
+      truncated: true,
+      size_chars: big.length + 2,
+      max_chars: 16_000,
+    });
+    expect(String(detail.body.outputs.huge.preview)).toMatch(/^"x{100}/);
+
+    const steps = detail.body.steps as Array<Record<string, unknown>>;
+    const hugeStep = steps.find((s) => s.node_id === 'huge')!;
+    const smallStep = steps.find((s) => s.node_id === 'small')!;
+    expect(hugeStep.output_truncated).toEqual({ size_chars: big.length + 2, max_chars: 16_000 });
+    // The preview field shows the value's head — not the marker repeating itself.
+    expect(String(hugeStep.output_preview)).toMatch(/^"x{100}/);
+    expect(smallStep.output).toBe('still-here');
+    expect(smallStep.output_truncated).toBeNull();
+  });
+
   it('run history: a failing step records error on the step AND the run', async () => {
     const plan = {
       id: 'hist-bad',

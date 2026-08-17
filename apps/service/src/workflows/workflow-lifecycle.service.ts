@@ -15,6 +15,7 @@ import { lintDataRefs } from '../compiler/ref-lint';
 import { assertAuthoredIrValid } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
+import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { VersionsWriteService } from './versions-write.service';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
@@ -44,6 +45,7 @@ export class WorkflowLifecycleService {
     private readonly envPointers: EnvPointersService,
     private readonly events: EventsService,
     private readonly catalog: ComposeCatalogService,
+    private readonly triggerSignals: TriggerSignalsService,
   ) {}
 
   /**
@@ -107,7 +109,7 @@ export class WorkflowLifecycleService {
     assertAuthoredIrValid(irDoc, this.catalog.facts());
     const name = typeof irDoc.name === 'string' && irDoc.name ? irDoc.name : 'Generated Workflow';
 
-    return this.dataSource.transaction(async (em) => {
+    const workflowId = await this.dataSource.transaction(async (em) => {
       const wf = em.create(WorkflowEntity, {
         id: newId(),
         name,
@@ -158,20 +160,37 @@ export class WorkflowLifecycleService {
         type: 'workflow.created',
         subjectType: 'workflow',
         subjectId: wf.id,
-        payload: { deployed: true, activated: true },
+        payload: { deployed: true },
       });
 
-      return {
-        workflow_id: wf.id,
-        workflow_url: '',
-        name,
-        version_number: 1,
-        activated: true, // immediately runnable — there is no external activation step
-        activation_error: null,
-        // Broken data refs surface at save, not at run time.
-        ref_warnings: lintDataRefs(irDoc),
-      };
+      return wf.id;
     });
+
+    // The prod pointer moved (committed), so this route owes the same reconcile as promote — and
+    // it WAITS for it, because the response below reports the activation rather than asserting it.
+    await this.triggerSignals.reconcileNow(workflowId);
+    const activation = await this.activationStateOf(workflowId);
+
+    return {
+      workflow_id: workflowId,
+      workflow_url: '',
+      name,
+      version_number: 1,
+      activated: activation.activated,
+      activation_error: activation.error,
+      // Broken data refs surface at save, not at run time.
+      ref_warnings: lintDataRefs(irDoc),
+    };
+  }
+
+  /** What the reconcile actually stood up: any activation left carrying an error is not live. */
+  private async activationStateOf(workflowId: string): Promise<{ activated: boolean; error: string | null }> {
+    const rows = await rawQuery<{ last_error: string | null }>(
+      this.dataSource.manager,
+      `SELECT last_error FROM runtime_trigger_activations WHERE workflow_id = $1 AND last_error IS NOT NULL`,
+      [workflowId],
+    );
+    return { activated: rows.length === 0, error: rows[0]?.last_error ?? null };
   }
 
   async deleteWorkflow(workflowId: string, actorId: string | null): Promise<Record<string, unknown>> {

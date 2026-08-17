@@ -25,9 +25,23 @@ export class TriggerSignalsService {
 
   constructor(@Inject(PG_BOSS) private readonly boss: PgBoss | null) {}
 
-  /** The trigger layer wires its reconciler here at boot (used only when pg-boss is off). */
+  /** The trigger layer wires its reconciler here at boot (registered in every mode). */
   registerInline(handler: InlineReconcile): void {
     this.inline = handler;
+  }
+
+  /**
+   * Reconcile `workflowId` and WAIT for it — for a caller that has to report the activation state
+   * it just created, rather than assert one. Falls back to the queue when no handler is wired.
+   */
+  async reconcileNow(workflowId: string): Promise<void> {
+    if (!this.inline) return this.enqueue(workflowId);
+    try {
+      await this.inline(workflowId);
+    } catch (err) {
+      // The row's `last_error` is what the caller reports; this line is for the operator.
+      this.logger.warn(`reconcile of ${workflowId} failed: ${errorMessage(err)}`);
+    }
   }
 
   /**
