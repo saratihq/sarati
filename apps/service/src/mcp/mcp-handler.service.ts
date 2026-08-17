@@ -16,7 +16,9 @@ import { toToolError, toToolResult } from './presentation/result';
 import { WorkflowInvokeTool } from './workflow-invoke.tool';
 import { CallableWorkflowsService, type WorkflowTool } from '../workflows/callable-workflows.service';
 
-const SERVER_INFO = { name: 'orchestr', version: '1.0.0' };
+// What an MCP client labels this server in its own UI — presentational, unlike the `orchestr_*`
+// tool names, which are the contract agents call and are not renamed here.
+const SERVER_INFO = { name: 'sarati', version: '1.0.0' };
 
 /** The principal for the request being served; keyed by the Request the controller built for it. */
 const principals = new WeakMap<Request, Principal>();
