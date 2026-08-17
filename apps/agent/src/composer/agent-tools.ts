@@ -359,7 +359,9 @@ export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<T
     ctx.session.draftIr = result.ir;
     ctx.emit({ event: 'op_applied', data: { ops: settled, ir: result.ir } });
     const summary = summarizeDraft(result.ir);
-    return { content: [{ type: 'text', text: notes.length > 0 ? `${summary}\n${notes.join('\n')}` : summary }] };
+    return {
+      content: [{ type: 'text', text: notes.length > 0 ? `${summary}\n${notes.join('\n')}` : summary }],
+    };
   } catch (err) {
     return toolError(err);
   }

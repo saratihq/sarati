@@ -150,9 +150,7 @@ describe('AgentModelCallProvider', () => {
 
   it("names the right app for a provider whose platform key isn't ours to explain", async () => {
     const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
-    const err = await provider
-      .call(req('openai', 'gpt-5'), authFor(undefined))
-      .catch((e: unknown) => e);
+    const err = await provider.call(req('openai', 'gpt-5'), authFor(undefined)).catch((e: unknown) => e);
     const message = (err as DomainError).message;
     expect(message).toContain('no OpenAI connection');
     expect(message).not.toContain('AI composer');

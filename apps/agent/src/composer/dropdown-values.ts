@@ -38,8 +38,7 @@ function optionsInSchema(def: Record<string, unknown>): DropdownOption[] | null 
 
 function matchByLabel(options: readonly DropdownOption[], written: string): DropdownOption | undefined {
   return (
-    options.find((o) => o.label === written) ??
-    options.find((o) => normalize(o.label) === normalize(written))
+    options.find((o) => o.label === written) ?? options.find((o) => normalize(o.label) === normalize(written))
   );
 }
 
@@ -73,9 +72,7 @@ export async function resolveDropdownParams(
     if (typeof value !== 'string' || value.includes('{{')) continue;
 
     const options =
-      kind === 'STATIC_DROPDOWN'
-        ? optionsInSchema(def as Record<string, unknown>)
-        : await loadOptions(key);
+      kind === 'STATIC_DROPDOWN' ? optionsInSchema(def as Record<string, unknown>) : await loadOptions(key);
     if (!options || options.length === 0) continue;
     if (options.some((o) => String(o.value) === value)) continue;
 

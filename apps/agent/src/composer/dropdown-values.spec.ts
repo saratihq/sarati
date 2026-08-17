@@ -21,11 +21,7 @@ describe('resolveDropdownParams', () => {
   });
 
   it('matches a label the person wrote without its "#"', async () => {
-    const { parameters } = await resolveDropdownParams(
-      liveSchema,
-      { channel: 'Social' },
-      loader(CHANNELS),
-    );
+    const { parameters } = await resolveDropdownParams(liveSchema, { channel: 'Social' }, loader(CHANNELS));
     expect(parameters.channel).toBe('C0BFN9NKRUH');
   });
 

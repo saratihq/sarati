@@ -169,7 +169,9 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
       [laneless('trigger', 'step')],
     );
     const deployed = await http().post('/api/deploy').send({ workflow_json: marked }).expect(201);
-    await http().delete(`/api/workflows/${deployed.body.workflow_id as string}`).expect(200);
+    await http()
+      .delete(`/api/workflows/${deployed.body.workflow_id as string}`)
+      .expect(200);
   });
 
   it('a stored version with no node positions still diffs, and re-committing it mints nothing', async () => {
