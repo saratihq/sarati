@@ -12,6 +12,8 @@ export interface RunOutputChange {
   before: unknown;
   /** Value on the source-branch (changed) side — truncated for storage. */
   after: unknown;
+  /** Set when this row collapses a contiguous run of added/removed array entries: how many. */
+  count?: number;
 }
 
 /** The field-level output regression of the source branch vs the target baseline. */
