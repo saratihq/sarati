@@ -13,6 +13,7 @@ import {
 import type { EnvConfig } from '../config/env.config';
 import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
 import { connectionIdOf } from './sdk-auth';
+import { alignComposioOutput } from './composio-output-shape';
 import { composioToolFor, isRoutableActionType, validatedAppSlug } from './sdk-actions.registry';
 import { SdkActionsProvider } from './sdk-actions.provider';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
@@ -130,7 +131,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     );
     // `input.idempotencyKey` is DELIBERATELY not forwarded (ADR 0040): Composio's typed execute API has no
     // idempotency parameter, so this rail is an accepted at-least-once exception and must never error for lacking a key.
-    return this.composio.execute({
+    const result = await this.composio.execute({
       scope,
       appSlug,
       actionName: this.actionNameOf(input.actionId),
@@ -140,6 +141,9 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
       // The EXACT tool this action was built from, so execution routes by slug rather than re-deriving it from the name.
       tool: composioToolFor(input.actionId),
     });
+    // One output shape per action whichever rail ran it — the catalog documents our SDK action's,
+    // so a step's `{{refs}}` must not depend on how the user happened to connect.
+    return { ...result, output: alignComposioOutput(input.actionId, result.output) };
   }
 
   // ─── Triggers: a MANAGED connection with a Composio-poll registry spec; anything else is unsupported. ───
