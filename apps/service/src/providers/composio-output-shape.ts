@@ -23,6 +23,8 @@ type Appended = Awaited<ReturnType<typeof actions.sheets.insertRow.execute>>;
 type Updated = Awaited<ReturnType<typeof actions.sheets.updateRow.execute>>;
 type Tabs = Awaited<ReturnType<typeof actions.sheets.listSheets.execute>>;
 type Tab = Tabs['sheets'][number];
+type Listing = Awaited<ReturnType<typeof actions.drive.listFiles.execute>>;
+type DriveFile = Awaited<ReturnType<typeof actions.drive.getFile.execute>>;
 type Rows = NonNullable<ReadRange['values']>;
 
 type Props = Record<string, unknown>;
@@ -124,12 +126,50 @@ function listSheets(raw: unknown): Tabs | null {
   return sheets.length > 0 ? { sheets, count: sheets.length } : null;
 }
 
+/** Drive answers with the API's own envelope (`kind`, `incompleteSearch`); the action declares the metadata itself. */
+function driveFile(entry: unknown): DriveFile | null {
+  if (!isRecord(entry)) return null;
+  const id = str(entry.id);
+  const name = str(entry.name);
+  const mimeType = str(entry.mimeType) ?? str(entry.mime_type);
+  if (id === undefined || name === undefined || mimeType === undefined) return null;
+  const modifiedTime = str(entry.modifiedTime) ?? str(entry.modified_time);
+  const size = str(entry.size);
+  const webViewLink = str(entry.webViewLink) ?? str(entry.web_view_link);
+  const parents = Array.isArray(entry.parents)
+    ? entry.parents.filter((p) => typeof p === 'string')
+    : undefined;
+  return {
+    id,
+    name,
+    mimeType,
+    ...(modifiedTime !== undefined ? { modifiedTime } : {}),
+    ...(size !== undefined ? { size } : {}),
+    ...(webViewLink !== undefined ? { webViewLink } : {}),
+    ...(parents !== undefined ? { parents } : {}),
+  };
+}
+
+function listFiles(raw: unknown): Listing | null {
+  const body = unwrapEnvelope(raw);
+  if (!isRecord(body) || !Array.isArray(body.files)) return null;
+  const files = body.files.map(driveFile).filter((file): file is DriveFile => file !== null);
+  return files.length === body.files.length ? { files, count: files.length } : null;
+}
+
+function getFile(raw: unknown): DriveFile | null {
+  return driveFile(unwrapEnvelope(raw));
+}
+
 const SHAPES: ReadonlyMap<string, Shaper> = new Map<string, Shaper>([
   ['sheets.create_spreadsheet', createSpreadsheet],
   ['sheets.read_range', readRange],
   ['sheets.insert_row', insertRow],
   ['sheets.update_row', updateRow],
   ['sheets.list_sheets', listSheets],
+  ['drive.list_files', listFiles],
+  ['drive.get_file', getFile],
+  ['drive.create_folder', getFile],
 ]);
 
 /** The action's documented output, from whatever the Composio rail returned. Unmapped types pass through. */

@@ -167,15 +167,6 @@ export interface ComposioCatalogTool {
 let composioToolCache: Map<string, ComposioCatalogTool> | null = null;
 
 /**
- * OUR action → the Composio catalog row that implements it, for actions Composio has no row of its own for.
- * Without an entry Composio NAME-MATCHES the action to a tool of its choosing: that is how `list_sheets` reached
- * a names-only tool and lost every tab's id and index.
- */
-const COMPOSIO_TOOL_ALIASES: ReadonlyMap<string, string> = new Map([
-  ['sheets.list_sheets', 'sheets.get_spreadsheet_info'],
-]);
-
-/**
  * The EXACT Composio tool a catalog action executes as. Execution MUST route by this recorded slug, never by
  * re-deriving it from the public `type`. `undefined` (not a Composio row / no recorded slug) → caller uses the name matcher.
  */
@@ -205,7 +196,7 @@ export function composioToolFor(type: string): ComposioCatalogTool | undefined {
       });
     }
   }
-  return composioToolCache.get(COMPOSIO_TOOL_ALIASES.get(type) ?? type);
+  return composioToolCache.get(type);
 }
 
 /**
