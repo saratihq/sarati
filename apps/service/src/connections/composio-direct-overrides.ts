@@ -185,6 +185,14 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
     },
   ],
   [
+    // The name matcher reaches a names-only tool, losing every tab's id and index.
+    'sheets.list_sheets',
+    {
+      toolSlug: 'GOOGLESHEETS_GET_SPREADSHEET_INFO',
+      toArguments: (p) => compact({ spreadsheet_id: p.spreadsheetId }),
+    },
+  ],
+  [
     'sheets.clear_sheet',
     {
       toolSlug: 'GOOGLESHEETS_CLEAR_VALUES',
@@ -252,6 +260,14 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
           location: p.location,
           description: p.description,
         }),
+    },
+  ],
+  [
+    // Composio has no row for our `get_file`, so the name matcher picks the tool; this names it.
+    'drive.get_file',
+    {
+      toolSlug: 'GOOGLEDRIVE_GET_FILE_METADATA',
+      toArguments: (p) => compact({ fileId: p.fileId, supportsAllDrives: true }),
     },
   ],
   [

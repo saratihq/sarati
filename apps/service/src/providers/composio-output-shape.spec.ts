@@ -104,6 +104,45 @@ describe('Composio output alignment', () => {
     });
   });
 
+  it('drive list_files: the API envelope becomes the declared metadata plus a count', () => {
+    const live = {
+      files: [
+        {
+          id: SPREADSHEET,
+          kind: 'drive#file',
+          mimeType: 'application/vnd.google-apps.spreadsheet',
+          name: 'Sarati — mention monitor log',
+        },
+      ],
+      incompleteSearch: false,
+      kind: 'drive#fileList',
+    };
+    expect(alignComposioOutput('drive.list_files', live, {})).toEqual({
+      files: [
+        {
+          id: SPREADSHEET,
+          name: 'Sarati — mention monitor log',
+          mimeType: 'application/vnd.google-apps.spreadsheet',
+        },
+      ],
+      count: 1,
+    });
+  });
+
+  it("drive get_file: `kind` is the API's, not the action's", () => {
+    const live = {
+      id: SPREADSHEET,
+      kind: 'drive#file',
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      name: 'Sarati — mention monitor log',
+    };
+    expect(alignComposioOutput('drive.get_file', live, {})).toEqual({
+      id: SPREADSHEET,
+      name: 'Sarati — mention monitor log',
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+    });
+  });
+
   it('passes an unmapped action through untouched rather than guessing at it', () => {
     const raw = { anything: true };
     expect(alignComposioOutput('slack.send_channel_message', raw, {})).toBe(raw);
@@ -132,7 +171,7 @@ describe('dual-rail inventory', () => {
   /** Live-checked: Composio already answers `sheets.clear_sheet` in the SDK's shape, so it needs no mapping. */
   const ALREADY_IN_CONTRACT = ['sheets.clear_sheet'];
   /** Apps whose actions have NOT been run on both rails — no live connection to check them against. */
-  const UNVERIFIED_APPS = ['calendar', 'docs', 'drive', 'gmail', 'intercom', 'jira', 'mailchimp', 'zendesk'];
+  const UNVERIFIED_APPS = ['calendar', 'docs', 'gmail', 'intercom', 'jira', 'mailchimp', 'zendesk'];
 
   const appOf = (type: string): string => type.split('.')[0] ?? type;
   const dualRail = actions.catalogActions
@@ -147,6 +186,6 @@ describe('dual-rail inventory', () => {
 
   it('names the apps still unchecked, so a new dual-rail app cannot be added silently', () => {
     const apps = [...new Set(dualRail.map((type) => type.split('.')[0]))].sort();
-    expect(apps).toEqual([...UNVERIFIED_APPS, 'sheets'].sort());
+    expect(apps).toEqual([...UNVERIFIED_APPS, 'sheets', 'drive'].sort());
   });
 });
