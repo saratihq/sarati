@@ -143,7 +143,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     });
     // One output shape per action whichever rail ran it — the catalog documents our SDK action's,
     // so a step's `{{refs}}` must not depend on how the user happened to connect.
-    return { ...result, output: alignComposioOutput(input.actionId, result.output) };
+    return { ...result, output: alignComposioOutput(input.actionId, result.output, input.props) };
   }
 
   // ─── Triggers: a MANAGED connection with a Composio-poll registry spec; anything else is unsupported. ───
