@@ -475,6 +475,8 @@ export class VersionsWriteService {
       // Moving an org workflow's PROD pointer is owner/admin-only — the SAME gate promote enforces.
       // Gate the OPERATION (before the idempotency check) so a member is denied consistently.
       if (actorId) await this.envPointers.assertPointerMoveAllowed(em, wf, PROD_ENV, actorId);
+      // Publish IS promote-to-prod: it refuses an environment that cannot run the version too.
+      await this.envPointers.assertEnvCanRun(em, wf, PROD_ENV, target);
 
       // Only write + emit when the pointer actually moves, so a repeated publish doesn't spam the
       // outbox. Publish IS promote-to-prod: the write goes through the env-pointer seam.
