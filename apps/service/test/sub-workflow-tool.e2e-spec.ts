@@ -95,7 +95,7 @@ const wfNode = (id: string, node_type: string, parameters: Record<string, unknow
   position: { x: 0, y: 0 },
   metadata: {},
 });
-/** A trigger DECLARING the workflow callable — what a caller now requires of a target (ADR 0062). */
+/** A trigger DECLARING the workflow callable — what a caller now requires of a target. */
 const toolTrigger = (tool_name: string, description: string) =>
   wfNode('trigger', 'orchestr:tool_trigger', {
     tool_name,
@@ -209,7 +209,7 @@ const parentDoc = (subWorkflowId: string, agentParams: Record<string, unknown> =
   metadata: { engine: 'orchestr' },
 });
 
-/** A sub-workflow that never declared itself callable — a plain manual trigger (ADR 0062 refusal). */
+/** A sub-workflow that never declared itself callable — a plain manual trigger. */
 const undeclaredDoc = (): Record<string, unknown> => ({
   version: '1.0',
   name: 'sub undeclared',
@@ -223,7 +223,7 @@ const undeclaredDoc = (): Record<string, unknown> => ({
   metadata: { engine: 'orchestr' },
 });
 
-/** A parent calling a workflow as an ordinary STEP (ADR 0062): trigger → call_workflow → concat. */
+/** A parent calling a workflow as an ordinary STEP: trigger → call_workflow → concat. */
 const stepParentDoc = (
   subWorkflowId: string,
   input: Record<string, unknown> = { q: 'hello' },
@@ -257,7 +257,7 @@ function isToolError(step: AgentStep): boolean {
   return typeof step.output === 'object' && step.output !== null && 'error' in step.output;
 }
 
-/** Sub-workflow-as-tool (ADR 0045 §3, feature A) end-to-end, isolated DB, DBOS OFF (direct path). */
+/** Sub-workflow-as-tool (feature A) end-to-end, isolated DB, DBOS OFF (direct path). */
 describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
@@ -557,7 +557,7 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
     expect(JSON.stringify(step?.output)).toContain('SUB_RESULT:hello');
   }, 15_000);
 
-  // ── ADR 0062: the same runner reached from an ORDINARY STEP, no agent involved ──
+  // ── the same runner reached from an ORDINARY STEP, no agent involved ──
 
   const runStep = (ir: WorkflowIR, extra: Record<string, unknown> = {}) =>
     app.get(DagInterpreter).run(compileWorkflowIrDag(ir), {

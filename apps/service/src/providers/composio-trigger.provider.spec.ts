@@ -12,7 +12,7 @@ import { ComposioTriggerProvider } from './composio-trigger.provider';
 const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
 /**
- * The Composio TRIGGER rail façade (ADR 0046): projection, public-type↔slug mapping, verify + subscribe delegation,
+ * The Composio TRIGGER rail façade: projection, public-type↔slug mapping, verify + subscribe delegation,
  * over a FAKE ComposioProvider. The exact HTTP endpoints/bodies are covered in composio.provider.triggers.spec.
  */
 

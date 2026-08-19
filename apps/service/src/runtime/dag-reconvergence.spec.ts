@@ -6,7 +6,7 @@ import type { DagPlan } from './dag-plan';
 import type { RunResult } from './run-plan';
 
 /**
- * RECONVERGENCE / OR-JOIN (ADR 0023): plain fan-out reconvergence, an IF-lane join with an external
+ * RECONVERGENCE / OR-JOIN: plain fan-out reconvergence, an IF-lane join with an external
  * inflow, lanes rejoining then remerging, fan-out-of-3, and an OR-join over a live path plus a dead
  * IF port. Each compiles + runs and asserts which nodes ran, which were skipped, and what refs
  * resolved to. The OR-join semantic: a join fires when ANY live path reaches it, and a ref to a node
@@ -70,7 +70,7 @@ const propsOf = (out: unknown): Record<string, unknown> => (out as { props: Reco
 const ranTimes = (result: RunResult, id: string): number =>
   result.trace.filter((t) => t.nodeId === id).length;
 
-describe('DAG reconvergence differential vs the tree compiler (ADR 0023 slice 3)', () => {
+describe('DAG reconvergence differential vs the tree compiler (slice 3)', () => {
   it('plain fan-out reconverges (IF present elsewhere): DAG OR-joins the diamond once', async () => {
     // A → B, A → C, B → J, C → J is a plain (non-IF) diamond, with an unrelated IF
     // downstream (J → gate → K): J must run ONCE with both inflows live.

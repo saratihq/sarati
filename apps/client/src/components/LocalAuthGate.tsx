@@ -62,7 +62,7 @@ function AuthNotice({ title, subtitle, body }: { title: string; subtitle: string
 
 /**
  * Picks the sign-in surface: the local email + password screens when the service offers them
- * (ADR 0054), otherwise `children` — today's Clerk flow, untouched.
+ * , otherwise `children` — today's Clerk flow, untouched.
  */
 export default function LocalAuthGate({ variant, children }: { variant: LocalAuthVariant; children: ReactNode }) {
   const { status, error } = useLocalAuthStatus();

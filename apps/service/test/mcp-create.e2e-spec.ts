@@ -53,7 +53,7 @@ const irDoc = (marker: string): Record<string, unknown> => ({
   metadata: { engine: 'orchestr' },
 });
 
-/** The authoring tools that LAND something, driven by the real MCP client over the real transport (ADR 0052). */
+/** The authoring tools that LAND something, driven by the real MCP client over the real transport. */
 describe('Platform MCP create surface (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;

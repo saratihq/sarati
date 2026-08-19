@@ -17,7 +17,7 @@ import { SaratiLoader } from "./SaratiLogo";
 import { useOrgs, activeOrgOf } from "@/store/useOrgs";
 import { isProtectedEnv } from "@/lib/envPresentation";
 
-// The environments surface (ADR 0014): one row per environment, one slot per app. Slots are
+// The environments surface: one row per environment, one slot per app. Slots are
 // references — assigning never moves the connection, and connecting an account never auto-assigns it.
 
 // Same status vocabulary as the pool chips: dot colour plus word, never colour alone.

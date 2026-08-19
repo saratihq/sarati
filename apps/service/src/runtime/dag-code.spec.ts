@@ -6,8 +6,8 @@ import { DagInterpreter } from './dag-interpreter';
 import type { RunResult } from './run-plan';
 
 /**
- * Code node (ADR 0027) end-to-end: a code leaf participates like any action — reading the run
- * scope, producing `scope[id]`, and flowing through the ADR 0020 policy and ADR 0021 pins.
+ * Code node end-to-end: a code leaf participates like any action — reading the run
+ * scope, producing `scope[id]`, and flowing through the policy and pins.
  * Uses the REAL sandbox, so this is a live proof.
  */
 
@@ -53,7 +53,7 @@ function run(workflow: WorkflowIR, opts: Partial<RunOptions> = {}): Promise<RunR
   });
 }
 
-describe('code node execution (ADR 0027, live sandbox)', () => {
+describe('code node execution (live sandbox)', () => {
   it('transforms an upstream step output and downstream refs read the result', async () => {
     const { outputs } = await run(
       ir(
@@ -90,7 +90,7 @@ describe('code node execution (ADR 0027, live sandbox)', () => {
     expect(outputs.after).toEqual({ ran: 'test.after', props: {} }); // downstream still ran
   });
 
-  it('a snippet failure routes the error lane (ADR 0020), then the run completes', async () => {
+  it('a snippet failure routes the error lane, then the run completes', async () => {
     const { outputs } = await run(
       ir(
         [
@@ -107,7 +107,7 @@ describe('code node execution (ADR 0027, live sandbox)', () => {
     await expect(run(ir([code('boom', 'throw new Error("fatal");')]))).rejects.toThrow(/fatal/);
   });
 
-  it('a pinned code node replays its captured output and never executes (ADR 0021)', async () => {
+  it('a pinned code node replays its captured output and never executes', async () => {
     // The snippet would throw — but the pin replaces execution entirely, so the run succeeds.
     const { outputs } = await run(ir([code('pinned', 'throw new Error("should not run");')]), {
       pins: { pinned: { replayed: true } },

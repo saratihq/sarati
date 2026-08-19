@@ -3,7 +3,7 @@ import { SignJWT, errors as joseErrors, jwtVerify } from 'jose';
 /** Only this verifier accepts this issuer, so a local session can never be mistaken for a Clerk/OIDC one. */
 export const LOCAL_ISSUER = 'orchestr:local';
 
-/** Long enough for a working day, short enough that a stolen token expires on its own (ADR 0054). */
+/** Long enough for a working day, short enough that a stolen token expires on its own. */
 export const SESSION_TTL_SECONDS = 12 * 60 * 60;
 
 function keyOf(secret: string): Uint8Array {

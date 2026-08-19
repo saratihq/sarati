@@ -36,7 +36,7 @@ function healthView(health: TriggerActivationHealth[] | null): {
   return { checked, error };
 }
 
-/** Read-only trigger indicator for the overview (ADR 0018) — the trigger is configured on the canvas. */
+/** Read-only trigger indicator for the overview — the trigger is configured on the canvas. */
 export default function TriggerActivationCard({
   nodes,
   liveVersion,

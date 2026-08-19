@@ -36,7 +36,7 @@ class CreateRunDto {
   @IsString()
   run_id?: string;
 
-  /** Dry run (preview, ADR 0041): fire no state-changing external call. */
+  /** Dry run (preview): fire no state-changing external call. */
   @IsOptional()
   @IsBoolean()
   dry_run?: boolean;
@@ -77,7 +77,7 @@ class StartAsyncDto {
   @IsObject()
   trigger_payload?: Record<string, unknown>;
 
-  /** Declared only so it can be REFUSED: a dry run is never durable (ADR 0041). */
+  /** Declared only so it can be REFUSED: a dry run is never durable. */
   @IsOptional()
   @IsBoolean()
   dry_run?: boolean;
@@ -111,12 +111,12 @@ class RunFromIrDto {
   @IsObject()
   trigger_payload?: Record<string, unknown>;
 
-  /** TRUE PINNING (ADR 0021): ephemeral `{ [nodeId]: output }` overrides — a pinned node replays instead of calling the provider. */
+  /** TRUE PINNING: ephemeral `{ [nodeId]: output }` overrides — a pinned node replays instead of calling the provider. */
   @IsOptional()
   @IsObject()
   pins?: Record<string, unknown>;
 
-  /** Dry run (preview, ADR 0041): fire NO state-changing external call; recorded as a dry run. */
+  /** Dry run (preview): fire NO state-changing external call; recorded as a dry run. */
   @IsOptional()
   @IsBoolean()
   dry_run?: boolean;
@@ -293,7 +293,7 @@ export class RunsController {
   async startAsync(@Req() req: Request, @Body() body: StartAsyncDto): Promise<RunHandle> {
     if (body.dry_run) {
       throw new DomainError(
-        'A dry run is never durable (ADR 0041) — preview with POST /api/runs/from-ir and `dry_run`.',
+        'A dry run is never durable — preview with POST /api/runs/from-ir and `dry_run`.',
         400,
       );
     }
@@ -374,7 +374,7 @@ export class RunsController {
       duration_ms: s.duration_ms,
       decided_by: s.decided_by,
       decided_at: s.decided_at,
-      // Both ends of a sub-workflow call (ADR 0062) — a nested run is recorded under the workflow
+      // Both ends of a sub-workflow call — a nested run is recorded under the workflow
       // that ran it, so these are the only path between the two.
       called_by: s.called_by,
       calls: s.calls,

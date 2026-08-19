@@ -110,7 +110,7 @@ function webhookDoc(): Record<string, unknown> {
   };
 }
 
-/** The synchronous chat-intake model (ADR 0045 addendum): activate, then reply with the terminal output. */
+/** The synchronous chat-intake model: activate, then reply with the terminal output. */
 describe('canvas-node chat trigger — activation + synchronous intake (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;

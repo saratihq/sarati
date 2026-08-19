@@ -22,10 +22,10 @@ const STAGING_ENV_ID = '00000000-0000-0000-0000-0000000000c5';
 const OWNER_KEY = 'sk-ant-slot-owner'; // distinct from any caller key → proves run-AS-owner
 
 /**
- * The env-slot connection fallback for the agent's model call (ADR 0014 × 0045): an env run
+ * The env-slot connection fallback for the agent's model call: an env run
  * resolves the provider SLOT and runs AS its owner — never falling back to the personal pool.
  */
-describe('AI agent model call — env-slot connection fallback (ADR 0014 × 0045)', () => {
+describe('AI agent model call — env-slot connection fallback', () => {
   let app: INestApplication;
   let db: Client;
   /** Each stubbed provider request — url + injected credential header. */

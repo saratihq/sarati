@@ -27,10 +27,10 @@ import { InlineError } from "./ui/inline-error";
 
 const IF_OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "truthy", "falsy"];
 
-// Owned by LoopEditor (ADR 0029), so the generic field form never renders them raw.
+// Owned by LoopEditor, so the generic field form never renders them raw.
 const LOOP_PARAM_KEYS = new Set(["mode", "items", "item_var", "condition", "max_iterations"]);
 
-// Owned by AgentEditor; these are the SERVICE compiler's keys (ADR 0045, compile-ir-dag
+// Owned by AgentEditor; these are the SERVICE compiler's keys (compile-ir-dag
 // buildAgentNode) — snake_case with `model` an object, and `memory` deliberately not a v1 param.
 const AGENT_PARAM_KEYS = new Set(["system_prompt", "model", "max_steps", "input", "connectionId"]);
 
@@ -49,7 +49,7 @@ const DEFAULT_AGENT_MAX_STEPS = 25;
 const AGENT_MAX_STEPS_CEILING = 100;
 
 // Display-only tolerant read of the `model` param; the committed shape must be `{ provider, model }`
-// or compile-ir-dag throws (ADR 0045).
+// or compile-ir-dag throws.
 function agentModelParam(value: unknown): { provider?: string; model?: string } | undefined {
   if (typeof value === "string") return { model: value };
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -992,7 +992,7 @@ function ReferenceTextInput({
   );
 }
 
-// Native canvas trigger kinds (ADR 0018): the node_types the service's isTriggerNode recognises.
+// Native canvas trigger kinds: the node_types the service's isTriggerNode recognises.
 const MANUAL_TRIGGER = "orchestr:trigger";
 const WEBHOOK_TRIGGER = "orchestr:webhook";
 const SCHEDULE_TRIGGER = "orchestr:schedule";
@@ -1407,7 +1407,7 @@ function TriggerOption({
 }
 
 /**
- * Trigger config for the canvas trigger node (ADR 0018): the trigger is an ordinary node, so picking
+ * Trigger config for the canvas trigger node: the trigger is an ordinary node, so picking
  * one re-types it in place. App triggers carry `metadata.trigger` and resolve their connection from
  * the environment slot, never from the node. Save ≠ Live — a promoted version activates it.
  */
@@ -1816,7 +1816,7 @@ function TriggerTypeConfig({
 }
 
 /**
- * Non-secret HMAC config on the webhook trigger's params (ADR 0030); the secret is set out-of-band
+ * Non-secret HMAC config on the webhook trigger's params; the secret is set out-of-band
  * and never enters the doc. Verify is enforced only when BOTH this config and a stored secret exist.
  */
 interface WebhookVerification {
@@ -1846,7 +1846,7 @@ const verifyInputStyle: CSSProperties = {
   color: "var(--orchestr-ink)",
 };
 
-/** "Verify signatures" (ADR 0030): a preset fills header + algorithm; the secret is write-only. */
+/** "Verify signatures": a preset fills header + algorithm; the secret is write-only. */
 function WebhookVerifySection({
   workflowId,
   nodeId,
@@ -2223,7 +2223,7 @@ function toolInputRows(raw: unknown): ToolInputRow[] {
 }
 
 /**
- * What this workflow tells callers about running it (ADR 0053 §1, ADR 0062). Name and description
+ * What this workflow tells callers about running it. Name and description
  * are load-bearing, not decoration: a caller picks this workflow on the description alone, and one
  * without both is withheld rather than offered — so the panel says so instead of failing later.
  */
@@ -3162,7 +3162,7 @@ function normalizeCondition(raw: unknown): SwitchCase {
 }
 
 /**
- * Loop node editor (ADR 0029): `items` iterates a collection, `while` repeats do-while a condition
+ * Loop node editor: `items` iterates a collection, `while` repeats do-while a condition
  * holds under a REQUIRED positive-integer `max_iterations`. Both modes stay two-port on the canvas.
  */
 function LoopEditor({
@@ -3460,7 +3460,7 @@ function ConnectionSelectField({
 }
 
 /**
- * AI Agent node editor (ADR 0045). Its params are the service compiler's contract: `system_prompt`,
+ * AI Agent node editor. Its params are the service compiler's contract: `system_prompt`,
  * a `{ provider, model }` object, and the `max_steps` cap. Tools are NOT configured here — they are
  * the nodes wired to its "tools" handle (`port_type:"tool"` edges, invariant #14).
  */
@@ -3853,12 +3853,12 @@ function AgentTestPanel({
 }
 
 /**
- * Call-workflow node editor (ADR 0045 §3): a picker committing `workflow_id`, excluding the current
+ * Call-workflow node editor: a picker committing `workflow_id`, excluding the current
  * workflow because a workflow can't call itself. Its tool name/description live in the shared
  * "Used as an agent tool" fields, never redefined here.
  */
 /**
- * Pick the workflow this step runs, and fill what it declared it needs (ADR 0062). The list is the
+ * Pick the workflow this step runs, and fill what it declared it needs. The list is the
  * CALLABLE ones only — a workflow that never declared itself would be refused at run time, so
  * offering it here would just move the discovery later.
  */
@@ -4026,7 +4026,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
   const seedBackground = useStepSamples((s) => s.seedBackground);
   const pinStep = useStepSamples((s) => s.pinStep);
   const unpinStep = useStepSamples((s) => s.unpinStep);
-  // Pinned (ADR 0021) means a Run replays this step's captured output instead of executing it.
+  // Pinned means a Run replays this step's captured output instead of executing it.
   const isPinned = useStepSamples((s) => (s.scopeKey === scopeKey ? Boolean(s.pinned[nodeId]) : false));
 
   // Seeds the picker from the last real run as background data, so this session's samples win.
@@ -4180,7 +4180,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
   const codeLanguage: "js" | "ts" = params.language === "ts" ? "ts" : "js";
   const codeValue = typeof params.code === "string" ? params.code : "";
 
-  // Retry policy (ADR 0020); maxAttempts ≤ 1 clears the key, and the compiler clamps on save.
+  // Retry policy; maxAttempts ≤ 1 clears the key, and the compiler clamps on save.
   const retryCfg = (params.retry ?? null) as { maxAttempts?: number; backoffMs?: number } | null;
   const retryAttempts = typeof retryCfg?.maxAttempts === "number" ? retryCfg.maxAttempts : 1;
   const retryBackoffMs = typeof retryCfg?.backoffMs === "number" ? retryCfg.backoffMs : 1000;
@@ -4191,7 +4191,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     updateIrNode(node.id, { parameters: next });
   };
 
-  // An error branch (ADR 0020) WINS over "On failure", so the select below is moot when one exists.
+  // An error branch WINS over "On failure", so the select below is moot when one exists.
   const hasErrorBranch = (
     (workflowJson?.edges as Array<{ source_node_id?: string; port_type?: string }> | undefined) ?? []
   ).some((e) => e.source_node_id === node.id && e.port_type === "error");
@@ -4231,7 +4231,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     // Call-workflow runs a whole sub-workflow in an env, which a single-node test can't stand up.
     nodeType !== "orchestr:call_workflow";
 
-  // Loop driver (ADR 0029); existing loops carry no `mode`, so `items` is the default.
+  // Loop driver; existing loops carry no `mode`, so `items` is the default.
   const loopMode: "items" | "while" = params.mode === "while" ? "while" : "items";
   // Drives the {{item}}/{{itemIndex}} guidance, so a customized item_var shows matching refs.
   const loopItemVar =
@@ -4891,7 +4891,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
           </div>
         )}
 
-        {/* Per-step error policy (ADR 0020); pure-routing nodes make no call, so it's hidden there. */}
+        {/* Per-step error policy; pure-routing nodes make no call, so it's hidden there. */}
         {!isBroken && !nodeIsTrigger(node) && !isIf && !isSwitch && (
           <div className="pt-2.5 mt-1" style={{ borderTop: "1px solid var(--orchestr-line)" }}>
             <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
@@ -4932,7 +4932,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
           </div>
         )}
 
-        {/* Retries (ADR 0020) run before the "On failure" policy applies; hidden on routing nodes. */}
+        {/* Retries run before the "On failure" policy applies; hidden on routing nodes. */}
         {!isBroken && !nodeIsTrigger(node) && !isIf && !isSwitch && (
           <div className="pt-2.5" style={{ borderTop: "1px solid var(--orchestr-line)" }}>
             <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
@@ -5062,7 +5062,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
               </p>
             )}
 
-            {/* Captured output feeds later pickers; PINNING it (ADR 0021) also skips executing the step. */}
+            {/* Captured output feeds later pickers; PINNING it also skips executing the step. */}
             {Object.prototype.hasOwnProperty.call(samples, node.id) && (
               <div
                 className="flex items-center gap-1.5 mt-1.5 text-[10px]"

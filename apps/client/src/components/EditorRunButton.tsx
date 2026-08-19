@@ -76,7 +76,7 @@ export default function EditorRunButton() {
     setOpen(true);
     setView({ status: "running" });
     setPollRunId(runId);
-    // True pinning (ADR 0021): pinned steps replay their captured output, scope-guarded to this doc.
+    // True pinning: pinned steps replay their captured output, scope-guarded to this doc.
     const samples = useStepSamples.getState();
     const scopeKey =
       workflowId ?? (typeof workflowJson.name === "string" && workflowJson.name ? workflowJson.name : "draft");

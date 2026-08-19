@@ -110,7 +110,7 @@ function CardBody({
   // getNodeCategory buckets the whole built-in trigger family as "trigger", so
   // the category alone is authoritative.
   const isTrigger = category === "trigger";
-  // Trigger kind comes from the node itself (ADR 0018) — one definition site
+  // Trigger kind comes from the node itself — one definition site
   // shared with the overview's read-only indicator.
   const triggerSubtitle = triggerKindLabel(nodeType);
   // Glyphs need a chip behind them; an app logo brings its own tile, so it fills
@@ -160,7 +160,7 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
   const pinnedQuestion = useComposer((s) => pendingQuestionFor(s.questions, id));
   const nodeAssumptions = useComposer((s) => s.assumptions[id]);
   const stepResult = useComposer((s) => s.stepResults[id]);
-  // Pinned for runs (ADR 0021): a Run replays this step's captured output
+  // Pinned for runs: a Run replays this step's captured output
   // instead of executing it.
   const pinned = useStepSamples((s) => Boolean(s.pinned[id]));
   const connectionNeed = useComposer((s) => s.connectionNeeds[id]);
@@ -206,7 +206,7 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
   // reads, so drawn handles and wired ports never disagree.
   const isSwitch = nodeType === "orchestr:switch";
   const switchPortCount = isSwitch ? outputPortCount(nodeType, parameters) : 0;
-  // The AI Agent (ADR 0045, invariant #14) adds a "tool" handle at its base
+  // The AI Agent (invariant #14) adds a "tool" handle at its base
   // alongside the main and error outputs.
   const isAgent = nodeType === "orchestr:agent";
 
@@ -259,7 +259,7 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
             data-testid={`node-bead-${stepResult.status}`}
           />
         )}
-        {/* Pin marker — a Run replays this step's data instead of executing it (ADR 0021). */}
+        {/* Pin marker — a Run replays this step's data instead of executing it. */}
         {pinned && (
           <span
             className="absolute -top-1 -left-1 w-3.5 h-3.5 rounded-full z-10 flex items-center justify-center"
@@ -315,7 +315,7 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
         ) : (
           <Handle type="source" position={Position.Right} className="wf-port" isConnectable={connectable ?? false} />
         )}
-        {/* Tool output (ADR 0045, invariant #14) — wires from here are `port_type:"tool"` edges, never a next step. */}
+        {/* Tool output (invariant #14) — wires from here are `port_type:"tool"` edges, never a next step. */}
         {isAgent && (
           <Handle
             id="tool"
@@ -327,7 +327,7 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
             isConnectable={connectable ?? false}
           />
         )}
-        {/* Error output (ADR 0020) — a wire from here runs when this step fails, skipping the main flow. */}
+        {/* Error output — a wire from here runs when this step fails, skipping the main flow. */}
         {!isTrigger && (
           <Handle
             id="err"

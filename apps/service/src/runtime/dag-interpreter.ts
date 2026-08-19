@@ -19,14 +19,14 @@ import { evaluateCondition } from './conditions';
 import type { DagIfNode, DagNode, DagPlan, DagSwitchNode, Guard } from './dag-plan';
 import type { RunResult } from './run-plan';
 
-/** Default bound on how many READY-and-live nodes run at once (ADR 0023 slice 5); no user-facing knob. */
+/** Default bound on how many READY-and-live nodes run at once (slice 5); no user-facing knob. */
 export const DAG_MAX_CONCURRENCY = 8;
 
 /** DI seam for the concurrency bound — unregistered by default (the constant wins). */
 export const DAG_CONCURRENCY = Symbol('DAG_CONCURRENCY');
 
 /**
- * The ONE runtime (ADR 0023 slice 4): a gating scheduler over a flat, topo-sorted `DagPlan` whose
+ * The ONE runtime (slice 4): a gating scheduler over a flat, topo-sorted `DagPlan` whose
  * control flow is expressed by GUARDS. It owns ONLY scheduling; every per-node semantic is
  * inherited from `BasePlanInterpreter`.
  *
@@ -216,7 +216,7 @@ export class DagInterpreter extends BasePlanInterpreter {
   ): Promise<void> {
     switch (node.kind) {
       case 'action':
-        // The error lane (ADR 0020) is a nested DagPlan run in place, passed as a callback so the
+        // The error lane is a nested DagPlan run in place, passed as a callback so the
         // base executor never sees the plan shape; a lane that runs throws ErrorLaneHalt.
         return this.executeAction(
           node,
@@ -228,7 +228,7 @@ export class DagInterpreter extends BasePlanInterpreter {
             : null,
         );
       case 'code':
-        // ADR 0027: the snippet runs in the WASM sandbox, honouring the same error lane as an action.
+        // The snippet runs in the WASM sandbox, honouring the same error lane as an action.
         return this.executeCode(
           node,
           scope,
@@ -243,7 +243,7 @@ export class DagInterpreter extends BasePlanInterpreter {
           this.schedule(node.body.nodes, childScope, childPath, ctx),
         );
       case 'while':
-        // ADR 0029: the same nested-body walk as forEach; the do-while control + cap live in the base.
+        // The same nested-body walk as forEach; the do-while control + cap live in the base.
         return this.executeWhile(node, scope, path, ctx, (childScope, childPath) =>
           this.schedule(node.body.nodes, childScope, childPath, ctx),
         );
@@ -257,7 +257,7 @@ export class DagInterpreter extends BasePlanInterpreter {
           (branchScope, i, childPath) => this.schedule(node.branches[i]!.nodes, branchScope, childPath, ctx),
         );
       case 'agent':
-        // ADR 0045: the durable tool-calling loop runs in the base executor, routing a
+        // The durable tool-calling loop runs in the base executor, routing a
         // max_steps exhaustion into the same error lane as an action failure.
         return this.executeAgent(
           node,
@@ -269,7 +269,7 @@ export class DagInterpreter extends BasePlanInterpreter {
             : null,
         );
       case 'callWorkflow':
-        // ADR 0062: the child runs nested through the same seam an agent's sub-workflow tool uses,
+        // The child runs nested through the same seam an agent's sub-workflow tool uses,
         // and a failure inside it routes into this node's error lane like any other.
         return this.executeCallWorkflow(
           node,

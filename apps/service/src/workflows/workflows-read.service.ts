@@ -365,7 +365,7 @@ export class WorkflowsReadService {
       ? (display.workflowJson.nodes as Array<Record<string, unknown>>)
       : [];
 
-    // Auth requirements come from the ONE connection-requirement site (ADR 0052), so the config view
+    // Auth requirements come from the ONE connection-requirement site, so the config view
     // and the author-time validator can never disagree about whether a step is wired up.
     const credentials = connectionRequirements(display.workflowJson, this.catalog.facts()).map((req) => ({
       node_name: req.node_name,

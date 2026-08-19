@@ -9,7 +9,7 @@ export class OrganizationEntity {
   @Column({ type: 'varchar', length: 255 })
   name!: string;
 
-  /** Auto-created 1:1 org for each user; the coexistence shim (ADR 0037). */
+  /** Auto-created 1:1 org for each user; the coexistence shim. */
   @Column({ name: 'is_personal', type: 'boolean', default: false })
   isPersonal!: boolean;
 
@@ -27,7 +27,7 @@ export type OrgRole = (typeof ORG_ROLES)[number];
 export const ASSIGNABLE_ORG_ROLES = ['owner', 'admin', 'member'] as const;
 export type AssignableOrgRole = (typeof ASSIGNABLE_ORG_ROLES)[number];
 
-/** Fixed OSS role matrix (ADR 0037); custom roles are an ee extension point. */
+/** Fixed OSS role matrix; custom roles are an ee extension point. */
 @Entity('org_members')
 export class OrgMemberEntity {
   @PrimaryColumn('uuid')

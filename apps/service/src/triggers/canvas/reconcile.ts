@@ -10,7 +10,7 @@ import {
 } from './trigger-activation';
 
 /**
- * The pure core of the trigger reconciler (ADR 0018) — no DB, no provider calls, no DI:
+ * The pure core of the trigger reconciler — no DB, no provider calls, no DI:
  * `deriveDesiredActivations` (env pointers × version-doc trigger nodes) → DESIRED, and
  * `reconcileActivations` (DESIRED, ACTUAL) → the create/update/delete plan the applier runs.
  */

@@ -32,7 +32,7 @@ export interface CanvasHistory {
   future: Array<Record<string, unknown>>;
 }
 
-/** The head-moved-under-us facts a 409 `branch_moved` carries (ADR 0034 B5). */
+/** The head-moved-under-us facts a 409 `branch_moved` carries. */
 export interface BranchMovedState {
   /** The version now at the branch head — what rebase/discard reload onto. */
   currentHeadVersionId: string;
@@ -124,7 +124,7 @@ interface WorkflowState {
   addSwitchCase: (nodeId: string) => void;
   /** Remove a Switch case (keeping at least one); higher ports slide down so wires still follow their case. */
   removeSwitchCase: (nodeId: string, index: number) => void;
-  /** Switch a loop between `items` and `while` (ADR 0029), seeding `while`'s required fields and keeping the other mode's. */
+  /** Switch a loop between `items` and `while`, seeding `while`'s required fields and keeping the other mode's. */
   setLoopMode: (nodeId: string, mode: "items" | "while") => void;
   deleteWorkflowNode: (name: string) => void;
   /** Paste nodes with fresh collision-free ids; only edges with BOTH endpoints copied survive. Returns the new ids. */
@@ -157,7 +157,7 @@ interface WorkflowState {
   editBranch: string;
   /** Opened FROM an old version (continue-from-vN): Save still appends a NEW head — vN stays immutable. */
   editFromVersion: number | null;
-  /** Optimistic-concurrency base (ADR 0034 B5): the head version this doc was last synced from. */
+  /** Optimistic-concurrency base: the head version this doc was last synced from. */
   baseVersionId: string | null;
   /** Set on a 409 `branch_moved`; drives BranchMovedDialog — we never silently retry or overwrite. */
   branchMoved: BranchMovedState | null;
@@ -977,7 +977,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       version = await api.commitVersion(workflowId, {
         workflow_json: workflowJson,
         branch: editBranch,
-        // A head that advanced past this 409s (ADR 0034 B5) rather than forking or clobbering.
+        // A head that advanced past this 409s rather than forking or clobbering.
         base_version_id: baseVersionId ?? undefined,
         // The user's words win, then continue-from provenance; otherwise no message at all.
         commit_message:
@@ -1025,7 +1025,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     }
 
     // Clear `dirty` here or a retry re-commits the same content as another version; advancing the base
-    // keeps the next commit's guard on the true head (ADR 0034 B5).
+    // keeps the next commit's guard on the true head.
     set({
       dirty: false,
       lastGeneratedJson: workflowJson,

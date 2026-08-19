@@ -11,7 +11,7 @@ import { EnvPointersService } from './env-pointers.service';
 /**
  * The contract a sub-workflow declares about being called, read from the version the CALLER's
  * environment runs — the same version the runner will execute, so what a model is offered and what
- * actually runs can never be two different documents (ADR 0053 §1, ADR 0062). Committing cannot
+ * actually runs can never be two different documents. Committing cannot
  * change it; promoting can.
  */
 @Injectable()

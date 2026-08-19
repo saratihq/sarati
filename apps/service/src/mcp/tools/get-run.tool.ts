@@ -25,11 +25,11 @@ const Step = z.object({
   node_id: z.string(),
   kind: z.string(),
   status: z.string(),
-  /** Provider calls this step took — greater than 1 means it was retried (ADR 0020). */
+  /** Provider calls this step took — greater than 1 means it was retried. */
   attempts: z.number(),
-  /** The step errored but the run continued past it (continue-on-fail, ADR 0020). */
+  /** The step errored but the run continued past it (continue-on-fail). */
   continued: z.boolean(),
-  /** The step replayed a pinned sample instead of calling the provider (ADR 0021). */
+  /** The step replayed a pinned sample instead of calling the provider. */
   pinned: z.boolean(),
   error: z.string().nullable(),
   started_at: z.string().nullable(),
@@ -45,7 +45,7 @@ const Output = z.object({
   workflow_version_id: z.string().nullable(),
   environment: z.string().nullable(),
   source: z.string().nullable(),
-  /** The run fired no state-changing external call (ADR 0041). */
+  /** The run fired no state-changing external call. */
   dry_run: z.boolean(),
   started_at: z.string().nullable(),
   finished_at: z.string().nullable(),
@@ -117,7 +117,7 @@ export class GetRunTool implements McpTool {
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { run_id, include_step_outputs } = Input.parse(input);
-    // The flag is a READ option, not a filter over an already-assembled payload (ADR 0052).
+    // The flag is a READ option, not a filter over an already-assembled payload.
     const detail = await this.runs.getRun(run_id, runAccessOf(ctx.principal), {
       includeStepOutputs: include_step_outputs,
     });

@@ -18,19 +18,19 @@ export interface ActionNode {
   props: Record<string, unknown>;
   /** Connection credential when the action needs auth. */
   auth?: unknown;
-  /** Per-node failure policy (ADR 0020); `"continue"` captures the error into scope and goes on.
+  /** Per-node failure policy; `"continue"` captures the error into scope and goes on.
    *  Absent ⇒ stop. Execution-time only; never in the doc. */
   onError?: 'continue';
-  /** Per-node retry policy (ADR 0020) — retried INSIDE the one durable step, so a mid-retry throw
+  /** Per-node retry policy — retried INSIDE the one durable step, so a mid-retry throw
    *  is never memoised; exhausted retries fall through to `onError`. */
   retry?: { maxAttempts: number; backoffMs: number };
-  /** ADR 0020 error lane, compiled from `port_type: 'error'` edges — WINS over `onError`, replaces
+  /** Error lane, compiled from `port_type: 'error'` edges — WINS over `onError`, replaces
    *  the node's main successors, and ends the run after it. Never both lanes. */
   onErrorBranch?: RunNode[];
 }
 
 /**
- * Run a user-authored code snippet in a secure sandbox (ADR 0027): an async function body receiving
+ * Run a user-authored code snippet in a secure sandbox: an async function body receiving
  * the run scope as `steps` (plus a `trigger` alias) whose return becomes the node's output.
  */
 export interface CodeNode {
@@ -40,11 +40,11 @@ export interface CodeNode {
   language: 'js' | 'ts';
   /** The snippet — an (async) function body that returns the node's output. */
   code: string;
-  /** Per-node failure policy (ADR 0020); `"continue"` tolerates a throw. Absent ⇒ stop. */
+  /** Per-node failure policy; `"continue"` tolerates a throw. Absent ⇒ stop. */
   onError?: 'continue';
-  /** Per-node retry policy (ADR 0020); the snippet re-runs up to `maxAttempts`. */
+  /** Per-node retry policy; the snippet re-runs up to `maxAttempts`. */
   retry?: { maxAttempts: number; backoffMs: number };
-  /** ERROR OUTPUT (ADR 0020): the lane to run when the snippet fails; wins over `onError`. */
+  /** ERROR OUTPUT: the lane to run when the snippet fails; wins over `onError`. */
   onErrorBranch?: RunNode[];
 }
 

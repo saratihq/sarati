@@ -63,7 +63,7 @@ function lowerNode(node: RunNode, guards: Guard[]): Lowered {
       return { nodes: [dagNode], exits: exit };
     }
     case 'code': {
-      // ADR 0027: transpile ts→js and carry guards/onError/retry; the error lane lowers
+      // Transpile ts→js and carry guards/onError/retry; the error lane lowers
       // to a nested sub-plan exactly like an action's.
       const { onErrorBranch } = node;
       const dagNode: DagCodeNode = {

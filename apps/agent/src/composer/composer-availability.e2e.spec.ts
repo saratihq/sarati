@@ -277,7 +277,7 @@ describe('composer availability', () => {
     });
   });
 
-  describe('local sessions (self-host, ADR 0054)', () => {
+  describe('local sessions (self-host)', () => {
     // Everything a self-host has: the SECRET_KEY the workflow service already signs its
     // sessions with. The Anthropic key comes from that service's store (`storedKey`).
     const SELF_HOST = { SECRET_KEY: SECRET };
@@ -327,7 +327,7 @@ describe('composer availability', () => {
     it('rejects a foreign issuer even when it is signed with the right secret', async () => {
       app = await boot(SELF_HOST);
 
-      // The ADR's core property: holding SECRET_KEY is not enough — a token has
+      // The core property: holding SECRET_KEY is not enough — a token has
       // to be a local session, so one path can never mint for another.
       await callToken(await localToken({ issuer: 'https://clerk.example' })).expect(401);
     });

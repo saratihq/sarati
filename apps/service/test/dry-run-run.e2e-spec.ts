@@ -12,8 +12,8 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
-/** ADR 0041 — a dry run refuses state-changing calls and records `dry_run`; a real run hits the server. */
-describe('dry run (ADR 0041, e2e, isolated DB, mock auth)', () => {
+/** A dry run refuses state-changing calls and records `dry_run`; a real run hits the server. */
+describe('dry run (e2e, isolated DB, mock auth)', () => {
   let app: INestApplication;
   let hitServer: Server;
   let hits: string[] = [];

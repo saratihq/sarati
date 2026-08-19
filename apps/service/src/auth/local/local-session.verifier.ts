@@ -7,7 +7,7 @@ import { TokenExpiredError } from '../auth.errors';
 import type { TokenVerifier, VerifiedIdentity } from '../token-verifier';
 import { readSession } from './local-session';
 
-/** Verifies sessions issued by local email+password login (ADR 0054); inert when local auth is off. */
+/** Verifies sessions issued by local email+password login; inert when local auth is off. */
 @Injectable()
 export class LocalSessionVerifier implements TokenVerifier {
   readonly name = 'local';

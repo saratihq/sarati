@@ -152,7 +152,7 @@ interface ReviewFeedCardProps {
   review: ReviewSummary;
   initiallyExpanded: boolean;
   busy: boolean;
-  /** Named environments (ADR 0014) for the pre-merge test's env picker. */
+  /** Named environments for the pre-merge test's env picker. */
   environments: EnvironmentSummary[] | null;
   onApproval: (review: ReviewSummary, decision: "approved" | "rejected", comment?: string) => void;
   onMergeRequest: (review: ReviewSummary) => void;
@@ -181,7 +181,7 @@ function ReviewFeedCard({
   const [commentBody, setCommentBody] = useState("");
   const [postingComment, setPostingComment] = useState(false);
   const [note, setNote] = useState("");
-  // Latest pre-merge test (ADR 0015); drives the merge-gate warning below.
+  // Latest pre-merge test; drives the merge-gate warning below.
   const [testResult, setTestResult] = useState<ReviewTestSummary | null>(null);
 
   useEffect(() => {
@@ -335,7 +335,7 @@ function ReviewFeedCard({
             />
           )}
 
-          {/* Pre-merge "Test this branch" (ADR 0015) */}
+          {/* Pre-merge "Test this branch" */}
           <ReviewTestPanel
             workflowId={workflowId}
             reviewId={review.id}
@@ -586,7 +586,7 @@ export default function ActivityFeed({
   const builtIn = true;
   const headVersionNumber = (versions ?? []).reduce((m, v) => Math.max(m, v.version_number), 0);
 
-  // ADR 0032 gate: the Promote menu is the only pointer-mover, so gating this one button covers both
+  // Gate: the Promote menu is the only pointer-mover, so gating this one button covers both
   // directions; a plain org member would otherwise hit a 403.
   const canMovePointers = useOrgs(canMoveEnvPointers);
 
@@ -597,7 +597,7 @@ export default function ActivityFeed({
   } | null>(null);
   const promoteMenuRef = useRef<HTMLDivElement>(null);
 
-  // The workspace's named environments (ADR 0014); kept across refetches so a failure never blanks it.
+  // The workspace's named environments; kept across refetches so a failure never blanks it.
   const [environments, setEnvironments] = useState<EnvironmentSummary[] | null>(null);
   const [envsFailed, setEnvsFailed] = useState(false);
   const [envsRetry, setEnvsRetry] = useState(0);
@@ -648,7 +648,7 @@ export default function ActivityFeed({
     setPendingPromote({ environment, version });
   };
 
-  // Un-promote (ADR 0014); removing prod means the workflow goes dark, so the confirm says so.
+  // Un-promote; removing prod means the workflow goes dark, so the confirm says so.
   const handleRemovePointer = (env: EnvironmentSummary, v: WorkflowVersionSummary) => {
     setPromoteMenuId(null);
     const doRemove = async () => {

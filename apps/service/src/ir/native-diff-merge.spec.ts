@@ -3,10 +3,10 @@ import { deepEqual, type IREdge, type IRNode, type WorkflowIR } from './models';
 import { threeWayMerge } from './merge';
 
 /**
- * The source-of-truth regression guard for the version-control engine (`ir/diff.ts` + `ir/merge.ts`,
- * ADR 0025). Every assertion states the CORRECT behaviour of a constitution invariant
+ * The source-of-truth regression guard for the version-control engine (`ir/diff.ts` + `ir/merge.ts`).
+ * Every assertion states the CORRECT behaviour of a constitution invariant
  * (`src/domain/README.md`) in human terms — never an opaque byte-snapshot of what the code emits.
- * A red test here means either a regression or a change that needs its own ADR.
+ * A red test here means either a regression or a deliberate amendment that says so.
  */
 
 // ── Native IR builders ────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ describe('computeDiff (native) — edge identity', () => {
     });
   });
 
-  it('a tool edge binds a tool, distinct from a main edge between the same nodes (invariant 14, ADR 0045)', () => {
+  it('a tool edge binds a tool, distinct from a main edge between the same nodes (invariant 14)', () => {
     // An agent already wired to a `search` node on `main` gains a `tool` edge to it: the
     // `tool` edge is a FIRST-CLASS added edge, and the `main` edge is untouched — they never
     // collapse (the endpoint tuple keys `port_type`). Adding/removing a tool is a reviewable diff.

@@ -273,7 +273,7 @@ describe('workflows read slice (e2e, isolated DB, mock auth)', () => {
   });
 
   it('GET /api/workflows/:id/config — native shape: webhook detected, action credential from the catalog', async () => {
-    // Auth requirements resolve from the built-in action catalog (ADR 0026).
+    // Auth requirements resolve from the built-in action catalog.
     const deployed = await request(app.getHttpServer())
       .post('/api/deploy')
       .send({

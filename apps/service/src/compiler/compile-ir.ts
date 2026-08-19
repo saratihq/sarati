@@ -37,7 +37,7 @@ export function isTriggerNode(
   return node.metadata?.trigger === true;
 }
 
-// The native canvas trigger kinds (ADR 0018), spelled as literals rather than imported from
+// The native canvas trigger kinds, spelled as literals rather than imported from
 // src/triggers, which the moat rules forbid. The trigger layer's constants carry the SAME values
 // and a compiler test guards that they stay in lockstep.
 const ORCHESTR_WEBHOOK = 'orchestr:webhook';
@@ -49,7 +49,7 @@ export const PUBLIC_ACTION_TYPE = /^[a-z][a-z0-9_-]*\.[\w.-]+$/;
 /** The internal `@scope/pkg:action` action form (back-compat). */
 export const INTERNAL_ACTION_TYPE = /^@[\w.-]+\/[\w.-]+:[\w.-]+$/;
 
-// Retry caps (ADR 0020) — `parameters.retry` comes from the version doc, so clamp it here: a typo
+// Retry caps — `parameters.retry` comes from the version doc, so clamp it here: a typo
 // or hostile config must not loop forever or sleep for hours inside a step.
 const RETRY_MAX_ATTEMPTS_CAP = 10;
 const RETRY_BACKOFF_CAP_MS = 60_000;
@@ -88,7 +88,7 @@ export function mapNode(node: IRNode, translate: (value: unknown) => unknown): R
   if (node.node_type === ORCHESTR_CODE) return buildCodeNode(node);
   if (PUBLIC_ACTION_TYPE.test(node.node_type) || INTERNAL_ACTION_TYPE.test(node.node_type)) {
     // Parameters ARE the props; `connectionId` becomes the checkpoint-safe auth reference, and the
-    // ADR 0020 policy fields are destructured OUT so they never leak to the provider.
+    // Policy fields are destructured OUT so they never leak to the provider.
     const { connectionId, onError, retry, ...props } = node.parameters;
     return {
       kind: 'action',
@@ -104,7 +104,7 @@ export function mapNode(node: IRNode, translate: (value: unknown) => unknown): R
 }
 
 /**
- * Lower an `orchestr:code` IR node to a `CodeNode` (ADR 0027). `code` is RAW source, never
+ * Lower an `orchestr:code` IR node to a `CodeNode`. `code` is RAW source, never
  * `translate`d — a snippet reads run data through its injected `steps`/`trigger`, not `{{ref}}`s.
  */
 function buildCodeNode(node: IRNode): CodeNode {

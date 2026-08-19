@@ -10,7 +10,7 @@ import { RunRecorderService } from './run-recorder.service';
 import { RuntimeCompiler } from './runtime-compiler';
 
 /**
- * The orchestration runtime — ONE engine (ADR 0023 slice 4): the gating-scheduler `DagInterpreter`
+ * The orchestration runtime — ONE engine (slice 4): the gating-scheduler `DagInterpreter`
  * over a `DagPlan`, with per-node execution in `base-plan-interpreter.ts`. `RuntimeCompiler`
  * produces that plan from either a `WorkflowIR` or a raw client `RunPlan`.
  */
@@ -21,7 +21,7 @@ import { RuntimeCompiler } from './runtime-compiler';
     RunRecorderService,
     RuntimeCompiler,
     CodeRunner,
-    // One in-process singleton wires both ends of the live agent step stream (ADR 0045 §9):
+    // One in-process singleton wires both ends of the live agent step stream:
     // the subscribe surface, and the interpreter's publish sink behind AGENT_STEP_SINK.
     AgentStepBus,
     { provide: AGENT_STEP_SINK, useExisting: AgentStepBus },

@@ -36,7 +36,7 @@ class LoginDto {
 }
 
 /**
- * Email + password for self-host (ADR 0054). Unauthenticated by necessity — these routes are how a
+ * Email + password for self-host. Unauthenticated by necessity — these routes are how a
  * caller gets a session in the first place — so both are rate-limited and registration is
  * bootstrap-or-invite only.
  */

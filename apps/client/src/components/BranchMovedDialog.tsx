@@ -8,7 +8,7 @@ import { SaratiLoader } from "./SaratiLogo";
 import { useWorkflow } from "@/store/useWorkflow";
 
 /**
- * Optimistic-concurrency conflict dialog (ADR 0034 B5) for a 409 `branch_moved` commit: rebase onto
+ * Optimistic-concurrency conflict dialog for a 409 `branch_moved` commit: rebase onto
  * the moved head or discard. Escape/backdrop keeps the local edits — never a silent retry or overwrite.
  */
 export function BranchMovedDialog({ onResolved }: { onResolved?: () => void } = {}) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getTagColor, isProtectedEnv } from "@/lib/envPresentation";
 
-/** Vault rule (ADR 0016): meaning derives from FLAGS and ids — a name is display only. */
+/** Vault rule: meaning derives from FLAGS and ids — a name is display only. */
 describe("isProtectedEnv", () => {
   it("protects production by its FLAG, whatever it is called", () => {
     expect(isProtectedEnv({ is_prod: true, name: "production" })).toBe(true);

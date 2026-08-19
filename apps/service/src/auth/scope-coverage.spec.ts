@@ -11,11 +11,11 @@ const SRC_ROOT = join(__dirname, '..');
 /** Controllers deliberately reachable without a principal — each carries its own signature/verification suite. */
 const PUBLIC_CONTROLLERS = [
   // Login and registration are how a caller GETS a session, so they cannot require one. Both are
-  // rate-limited, and registration is bootstrap-or-invite only (ADR 0054).
+  // rate-limited, and registration is bootstrap-or-invite only.
   'auth/local/local-auth.controller.ts',
   'health/health.controller.ts',
   // An invitee has no account yet on a self-hosted instance, so reading which org they were
-  // invited to cannot require one; the token is the capability (ADR 0054).
+  // invited to cannot require one; the token is the capability.
   'orgs/invite-preview.controller.ts',
   'triggers/chat.controller.ts',
   'triggers/hooks.controller.ts',
@@ -58,7 +58,7 @@ function declaredScope(controller: Ctor, handler: object): unknown {
   return Reflect.getMetadata(SCOPE_METADATA, handler) ?? Reflect.getMetadata(SCOPE_METADATA, controller);
 }
 
-/** ADR 0051: the guard denies unannotated routes at runtime — this catches the omission at build time. */
+/** The guard denies unannotated routes at runtime — this catches the omission at build time. */
 describe('API-key scope coverage', () => {
   const files = controllerFiles(SRC_ROOT).sort();
   const authenticated: string[] = [];

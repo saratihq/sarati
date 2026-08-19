@@ -12,7 +12,7 @@ import type { RunPlan } from './run-plan';
  */
 @Injectable()
 export class RuntimeCompiler {
-  /** Lower a versioned `WorkflowIR`; `workflowId` arms the self-reference guard (ADR 0045 §3). */
+  /** Lower a versioned `WorkflowIR`; `workflowId` arms the self-reference guard. */
   compile(ir: WorkflowIR, workflowId?: string): DagPlan {
     return compileWorkflowIrDag(ir, workflowId);
   }

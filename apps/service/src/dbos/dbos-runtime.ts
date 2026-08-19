@@ -37,13 +37,13 @@ const runPlanWorkflow = DBOS.registerWorkflow(
       runId: args.runId,
       recorder: activeRecorder ?? undefined,
       initialScope: args.initialScope,
-      // Pins ride the checkpointed args so a crash-resume replays the same pinned steps (ADR 0021).
+      // Pins ride the checkpointed args so a crash-resume replays the same pinned steps.
       pins: args.pins,
       // Checkpointed too, so a crash-resume rehydrates the env and re-resolves the slot connection.
       environment: args.environment,
       environmentId: args.environmentId,
       orgId: args.orgId,
-      // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel (ADR 0045).
+      // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
       chatChannelKey: args.chatChannelKey,
     });
   },

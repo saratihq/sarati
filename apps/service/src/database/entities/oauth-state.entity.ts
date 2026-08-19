@@ -18,7 +18,7 @@ export class OAuthStateEntity {
   @Column({ name: 'code_verifier', type: 'varchar', length: 255, nullable: true })
   codeVerifier!: string | null;
 
-  /** BYO OAuth client carried authorize → callback (ADR 0042), encrypted; null for env-configured. */
+  /** BYO OAuth client carried authorize → callback, encrypted; null for env-configured. */
   @Column({ name: 'oauth_client', type: 'text', nullable: true })
   oauthClient!: string | null;
 

@@ -12,7 +12,7 @@ import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-/** The MCP surface, exercised by the real MCP client over the real transport (ADR 0052). */
+/** The MCP surface, exercised by the real MCP client over the real transport. */
 describe('Platform MCP (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;

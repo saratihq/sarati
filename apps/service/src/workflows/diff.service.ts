@@ -89,7 +89,7 @@ export class DiffService {
     };
   }
 
-  /** The same comparison, grouped for a caller that must see what each op is keyed on (ADR 0052). */
+  /** The same comparison, grouped for a caller that must see what each op is keyed on. */
   async getChangeSet(
     principal: Principal,
     workflowId: string,

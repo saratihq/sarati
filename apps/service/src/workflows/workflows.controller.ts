@@ -114,7 +114,7 @@ export class WorkflowsController {
     @Query('from_branch') fromBranch?: string,
     @Query('to_branch') toBranch?: string,
   ): Promise<Record<string, unknown>> {
-    // Authorized inside the service, so the MCP surface hits the same check (ADR 0052).
+    // Authorized inside the service, so the MCP surface hits the same check.
     return this.diffs.getDiff(
       requirePrincipal(req),
       workflowId,

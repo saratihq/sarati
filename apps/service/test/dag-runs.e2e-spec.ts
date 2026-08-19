@@ -12,7 +12,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
-/** ADR 0023 — compiled IR and raw plans both lower onto the ONE DagInterpreter; DBOS off (direct path). */
+/** Compiled IR and raw plans both lower onto the ONE DagInterpreter; DBOS off (direct path). */
 describe('runs endpoint on the general-DAG engine (e2e, isolated DB)', () => {
   let app: INestApplication;
   let echoServer: Server;
@@ -141,7 +141,7 @@ describe('runs endpoint on the general-DAG engine (e2e, isolated DB)', () => {
     expect(other.body.outputs.active_path).toBeUndefined();
   });
 
-  it('DAG path: error output routes the error lane, skips the main successor, run completes (ADR 0020)', async () => {
+  it('DAG path: error output routes the error lane, skips the main successor, run completes', async () => {
     const concat = (id: string, texts: string[]) => ({
       id,
       name: id,
@@ -199,7 +199,7 @@ describe('runs endpoint on the general-DAG engine (e2e, isolated DB)', () => {
     expect(detail.body.status).toBe('completed');
   });
 
-  it('DAG path: continue-on-fail tolerates a throw and composes against the captured error (ADR 0020)', async () => {
+  it('DAG path: continue-on-fail tolerates a throw and composes against the captured error', async () => {
     const workflow_ir = {
       version: '1',
       name: 'dag-continue',

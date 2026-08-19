@@ -1,4 +1,4 @@
-// ─── Environments API (ADR 0014 — one pool, curated named environments) ───
+// ─── Environments API (— one pool, curated named environments) ───
 // Environments are curation layers over the flat connection pool: one slot per app, filled by *assigning*
 // a pool connection. Slots are references — assignment never moves the connection.
 

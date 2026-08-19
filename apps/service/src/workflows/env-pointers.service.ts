@@ -68,7 +68,7 @@ export class EnvPointersService {
 
   /**
    * The version a CALLER's environment runs — the one answer for calling a workflow from anywhere
-   * (ADR 0062), so what an agent is offered and what actually executes can never be two versions.
+   * , so what an agent is offered and what actually executes can never be two versions.
    * `null` environmentId = Default, which runs production, exactly like a Default trigger fire.
    */
   async resolveVersionIdForCaller(
@@ -81,7 +81,7 @@ export class EnvPointersService {
     return env ? this.resolveVersionIdForEnv(em, wf, env) : null;
   }
 
-  /** The version an ENV ROW runs (ADR 0014): prefers `environment_id`, falls back to a name-only pointer, then the prod alias. */
+  /** The version an ENV ROW runs: prefers `environment_id`, falls back to a name-only pointer, then the prod alias. */
   async resolveVersionIdForEnv(
     em: EntityManager,
     wf: WorkflowEntity,
@@ -168,7 +168,7 @@ export class EnvPointersService {
       });
       return { removed: true as const, environment: env.name };
     });
-    // Pointer moved (committed) → reconcile this workflow's activations (ADR 0018).
+    // Pointer moved (committed) → reconcile this workflow's activations.
     await this.triggerSignals.enqueue(workflowId);
     return result;
   }
@@ -268,7 +268,7 @@ export class EnvPointersService {
         previous_version_number: previous?.versionNumber ?? null,
       };
     });
-    // Pointer moved (committed) → reconcile this workflow's activations (ADR 0018).
+    // Pointer moved (committed) → reconcile this workflow's activations.
     await this.triggerSignals.enqueue(workflowId);
     return result;
   }

@@ -51,7 +51,7 @@ function connIr(): Record<string, unknown> {
   };
 }
 
-/** A connection-less echo workflow fed by a canvas webhook trigger node (ADR 0018). */
+/** A connection-less echo workflow fed by a canvas webhook trigger node. */
 function concatIr(): Record<string, unknown> {
   return {
     version: '1.0',
@@ -535,7 +535,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await db.query(`DELETE FROM connections WHERE id = ANY($1)`, [[dead, active]]);
   });
 
-  it('member-leave SLOT guard (ADR 0014, P0): a member whose PERSONAL connection fills an org env slot is 409-blocked until the slot is freed', async () => {
+  it('member-leave SLOT guard (P0): a member whose PERSONAL connection fills an org env slot is 409-blocked until the slot is freed', async () => {
     // Env SLOTS reference PERSONAL pool connections (`org_id` NULL), not cluster rows.
     const slotOrg = await asA(http().post('/api/orgs').send({ name: 'Slot Guard Co' })).expect(201);
     const slotOrgId = slotOrg.body.id as string;
@@ -589,7 +589,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await asB(http().get(`/api/orgs/${slotOrgId}/members`)).expect(403); // no longer a member
   });
 
-  it('canvas env-scoped triggers (ADR 0018): a staging webhook fire carries the environment through to the resolver', async () => {
+  it('canvas env-scoped triggers: a staging webhook fire carries the environment through to the resolver', async () => {
     // The per-`(workflow, env)` URL fires the staging-pinned version.
     const dep = await asA(
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: concatIr() }),

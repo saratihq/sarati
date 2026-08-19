@@ -136,7 +136,7 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
     ).expect(201);
     const workflowId = created.body.workflow_id as string;
     await org(act(http().post(`/api/workflows/${workflowId}/branches`).send({ name: 'change' }))).expect(201);
-    // An api_key principal must pin the head it edited (ADR 0052), so read it first.
+    // An api_key principal must pin the head it edited, so read it first.
     const head = await org(act(http().get(`/api/workflows/${workflowId}/branches/change/head`))).expect(200);
     await org(
       act(

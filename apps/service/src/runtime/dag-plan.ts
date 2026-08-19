@@ -3,7 +3,7 @@ import type { Condition } from './conditions';
 import type { ActionNode, CodeNode, DelayNode, WaitForEventNode } from './run-plan';
 
 /**
- * DagPlan — the FLAT general-DAG executable shape, and the ONE plan the runtime executes (ADR 0023
+ * DagPlan — the FLAT general-DAG executable shape, and the ONE plan the runtime executes (
  * slice 4), emitted by both `compileWorkflowIrDag` and `runPlanToDag`. Control flow is expressed by
  * GUARDS over a deterministically topo-sorted node list, so a node reachable from N inflows appears
  * ONCE with N guards. Data flows by reference (`{{node.id}}`), never along edges — a guard carries
@@ -25,20 +25,20 @@ export interface Guard {
   port: number;
 }
 
-/** Run a provider action — `ActionNode`'s payload, with the ADR 0020 error lane as a nested `DagPlan`. */
+/** Run a provider action — `ActionNode`'s payload, with the error lane as a nested `DagPlan`. */
 export type DagActionNode = Omit<ActionNode, 'onErrorBranch'> & {
   guards: Guard[];
-  /** ADR 0020 error lane, compiled as a nested sub-plan (empty guards at its roots). */
+  /** Error lane, compiled as a nested sub-plan (empty guards at its roots). */
   onErrorBranch?: DagPlan;
 };
 
 /**
- * Run a code snippet (ADR 0027) — an executable leaf like an action. `language` is dropped because
+ * Run a code snippet — an executable leaf like an action. `language` is dropped because
  * the snippet is already transpiled to JS by the time it reaches the runtime.
  */
 export type DagCodeNode = Omit<CodeNode, 'onErrorBranch' | 'language'> & {
   guards: Guard[];
-  /** ADR 0020 error lane, compiled as a nested sub-plan (empty guards at its roots). */
+  /** Error lane, compiled as a nested sub-plan (empty guards at its roots). */
   onErrorBranch?: DagPlan;
 };
 
@@ -62,7 +62,7 @@ export interface DagSwitchNode {
   guards: Guard[];
 }
 
-/** Per-item iteration; `body` runs in a real child scope, so it stays a nested sub-plan (ADR 0023). */
+/** Per-item iteration; `body` runs in a real child scope, so it stays a nested sub-plan. */
 export interface DagForEachNode {
   kind: 'forEach';
   id: string;
@@ -73,7 +73,7 @@ export interface DagForEachNode {
 }
 
 /**
- * Do-while iteration (ADR 0029) — the `mode: 'while'` driver of the same loop node, sharing
+ * Do-while iteration — the `mode: 'while'` driver of the same loop node, sharing
  * forEach's body peel and child scope. Round 1 always runs; `maxIterations` is the required hard
  * infinite-loop guard and reaching it stops cleanly, never with an error.
  */
@@ -97,7 +97,7 @@ export interface DagParallelNode {
 }
 
 /**
- * A durable tool-calling AGENT (ADR 0045) — a work-bearing leaf producing `scope[id]` (an
+ * A durable tool-calling AGENT — a work-bearing leaf producing `scope[id]` (an
  * `AgentResult`); its internal model + tool calls are durable steps, never separate DAG nodes.
  * `tools` is filled by `buildScopedDag`'s deferred peel of the `port_type:'tool'` edges (invariant #14).
  */
@@ -117,13 +117,13 @@ export interface DagAgentNode {
   auth?: unknown;
   /** The bound tools — peeled from `port_type:'tool'` edges (invariant #14), attached after flatten. */
   tools: DagAgentTool[];
-  /** ADR 0020 error lane — run when the loop exhausts `max_steps` (§7); a nested sub-plan. */
+  /** Error lane — run when the loop exhausts `max_steps` (§7); a nested sub-plan. */
   onErrorBranch?: DagPlan;
   guards: Guard[];
 }
 
 /**
- * Call another workflow as an ordinary STEP (ADR 0062) — a work-bearing leaf producing `scope[id]`
+ * Call another workflow as an ordinary STEP — a work-bearing leaf producing `scope[id]`
  * (the child's terminal output), run through the same seam that backs an agent's sub-workflow tool.
  * Only who decides to call differs: here the author wired it, so nothing bounds how often.
  */
@@ -135,7 +135,7 @@ export interface DagCallWorkflowNode {
   /** The child's firing event (`{{trigger.<field>}}` inside it), resolved against the run scope. */
   input: Record<string, unknown>;
   onError?: 'continue';
-  /** ADR 0020 error lane, compiled as a nested sub-plan (empty guards at its roots). */
+  /** Error lane, compiled as a nested sub-plan (empty guards at its roots). */
   onErrorBranch?: DagPlan;
   guards: Guard[];
 }

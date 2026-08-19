@@ -94,7 +94,7 @@ function slackPollingDoc(): Record<string, unknown> {
   return doc;
 }
 
-/** The SDK polling rail (ADR 0047) end to end with a stubbed outbound fetch — activate, prime, poll, fire. */
+/** The SDK polling rail end to end with a stubbed outbound fetch — activate, prime, poll, fire. */
 describe('SDK polling-trigger activation (e2e, stubbed fetch)', () => {
   let app: INestApplication;
   let db: Client;

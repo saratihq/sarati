@@ -11,7 +11,7 @@ const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } a
 
 jest.mock('undici', () => ({ request: jest.fn() }));
 
-/** The Composio v3 client's TRIGGER-INSTANCE leg (ADR 0046) — asserts the exact endpoints + bodies, `undici` mocked. */
+/** The Composio v3 client's TRIGGER-INSTANCE leg — asserts the exact endpoints + bodies, `undici` mocked. */
 const mockRequest = request as unknown as jest.Mock;
 
 function jsonResponse(body: unknown): { statusCode: number; body: { text: () => Promise<string> } } {

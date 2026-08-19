@@ -113,7 +113,7 @@ export default function PreviewPanel({
   const irNodeIds = useMemo(() => {
     const nodes = (workflowJson?.nodes as Array<{ id?: string }>) ?? [];
     // The trigger node is included — it carries its own inspector config as a
-    // version-doc node (ADR 0018).
+    // version-doc node.
     return new Set(nodes.filter((n) => n.id).map((n) => n.id as string));
   }, [workflowJson]);
   const irActiveSelection =

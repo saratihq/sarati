@@ -137,7 +137,7 @@ const shape = (body: Record<string, unknown>, id: string): Record<string, unknow
 });
 
 /**
- * ADR 0053 — a published workflow is a tool an agent can call: only what is LIVE in production is
+ * A published workflow is a tool an agent can call: only what is LIVE in production is
  * callable, only a `orchestr:tool_trigger` workflow is invocable, the arguments ARE the firing
  * event, and the answer is the terminal-node output (never the whole scope).
  */
@@ -224,7 +224,7 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
         .send({ name: 'Globex' })
         .expect(201)
     ).body.id as string;
-    // The key you paste into an agent: `workflow:invoke` and nothing else (ADR 0053 §3).
+    // The key you paste into an agent: `workflow:invoke` and nothing else.
     await db.query(
       `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'invoke-only', $3, $4, $5::json, now())`,
@@ -253,7 +253,7 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
       (v) => v.version_number === 1,
     )!.id;
 
-    // A key commit must name the head it edits (ADR 0052) — this one lands v2 and moves the branch.
+    // A key commit must name the head it edits — this one lands v2 and moves the branch.
     v2Id = (
       await asA(
         http()
@@ -354,7 +354,7 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
     expect(res.body.code).toBe('not_invocable');
     expect(String(res.body.detail)).toContain('orchestr:tool_trigger');
     // The full contract is the bar, not the node's presence — an undescribed tool is withheld from
-    // the tool list, so the message names describing it as part of the fix (ADR 0062).
+    // the tool list, so the message names describing it as part of the fix.
     expect(String(res.body.detail)).toMatch(/add that trigger, describe it, then publish/i);
   });
 

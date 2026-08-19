@@ -265,7 +265,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(detail.body.finished_at).toBeTruthy();
   });
 
-  it('true pinning: a pinned step REPLAYS its output — the provider is never called (ADR 0021)', async () => {
+  it('true pinning: a pinned step REPLAYS its output — the provider is never called', async () => {
     // The pinned node's action would FAIL if executed, so the run can only succeed if the pin
     // short-circuits the provider call entirely.
     const workflow_ir = {
@@ -331,7 +331,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(steps.find((s) => s.node_id === 'after')?.pinned).toBe(false);
   });
 
-  it('continue-on-fail: an errored step with onError:"continue" lets the run go on (ADR 0020)', async () => {
+  it('continue-on-fail: an errored step with onError:"continue" lets the run go on', async () => {
     // `boom` throws if executed; onError:"continue" must capture the error into scope instead of halting.
     const boom = (parameters: Record<string, unknown>) => ({
       id: 'boom',
@@ -398,7 +398,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(steps.find((s) => s.node_id === 'after')?.continued).toBe(false);
   });
 
-  it('retry-on-fail: a failing step is retried up to maxAttempts (ADR 0020)', async () => {
+  it('retry-on-fail: a failing step is retried up to maxAttempts', async () => {
     const boom = (parameters: Record<string, unknown>) => ({
       id: 'boom',
       name: 'boom',
@@ -460,7 +460,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(comboStep?.continued).toBe(true);
   });
 
-  it('error output: a throwing step routes to its error lane, skipping the main successor (ADR 0020)', async () => {
+  it('error output: a throwing step routes to its error lane, skipping the main successor', async () => {
     // `boom` throws and has both a `main` and an `error` outgoing edge — only the error lane may run.
     const concat = (id: string, texts: string[]) => ({
       id,

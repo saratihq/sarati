@@ -198,7 +198,7 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     const detail = await request(app.getHttpServer()).get('/api/node-types/gmail.list_messages').expect(200);
     expect(detail.body.parameters).toHaveProperty('query');
     expect(detail.body.auth).toBe('connection');
-    // The BYO-authable auth scheme (ADR 0042 A1) must survive the `toEntry` projection.
+    // The BYO-authable auth scheme (A1) must survive the `toEntry` projection.
     expect(detail.body.authScheme).toBeDefined();
     expect(typeof detail.body.authScheme.type).toBe('string');
     expect(detail.body.authScheme.type).not.toBe('none');

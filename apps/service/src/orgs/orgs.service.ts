@@ -12,7 +12,7 @@ export interface ActiveOrg {
   role: OrgRole | null;
 }
 
-/** Tenancy primitive (ADR 0037): every user has exactly one personal org, on the same tables as real orgs. */
+/** Tenancy primitive: every user has exactly one personal org, on the same tables as real orgs. */
 @Injectable()
 export class OrgsService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

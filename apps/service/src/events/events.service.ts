@@ -16,7 +16,7 @@ export interface DomainEventInput {
 }
 
 /**
- * The outbox (ADR 0037) behind audit, notifications, and metering. `emit` writes within the
+ * The outbox behind audit, notifications, and metering. `emit` writes within the
  * CALLER's transaction, so an event exists iff the mutation committed.
  */
 @Injectable()

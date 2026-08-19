@@ -29,7 +29,7 @@ export function activeOrgOf(s: Pick<OrgState, "orgs" | "activeOrgId">): OrgSumma
 }
 
 /**
- * Env-pointer moves (publish/promote/restore) are owner/admin-only in a non-personal org (ADR 0032).
+ * Env-pointer moves (publish/promote/restore) are owner/admin-only in a non-personal org.
  * Returns true while the org list loads — the service stays the backstop, so nobody is falsely locked out.
  */
 export function canMoveEnvPointers(s: Pick<OrgState, "orgs" | "activeOrgId">): boolean {

@@ -21,7 +21,7 @@ class CreateKeyDto {
   scopes?: string[];
 }
 
-/** Programmatic-access keys (ADR 0037). */
+/** Programmatic-access keys. */
 @Controller('api/api-keys')
 @UseGuards(AuthGuard)
 export class ApiKeysController {

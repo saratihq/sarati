@@ -5,10 +5,10 @@ import { mergeComposioCatalog, sdkCatalogEntries } from '../providers/sdk-action
 
 /**
  * In-process node/module catalog retrieval: brute-force cosine over in-memory vectors, behind an
- * {@link EmbeddingProvider} seam (pgvector-swappable, ADR 0037). Feeds an LLM reranker.
+ * {@link EmbeddingProvider} seam (pgvector-swappable). Feeds an LLM reranker.
  */
 
-/** Catalog collections — the single built-in collection (ADR 0026), assembled in-process. */
+/** Catalog collections — the single built-in collection, assembled in-process. */
 export const ENGINE_COLLECTIONS = {
   orchestr: 'orchestr_actions',
 } as const;

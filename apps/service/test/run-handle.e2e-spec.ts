@@ -58,7 +58,7 @@ const edge = (source: string, target: string) => ({
 });
 
 /**
- * ADR 0052 — a run is debuggable from its own handle: `from-ir` answers with `run_id`, a bounded
+ * A run is debuggable from its own handle: `from-ir` answers with `run_id`, a bounded
  * wait hands back a pollable handle instead of hanging, and a failure carries the failing node.
  */
 describe('run handle: run_id, bounded wait, and debuggable failure (e2e, isolated DB, mock auth)', () => {

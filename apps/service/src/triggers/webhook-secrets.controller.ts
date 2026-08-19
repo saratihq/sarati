@@ -31,7 +31,7 @@ class SetSecretDto {
 }
 
 /**
- * Set/clear the env-scoped webhook signing SECRET (ADR 0030 native HMAC) through a
+ * Set/clear the env-scoped webhook signing SECRET (native HMAC) through a
  * dedicated authenticated endpoint — NEVER the version-doc save path, so the secret
  * never enters a diff/review. The non-secret verification config lives on the node.
  */
@@ -58,7 +58,7 @@ export class WebhookSecretsController {
 
   /**
    * Whether a signing secret is stored for this node in this env. Returns a boolean ONLY —
-   * the secret is write-only and must never leave the server (ADR 0030).
+   * the secret is write-only and must never leave the server.
    */
   @Scope('connection:read')
   @Get()

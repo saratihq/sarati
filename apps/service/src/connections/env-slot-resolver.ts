@@ -1,7 +1,7 @@
 import { DomainError } from '../common/domain-error';
 
 /**
- * The env scope a run carries (ADR 0014): `environmentId` is THE resolution key, `environment` is the NAME and,
+ * The env scope a run carries: `environmentId` is THE resolution key, `environment` is the NAME and,
  * with `orgId`, the LEGACY pre-006 cluster key. All unset = a Default run on the personal pool.
  */
 export interface EnvScope {
@@ -33,7 +33,7 @@ export interface EnvSlotResolvers {
 }
 
 /**
- * THE env-slot decision, shared by every in-process rail (ADR 0014) so a model call resolves exactly like an action:
+ * THE env-slot decision, shared by every in-process rail so a model call resolves exactly like an action:
  * `null` when the run isn't env-scoped, a SLOT the caller rebinds to AND runs AS the owner of, or a hard 428 when
  * the slot is empty — NEVER a silent fall back to anyone's personal pool.
  */

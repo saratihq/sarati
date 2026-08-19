@@ -28,7 +28,7 @@ function toLogin(req: NextRequest) {
   return NextResponse.redirect(loginUrl);
 }
 
-// A UX gate only — presence, never validity: the service verifies the token on every call (ADR 0054).
+// A UX gate only — presence, never validity: the service verifies the token on every call.
 const hasLocalSession = (req: NextRequest) => Boolean(req.cookies.get(LOCAL_SESSION_COOKIE)?.value);
 
 // No Clerk key = a self-hosted instance that signs in with email + password; calling clerkMiddleware

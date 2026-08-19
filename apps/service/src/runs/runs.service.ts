@@ -34,7 +34,7 @@ export interface RunDispatchOptions {
   externalUserId: string;
   runId?: string;
   initialScope?: Record<string, unknown>;
-  /** TRUE PINNING (ADR 0021): ephemeral `{ [nodeId]: output }` overrides — a pinned node replays instead of hitting the provider. */
+  /** TRUE PINNING: ephemeral `{ [nodeId]: output }` overrides — a pinned node replays instead of hitting the provider. */
   pins?: Record<string, unknown>;
   /** The workflow this run executes — recorded for the runs panel (already validated). */
   workflowId?: string | null;
@@ -42,15 +42,15 @@ export interface RunDispatchOptions {
   workflowVersionId?: string | null;
   /** What started the run (defaults to 'api' — a raw plan over HTTP). */
   source?: RunSource;
-  /** Per-env connection scoping (ADR 0014): env NAME snapshot; unset = Default → personal. */
+  /** Per-env connection scoping: env NAME snapshot; unset = Default → personal. */
   environment?: string | null;
   environmentId?: string | null;
   orgId?: string | null;
-  /** The review this run tests (recorded when source='review_test', ADR 0015). */
+  /** The review this run tests (recorded when source='review_test'). */
   reviewId?: string | null;
-  /** Dry run (preview): no state-changing external call fires (ADR 0041); forced onto the in-process path. */
+  /** Dry run (preview): no state-changing external call fires; forced onto the in-process path. */
   dryRun?: boolean;
-  /** SCOPED `workflow:env:session` key the agent loop streams steps to (ADR 0045 §9); unset → no streaming. */
+  /** SCOPED `workflow:env:session` key the agent loop streams steps to; unset → no streaming. */
   chatChannelKey?: string | null;
 }
 
@@ -63,7 +63,7 @@ export interface GetRunOptions {
   includeStepOutputs?: boolean;
 }
 
-/** One end of a sub-workflow call, as run detail reports it (ADR 0062). */
+/** One end of a sub-workflow call, as run detail reports it. */
 export interface SubWorkflowRunLink {
   run_id: string;
   /** The calling step's key — always the CHILD's, whichever end this link is. */
@@ -93,7 +93,7 @@ function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
 
 /** A run's detail shape: status + provenance + the per-step log. */
 export type RunDetail = RunStatus & {
-  /** The run that called this one, when a sub-workflow call started it (ADR 0062). */
+  /** The run that called this one, when a sub-workflow call started it. */
   called_by: SubWorkflowRunLink | null;
   /** The runs this one started by calling other workflows. */
   calls: SubWorkflowRunLink[];
@@ -105,7 +105,7 @@ export type RunDetail = RunStatus & {
   environment: string | null;
   environment_id: string | null;
   source: string | null;
-  /** Dry run (preview): this run fired no state-changing external call (ADR 0041). */
+  /** Dry run (preview): this run fired no state-changing external call. */
   dry_run: boolean;
   duration_ms: number | null;
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
@@ -141,7 +141,7 @@ export class RunsService {
     return this.runExecutable(this.compiler.fromRunPlan(plan), opts);
   }
 
-  /** Dispatch a COMPILED `DagPlan`: record the run, then execute via DBOS or the interpreter. Every entry point funnels here (ADR 0023). */
+  /** Dispatch a COMPILED `DagPlan`: record the run, then execute via DBOS or the interpreter. Every entry point funnels here. */
   async runExecutable(plan: DagPlan, opts: RunDispatchOptions): Promise<RunResult> {
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
@@ -226,18 +226,18 @@ export class RunsService {
     }
   }
 
-  /** Bind the sub-workflow runner onto the ONE interpreter (ADR 0062) — a setter, since the runner sits above us and a constructor dep would cycle. */
+  /** Bind the sub-workflow runner onto the ONE interpreter — a setter, since the runner sits above us and a constructor dep would cycle. */
   bindSubWorkflowRunner(runner: SubWorkflowRunner): void {
     this.interpreter.setSubWorkflowRunner(runner);
   }
 
-  /** Bind the sub-workflow tool CONTRACT source onto the same interpreter (ADR 0053 §1). */
+  /** Bind the sub-workflow tool CONTRACT source onto the same interpreter. */
   bindWorkflowToolCatalog(catalog: AgentWorkflowCatalog): void {
     this.interpreter.setAgentWorkflowCatalog(catalog);
   }
 
   /**
-   * Run a COMPILED sub-workflow NESTED inside the caller's durable run (ADR 0045 §3): one parent
+   * Run a COMPILED sub-workflow NESTED inside the caller's durable run: one parent
    * checkpoint, so inner steps get no per-step memoization — a mid-run crash re-runs the whole sub-workflow.
    */
   async runSubWorkflowNested(
@@ -246,7 +246,7 @@ export class RunsService {
       externalUserId: string;
       /** Deterministic child run id — stable across a crash-replay, so step idempotency keys repeat. */
       runId: string;
-      /** The CHILD's workflow and version: the run is recorded under what actually executed (ADR 0062). */
+      /** The CHILD's workflow and version: the run is recorded under what actually executed. */
       workflowId: string;
       workflowVersionId: string;
       parentRunId: string;
@@ -294,7 +294,7 @@ export class RunsService {
   }
 
   /**
-   * Run a WorkflowIR with a BOUNDED wait (ADR 0052): the full result when it settles inside
+   * Run a WorkflowIR with a BOUNDED wait: the full result when it settles inside
    * `awaitMs`, else a handle — the run goes on, and `GET /api/runs/:run_id` reports it.
    */
   async runFromIrBounded(ir: WorkflowIR, opts: IrRunOptions & { awaitMs: number }): Promise<RunOutcome> {
@@ -323,14 +323,14 @@ export class RunsService {
   /** The ONE compile seam every IR entry point takes — sync, bounded and async all lower a document here. */
   private async compileIr(ir: WorkflowIR, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
-      // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow` (ADR 0045 §3).
+      // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
       return this.compiler.compile(ir, opts.workflowId ?? undefined);
     } catch (err) {
       // A document that can't compile is the CALLER's problem → 400, recorded as a failed
       // run first (there is no plan yet, so the interpreter never writes one).
       const message = `Workflow can't run: ${errorMessage(err)}`;
       const scoped = this.scopedRunId(opts.externalUserId, runId);
-      // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review (ADR 0015) / env.
+      // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review / env.
       await this.recorder?.runStarted(scoped, runId, opts.externalUserId, null, {
         workflowId: opts.workflowId ?? null,
         source: opts.source ?? 'api',
@@ -593,7 +593,7 @@ export class RunsService {
   }
 
   /**
-   * Both ends of a sub-workflow call (ADR 0062): the run that called this one, and the runs it
+   * Both ends of a sub-workflow call: the run that called this one, and the runs it
    * called. Without them a nested failure is only readable if you already know where to look.
    */
   private async subWorkflowLinks(
@@ -847,7 +847,7 @@ export class RunsService {
   /**
    * Resolve a run the caller may see/act on: their own, else — for an INTERACTIVE session only — any run in
    * their active org (the X-Org-Id guard already proved membership). A bearer credential never reaches another
-   * member's run: org-wide reach exists for the human approvals inbox and consults no policy (ADR 0051/0052).
+   * member's run: org-wide reach exists for the human approvals inbox and consults no policy.
    */
   private async resolveActionableRun(
     em: EntityManager,
@@ -907,11 +907,11 @@ function stepLog(s: RuntimeRunStepEntity, includeOutputs: boolean): Record<strin
     node_id: s.nodeId,
     kind: s.kind,
     status: s.status,
-    // Replayed (pinned) steps skipped the provider (ADR 0021) — the panel says "replayed".
+    // Replayed (pinned) steps skipped the provider — the panel says "replayed".
     pinned: s.pinned,
-    // Errored-but-tolerated (continue-on-fail, ADR 0020): 'error' status, run went on.
+    // Errored-but-tolerated (continue-on-fail): 'error' status, run went on.
     continued: s.continued,
-    // How many provider calls this step took (retry-on-fail, ADR 0020) — 1 unless retried.
+    // How many provider calls this step took (retry-on-fail) — 1 unless retried.
     attempts: s.attempts,
     ...(includeOutputs
       ? {

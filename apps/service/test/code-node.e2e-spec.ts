@@ -9,7 +9,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
-/** Code node (ADR 0027) end-to-end over HTTP: compile the TS, then run it in the CodeRunner WASM sandbox. */
+/** Code node end-to-end over HTTP: compile the TS, then run it in the CodeRunner WASM sandbox. */
 describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
   let app: INestApplication;
 

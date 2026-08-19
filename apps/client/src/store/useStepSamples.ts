@@ -12,7 +12,7 @@ interface StepSamplesState {
   scopeKey: string | null;
   /** node id (or `trigger`) → the step's last observed output. */
   samples: Record<string, unknown>;
-  /** node ids the user EXPLICITLY pinned — a Run replays their captured output (ADR 0021). */
+  /** node ids the user EXPLICITLY pinned — a Run replays their captured output. */
   pinned: Record<string, true>;
   /** Record a step's real output, rescoping (and clearing) when the workflow changed. */
   setSample: (scopeKey: string, nodeId: string, output: unknown) => void;

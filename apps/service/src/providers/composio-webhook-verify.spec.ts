@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 
 import { verifyComposioWebhook } from './composio-webhook-verify';
 
-/** The Composio webhook signature verifier (ADR 0046) — the `/api/hooks/composio` trust boundary. */
+/** The Composio webhook signature verifier — the `/api/hooks/composio` trust boundary. */
 describe('verifyComposioWebhook', () => {
   const secret = 'whsec_test_raw_secret_value';
   const id = 'msg_2abc';

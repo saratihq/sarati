@@ -23,7 +23,7 @@ class BatchDto {
 
 /**
  * Node-icon resolver: `node_icons` cache → the app logo for a `<slug>.<action>` type. Icons are
- * self-hosted inline SVGs (ADR 0043) — no external fetch; anything without a logo resolves to null.
+ * self-hosted inline SVGs — no external fetch; anything without a logo resolves to null.
  */
 @Controller('api')
 @UseGuards(AuthGuard)

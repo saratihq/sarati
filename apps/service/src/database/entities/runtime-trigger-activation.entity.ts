@@ -1,7 +1,7 @@
 import { Column, Entity, Index, PrimaryColumn, Unique } from 'typeorm';
 
 /**
- * A materialized trigger ACTIVATION (ADR 0018) — DERIVED STATE the reconciler converges. Only an
+ * A materialized trigger ACTIVATION — DERIVED STATE the reconciler converges. Only an
  * env-pointer move or slot change alters one; a commit never does (Save ≠ Live, invariant #2).
  */
 @Entity('runtime_trigger_activations')
@@ -40,7 +40,7 @@ export class RuntimeTriggerActivationEntity {
   @Column({ type: 'json', nullable: true })
   props!: Record<string, unknown> | null;
 
-  /** Composio trigger-instance id (ADR 0046); NOT unique — Composio dedupes instances, so
+  /** Composio trigger-instance id; NOT unique — Composio dedupes instances, so
    *  activations sharing a slot + config share an id (delivery fans out, delete refcounts). */
   @Column({ name: 'composio_trigger_instance_id', type: 'varchar', length: 64, nullable: true })
   composioTriggerInstanceId!: string | null;

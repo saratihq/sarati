@@ -16,7 +16,7 @@ import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { WorkflowsReadService } from './workflows-read.service';
 import { WorkflowAccessService } from './workflow-access.service';
 
-/** How long an invocation waits before handing back a run handle to poll (ADR 0053 §5). */
+/** How long an invocation waits before handing back a run handle to poll. */
 export const DEFAULT_INVOKE_AWAIT_MS = 15_000;
 /** Ceiling on that wait — past it the caller polls rather than holding a connection open. */
 export const MAX_INVOKE_AWAIT_MS = 60_000;
@@ -39,7 +39,7 @@ interface ProductionTarget {
 }
 
 /**
- * Workflow-as-tool invocation (ADR 0053): fire the workflow's PRODUCTION version with the caller's
+ * Workflow-as-tool invocation: fire the workflow's PRODUCTION version with the caller's
  * arguments as the firing event and answer with what it replied.
  *
  * The locked design: only what is published is callable, resolved through {@link EnvPointersService}
@@ -73,7 +73,7 @@ export class WorkflowInvokeService {
     const target = await this.productionTarget(em, wf);
     const ir = await this.invocableIr(em, wf, target);
 
-    // Audit trail for the surface where an agent fires a real side effect (ADR 0053 §5).
+    // Audit trail for the surface where an agent fires a real side effect.
     this.logger.log(
       `invoke → "${wf.name}" (${wf.id}) v=${target.versionId} env=${target.environment} ` +
         `as user=${principal.user.id} kind=${principal.kind}`,
@@ -135,7 +135,7 @@ export class WorkflowInvokeService {
       });
     }
     // The full contract, not just the trigger's presence: an undescribed tool is withheld from the
-    // tool LIST (ADR 0053 §1), so accepting it here would publish a call nobody could discover.
+    // tool LIST, so accepting it here would publish a call nobody could discover.
     if (!contractOfDocument(ir, wf.name)) {
       throw new DomainError(
         `Workflow "${wf.name}" isn't callable as a tool — the version live in production has no ` +

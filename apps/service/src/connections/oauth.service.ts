@@ -57,7 +57,7 @@ export class OAuthService {
   ) {}
 
   /**
-   * Start the authorization-code flow. A `byoClient` (ADR 0042) runs the identical flow against the user's OWN OAuth
+   * Start the authorization-code flow. A `byoClient` runs the identical flow against the user's OWN OAuth
    * app, persisting the encrypted client on the state so the callback and later refresh redeem against the same client.
    */
   async startAuthorization(

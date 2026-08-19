@@ -18,7 +18,7 @@ describe('trigger catalog (e2e, isolated DB, mock auth)', () => {
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
-    // Composio projection OFF (ADR 0046) so the palette is deterministic and makes no live call.
+    // Composio projection OFF so the palette is deterministic and makes no live call.
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
@@ -78,7 +78,7 @@ describe('trigger catalog (e2e, isolated DB, mock auth)', () => {
     expect(slack.parameters.types?.options).toHaveLength(2);
     const types = new Set(triggers.map((t) => t.type));
     expect(types.has('orchestr:schedule')).toBe(true); // native schedule
-    // Native chat intake (ADR 0045 addendum): a control trigger, no auth, presentational params only.
+    // Native chat intake: a control trigger, no auth, presentational params only.
     const chat = triggers.find((t) => t.type === 'orchestr:chat');
     expect(chat?.name).toBe('Chat');
     expect(chat?.category).toBe('control');
@@ -91,7 +91,7 @@ describe('trigger catalog (e2e, isolated DB, mock auth)', () => {
     expect(types.has('github.new_push')).toBe(true); // SDK registered webhook
     expect(types.has('github.new_issue')).toBe(true); // SDK registered webhook
     expect(types.has('github.new_pull_request')).toBe(true); // SDK registered webhook
-    // The SDK polling rail (ADR 0047) needs no Composio key: rss/hackernews/http are no-auth.
+    // The SDK polling rail needs no Composio key: rss/hackernews/http are no-auth.
     expect(types.has('rss.new_item')).toBe(true);
     expect(types.has('hackernews.new_story')).toBe(true);
     expect(types.has('http.new_item')).toBe(true);

@@ -20,13 +20,13 @@ import type { EnvConfig } from '../config/env.config';
  *   against the instance JWKS — issuer + exp checked, optional azp allow-list,
  *   `aud` not verified (Clerk session tokens carry none). Mirrors
  *   workflow-service's ClerkVerifier.
- * - **Local session** (workflow-service ADR 0054): a self-host signs in with
+ * **Local session** (workflow-service): a self-host signs in with
  *   email + password and gets an HS256 JWT signed with the shared SECRET_KEY.
  *   Without this path the composer 401s every self-host caller, so an operator
  *   who supplied ANTHROPIC_API_KEY still could not reach it.
  *
  * Each path pins its OWN issuer and algorithm, so a token minted for one can
- * never be accepted by the other — the property ADR 0054 relies on. Local runs
+ * never be accepted by the other — the property relies on. Local runs
  * first: it is networkless, and it is the only path a self-host has.
  *
  * The RAW bearer is attached to the request: tool calls forward it so

@@ -415,7 +415,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
     acceptOffer: async (choice: OfferChoice, workflowId?: string) => {
       set({ offerPending: false });
       if (choice === "tweak") return;
-      // Accept = SAVE only: the composer commits versions but NEVER moves a live pointer (ADR 0032).
+      // Accept = SAVE only: the composer commits versions but NEVER moves a live pointer.
       set({ accepting: true });
       try {
         if (!workflowId) {

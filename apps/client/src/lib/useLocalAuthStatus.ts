@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import * as api from "@/api/client";
 
-/** What sign-in the service offers (ADR 0054); `status` stays null until the answer lands. */
+/** What sign-in the service offers; `status` stays null until the answer lands. */
 export interface LocalAuthGateState {
   status: api.LocalAuthStatus | null;
   /** Set when the service couldn't be asked — the caller decides what to fall back to. */

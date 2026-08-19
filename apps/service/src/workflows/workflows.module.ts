@@ -27,7 +27,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
 @Module({
   // Environments: pointer environment_id dual-write. TriggerSignals: pointer moves enqueue a
   // reconcile. Generation: the action catalog for node auth. Compose: control types for the commit
-  // gate. Runs: workflow-as-tool invocation fires the published version (ADR 0053).
+  // gate. Runs: workflow-as-tool invocation fires the published version.
   imports: [
     AuthModule,
     ComposeModule,

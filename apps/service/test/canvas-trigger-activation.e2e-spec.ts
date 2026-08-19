@@ -11,7 +11,7 @@ import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconci
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-/** The trigger IS the `orchestr:webhook` node (ADR 0018) — its activation derives from the env pointer. */
+/** The trigger IS the `orchestr:webhook` node — its activation derives from the env pointer. */
 function webhookDoc(): Record<string, unknown> {
   return {
     version: '1.0',

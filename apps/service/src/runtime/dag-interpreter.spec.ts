@@ -36,7 +36,7 @@ function action(
 
 const plan = (nodes: DagNode[]): DagPlan => ({ id: 'dag', nodes });
 
-describe('DagInterpreter (ADR 0023 gating scheduler)', () => {
+describe('DagInterpreter (gating scheduler)', () => {
   const interpreter = new DagInterpreter(echoProvider());
 
   it('runs a linear chain and passes an upstream output into a downstream step', async () => {
@@ -169,7 +169,7 @@ describe('DagInterpreter (ADR 0023 gating scheduler)', () => {
     expect(result.outputs.act).toEqual({ ran: 'act.act', props: { decision: 'ok' } });
   });
 
-  it('pinning (ADR 0021): a pinned action replays its output and never calls the provider', async () => {
+  it('pinning: a pinned action replays its output and never calls the provider', async () => {
     const seen: string[] = [];
     const recording: DurableStep = {
       run: <T>(name: string, fn: () => Promise<T>) => {
@@ -188,7 +188,7 @@ describe('DagInterpreter (ADR 0023 gating scheduler)', () => {
     expect(seen).toEqual(['dag:push']); // only push went through the durable provider step
   });
 
-  it('error lane (ADR 0020): a throwing action runs its nested lane, skips the main successor, completes', async () => {
+  it('error lane: a throwing action runs its nested lane, skips the main successor, completes', async () => {
     const failing = new DagInterpreter(echoProvider((id) => id === 'act.boom'));
     const lane: DagPlan = {
       id: 'dag#boom:error',
@@ -203,7 +203,7 @@ describe('DagInterpreter (ADR 0023 gating scheduler)', () => {
     expect((result.outputs.boom as { __errored: boolean }).__errored).toBe(true);
   });
 
-  it('continue-on-fail (ADR 0020): a tolerated throw captures the error and lets the run go on', async () => {
+  it('continue-on-fail: a tolerated throw captures the error and lets the run go on', async () => {
     const failing = new DagInterpreter(echoProvider((id) => id === 'act.boom'));
     const result = await failing.run(
       plan([
@@ -216,7 +216,7 @@ describe('DagInterpreter (ADR 0023 gating scheduler)', () => {
     expect((result.outputs.after as { props: { msg: string } }).props.msg).toContain('boom:act.boom');
   });
 
-  it('retry-on-fail (ADR 0020): the provider is retried up to maxAttempts inside the one step', async () => {
+  it('retry-on-fail: the provider is retried up to maxAttempts inside the one step', async () => {
     let calls = 0;
     const flaky: ManagedIntegrationProvider = {
       key: 'flaky',

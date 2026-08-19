@@ -83,7 +83,7 @@ function summarize(changes: WorkflowChangeSet): ReviewDiffSummary {
 /**
  * Opening a review: authorize, create it, then describe what it proposes — the field-level change set
  * from the one content oracle (`DiffService`) and a read-only mergeability probe. Merging is a human
- * act and is deliberately absent (ADR 0052).
+ * act and is deliberately absent.
  */
 @Injectable()
 export class ReviewProposalService {

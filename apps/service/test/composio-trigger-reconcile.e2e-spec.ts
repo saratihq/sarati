@@ -94,8 +94,8 @@ const composioTriggerDoc = (): Record<string, unknown> => ({
   metadata: {},
 });
 
-/** The Composio-subscription reconciler lifecycle (ADR 0046); the v3 client is spied, so no live call. */
-describe('Composio trigger reconcile lifecycle (ADR 0046, e2e, isolated DB)', () => {
+/** The Composio-subscription reconciler lifecycle; the v3 client is spied, so no live call. */
+describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
   const userId = randomUUID();

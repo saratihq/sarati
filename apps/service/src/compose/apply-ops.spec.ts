@@ -115,7 +115,7 @@ describe('applyOps', () => {
     );
   });
 
-  describe('trigger re-typing (ADR 0018 — the canvas is the only place a trigger is set)', () => {
+  describe('trigger re-typing (— the canvas is the only place a trigger is set)', () => {
     const TRIGGERS = new Set([
       'orchestr:trigger',
       'orchestr:webhook',
@@ -451,7 +451,7 @@ describe('applyOps', () => {
     expect(next.edges).toHaveLength(0);
   });
 
-  describe('tool edges (ADR 0045, invariant #14) — the agent tools handle', () => {
+  describe('tool edges (invariant #14) — the agent tools handle', () => {
     // An allow-list with an agent, a control node, and action targets to bind.
     const AGENT_ALLOWED = new Set([
       'orchestr:trigger',
@@ -503,7 +503,7 @@ describe('applyOps', () => {
     });
 
     it('binds an orchestr:call_workflow (sub-workflow) to the agent as a tool (feature A)', () => {
-      // A sub-workflow is a first-class agent tool (ADR 0045 §3), so isToolEligibleTarget
+      // A sub-workflow is a first-class agent tool, so isToolEligibleTarget
       // must accept call_workflow.
       const ir = applyOps(
         null,
@@ -617,7 +617,7 @@ describe('applyOps', () => {
       ).toThrow(/a tool edge leaves a single handle/);
     });
 
-    it('an error edge (ADR 0020) carries the error lane in its id', () => {
+    it('an error edge carries the error lane in its id', () => {
       const ir = withAgentAnd({
         op: 'connect',
         source_node_id: 'notify',

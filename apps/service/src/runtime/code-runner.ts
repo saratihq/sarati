@@ -11,11 +11,11 @@ import {
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 
-/** Wall-clock ceiling per snippet (ADR 0027) — enforced by BOTH the interrupt handler (CPU-bound
+/** Wall-clock ceiling per snippet — enforced by BOTH the interrupt handler (CPU-bound
  *  loops) and the host poll loop (a suspended `await`, which queues no job to interrupt). */
 export const CODE_TIME_LIMIT_MS = 5_000;
 
-/** Per-execution heap ceiling (ADR 0027); an allocation past it throws `out of memory` in the guest. */
+/** Per-execution heap ceiling; an allocation past it throws `out of memory` in the guest. */
 export const CODE_MEMORY_LIMIT_BYTES = 128 * 1024 * 1024;
 
 /** Max serialized size of a code node's return value — it lands in the run record AND every
@@ -26,7 +26,7 @@ export const CODE_OUTPUT_LIMIT_BYTES = 1024 * 1024; // 1 MiB
  *  raises a raw `RangeError` instead of QuickJS's clean guest `stack overflow`. */
 const CODE_STACK_LIMIT_BYTES = 256 * 1024;
 
-/** The one input a snippet receives — the run scope plus a `trigger` convenience alias (ADR 0027). */
+/** The one input a snippet receives — the run scope plus a `trigger` convenience alias. */
 export interface CodeInput {
   /** Prior steps' outputs, keyed by node id — the SAME shape references resolve against. */
   steps: Record<string, unknown>;
@@ -86,7 +86,7 @@ function quickJsModule(): Promise<QuickJSAsyncWASMModule> {
 /**
  * Runs a user snippet in a REAL sandbox: the JS engine itself runs inside WebAssembly (QuickJS via
  * `quickjs-emscripten`), so Node, V8, `require`, `process`, `fetch`, the filesystem and the network
- * are simply absent (ADR 0027 — never swap this for `node:vm`). Only the injected input and the
+ * are simply absent (— never swap this for `node:vm`). Only the injected input and the
  * JSON-marshalled return value cross the boundary. Every execution is bounded by a wall-clock
  * deadline, a heap limit and a stack limit; every failure becomes a clean {@link DomainError}.
  */

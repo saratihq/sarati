@@ -24,7 +24,7 @@ export class ConnectionEntity {
   @Column({ type: 'text' })
   credential!: string;
 
-  /** BYO OAuth client that minted this connection (ADR 0042), encrypted — REFRESH must redeem
+  /** BYO OAuth client that minted this connection, encrypted — REFRESH must redeem
    *  against the same client. Null for env-configured providers and non-oauth2 rows. */
   @Column({ name: 'oauth_client', type: 'text', nullable: true })
   oauthClient!: string | null;

@@ -891,7 +891,7 @@ function formatRunRecord(record: RunRecord): string {
 }
 
 /**
- * The find_trigger handler (ADR 0018): search the trigger catalog for an app
+ * The find_trigger handler: search the trigger catalog for an app
  * event and return exact types + params. The agent then re-types the canvas
  * trigger node with apply_ops — there is no separate trigger row. The two native
  * kinds (orchestr:webhook / orchestr:schedule) need no lookup.

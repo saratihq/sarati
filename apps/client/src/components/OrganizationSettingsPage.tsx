@@ -585,7 +585,7 @@ function OrgManagement({
         </section>
       )}
 
-      {/* ── Environments moved to Integrations (ADR 0014) — leave a pointer ── */}
+      {/* ── Environments moved to Integrations — leave a pointer ── */}
       <section className="mb-10">
         <h2 className="text-xs text-[var(--orchestr-ink-muted)] font-semibold uppercase tracking-wider mb-4 flex items-center gap-1.5">
           <Layers size={13} /> Environments

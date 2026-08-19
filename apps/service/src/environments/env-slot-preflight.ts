@@ -9,7 +9,7 @@ const AGENT_TYPE = 'orchestr:agent';
 
 /**
  * The apps a version will demand an environment SLOT for — the same set the runtime resolves, so a
- * promote refuses for the reason a run would (ADR 0014).
+ * promote refuses for the reason a run would.
  *
  * The two rails ask differently and this must match both: an ACTION resolves a slot only when the
  * step names a connection, while an AGENT resolves its model provider's slot on every call, with or

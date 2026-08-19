@@ -5,7 +5,7 @@ import type { ApiScope } from './scopes';
 export const SCOPE_METADATA = 'orchestr:required-scope';
 
 /**
- * Required on every authenticated route — unannotated routes deny API keys (ADR 0051).
+ * Required on every authenticated route — unannotated routes deny API keys.
  * Several scopes mean ANY of them satisfies the route: a door that leads to different rooms, where
  * what the caller may do once inside is enforced beyond it.
  */

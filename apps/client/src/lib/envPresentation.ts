@@ -1,4 +1,4 @@
-// Environment & tag PRESENTATION — the client cell of the invariant vault (ADR 0016).
+// Environment & tag PRESENTATION — the client cell of the invariant vault.
 // Vault rule: meaning derives from FLAGS and ids (`is_prod`); names are display only.
 
 const TAG_COLORS: Record<string, { bg: string; text: string }> = {

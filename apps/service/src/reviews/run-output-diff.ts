@@ -2,7 +2,7 @@ import { deepEqual } from '../ir/models';
 import type { RunOutputChange, RunOutputRegression } from './review-test.types';
 
 /**
- * Field-level regression between two runs' output maps (ADR 0015) — a RUN-OUTPUT diff, NOT the IR
+ * Field-level regression between two runs' output maps — a RUN-OUTPUT diff, NOT the IR
  * `computeDiff` that compares workflow docs. `before`=base (baseline), `after`=head (the change).
  */
 

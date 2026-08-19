@@ -5,7 +5,7 @@ export type RuntimeStepStatus = 'running' | 'completed' | 'error';
 export type RuntimeStepKind = 'action' | 'code' | 'delay' | 'waitForEvent' | 'agent' | 'callWorkflow';
 /**
  * What started the run (best-effort provenance for the runs panel); `mcp` = an agent invoked a
- * published workflow (ADR 0053), `sub_workflow` = another workflow called it (ADR 0062).
+ * published workflow, `sub_workflow` = another workflow called it.
  */
 export type RunSource = 'manual' | 'trigger' | 'webhook' | 'api' | 'review_test' | 'mcp' | 'sub_workflow';
 
@@ -51,7 +51,7 @@ export class RuntimeRunEntity {
   @Column({ type: 'varchar', length: 20, nullable: true })
   source!: RunSource | null;
 
-  /** The run that called this one (ADR 0062); null for a top-level run. */
+  /** The run that called this one; null for a top-level run. */
   @Column({ name: 'parent_run_id', type: 'varchar', length: 200, nullable: true })
   parentRunId!: string | null;
 
@@ -59,11 +59,11 @@ export class RuntimeRunEntity {
   @Column({ name: 'parent_step_key', type: 'varchar', length: 500, nullable: true })
   parentStepKey!: string | null;
 
-  /** The review this run tested, when `source = 'review_test'` (ADR 0015). */
+  /** The review this run tested, when `source = 'review_test'`. */
   @Column({ name: 'review_id', type: 'uuid', nullable: true })
   reviewId!: string | null;
 
-  /** Dry run (preview): this run fired no state-changing external call (ADR 0041). */
+  /** Dry run (preview): this run fired no state-changing external call. */
   @Column({ name: 'dry_run', type: 'boolean', default: false })
   dryRun!: boolean;
 
@@ -128,15 +128,15 @@ export class RuntimeRunStepEntity {
   @Column({ type: 'text', nullable: true })
   error!: string | null;
 
-  /** True pinning (ADR 0021): this step replayed a pinned sample, so no side effect fired. */
+  /** True pinning: this step replayed a pinned sample, so no side effect fired. */
   @Column({ type: 'boolean', default: false })
   pinned!: boolean;
 
-  /** Continue-on-fail (ADR 0020): this step errored but the run went on (with `status = 'error'`). */
+  /** Continue-on-fail: this step errored but the run went on (with `status = 'error'`). */
   @Column({ type: 'boolean', default: false })
   continued!: boolean;
 
-  /** Retry-on-fail (ADR 0020): how many times the provider was called for this step. */
+  /** Retry-on-fail: how many times the provider was called for this step. */
   @Column({ type: 'integer', default: 1 })
   attempts!: number;
 

@@ -25,7 +25,7 @@ function hashKey(plaintext: string): string {
   return createHash('sha256').update(plaintext, 'utf8').digest('hex');
 }
 
-/** Programmatic access (ADR 0037): only the hash is stored — the plaintext exists once. */
+/** Programmatic access: only the hash is stored — the plaintext exists once. */
 @Injectable()
 export class ApiKeysService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

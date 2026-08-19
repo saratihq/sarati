@@ -552,7 +552,7 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
   });
 
   it('P1.3: an agent node with a malformed model (non-object) is rejected at commit (422)', async () => {
-    // A lone connection-less agent is VALID (env-slot fallback, ADR 0014) — it deploys.
+    // A lone connection-less agent is VALID (env-slot fallback) — it deploys.
     const base = {
       version: '1',
       name: 'P1.3 agent',

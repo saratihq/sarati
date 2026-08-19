@@ -23,7 +23,7 @@ const ROLE_ALLOWS: Record<OrgRole, ReadonlySet<PolicyAction>> = {
   viewer: new Set(['read']),
 };
 
-/** The single authorization point (ADR 0037): routes ask `can(...)` — never compare user ids inline. */
+/** The single authorization point: routes ask `can(...)` — never compare user ids inline. */
 @Injectable()
 export class PolicyService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

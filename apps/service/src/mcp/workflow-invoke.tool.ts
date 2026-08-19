@@ -40,7 +40,7 @@ export function inputSchemaOf(tool: WorkflowTool): z.ZodObject<Record<string, z.
 }
 
 /**
- * Registers a tenant's published workflows as callable tools (ADR 0053). Unlike every other tool,
+ * Registers a tenant's published workflows as callable tools. Unlike every other tool,
  * these fire real side effects by design — invocation exists to do the thing — so they are gated by
  * the `workflow:invoke` scope and charged against the same hourly budget as a live test run.
  */

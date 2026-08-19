@@ -53,7 +53,7 @@ export class JobsLifecycle implements OnModuleInit, OnApplicationShutdown {
 }
 
 /**
- * pg-boss wiring (ADR 0037): this module owns only the queue lifecycle — feature modules
+ * pg-boss wiring: this module owns only the queue lifecycle — feature modules
  * register their own jobs. Its tables live in a separate `pgboss` schema, not the app schema.
  */
 @Module({

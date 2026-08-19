@@ -21,7 +21,7 @@ export interface CatalogEntry {
   parameters: Record<string, unknown>;
 }
 
-/** A trigger catalog row — the agent's find_trigger surface (ADR 0018). */
+/** A trigger catalog row — the agent's find_trigger surface. */
 export interface TriggerCatalogEntry {
   type: string;
   name: string;
@@ -186,7 +186,7 @@ export class WorkflowServiceClient {
    * The trigger catalog — the two native kinds (orchestr:webhook, orchestr:schedule)
    * plus every app/polling trigger — for the agent's find_trigger tool. The agent
    * copies a "type" and applies it to the canvas trigger node via apply_ops
-   * (ADR 0018); there is no separate trigger row anymore.
+   * ; there is no separate trigger row anymore.
    */
   async listTriggerCatalog(token: string | null): Promise<TriggerCatalogEntry[]> {
     const { status, body } = await this.request('GET', '/api/triggers/catalog', token);

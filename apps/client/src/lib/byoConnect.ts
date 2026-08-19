@@ -4,7 +4,7 @@ import * as api from "@/api/client";
 import type { AuthScheme } from "@/api/client";
 import { appDisplayName } from "@/lib/connections";
 
-// Bring-your-own-auth (ADR 0042): the user's OWN credential for an SDK app — a pasted key/basic creds,
+// Bring-your-own-auth: the user's OWN credential for an SDK app — a pasted key/basic creds,
 // or their own OAuth app. Only rows carrying an `authScheme` are BYO-able; Composio apps are managed-only.
 
 /** A BYO-connectable app: its slug, a display name, and the auth shape to render. */

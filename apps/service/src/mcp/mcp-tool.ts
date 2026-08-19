@@ -4,7 +4,7 @@ import type { ZodType } from 'zod';
 import type { Principal } from '../auth/principal';
 import type { ApiScope } from '../auth/scopes';
 
-/** Everything a tool handler is allowed to know about its caller (ADR 0052 — no per-connection state). */
+/** Everything a tool handler is allowed to know about its caller (— no per-connection state). */
 export interface McpCallContext {
   readonly principal: Principal;
   /** The tools this token may call — the handler's own scope filter, so the mapping has one home. */

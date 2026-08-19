@@ -57,7 +57,7 @@ interface RepoState {
   tags: Array<{ tag: string; version_id: string; branch_id: string | null }>;
 }
 
-/** `orchestr_open_review` through the real MCP client — an agent's terminal move (ADR 0052). */
+/** `orchestr_open_review` through the real MCP client — an agent's terminal move. */
 describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;

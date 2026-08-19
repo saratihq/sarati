@@ -9,7 +9,7 @@ import { TriggerReconcilerService } from './trigger-reconciler.service';
 const SWEEP_CRON = '*/15 * * * *';
 
 /**
- * Drives the trigger-activation reconciler (ADR 0018) as a pg-boss singleton: a per-workflow
+ * Drives the trigger-activation reconciler as a pg-boss singleton: a per-workflow
  * queue plus a full-sweep schedule. With pg-boss OFF it is driven inline from the signal seam.
  */
 @Injectable()

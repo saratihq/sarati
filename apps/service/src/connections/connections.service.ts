@@ -223,7 +223,7 @@ export class ConnectionsService {
   }
 
   /**
-   * THE env-scoped resolver for `(environment_id, app)` (ADR 0014) — returns the pool row AND its owner,
+   * THE env-scoped resolver for `(environment_id, app)` — returns the pool row AND its owner,
    * since the step must run AS the owner; null on an empty slot, and callers must never fall back to a personal pool.
    */
   async resolveSlotConnection(
@@ -322,7 +322,7 @@ export class ConnectionsService {
   }
 
   /**
-   * One page of the caller's OWN connections as authoring references (ADR 0052) — never another user's
+   * One page of the caller's OWN connections as authoring references — never another user's
    * rows, and never credential material. `query` matches the provider; ordering is stable so offset paging is too.
    */
   async listChoices(

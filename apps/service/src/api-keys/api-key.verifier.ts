@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 import type { TokenVerifier, VerifiedIdentity } from '../auth/token-verifier';
 import { ApiKeysService } from './api-keys.service';
 
-/** The API-key auth strategy (ADR 0002): an `ork_` key resolves straight to its owner, other shapes are ignored. */
+/** The API-key auth strategy: an `ork_` key resolves straight to its owner, other shapes are ignored. */
 @Injectable()
 export class ApiKeyVerifier implements TokenVerifier {
   readonly name = 'api-key';

@@ -27,7 +27,7 @@ interface EnvironmentsRailProps {
   refreshKey: number;
   /** Opens the parent's Publish dialog (field-diff release). */
   onRequestPublish?: () => void;
-  /** ADR 0032 gate: false when the member can't move the live pointer, so Publish disables with a why. */
+  /** Gate: false when the member can't move the live pointer, so Publish disables with a why. */
   canPublish?: boolean;
 }
 

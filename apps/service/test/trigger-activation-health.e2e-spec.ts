@@ -16,7 +16,7 @@ import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-/** A canvas-node polling workflow (ADR 0018) — the kind whose activation records poll health. */
+/** A canvas-node polling workflow — the kind whose activation records poll health. */
 function pollingDoc(): Record<string, unknown> {
   return {
     version: '1.0',

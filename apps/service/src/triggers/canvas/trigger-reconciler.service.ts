@@ -68,7 +68,7 @@ interface PointerRow {
 }
 
 /**
- * The trigger-activation RECONCILER (ADR 0018) — the definition site of the invariant
+ * The trigger-activation RECONCILER — the definition site of the invariant
  * "trigger activations are derived state": DESIRED (env pointers × version-doc trigger
  * nodes) diffed against ACTUAL (`runtime_trigger_activations`), applied idempotently.
  * Trigger identity comes from the compiler's `isTriggerNode` — never re-declared here.
@@ -341,7 +341,7 @@ export class TriggerReconcilerService {
         case 'webhook':
           return; // the per-(workflow,env) URL IS the deployment — nothing to stand up
         case 'chat':
-          return; // ditto (ADR 0045 addendum)
+          return; // ditto
       }
     } catch (err) {
       await this.recordError(activationId, err);
@@ -416,7 +416,7 @@ export class TriggerReconcilerService {
   }
 
   /**
-   * Subscribe a Composio trigger INSTANCE for this activation (ADR 0046) and persist its id
+   * Subscribe a Composio trigger INSTANCE for this activation and persist its id
    * on the row — the intake maps deliveries back through it and teardown deletes it.
    */
   private async subscribeComposio(activationId: string, desired: DesiredActivation): Promise<void> {
@@ -492,7 +492,7 @@ export class TriggerReconcilerService {
   }
 
   /**
-   * Tear down this activation's Composio subscription (ADR 0046). REFCOUNTED: activations
+   * Tear down this activation's Composio subscription. REFCOUNTED: activations
    * share a `ti_…`, so delete the instance only when no other activation references it;
    * always clear this row's id (non-null means "holds a live subscription").
    */
@@ -538,7 +538,7 @@ export class TriggerReconcilerService {
    */
   private kindOf(node: IRNode): ActivationKind | null {
     // Neither fires on its own: the manual trigger waits for a Run, the tool trigger for a caller
-    // (ADR 0062). Without this a tool trigger falls through to the Composio rail and asks for a
+    // . Without this a tool trigger falls through to the Composio rail and asks for a
     // connection slot it can never have.
     if (node.node_type === MANUAL_TRIGGER || node.node_type === AGENT_TOOL_PUBLIC) return null;
     if (node.node_type === INCOMING_WEBHOOK_PUBLIC) {
@@ -549,7 +549,7 @@ export class TriggerReconcilerService {
     if (this.sdkWebhooks.isRegisteredWebhook(node.node_type)) return 'registered_webhook';
     if (this.sdkPolling.isPollingTrigger(node.node_type)) return 'polling';
     // The hand-polled Composio-poll exceptions keep OUR poll cycle; everything else
-    // `<app>.<trigger>` rides the Composio native-subscription rail (ADR 0046).
+    // `<app>.<trigger>` rides the Composio native-subscription rail.
     if (composioTriggerSpec(node.node_type)) return 'polling';
     return 'composio_subscription';
   }

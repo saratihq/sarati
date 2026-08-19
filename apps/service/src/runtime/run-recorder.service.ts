@@ -48,11 +48,11 @@ export interface RunStartMeta {
   environment?: string | null;
   /** Env id linking the row; null = Default. */
   environmentId?: string | null;
-  /** The review this run tested (source='review_test', ADR 0015); else null. */
+  /** The review this run tested (source='review_test'); else null. */
   reviewId?: string | null;
-  /** Dry run (preview): no state-changing external call fired (ADR 0041). */
+  /** Dry run (preview): no state-changing external call fired. */
   dryRun?: boolean;
-  /** The run that called this one (ADR 0062); null for a top-level run. */
+  /** The run that called this one; null for a top-level run. */
   parentRunId?: string | null;
   /** The calling step's `step_key` in the parent run. */
   parentStepKey?: string | null;
@@ -79,9 +79,9 @@ export interface RunRecorder {
     pinned?: boolean,
   ): Promise<void>;
   stepFinished(scopedRunId: string, stepKey: string, output: unknown, error: string | null): Promise<void>;
-  /** Flag an errored step as tolerated (continue-on-fail, ADR 0020) — the run went on. */
+  /** Flag an errored step as tolerated (continue-on-fail) — the run went on. */
   stepContinued(scopedRunId: string, stepKey: string): Promise<void>;
-  /** Record how many attempts a step took (retry-on-fail, ADR 0020); 1 unless retried. */
+  /** Record how many attempts a step took (retry-on-fail); 1 unless retried. */
   stepAttempts(scopedRunId: string, stepKey: string, attempts: number): Promise<void>;
   /** Record a step's non-fatal honesty warnings (e.g. a `{{ref}}` that resolved to nothing); never fails it. */
   stepWarnings(scopedRunId: string, stepKey: string, warnings: string[]): Promise<void>;
@@ -140,7 +140,7 @@ export class RunRecorderService implements RunRecorder {
     kind: RuntimeStepKind,
     pinned = false,
   ): Promise<void> {
-    // `pinned` marks a REPLAYED step (ADR 0021) — set on both the insert and the crash-replay
+    // `pinned` marks a REPLAYED step — set on both the insert and the crash-replay
     // UPSERT so history stays honest about which steps actually executed.
     await this.write('stepStarted', scopedRunId, [
       `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at, pinned)

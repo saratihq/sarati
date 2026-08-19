@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { findTriggerNode, isManualTrigger, triggerKindLabel } from "@/lib/triggerKind";
 
 /**
- * VAULT MIRROR — "how does this workflow start?" is the server constitution's question (ADR 0018,
+ * VAULT MIRROR — "how does this workflow start?" is the server constitution's question (,
  * `compiler/compile-ir.ts` isTriggerNode). `@/lib/triggerKind` is the client's ONE answer, and a
  * second competing copy lives in `IrNodeInspector.tsx`. This spec pins the answer AND cross-checks
  * every copy against it, so the two can never quietly disagree about what a node_type means.

@@ -27,7 +27,7 @@ function captureServer(): Promise<{ url: string; hits: Array<{ method: string }>
 
 const noneAuth = (): AuthHandle => createDirectAuth({ type: 'none' }, { type: 'none' });
 
-describe('DryRunHttpClient (ADR 0041 — preview without firing side effects)', () => {
+describe('DryRunHttpClient (— preview without firing side effects)', () => {
   it('does NOT send a mutating request — it refuses at the seam, server never hit', async () => {
     const srv = await captureServer();
     try {

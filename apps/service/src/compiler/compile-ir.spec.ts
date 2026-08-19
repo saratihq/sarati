@@ -351,7 +351,7 @@ describe('compileWorkflowIrDag — node mapping + translation (via the shared he
   });
 });
 
-describe('isTriggerNode — the single trigger predicate (ADR 0018 broadening)', () => {
+describe('isTriggerNode — the single trigger predicate (broadening)', () => {
   const withMeta = (nodeType: string, metadata: Record<string, unknown>): IRNode => ({
     ...irNode('n', nodeType, {}),
     metadata,
@@ -360,7 +360,7 @@ describe('isTriggerNode — the single trigger predicate (ADR 0018 broadening)',
   it('matches the native canvas trigger kinds', () => {
     expect(isTriggerNode(irNode('t', 'orchestr:webhook', {}))).toBe(true);
     expect(isTriggerNode(irNode('t', 'orchestr:schedule', {}))).toBe(true);
-    // orchestr:chat (ADR 0045 addendum) — the synchronous chat-intake start node.
+    // orchestr:chat — the synchronous chat-intake start node.
     expect(isTriggerNode(irNode('t', 'orchestr:chat', {}))).toBe(true);
   });
 

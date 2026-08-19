@@ -24,9 +24,9 @@ const METADATA_CACHE_TTL_MS = 5 * 60_000;
 /** Composio caps toolkit pages at 1000. */
 const TOOLKIT_PAGE_LIMIT = 1000;
 const TOOL_PAGE_LIMIT = 100;
-/** Trigger-type catalog page size (ADR 0046). */
+/** Trigger-type catalog page size. */
 const TRIGGER_TYPE_PAGE_LIMIT = 100;
-/** Active trigger-instance page size (ADR 0046 orphan reaper). */
+/** Active trigger-instance page size (orphan reaper). */
 const TRIGGER_INSTANCE_PAGE_LIMIT = 100;
 
 /**
@@ -87,7 +87,7 @@ export interface ComposioToolDef {
   inputTypes: Record<string, string>;
 }
 
-/** One Composio trigger TYPE (catalog row, ADR 0046) — the managed-subscription rail's unit. */
+/** One Composio trigger TYPE (catalog row) — the managed-subscription rail's unit. */
 export interface ComposioTriggerType {
   slug: string;
   name: string;
@@ -357,7 +357,7 @@ export class ComposioProvider {
     };
   }
 
-  // ─── Trigger instances (ADR 0046 — the managed native-subscription rail) ───
+  // ─── Trigger instances (— the managed native-subscription rail) ───
 
   /**
    * Every Composio trigger TYPE, malformed rows dropped — the FULL trigger universe.
@@ -397,7 +397,7 @@ export class ComposioProvider {
   }
 
   /**
-   * Idempotent UPSERT of a Composio trigger INSTANCE (ADR 0046). Composio dedupes on
+   * Idempotent UPSERT of a Composio trigger INSTANCE. Composio dedupes on
    * `(connected_account, slug, trigger_config)`, so identical activations SHARE an id — the caller must refcount teardown.
    */
   async createTriggerInstance(
@@ -425,7 +425,7 @@ export class ComposioProvider {
     return body.trigger_id;
   }
 
-  /** Every LIVE Composio trigger instance id on this project — the ADR 0046 orphan reaper diffs these against activation rows. */
+  /** Every LIVE Composio trigger instance id on this project — the orphan reaper diffs these against activation rows. */
   async listActiveTriggerInstanceIds(scope: PlatformKeyScope): Promise<string[]> {
     const ids: string[] = [];
     let cursor: string | null = null;

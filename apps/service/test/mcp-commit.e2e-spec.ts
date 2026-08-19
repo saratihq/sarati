@@ -29,7 +29,7 @@ interface Seeded {
 }
 
 /**
- * `orchestr_commit` through the real MCP client (ADR 0052): the tool the moat rides on, so the
+ * `orchestr_commit` through the real MCP client: the tool the moat rides on, so the
  * concurrency token, the 409 recipe and "save ≠ live" are each asserted end to end.
  */
 describe('orchestr_commit (e2e, real MCP client, isolated DB)', () => {

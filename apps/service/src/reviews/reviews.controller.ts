@@ -214,7 +214,7 @@ export class ReviewsController {
     };
   }
 
-  /** Pre-merge "Test this branch" (ADR 0015): dual-run both heads on one payload. REALLY executes — live effects can fire. */
+  /** Pre-merge "Test this branch": dual-run both heads on one payload. REALLY executes — live effects can fire. */
   @Scope('run:execute')
   @Post(':reviewId/test')
   async test(

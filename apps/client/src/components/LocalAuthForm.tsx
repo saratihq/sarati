@@ -21,7 +21,7 @@ export interface LocalAuthFormProps {
   onDone: (user: api.AuthUser) => void | Promise<void>;
 }
 
-/** Email + password form for local auth (ADR 0054), used by the sign-in screen and the join page. */
+/** Email + password form for local auth, used by the sign-in screen and the join page. */
 export function LocalAuthForm({ kind, inviteToken, submitLabel, onDone }: LocalAuthFormProps) {
   const registering = kind === "register";
   const [name, setName] = useState("");
