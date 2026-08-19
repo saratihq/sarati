@@ -1,4 +1,4 @@
-import { resolveReference } from './reference-resolver';
+import { resolveReference, type UnresolvedRefSink } from './reference-resolver';
 
 /**
  * Conditions for `if` routers. Structured (not an eval'd
@@ -15,12 +15,18 @@ export interface Condition {
   right?: unknown;
 }
 
-export function evaluateCondition(condition: Condition, scope: Record<string, unknown>): boolean {
-  const left = resolveReference(condition.left, scope);
+export function evaluateCondition(
+  condition: Condition,
+  scope: Record<string, unknown>,
+  onUnresolved?: UnresolvedRefSink,
+): boolean {
+  // `truthy`/`falsy` ARE the test for absence, so a missing value there is the answer, not a problem.
+  const sink = condition.op === 'truthy' || condition.op === 'falsy' ? undefined : onUnresolved;
+  const left = resolveReference(condition.left, scope, sink);
   if (condition.op === 'truthy') return isTruthy(left);
   if (condition.op === 'falsy') return !isTruthy(left);
 
-  const right = resolveReference(condition.right, scope);
+  const right = resolveReference(condition.right, scope, sink);
   switch (condition.op) {
     case 'eq':
       return valuesEqual(left, right);

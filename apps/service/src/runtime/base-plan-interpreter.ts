@@ -559,7 +559,17 @@ export abstract class BasePlanInterpreter {
       // `runRound` leaves `childScope` carrying this round's body outputs, so the
       // post-round do-while condition below reads them (e.g. `{{poll.body.ready}}`).
       perRound.push(await this.runRound(childScope, `${path}${node.id}#${round}/`, runBody));
-      if (!evaluateCondition(node.condition, childScope)) break;
+      const unresolved = new Set<string>();
+      const again = evaluateCondition(node.condition, childScope, (ref) => unresolved.add(ref));
+      await this.recordUndecidableRouting(
+        ctx,
+        `${path}${node.id}#${round}:condition`,
+        node.id,
+        'if',
+        again ? 0 : 1,
+        unresolved,
+      );
+      if (!again) break;
     }
     scope[node.id] = perRound;
   }
@@ -938,6 +948,31 @@ export abstract class BasePlanInterpreter {
 
   private async recordAttempts(ctx: RunContext, stepKey: string, attempts: number): Promise<void> {
     if (ctx.record) await ctx.record.recorder.stepAttempts(ctx.record.runId, stepKey, attempts);
+  }
+
+  /**
+   * Record a routing decision that could NOT fully resolve its condition. `if`/`switch` are pure and
+   * settle without a step row, so an unresolvable operand had nowhere to be reported and silently
+   * chose a branch. Only the unresolved case is recorded — a healthy branch is not worth a row per
+   * loop iteration.
+   */
+  protected async recordUndecidableRouting(
+    ctx: RunContext,
+    stepKey: string,
+    nodeId: string,
+    kind: 'if' | 'switch',
+    selectedPort: number,
+    refs: ReadonlySet<string>,
+  ): Promise<void> {
+    if (refs.size === 0) return;
+    const output = { selected_port: selectedPort };
+    if (ctx.record) {
+      const { runId, recorder } = ctx.record;
+      await recorder.stepStarted(runId, stepKey, nodeId, kind, false);
+      await recorder.stepFinished(runId, stepKey, output, null);
+    }
+    await this.warn(ctx, stepKey, [...refs].map(unresolvedNote));
+    ctx.trace.push({ nodeId: stepKey, output, warnings: ctx.stepWarnings.get(stepKey) ?? [] });
   }
 
   /**

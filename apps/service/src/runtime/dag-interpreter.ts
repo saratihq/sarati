@@ -83,6 +83,9 @@ export class DagInterpreter extends BasePlanInterpreter {
     const ran = new Set<string>();
     const ifLivePort = new Map<string, number>();
     const switchLivePort = new Map<string, number>();
+    // Routing settles inside a SYNCHRONOUS pump, so a decision that could not resolve its condition
+    // is collected here and recorded once the wave is done — the scheduler stays untouched.
+    const undecided: Array<{ node: DagNode; kind: 'if' | 'switch'; port: number; refs: Set<string> }> = [];
 
     const guardLive = (guard: Guard): boolean => {
       if (!ran.has(guard.source)) return false; // source skipped/absent → its ports are dead
@@ -152,7 +155,10 @@ export class DagInterpreter extends BasePlanInterpreter {
         if (node.kind === 'if') {
           // Pure routing (no scope output, no I/O): settle synchronously so the
           // selected port is visible before any dependent is scheduled.
-          ifLivePort.set(node.id, evaluateCondition(node.condition, scope) ? 0 : 1);
+          const unresolved = new Set<string>();
+          const port = evaluateCondition(node.condition, scope, (ref) => unresolved.add(ref)) ? 0 : 1;
+          ifLivePort.set(node.id, port);
+          if (unresolved.size > 0) undecided.push({ node, kind: 'if', port, refs: unresolved });
           ran.add(node.id);
           settle(node.id);
           continue;
@@ -161,13 +167,17 @@ export class DagInterpreter extends BasePlanInterpreter {
           // Pure routing, like IF: cases evaluate IN ORDER, first match wins, else the
           // default port. Settled synchronously so the port is visible before any dependent.
           let selected = node.cases.length; // default/fallback when no case matches
+          const unresolved = new Set<string>();
           for (let i = 0; i < node.cases.length; i++) {
-            if (evaluateCondition(node.cases[i]!.condition, scope)) {
+            if (evaluateCondition(node.cases[i]!.condition, scope, (ref) => unresolved.add(ref))) {
               selected = i;
               break;
             }
           }
           switchLivePort.set(node.id, selected);
+          if (unresolved.size > 0) {
+            undecided.push({ node, kind: 'switch', port: selected, refs: unresolved });
+          }
           ran.add(node.id);
           settle(node.id);
           continue;
@@ -200,6 +210,17 @@ export class DagInterpreter extends BasePlanInterpreter {
     while (active.size > 0) {
       await Promise.race(active);
       pump();
+    }
+    // Recorded after the wave, never inside it — the pump must stay synchronous.
+    for (const entry of undecided) {
+      await this.recordUndecidableRouting(
+        ctx,
+        `${path}${entry.node.id}`,
+        entry.node.id,
+        entry.kind,
+        entry.port,
+        entry.refs,
+      );
     }
     if (halted) throw haltError instanceof Error ? haltError : new Error(String(haltError));
   }

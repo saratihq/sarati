@@ -2,7 +2,8 @@ import { Column, Entity, Index, PrimaryColumn, Unique } from 'typeorm';
 
 export type RuntimeRunStatus = 'running' | 'waiting' | 'completed' | 'error' | 'cancelled';
 export type RuntimeStepStatus = 'running' | 'completed' | 'error';
-export type RuntimeStepKind = 'action' | 'code' | 'delay' | 'waitForEvent' | 'agent' | 'callWorkflow';
+export type RuntimeStepKind =
+  'action' | 'code' | 'delay' | 'waitForEvent' | 'agent' | 'callWorkflow' | 'if' | 'switch';
 /**
  * What started the run (best-effort provenance for the runs panel); `mcp` = an agent invoked a
  * published workflow, `sub_workflow` = another workflow called it.
