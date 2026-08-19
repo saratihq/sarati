@@ -31,7 +31,7 @@ type Props = Record<string, unknown>;
 type Shaper = (raw: unknown, props: Props) => object | null;
 
 /** Composio wraps an upstream body in `response_data`; that envelope is theirs, not the API's. */
-function unwrapEnvelope(raw: unknown): unknown {
+export function unwrapComposioEnvelope(raw: unknown): unknown {
   return isRecord(raw) && isRecord(raw.response_data) ? raw.response_data : raw;
 }
 
@@ -49,7 +49,7 @@ function rowsOf(value: unknown): Rows | undefined {
 
 /** `values.batchGet` answers with a `valueRanges` array; the SDK's `values.get` answers with the range itself. */
 function readRange(raw: unknown, props: Props): ReadRange | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body)) return null;
   const ranges = body.valueRanges ?? body.value_ranges;
   const first = Array.isArray(ranges) ? ranges.find(isRecord) : undefined;
@@ -66,7 +66,7 @@ function readRange(raw: unknown, props: Props): ReadRange | null {
 }
 
 function createSpreadsheet(raw: unknown, props: Props): Created | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body)) return null;
   const spreadsheetId = str(body.spreadsheet_id) ?? str(body.spreadsheetId);
   const properties = isRecord(body.properties) ? body.properties : {};
@@ -96,13 +96,13 @@ function writeResult(
 }
 
 function insertRow(raw: unknown, props: Props): Appended | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body)) return null;
   return writeResult(isRecord(body.updates) ? body.updates : body, body, props);
 }
 
 function updateRow(raw: unknown, props: Props): Updated | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body)) return null;
   const batch = isRecord(body.spreadsheet) ? body.spreadsheet : body;
   const first = Array.isArray(batch.responses) ? batch.responses.find(isRecord) : undefined;
@@ -120,7 +120,7 @@ function tabOf(entry: unknown): Tab | null {
 }
 
 function listSheets(raw: unknown): Tabs | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body) || !Array.isArray(body.sheets)) return null;
   const sheets = body.sheets.map(tabOf).filter((tab): tab is Tab => tab !== null);
   return sheets.length > 0 ? { sheets, count: sheets.length } : null;
@@ -151,14 +151,14 @@ function driveFile(entry: unknown): DriveFile | null {
 }
 
 function listFiles(raw: unknown): Listing | null {
-  const body = unwrapEnvelope(raw);
+  const body = unwrapComposioEnvelope(raw);
   if (!isRecord(body) || !Array.isArray(body.files)) return null;
   const files = body.files.map(driveFile).filter((file): file is DriveFile => file !== null);
   return files.length === body.files.length ? { files, count: files.length } : null;
 }
 
 function getFile(raw: unknown): DriveFile | null {
-  return driveFile(unwrapEnvelope(raw));
+  return driveFile(unwrapComposioEnvelope(raw));
 }
 
 const SHAPES: ReadonlyMap<string, Shaper> = new Map<string, Shaper>([

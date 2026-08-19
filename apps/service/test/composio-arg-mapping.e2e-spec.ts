@@ -80,7 +80,12 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
         if (req.method === 'POST' && typed) {
           const body = JSON.parse(raw) as { arguments?: Record<string, unknown> };
           toolCalls.push({ tool: typed[1]!, args: body.arguments ?? {} });
-          json(200, { successful: true, data: { ok: true, id: 'srv_1' }, error: null });
+          const refuse = (body.arguments ?? {}).subject === 'REFUSE';
+          json(200, {
+            successful: true,
+            error: null,
+            data: refuse ? { ok: false, error: 'channel_not_found' } : { ok: true, id: 'srv_1' },
+          });
           return;
         }
         if (req.method === 'GET' && /^\/api\/v3\/connected_accounts\//.test(url)) {
@@ -162,6 +167,19 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
     }).expect(201);
     expect(toolCalls[0]!.args.recipient_email).toBe('to@x.com');
     expect(toolCalls[0]!.args.to).toBeUndefined();
+  });
+
+  it('(i-c) an API that refuses inside a 200 fails the step instead of recording it green', async () => {
+    const res = await testStep('gmail.send_email', {
+      connectionId: gmailConnId,
+      recipient_email: 'to@x.com',
+      subject: 'REFUSE',
+      body: 'nobody receives this',
+    }).expect(422);
+
+    // The call WAS made — this is the API's answer, not a pre-flight rejection.
+    expect(toolCalls).toHaveLength(1);
+    expect(String(res.body.detail)).toContain('channel_not_found');
   });
 
   it('(ii) a missing REQUIRED input is a clean 400 BEFORE Composio is called', async () => {
