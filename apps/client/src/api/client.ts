@@ -1536,6 +1536,16 @@ export async function listIntegrationProviders(): Promise<{
   return { providers };
 }
 
+/** Which account a connection is authorized against — GET /connections/:id/account. */
+export interface ConnectionAccount {
+  account: { name: string | null; id: string | null } | null;
+  detail: string;
+}
+
+export async function connectionAccount(id: string): Promise<ConnectionAccount> {
+  return request<ConnectionAccount>(`/connections/${encodeURIComponent(id)}/account`);
+}
+
 export async function listConnections(): Promise<{
   connections: Connection[];
 }> {

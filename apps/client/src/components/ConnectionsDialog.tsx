@@ -194,14 +194,23 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
 
   // On-demand health check; the service's `detail` is already plain language, so it toasts verbatim.
   const [testingId, setTestingId] = useState<string | null>(null);
+  /** Which account each connection answered as, once tested — kept for the life of the dialog. */
+  const [accounts, setAccounts] = useState<Record<string, { name: string | null; id: string | null }>>({});
   const testConn = async (c: Connection) => {
     if (testingId) return;
     setTestingId(c.id);
     const label = c.display_name || appLabel(c.provider);
     try {
       const res = await api.testConnection(c.id);
-      if (res.ok) toast.success(`${label} is working`, res.detail);
-      else toast.error(`${label} needs attention`, res.detail);
+      if (res.ok) {
+        // Health is not identity: a valid token on the WRONG workspace passes every check.
+        const named = await api.connectionAccount(c.id).catch(() => null);
+        toast.success(`${label} is working`, named?.detail ?? res.detail);
+        const identity = named?.account;
+        if (identity) setAccounts((prev) => ({ ...prev, [c.id]: identity }));
+      } else {
+        toast.error(`${label} needs attention`, res.detail);
+      }
       refreshConnections();
     } catch (e) {
       toast.error(`Couldn't check ${label}`, e instanceof Error ? e.message : undefined);
@@ -323,6 +332,7 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
                   key={c.id}
                   connection={c}
                   label={c.display_name || appLabel(c.provider)}
+                  account={accounts[c.id]}
                   reconnecting={reconnectingId === c.id}
                   testing={testingId === c.id}
                   onTest={() => void testConn(c)}
@@ -513,6 +523,7 @@ function referencesLabel(references: ConnectionReference[]): string {
 function ConnectionChip({
   connection,
   label,
+  account,
   reconnecting,
   testing,
   onTest,
@@ -522,6 +533,8 @@ function ConnectionChip({
 }: {
   connection: Connection;
   label: string;
+  /** Which account it answered as, once tested — health alone cannot tell these apart. */
+  account?: { name: string | null; id: string | null };
   reconnecting: boolean;
   testing: boolean;
   onTest: () => void;
@@ -535,6 +548,10 @@ function ConnectionChip({
   // The service's stored reason wins; the static hint is the fallback copy.
   const reason = connection.status_reason || meta?.hint;
   const checked = connection.last_checked_at ? ` — checked ${timeAgo(connection.last_checked_at)}` : "";
+  const accountName = account ? (account.name ?? account.id) : null;
+  const accountTitle = account
+    ? ` — authorized against ${account.name ?? "an unnamed account"}${account.id ? ` (${account.id})` : ""}`
+    : "";
   return (
     <span
       className="group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-lg"
@@ -545,7 +562,7 @@ function ConnectionChip({
     >
       <span
         aria-hidden
-        title={`${reason ?? "Connected and active"}${checked}`}
+        title={`${reason ?? "Connected and active"}${checked}${accountTitle}`}
         className="w-1.5 h-1.5 rounded-full shrink-0"
         style={{ background: meta ? meta.color : "var(--orchestr-success)" }}
       />
@@ -553,6 +570,16 @@ function ConnectionChip({
       <span className="text-[11.5px]" style={{ color: "var(--orchestr-ink)" }}>
         {label}
       </span>
+      {accountName && (
+        <span
+          className="text-[10px] max-w-[13ch] truncate"
+          style={{ color: "var(--orchestr-ink-subtle)" }}
+          title={accountTitle.replace(" — ", "")}
+          data-testid={`connection-account-${connection.id}`}
+        >
+          {accountName}
+        </span>
+      )}
       {meta && (
         <>
           <span className="text-[10px] font-medium" style={{ color: meta.color }} title={`${reason}${checked}`}>
