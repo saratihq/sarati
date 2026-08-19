@@ -16,7 +16,7 @@ import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-/** A canvas-node polling app-trigger (ADR 0018); gmail is the hand-polled one (ADR 0046). */
+/** A canvas-node polling app-trigger; gmail is the hand-polled one. */
 function pollingDoc(): Record<string, unknown> {
   return {
     version: '1.0',

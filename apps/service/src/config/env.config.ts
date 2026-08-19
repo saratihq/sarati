@@ -123,7 +123,7 @@ export class EnvConfig {
   clerkAuthorizedParties = DEFAULT_CLIENT_ORIGIN;
 
   /**
-   * Email + password sign-in (ADR 0054). Defaults ON so a self-hoster can reach their own instance,
+   * Email + password sign-in. Defaults ON so a self-hoster can reach their own instance,
    * and OFF where Clerk is configured so a managed deployment gains no second front door.
    */
   @IsBoolean()
@@ -155,7 +155,7 @@ export class EnvConfig {
   @IsString()
   composioFallbackApps = '';
 
-  /** Open-core edition flag (ADR 0004): gates ee-only wiring, never core logic. */
+  /** Open-core edition flag: gates ee-only wiring, never core logic. */
   @IsIn(['oss', 'cloud'])
   edition: 'oss' | 'cloud' = 'oss';
 

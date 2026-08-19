@@ -28,7 +28,7 @@ export class HooksController {
   }
 
   /**
-   * The GENERIC Composio trigger intake (ADR 0046) — one endpoint for every projected trigger
+   * The GENERIC Composio trigger intake — one endpoint for every projected trigger
    * type. No auth guard: the Svix signature IS the capability (unverified → 401).
    */
   @Throttle({ default: { limit: 240, ttl: 60_000 } })
@@ -45,7 +45,7 @@ export class HooksController {
   }
 
   /**
-   * Per-`(workflow, env)` webhook intake (ADR 0018) — the ONLY canvas-trigger fire URL.
+   * Per-`(workflow, env)` webhook intake — the ONLY canvas-trigger fire URL.
    * Must stay declared after the literal-first-segment routes above so they keep precedence.
    */
   @Throttle({ default: { limit: 120, ttl: 60_000 } })

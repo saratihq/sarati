@@ -23,7 +23,7 @@ interface PublishedRow {
 }
 
 /**
- * Which of an org's workflows can be called (ADR 0053, ADR 0062): the ones whose PRODUCTION-live
+ * Which of an org's workflows can be called: the ones whose PRODUCTION-live
  * version carries an `orchestr:tool_trigger` declaring a name and description. Built from
  * environment pointers, so committing never changes what is callable — only publishing does.
  *

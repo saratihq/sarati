@@ -12,7 +12,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import { useNodeIcons } from "@/store/useNodeIcons";
 
-/** Integrations surface (ADR 0014): default connection pool + per-env slots; `?picker=0` skips auto-open. */
+/** Integrations surface: default connection pool + per-env slots; `?picker=0` skips auto-open. */
 export default function IntegrationsPage() {
   useDocumentTitle("Integrations");
   const router = useRouter();

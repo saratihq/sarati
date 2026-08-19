@@ -58,7 +58,7 @@ function missingConnectionHelp(provider: AgentProvider): string {
 }
 
 /**
- * The production {@link AgentModelPort} (ADR 0045) — binds the AI Agent node's model seam to the SDK's tool-aware
+ * The production {@link AgentModelPort} — binds the AI Agent node's model seam to the SDK's tool-aware
  * `callAgentModel`, resolving the connection through {@link resolveSdkAuthHandle} and returning the normalized turn.
  * Not a catalog action and stateless, so one instance serves every agent run.
  */
@@ -125,7 +125,7 @@ export class AgentModelCallProvider implements AgentModelPort {
 
   /**
    * The connection + tenant the model call runs on. In an ENV-scoped run the provider's env SLOT wins and the call
-   * runs as its owner (action parity, ADR 0014); a Default run uses `auth.connection`, and a missing slot is a hard 428.
+   * runs as its owner (action parity); a Default run uses `auth.connection`, and a missing slot is a hard 428.
    */
   private async resolveModelConnection(
     provider: AgentProvider,

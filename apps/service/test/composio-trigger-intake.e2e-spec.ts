@@ -53,8 +53,8 @@ const workflowDoc = (): Record<string, unknown> => ({
   metadata: {},
 });
 
-/** The generic Composio trigger intake (ADR 0046); the activation row is seeded, so no live Composio call. */
-describe('Composio trigger intake (ADR 0046, e2e, isolated DB)', () => {
+/** The generic Composio trigger intake; the activation row is seeded, so no live Composio call. */
+describe('Composio trigger intake (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
   const userId = randomUUID();

@@ -7,7 +7,7 @@ import { DagInterpreter } from './dag-interpreter';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 
 /**
- * The `orchestr:agent` engine (ADR 0045): the compiler's tool-edge peel plus the durable loop.
+ * The `orchestr:agent` engine: the compiler's tool-edge peel plus the durable loop.
  * A recording provider proves a tool actually ran through the durable dispatch, and the model is
  * scripted so the loop's control flow is exercised deterministically without a network.
  */
@@ -67,7 +67,7 @@ function ir(nodes: IRNode[], edges: IREdge[]): WorkflowIR {
   };
 }
 
-/** chat trigger → agent (bound to ONE action tool) → reply — the flow the ADR pins. */
+/** chat trigger → agent (bound to ONE action tool) → reply — the flow the constitution pins. */
 function chatAgentIr(agentParams: Record<string, unknown> = {}): WorkflowIR {
   return ir(
     [
@@ -382,7 +382,7 @@ describe('orchestr:agent — durable loop (scripted model)', () => {
     expect(model.requests.at(-1)!.tools).toEqual([]);
   });
 
-  it('routes max_steps exhaustion to the ADR-0020 error lane — CARRYING the partial (§7)', async () => {
+  it('routes max_steps exhaustion to the error lane — CARRYING the partial (§7)', async () => {
     const doc = ir(
       [
         node('chat', 'orchestr:chat'),

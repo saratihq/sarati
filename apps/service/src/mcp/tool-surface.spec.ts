@@ -63,8 +63,8 @@ const NOT_IDEMPOTENT = new Set(['orchestr_create_branch', 'orchestr_open_review'
 const TOUCHES_THE_WORLD = 'orchestr_test_workflow';
 
 /**
- * The tool surface is a published contract (ADR 0052) — a client caches it and a model is prompted
- * against it. Every line here is a promise; changing one is an ADR-level decision, not a refactor.
+ * The tool surface is a published contract — a client caches it and a model is prompted
+ * against it. Every line here is a promise; changing one is a deliberate amendment, not a refactor.
  */
 describe('MCP tool surface', () => {
   it('is exactly the v1 surface, in a stable order', () => {

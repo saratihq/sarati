@@ -119,7 +119,7 @@ export class McpHandlerService implements OnModuleDestroy {
     return server;
   }
 
-  /** A tenant's own published workflows (ADR 0053) — visible only to a key that may invoke them. */
+  /** A tenant's own published workflows — visible only to a key that may invoke them. */
   private async publishedToolsFor(principal: Principal): Promise<WorkflowTool[]> {
     const holds = principal.kind !== 'api_key' || scopeSatisfied(principal.scopes, 'workflow:invoke');
     if (!holds) return [];

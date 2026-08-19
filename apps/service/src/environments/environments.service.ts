@@ -49,7 +49,7 @@ export interface ConnectionReference {
 }
 
 /**
- * Named environments (ADR 0014): org-scoped SLOTS — (env, app) → one pool connection, by reference.
+ * Named environments: org-scoped SLOTS — (env, app) → one pool connection, by reference.
  * A missing slot fails honestly and NEVER falls back to the Default pool; names are stored lowercase.
  */
 @Injectable()
@@ -181,7 +181,7 @@ export class EnvironmentsService {
     });
   }
 
-  /** Delete an env: pointers dropped, slots and trigger activations cascade (ADR 0018); 409 on is_prod. */
+  /** Delete an env: pointers dropped, slots and trigger activations cascade; 409 on is_prod. */
   async remove(
     orgId: string,
     envId: string,
@@ -266,7 +266,7 @@ export class EnvironmentsService {
         also_in_environments: also.map((r) => r.name),
       };
     });
-    // A slot swap changes what a promoted activation runs AS (ADR 0018) — reconcile this env's workflows.
+    // A slot swap changes what a promoted activation runs AS — reconcile this env's workflows.
     await this.enqueueEnvWorkflows(envId);
     return result;
   }
@@ -283,11 +283,11 @@ export class EnvironmentsService {
     if (removed === 0) {
       throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
     }
-    // Emptying a slot can strand a connection-needing activation (ADR 0018) — reconcile.
+    // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
   }
 
-  /** Enqueue a trigger-activation reconcile for every workflow promoted to this env (ADR 0018). */
+  /** Enqueue a trigger-activation reconcile for every workflow promoted to this env. */
   private async enqueueEnvWorkflows(envId: string): Promise<void> {
     const rows = await rawQuery<{ workflow_id: string }>(
       this.dataSource.manager,

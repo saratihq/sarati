@@ -18,7 +18,7 @@ export class WorkflowEnvPointerEntity {
   @Column({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
-  /** The environments row (ADR 0014) — dual-written with the legacy name; reads prefer the id. */
+  /** The environments row — dual-written with the legacy name; reads prefer the id. */
   @Column({ name: 'environment_id', type: 'uuid', nullable: true })
   environmentId!: string | null;
 }

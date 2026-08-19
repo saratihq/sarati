@@ -11,7 +11,7 @@ import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** The PUBLIC type of the native inbound-webhook trigger kind (catalog + version-doc node_type). */
 export const INCOMING_WEBHOOK_PUBLIC = 'orchestr:webhook';
-/** The PUBLIC type of the native synchronous chat-intake trigger kind (ADR 0045 addendum). */
+/** The PUBLIC type of the native synchronous chat-intake trigger kind. */
 export const INCOMING_CHAT_PUBLIC = 'orchestr:chat';
 
 // Re-exported so existing importers keep one source; it is declared with the contract it carries.
@@ -118,7 +118,7 @@ const NATIVE_TRIGGERS: ReadonlyArray<Record<string, unknown>> = [
 ];
 
 /**
- * THE trigger catalog (ADR 0052): the ONE source the picker route, the compose vocabulary and the
+ * THE trigger catalog: the ONE source the picker route, the compose vocabulary and the
  * MCP surface all read, so a trigger the palette offers is a trigger `apply_ops` accepts.
  */
 @Injectable()

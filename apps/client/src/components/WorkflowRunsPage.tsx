@@ -151,7 +151,7 @@ function StepRow({ step }: { step: RunStepInfo }) {
 }
 
 /**
- * Both ends of a sub-workflow call (ADR 0062). A nested run lives under the workflow that ran, so
+ * Both ends of a sub-workflow call. A nested run lives under the workflow that ran, so
  * this is the only path between them — without it "why did that step fail?" has nowhere to go.
  */
 function SubWorkflowLinks({ detail }: { detail: RunDetail }) {
@@ -432,7 +432,7 @@ export default function WorkflowRunsPage() {
                         </span>
                       )}
                     </span>
-                    {/* null environment = the Default pool — labeled, never blank (ADR 0014). */}
+                    {/* null environment = the Default pool — labeled, never blank. */}
                     <span className="min-w-0">
                       <span
                         className="text-[9px] py-[1px] px-1.5 rounded font-semibold uppercase"

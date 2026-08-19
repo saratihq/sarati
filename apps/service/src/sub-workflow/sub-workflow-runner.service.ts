@@ -21,7 +21,7 @@ import { WorkflowToolContractService } from '../workflows/workflow-tool-contract
 import { EnvPointersService } from '../workflows/env-pointers.service';
 
 /**
- * The ONE way a workflow runs inside another (ADR 0045 §3, ADR 0062) — an AI agent picking it as a
+ * The ONE way a workflow runs inside another — an AI agent picking it as a
  * tool and an authored `orchestr:call_workflow` step arrive here alike. It sits ABOVE the
  * interpreter, so it wires itself in through the RunsService setter — a constructor dependency
  * would be a module cycle.
@@ -59,12 +59,12 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
         `Maximum sub-workflow call depth (${MAX_SUB_WORKFLOW_DEPTH}) exceeded — workflows are nested too deep (a call chain or cycle). Simplify the chain.`,
       );
     }
-    // The BREADTH guard is charged by the agent path before it gets here (ADR 0062); the counter
+    // The BREADTH guard is charged by the agent path before it gets here; the counter
     // rides along so every agent nested under this run shares one budget.
     const em = this.dataSource.manager;
     const wf = await this.resolveCallableWorkflow(em, call.workflowId, ctx);
 
-    // Resolve the LIVE version for the CALLER's env (ADR 0014 reuse) + load its document.
+    // Resolve the LIVE version for the CALLER's env + load its document.
     const versionId = await this.envPointers.resolveVersionIdForCaller(em, wf, ctx.environmentId);
     if (!versionId) {
       throw new DomainError(
@@ -77,7 +77,7 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
 
     // Being callable is OPT-IN, and asserted against the document about to run rather than a
     // separately-resolved one — the same requirement MCP `invoke` makes of an external caller
-    // (ADR 0053 §1, ADR 0062). A workflow nobody declared callable is not one to call by accident.
+    // . A workflow nobody declared callable is not one to call by accident.
     if (!contractOfDocument(ir, wf.name)) {
       throw new DomainError(
         `Sub-workflow "${wf.name}" doesn't declare itself callable, so it can't be called from another workflow. ` +
@@ -155,7 +155,7 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
 
 /**
  * The child run's id: deterministic, so a crash-replay reuses the row AND re-issues the same step
- * idempotency keys (the SDK rail dedupes on them per ADR 0040; Composio does not) — and bounded,
+ * idempotency keys (the SDK rail dedupes on them; Composio does not) — and bounded,
  * because chaining parent id onto call key would outgrow the column a few levels down. What the
  * chain WAS is recorded in `parent_run_id`/`parent_step_key`, not encoded in the id.
  */

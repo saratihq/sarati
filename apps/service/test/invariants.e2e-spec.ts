@@ -20,7 +20,7 @@ const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 /**
  * THE CONSTITUTION (src/domain/README.md): one named test per load-bearing rule.
- * A red test here means the change is wrong or needs an ADR — never edit the test to pass.
+ * A red test here means the change is wrong, or is a deliberate amendment that says so — never edit the test to pass.
  */
 describe('domain invariants (the constitution)', () => {
   let app: INestApplication;
@@ -74,7 +74,7 @@ describe('domain invariants (the constitution)', () => {
     return dep.body.workflow_id as string;
   };
 
-  // ─── ADR 0018 fixtures: a trigger is an IR NODE in the version doc ───
+  // ─── fixtures: a trigger is an IR NODE in the version doc ───
 
   /** A version doc whose SOURCE is a native canvas trigger node feeding an `announce` step. */
   const triggerIr = (
@@ -407,9 +407,9 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
-  // ─── ADR 0018 — triggers in the canvas (invariant #9 amendment + new invariant #11) ───
+  // ─── — triggers in the canvas (invariant #9 amendment + new invariant #11) ───
 
-  it('invariant 9 (ADR 0018): per-(workflow,env) webhook fires the pinned version, resolved from the version-doc trigger node', async () => {
+  it('invariant 9: per-(workflow,env) webhook fires the pinned version, resolved from the version-doc trigger node', async () => {
     // v1 has a native webhook trigger node (the SOURCE) + an announce step that echoes the version.
     const wf = await seedDoc(webhookIr('v1', 'inv9 canvas'));
     const v1 = await versionId(wf, 1);
@@ -432,7 +432,7 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   }, 30_000);
 
-  it('invariant 11 (ADR 0018): a commit changes no activation', async () => {
+  it('invariant 11: a commit changes no activation', async () => {
     const wf = await seedDoc(scheduleIr('v1', { interval_minutes: 60 }, 'inv11 no-touch'));
     const v1 = await versionId(wf, 1);
     await http()
@@ -459,7 +459,7 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   }, 30_000);
 
-  it('invariant 11 (ADR 0018): promote keeps an unchanged trigger cursor, resets a changed one', async () => {
+  it('invariant 11: promote keeps an unchanged trigger cursor, resets a changed one', async () => {
     const wf = await seedDoc(scheduleIr('v1', { interval_minutes: 60 }, 'inv11 cursor'));
     await http()
       .post(`/api/workflows/${wf}/promote`)
@@ -497,7 +497,7 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   }, 30_000);
 
-  it('invariant 12 (ADR 0020): error output routes the error lane, never both, as a distinct edge', () => {
+  it('invariant 12: error output routes the error lane, never both, as a distinct edge', () => {
     const concat = (id: string, texts: string[]) => ({
       id,
       name: id,
@@ -567,7 +567,7 @@ describe('domain invariants (the constitution)', () => {
       });
   });
 
-  it('invariant 14 (ADR 0045): a tool edge binds a tool, distinct from a main edge, never collapses', () => {
+  it('invariant 14: a tool edge binds a tool, distinct from a main edge, never collapses', () => {
     const node = (id: string, node_type: string, parameters: Record<string, unknown> = {}) => ({
       id,
       name: id,
@@ -611,7 +611,7 @@ describe('domain invariants (the constitution)', () => {
     expect(agent.tools).toEqual([
       {
         kind: 'action',
-        // Sanitized to a provider-legal identifier (ADR 0045 addendum); actionId keeps the routing id.
+        // Sanitized to a provider-legal identifier; actionId keeps the routing id.
         name: 'slack_send_message',
         actionId: 'slack.send_message',
         props: { channel: '#ops' },

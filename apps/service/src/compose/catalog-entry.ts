@@ -9,7 +9,7 @@ import { deriveSupport, supportFacts, type SupportFacts, type SupportInfo } from
 /** What a row is: a runnable step, a workflow entry point, or a built-in control construct. */
 export type CatalogKind = 'action' | 'trigger' | 'control';
 
-/** Which rail runs the row: our clean-room SDK, the Composio broker, or our own engine (ADR 0022). */
+/** Which rail runs the row: our clean-room SDK, the Composio broker, or our own engine. */
 export type CatalogRail = 'sdk' | 'composio' | 'control' | 'native';
 
 /** A catalog row as an author (human or agent) sees it in a list. */
@@ -26,7 +26,7 @@ export interface CatalogEntry {
   auth_scheme: string;
   parameters: Record<string, unknown>;
   support: SupportInfo;
-  /** The BYO-authable auth scheme (ADR 0042) — present on SDK rows only. */
+  /** The BYO-authable auth scheme — present on SDK rows only. */
   authScheme?: Record<string, unknown>;
   /** An authored example event — present on SDK trigger rows only. */
   sample?: unknown;

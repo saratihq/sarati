@@ -6,7 +6,7 @@ import type { RunResult, TraceEntry } from './run-plan';
 const RESPOND_NODE_TYPE = 'orchestr:respond';
 
 /**
- * A run's TERMINAL OUTPUT by a deterministic rule (ADR 0045 addendum) — the ONE place both the chat
+ * A run's TERMINAL OUTPUT by a deterministic rule — the ONE place both the chat
  * intake and the sub-workflow-as-tool runner read a finished run's "answer", so they can't diverge:
  * an `orchestr:respond` node that ran wins, else the unique non-trigger leaf, else (ambiguous
  * multi-leaf flow) the LAST-EXECUTED leaf by trace order — never an arbitrary output key. The

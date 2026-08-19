@@ -79,7 +79,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   }
 
   /**
-   * Rebind a step's connection through the env's SLOT for `(environmentId, app)` (ADR 0014), via the SHARED resolver.
+   * Rebind a step's connection through the env's SLOT for `(environmentId, app)`, via the SHARED resolver.
    * A connection-less step and a Default run are untouched; a missing slot is a hard 428, NEVER a personal-pool fallback.
    */
   private async applyEnvConnection(input: RunActionInput): Promise<RunActionInput> {
@@ -129,7 +129,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     this.logger.log(
       `Routing ${appSlug}.${this.actionNameOf(input.actionId)} through the Composio fallback rail`,
     );
-    // `input.idempotencyKey` is DELIBERATELY not forwarded (ADR 0040): Composio's typed execute API has no
+    // `input.idempotencyKey` is DELIBERATELY not forwarded: Composio's typed execute API has no
     // idempotency parameter, so this rail is an accepted at-least-once exception and must never error for lacking a key.
     const result = await this.composio.execute({
       scope,

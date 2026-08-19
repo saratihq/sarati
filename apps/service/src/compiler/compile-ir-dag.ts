@@ -25,7 +25,7 @@ import {
 } from './compile-ir';
 
 /**
- * The ONE compiler (ADR 0023 slice 4) — lowers a `WorkflowIR` to a flat, deterministically
+ * The ONE compiler (slice 4) — lowers a `WorkflowIR` to a flat, deterministically
  * topo-sorted `DagPlan` where each node records its incoming `(source, port)` guards, so fan-in /
  * reconvergence / diamonds all work. Per-node payloads reuse `compile-ir.ts`'s helpers, so a node
  * compiles identically regardless of graph structure. Nested sub-graphs (error lanes, loop bodies,
@@ -33,7 +33,7 @@ import {
  * are hard errors.
  */
 
-// Structured loop node (ADR 0023 slice 6 items-mode; ADR 0029 while-mode). Its outgoing main edges
+// Structured loop node (slice 6 items-mode; while-mode). Its outgoing main edges
 // split by `source_port`: BODY (0) feeds the per-round sub-graph, AFTER (1) is the continuation —
 // mirroring IF's 0=then / 1=else convention, which the client builds to.
 const ORCHESTR_LOOP = 'orchestr:loop';
@@ -45,11 +45,11 @@ const DEFAULT_ITEM_VAR = 'item';
 // `i`'s output and `source_port: cases.length` the default — flat, like IF (no nested scope).
 const ORCHESTR_SWITCH = 'orchestr:switch';
 
-// Durable tool-calling node (ADR 0045). Its tools are the edges leaving it on `port_type: 'tool'`
+// Durable tool-calling node. Its tools are the edges leaving it on `port_type: 'tool'`
 // (invariant #14), peeled below out of the structural main flow onto the agent step's `tools[]`.
 const ORCHESTR_AGENT = 'orchestr:agent';
 export const AGENT_TOOL_PORT_TYPE = 'tool';
-/** Error output (ADR 0020): edges leaving a node on this lane. */
+/** Error output: edges leaving a node on this lane. */
 const ERROR_PORT_TYPE = 'error';
 /** The lanes this compiler routes — an edge on any other lane reaches no step at all. */
 export const ROUTED_PORT_TYPES: ReadonlySet<string> = new Set([
@@ -60,7 +60,7 @@ export const ROUTED_PORT_TYPES: ReadonlySet<string> = new Set([
 const ORCHESTR_CALL_WORKFLOW = 'orchestr:call_workflow';
 const DEFAULT_AGENT_MAX_STEPS = 25;
 // The hard loop cap must itself be capped — an unbounded `max_steps` is a fan-out vector, since
-// each sub-workflow tool call spawns a nested run (ADR 0045 §3).
+// each sub-workflow tool call spawns a nested run.
 const MAX_AGENT_MAX_STEPS = 100;
 const DEFAULT_AGENT_MODEL = { provider: 'claude' as AgentProvider, model: 'claude-opus-4-8' };
 const AGENT_PROVIDERS: ReadonlySet<AgentProvider> = new Set(['openai', 'claude', 'gemini', 'mistral']);
@@ -75,7 +75,7 @@ function isAgentNode(node: IRNode): boolean {
   return node.node_type === ORCHESTR_AGENT;
 }
 
-/** Which driver a loop uses: `items` (default) or `while` (ADR 0029); an unknown mode fails loud. */
+/** Which driver a loop uses: `items` (default) or `while`; an unknown mode fails loud. */
 function loopModeOf(node: IRNode): 'items' | 'while' {
   const mode = node.parameters.mode;
   if (mode === undefined || mode === null || mode === 'items') return 'items';
@@ -92,7 +92,7 @@ function isSwitchNode(node: IRNode): boolean {
 /**
  * Compile a `WorkflowIR` to a flat `DagPlan`.
  * @param enclosingWorkflowId Id of the workflow being compiled — a `orchestr:call_workflow` tool
- *   pointing at it is a hard error (ADR 0045 §3); undefined skips the check.
+ *   pointing at it is a hard error; undefined skips the check.
  */
 export function compileWorkflowIrDag(ir: WorkflowIR, enclosingWorkflowId?: string): DagPlan {
   const byId = new Map(ir.nodes.map((n) => [n.id, n]));
@@ -132,7 +132,7 @@ export function compileWorkflowIrDag(ir: WorkflowIR, enclosingWorkflowId?: strin
       !skipped(e.source_node_id) &&
       !skipped(e.target_node_id),
   );
-  // Agent tool edges (ADR 0045, invariant #14): `port_type: 'tool'` binds the target as a tool.
+  // Agent tool edges (invariant #14): `port_type: 'tool'` binds the target as a tool.
   const toolEdges = ir.edges.filter(
     (e) =>
       edgePortType(e) === AGENT_TOOL_PORT_TYPE &&
@@ -442,7 +442,7 @@ function flattenDag(
   }
 
   // Always pop the ready node with the smallest IR index: the same IR must always yield
-  // the same order (determinism is load-bearing — ADR 0023).
+  // the same order (determinism is load-bearing).
   const ready = nodes.filter((n) => (indegree.get(n.id) ?? 0) === 0).map((n) => n.id);
   const order: IRNode[] = [];
   while (ready.length > 0) {
@@ -498,7 +498,7 @@ function buildDagNode(
     case 'waitForEvent':
       return { ...run, guards };
     case 'code':
-      // ADR 0027: transpile (ts→js) + attach guards; the error lane is attached below.
+      // Transpile (ts→js) + attach guards; the error lane is attached below.
       return toDagCodeNode(run, guards);
     case 'action':
       // `ActionNode` declares `onErrorBranch?: RunNode[]` (never set by mapNode — the lane is
@@ -510,7 +510,7 @@ function buildDagNode(
 }
 
 /**
- * Loop-Over-Items (ADR 0023 slice 6) → a `DagForEachNode`; the body references `{{item}}` /
+ * Loop-Over-Items (slice 6) → a `DagForEachNode`; the body references `{{item}}` /
  * `{{itemIndex}}`. `body` is an empty placeholder — `buildScopedDag` peels and attaches the real one.
  */
 function buildForEachNode(
@@ -535,7 +535,7 @@ function buildForEachNode(
 }
 
 /**
- * Loop while-mode (ADR 0029) → a `DagWhileNode`; the condition is the same `{left, op, right}` shape
+ * Loop while-mode → a `DagWhileNode`; the condition is the same `{left, op, right}` shape
  * IF/Switch carry. `max_iterations` is REQUIRED and positive — the hard infinite-loop guard.
  */
 function buildWhileNode(node: IRNode, translate: (value: unknown) => unknown, guards: Guard[]): DagWhileNode {
@@ -593,7 +593,7 @@ function buildSwitchNode(
 }
 
 /**
- * Agent (ADR 0045) → a `DagAgentNode`: system prompt, model, the bounded `max_steps` cap, and the
+ * Agent → a `DagAgentNode`: system prompt, model, the bounded `max_steps` cap, and the
  * input expression. `tools` is an empty placeholder — `buildScopedDag` peels and attaches the real
  * descriptors from the `port_type:'tool'` edges (invariant #14).
  */
@@ -619,7 +619,7 @@ function buildAgentNode(node: IRNode, translate: (value: unknown) => unknown, gu
     model = { provider: m.provider as AgentProvider, model: m.model };
   }
 
-  // Bounded on BOTH sides: an unbounded cap is itself a fan-out vector (ADR 0045 §3).
+  // Bounded on BOTH sides: an unbounded cap is itself a fan-out vector.
   const rawMax = p.max_steps;
   let maxSteps = DEFAULT_AGENT_MAX_STEPS;
   if (rawMax !== undefined && rawMax !== null) {
@@ -684,7 +684,7 @@ function dedupeToolNames(tools: DagAgentTool[]): void {
 
 /**
  * The workflow an `orchestr:call_workflow` node targets — the ONE definition site of both target
- * guards, so the agent-tool path and the authored-step path can never disagree (ADR 0062). Calling
+ * guards, so the agent-tool path and the authored-step path can never disagree. Calling
  * ITSELF is an immediate infinite loop; the run-time depth guard is the backstop that also bounds
  * an indirect cycle (A→B→A).
  */
@@ -703,7 +703,7 @@ function calledWorkflowId(node: IRNode, enclosingWorkflowId: string | undefined)
 }
 
 /**
- * Lower a main-path `orchestr:call_workflow` to a runnable step (ADR 0062). Its `input` parameters
+ * Lower a main-path `orchestr:call_workflow` to a runnable step. Its `input` parameters
  * become the child's firing event, so `{{trigger.<field>}}` inside the child reads them.
  */
 function buildCallWorkflowNode(
@@ -725,7 +725,7 @@ function buildCallWorkflowNode(
 }
 
 /**
- * Lower ONE bound tool node to a `DagAgentTool` descriptor (ADR 0045 §3/§4): `orchestr:call_workflow`
+ * Lower ONE bound tool node to a `DagAgentTool` descriptor (/§4): `orchestr:call_workflow`
  * becomes a sub-workflow tool, anything else an action tool whose params become the call's base props.
  */
 function buildAgentTool(

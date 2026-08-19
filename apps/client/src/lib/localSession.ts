@@ -1,4 +1,4 @@
-// The local email+password session (ADR 0054). A COOKIE, not localStorage: the Next middleware runs
+// The local email+password session. A COOKIE, not localStorage: the Next middleware runs
 // on the server and must see it to gate routes, and Max-Age expires the token without any sweeper.
 export const LOCAL_SESSION_COOKIE = "orchestr_local_session";
 

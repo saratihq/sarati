@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
- * Composio webhook verification (ADR 0046) — the `/api/hooks/composio` trust boundary, implementing the Svix scheme:
+ * Composio webhook verification — the `/api/hooks/composio` trust boundary, implementing the Svix scheme:
  * HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<rawBody>`, base64, against possibly SEVERAL space-separated
  * `v1,<sig>` values during rotation. The secret is used as a RAW utf-8 string (never base64-decoded). Never throws.
  */

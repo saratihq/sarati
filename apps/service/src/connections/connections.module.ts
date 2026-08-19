@@ -19,7 +19,7 @@ import { OAuthService } from './oauth.service';
  * the Composio (managed-row) half is inert without COMPOSIO_API_KEY and the BYO token/oauth2 paths never touch it.
  */
 @Module({
-  // EnvironmentsModule: the delete endpoint consults slot references (ADR 0014).
+  // EnvironmentsModule: the delete endpoint consults slot references.
   imports: [AuthModule, EnvironmentsModule],
   providers: [
     ConnectionsService,

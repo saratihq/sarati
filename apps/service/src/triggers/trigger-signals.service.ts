@@ -13,7 +13,7 @@ export const RECONCILE_SWEEP_QUEUE = 'trigger-reconcile-sweep';
 export type InlineReconcile = (workflowId: string) => Promise<void>;
 
 /**
- * The pointer/slot-move → reconcile SIGNAL seam (ADR 0018): the signal carries only a workflow
+ * The pointer/slot-move → reconcile SIGNAL seam: the signal carries only a workflow
  * id, and the reconcile recomputes that workflow's whole desired set. MUST stay dependency-light
  * (PG_BOSS only) — workflows/environments depend on it, so importing the trigger layer would
  * be a module cycle. With pg-boss off it runs inline via a handler registered at boot.

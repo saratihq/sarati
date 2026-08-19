@@ -2,7 +2,7 @@ import { DomainError } from '../common/domain-error';
 import { CodeRunner, type CodeInput } from './code-runner';
 
 /**
- * The sandbox proof (ADR 0027): every guarantee making it safe to run user code is a NAMED test —
+ * The sandbox proof: every guarantee making it safe to run user code is a NAMED test —
  * the boundary (no host reach), the bounds (time / memory / stack), and the marshalling. Isolation
  * is structural (the engine runs inside WASM), but assert it rather than assume it.
  */

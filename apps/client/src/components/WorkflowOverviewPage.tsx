@@ -70,7 +70,7 @@ export default function WorkflowOverviewPage() {
   const [docNodes, setDocNodes] = useState<Record<string, unknown>[] | null>(
     null,
   );
-  // Runtime health of the canvas-trigger activations (ADR 0018) — so the card
+  // Runtime health of the canvas-trigger activations — so the card
   // can show a live-but-failing trigger, not just publish state.
   const [triggerHealth, setTriggerHealth] = useState<
     TriggerActivationHealth[] | null
@@ -140,7 +140,7 @@ export default function WorkflowOverviewPage() {
       ? release.liveId !== release.latestId
       : release.latest > release.live);
 
-  // Prod-publish gate (ADR 0032): a plain member of a non-personal org can't
+  // Prod-publish gate: a plain member of a non-personal org can't
   // move the live pointer — the service 403s Publish, so disable it with a why.
   const canPublish = useOrgs(canMoveEnvPointers);
 

@@ -12,7 +12,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const PASSWORD = 'a-long-enough-passphrase';
 
-/** ADR 0054 — the self-host way in: bootstrap the first account, then sign in. */
+/** The self-host way in: bootstrap the first account, then sign in. */
 describe('local email + password auth (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;

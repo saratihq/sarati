@@ -25,7 +25,7 @@ export class OAuthExchangeError extends Error {}
  * or throwing `OAuthExchangeError` with the upstream detail.
  */
 async function postToken(tokenUrl: string, params: Record<string, string>): Promise<OAuthTokenSet> {
-  // The SSRF choke point for BOTH grants — `tokenUrl` may be a fully user-supplied BYO endpoint (ADR 0042).
+  // The SSRF choke point for BOTH grants — `tokenUrl` may be a fully user-supplied BYO endpoint.
   await guardUserUrl(tokenUrl);
   const body = new URLSearchParams(params).toString();
   const res = await request(tokenUrl, {

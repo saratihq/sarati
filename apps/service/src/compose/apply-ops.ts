@@ -30,7 +30,7 @@ export type ComposeOp =
       source_node_id: string;
       target_node_id: string;
       source_port?: number;
-      /** `main` (default; a step in the flow), `tool` (bind the target as an agent tool, ADR 0045), or `error` (the ADR-0020 error lane). */
+      /** `main` (default; a step in the flow), `tool` (bind the target as an agent tool), or `error` (the error lane). */
       port_type?: ConnectPortType;
     }
   | {
@@ -177,7 +177,7 @@ function applyAddNode(ir: WorkflowIR, op: Extract<ComposeOp, { op: 'add_node' }>
 
 /**
  * Only the trigger node changes its type — an action's type is its identity, so re-add it instead.
- * The trigger node is where a workflow's start kind is chosen (ADR 0018), and re-typing REPLACES
+ * The trigger node is where a workflow's start kind is chosen, and re-typing REPLACES
  * parameters so the new kind never inherits the previous kind's props.
  */
 function retypeNode(

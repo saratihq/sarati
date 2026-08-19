@@ -33,7 +33,7 @@ function build(opts: {
   sdkTypes?: string[];
   /** The org cluster connection resolveClusterConnection returns (default: none). */
   clusterConn?: { id: string; ownerUserId: string } | null;
-  /** The env SLOT connection resolveSlotConnection returns (ADR 0014; default: none). */
+  /** The env SLOT connection resolveSlotConnection returns (; default: none). */
   slotConn?: { id: string; ownerUserId: string } | null;
 }) {
   // Bare jest.fn()s so assertions reference the mock directly — the linter forbids an unbound class method.
@@ -184,7 +184,7 @@ describe('ActionRouterProvider', () => {
     });
   });
 
-  it('drops idempotencyKey on the Composio typed rail (accepted at-least-once, ADR 0040) — and never errors for it', async () => {
+  it('drops idempotencyKey on the Composio typed rail (accepted at-least-once) — and never errors for it', async () => {
     const { router, execute } = build({ managedRef: managed() });
     const withKey: RunActionInput = {
       ...input('jira.search_issues', 'conn-1'),
@@ -196,7 +196,7 @@ describe('ActionRouterProvider', () => {
     expect(execute).toHaveBeenCalledWith(expect.not.objectContaining({ idempotencyKey: expect.anything() }));
   });
 
-  it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed (ADR 0041)', async () => {
+  it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed', async () => {
     const { router, execute } = build({}); // no managed connection at all
     const dry: RunActionInput = { ...input('jira.search_issues'), dryRun: true };
     const out = await router.runAction(dry);
@@ -291,7 +291,7 @@ describe('ActionRouterProvider', () => {
     await expect(router.runAction(input('nodots'))).rejects.toThrow(/Malformed action id/);
   });
 
-  // ─── Per-env connection scoping (ADR 0014): an env-deployed run swaps in the slot
+  // ─── Per-env connection scoping: an env-deployed run swaps in the slot
   //     connection and runs AS its owner. Observed via the SDK rail. ───
 
   const PROD = { environment: 'prod', orgId: 'org-1' };

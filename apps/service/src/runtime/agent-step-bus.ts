@@ -9,7 +9,7 @@ import type { AgentStep, AgentStepSink } from './agent';
 const CHANNEL_TTL_MS = 10 * 60 * 1000;
 
 /**
- * The bus channel key (ADR 0045 §9) — scoped by `workflow:env:session`, never the bare session id,
+ * The bus channel key — scoped by `workflow:env:session`, never the bare session id,
  * so a leaked id can't address another tenant's channel. BOTH ends of the bus must build the key
  * here so they agree byte-for-byte; `env` canonicalizes (invariant #7) so `prod` and `production`
  * still rendezvous.
@@ -39,7 +39,7 @@ interface Channel {
 
 /**
  * The channel-keyed in-process pub/sub carrying an agent run's live steps to the SSE side-channel
- * (ADR 0045 §9): the durable loop publishes, the `@Sse()` chat-events endpoint subscribes. Run
+ * : the durable loop publishes, the `@Sse()` chat-events endpoint subscribes. Run
  * history is the source of truth, so the bus is deliberately best-effort — publishing with no live
  * channel is a silent drop, `publish` never blocks (backpressure is the socket's problem, no queue
  * is held), and a channel is dropped on last unsubscribe, `close`, or TTL.

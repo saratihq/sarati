@@ -46,7 +46,7 @@ export class WorkflowReviewEntity {
   @Column({ name: 'updated_at', type: 'timestamptz', nullable: true })
   updatedAt!: Date | null;
 
-  /** Latest pre-merge "Test this branch" result (ADR 0015) — null until run. */
+  /** Latest pre-merge "Test this branch" result — null until run. */
   @Column({ name: 'last_test', type: 'json', nullable: true })
   lastTest!: ReviewTestSummary | null;
 }

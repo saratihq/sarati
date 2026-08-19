@@ -21,7 +21,7 @@ import { TriggersService } from './triggers.service';
 const HEARTBEAT_MS = 15_000;
 
 /**
- * The public SYNCHRONOUS chat intake (ADR 0045 addendum) — NO auth guard: the unguessable
+ * The public SYNCHRONOUS chat intake — NO auth guard: the unguessable
  * per-`(workflow, env)` path is the capability token. Locked contract:
  * `POST /api/chat/:workflowId/:env` `{ chatInput, sessionId?, action? }` →
  * 200 `{ run_id, session_id, reply, outputs }`, 404 when the env has no live chat node.
@@ -34,7 +34,7 @@ export class ChatController {
   ) {}
 
   /**
-   * The LIVE agent-step SSE side-channel (ADR 0045 §9):
+   * The LIVE agent-step SSE side-channel:
    * `GET /api/chat/:workflowId/:env/events?session_id=X`. Auth is `none` — the scoped
    * `workflow:env:session` channel key is the capability. The SSE `id` is the bus's per-channel
    * monotonic `seq`, NOT `step_index` (which resets to 0 on every agent-loop invocation, so a

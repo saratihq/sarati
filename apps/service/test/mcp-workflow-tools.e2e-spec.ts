@@ -12,7 +12,7 @@ import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-/** ADR 0053: a PUBLISHED workflow is a tool an agent can call, and only a published one. */
+/** A PUBLISHED workflow is a tool an agent can call, and only a published one. */
 describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;
@@ -24,7 +24,7 @@ describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
   const invokeKey = 'ork_wt_invoke_aaaaaaaaaaaaaaaaaaaa';
   const readKey = 'ork_wt_read_bbbbbbbbbbbbbbbbbbbbbb';
   const deployKey = 'ork_wt_deploy_cccccccccccccccccccc';
-  // Keys are pinned to their issuing org (ADR 0051), so publishing elsewhere needs its own key.
+  // Keys are pinned to their issuing org, so publishing elsewhere needs its own key.
   const otherDeployKey = 'ork_wt_other_dddddddddddddddddddd';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 

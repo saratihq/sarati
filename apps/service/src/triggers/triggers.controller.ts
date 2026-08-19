@@ -10,7 +10,7 @@ import { isIdShape } from '../database/ids';
 import { PlatformKeysService } from '../platform/platform-keys.service';
 
 /**
- * The trigger picker catalog + the per-workflow activation-health readout (ADR 0018). Triggers
+ * The trigger picker catalog + the per-workflow activation-health readout. Triggers
  * are authored as version-doc nodes, so there is deliberately no imperative create/deploy API.
  */
 @Controller('api/triggers')
@@ -31,7 +31,7 @@ export class TriggersController {
   }
 
   /**
-   * Runtime health of a workflow's canvas-trigger activations (ADR 0018) — whether a LIVE
+   * Runtime health of a workflow's canvas-trigger activations — whether a LIVE
    * trigger is actually firing, not just its publish state. The service authorizes the read.
    */
   @Scope('workflow:read')

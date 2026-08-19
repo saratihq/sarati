@@ -2,7 +2,7 @@ import { parseWebhookPath, webhookPathFor, webhookUrlFor } from './webhook-url';
 
 const WF = '11111111-1111-1111-1111-111111111111';
 
-describe('webhookPathFor / webhookUrlFor (ADR 0018 per-(workflow,env) URL)', () => {
+describe('webhookPathFor / webhookUrlFor (per-(workflow,env) URL)', () => {
   it('builds the canonical two-segment path and canonicalizes the env (prod → production)', () => {
     expect(webhookPathFor(WF, 'staging')).toBe(`/api/hooks/${WF}/staging`);
     expect(webhookPathFor(WF, 'prod')).toBe(`/api/hooks/${WF}/production`);

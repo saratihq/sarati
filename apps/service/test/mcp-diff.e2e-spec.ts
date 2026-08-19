@@ -47,7 +47,7 @@ interface ChangeSet {
   renames_are_presentational: boolean;
 }
 
-/** `orchestr_diff` through the real MCP client — the moat tool, so every claim is asserted (ADR 0052). */
+/** `orchestr_diff` through the real MCP client — the moat tool, so every claim is asserted. */
 describe('orchestr_diff (e2e, real MCP client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;

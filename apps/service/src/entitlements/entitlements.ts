@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
-/** The plans seam (ADR 0004): every limit point asks here, so core never learns about plans or billing. */
+/** The plans seam: every limit point asks here, so core never learns about plans or billing. */
 export interface EntitlementsProvider {
   /** Feature gate: may this org use `feature` at all? */
   allows(orgId: string, feature: string): Promise<boolean>;

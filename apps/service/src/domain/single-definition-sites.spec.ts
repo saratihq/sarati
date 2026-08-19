@@ -9,7 +9,7 @@ const SRC = join(__dirname, '..');
 
 /** Each load-bearing question, and the ONE file allowed to answer it. */
 const SINGLE_DEFINITION = [
-  // Constitution, "Rules of the vault" + ADR 0018 — which nodes are triggers.
+  // Constitution, "Rules of the vault" + — which nodes are triggers.
   { symbol: 'isTriggerNode', definedIn: 'compiler/compile-ir.ts' },
   // Constitution #4 — "did the content change?" is answered ONLY by computeDiff.
   { symbol: 'computeDiff', definedIn: 'ir/diff.ts' },

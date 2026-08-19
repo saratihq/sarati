@@ -1147,7 +1147,7 @@ describe('ComposerAuthGuard', () => {
     });
 
     it('refuses a local token once local auth is off, secret or not', async () => {
-      // What a Clerk deployment derives: no second front door (ADR 0054).
+      // What a Clerk deployment derives: no second front door.
       const guard = guardWith(() => Promise.reject(new Error('not a Clerk token')), {
         ...ENV,
         localSessionSecret: null,

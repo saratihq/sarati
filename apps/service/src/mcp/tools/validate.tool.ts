@@ -41,7 +41,7 @@ const Output = z.object({
       }),
     )
     .describe(
-      'Steps needing a credential that carry no connectionId. A dry run deliberately does not catch these (ADR 0041), so this is the only warning before the first real fire — set parameters.connectionId from orchestr_list_connections.',
+      'Steps needing a credential that carry no connectionId. A dry run deliberately does not catch these, so this is the only warning before the first real fire — set parameters.connectionId from orchestr_list_connections.',
     ),
 });
 

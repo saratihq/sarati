@@ -25,7 +25,7 @@ class AssignSlotDto {
 /** App slugs, one vocabulary with action/trigger public types (`slack`, `gmail`, …). */
 const APP_SHAPE = /^[a-z][a-z0-9_-]{0,119}$/;
 
-/** Env lifecycle + slot curation (ADR 0014) for the active org: reads need membership, writes owner/admin. */
+/** Env lifecycle + slot curation for the active org: reads need membership, writes owner/admin. */
 @Controller('api/environments')
 @UseGuards(AuthGuard)
 export class EnvironmentsController {

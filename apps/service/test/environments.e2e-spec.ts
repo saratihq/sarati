@@ -21,7 +21,7 @@ const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const CA_PERSONAL = 'ca_env_personal';
 const CA_STAGING = 'ca_env_staging';
 
-/** A gmail-connection step behind a canvas webhook trigger node (ADR 0018) — the rebind subject. */
+/** A gmail-connection step behind a canvas webhook trigger node — the rebind subject. */
 function gmailIr(connectionId: string): Record<string, unknown> {
   return {
     version: '1.0',
@@ -62,7 +62,7 @@ function gmailIr(connectionId: string): Record<string, unknown> {
   };
 }
 
-/** ADR 0014 — environments as first-class rows, end to end against a stubbed Composio transport. */
+/** Environments as first-class rows, end to end against a stubbed Composio transport. */
 describe('environments (e2e, isolated DB, org owner + member via API keys, stubbed Composio)', () => {
   let app: INestApplication;
   let db: Client;
@@ -452,7 +452,7 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
         .send({ environment: 'staging', version_id: v1.id }),
     ).expect(201);
 
-    // Canvas triggers (ADR 0018): the webhook node lives in the version doc — no trigger row.
+    // Canvas triggers: the webhook node lives in the version doc — no trigger row.
     envHookPath = `/api/hooks/${gmailWfId}/staging`;
 
     // ENV-SCOPED FIRE → the step must execute on the SLOT's account, AS its owner.
@@ -510,7 +510,7 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
   }, 30_000);
 
   it('env delete: cascades its pointers AND its trigger activations, with the receipt', async () => {
-    // qa2 gets a pointer + a materialized webhook activation (ADR 0018), then dies.
+    // qa2 gets a pointer + a materialized webhook activation, then dies.
     const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', orgId)).expect(
       200,
     );

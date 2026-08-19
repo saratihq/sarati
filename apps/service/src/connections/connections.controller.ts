@@ -90,7 +90,7 @@ export class ConnectionsController {
     return this.connections.list(this.userId(req));
   }
 
-  /** The environments whose slots reference this connection (ADR 0014); ownership-scoped, so a foreign one is a 404. */
+  /** The environments whose slots reference this connection; ownership-scoped, so a foreign one is a 404. */
   @Scope('connection:read')
   @Get(':id/references')
   async references(

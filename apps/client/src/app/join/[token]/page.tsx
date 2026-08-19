@@ -26,7 +26,7 @@ const CARD_STYLE = {
  * no org-scoped caches to drop yet, and SPA nav lets the "Joined" toast survive.
  *
  * On a self-hosted instance the invitee may have no account at all, in which case the page registers
- * them against the invite instead (ADR 0054) — the service accepts it as part of registration.
+ * them against the invite instead — the service accepts it as part of registration.
  */
 export default function JoinPage() {
   useDocumentTitle("Join organization");
@@ -50,7 +50,7 @@ export default function JoinPage() {
   const resolving = !clerkEnabled && !status && !statusError;
   const needsAccount = !clerkEnabled && status?.enabled === true && !signedIn;
 
-  // Unauthenticated by design (ADR 0054), so this runs even for an invitee with no account yet.
+  // Unauthenticated by design, so this runs even for an invitee with no account yet.
   useEffect(() => {
     if (!token || previewed.current) return;
     previewed.current = true;

@@ -1,13 +1,13 @@
 import { deepEqual } from '../../ir/models';
 
 /**
- * Canvas triggers (ADR 0018): the desired/actual activation descriptors and the
+ * Canvas triggers: the desired/actual activation descriptors and the
  * descriptor-equality guard the reconciler applies. `reconcile.ts` holds the sweep.
  */
 
 /**
  * How an activation is materialized against the outside world. `composio_subscription`
- * (ADR 0046) is the DEFAULT for a `<app>.<trigger>` catalog trigger that is not a native
+ *  is the DEFAULT for a `<app>.<trigger>` catalog trigger that is not a native
  * kind, an SDK registered-webhook, or a hand-polled Composio-poll exception (`polling`);
  * `webhook` and `chat` stand up no remote side-effect — their intake URL IS the deployment.
  */
@@ -15,7 +15,7 @@ export type ActivationKind =
   'webhook' | 'chat' | 'registered_webhook' | 'polling' | 'schedule' | 'composio_subscription';
 
 /**
- * A connection reference resolved from an env slot (ADR 0014) — never a secret. `null` means the
+ * A connection reference resolved from an env slot — never a secret. `null` means the
  * kind needs none; an UNFILLED slot is an activation error instead, never a silent `null`.
  */
 export interface ConnectionRef {

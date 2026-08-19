@@ -1,13 +1,13 @@
-/** API-key capability scopes (ADR 0051). Sessions are not scope-limited; keys are. */
+/** API-key capability scopes. Sessions are not scope-limited; keys are. */
 export const API_SCOPES = [
   'workflow:read',
   'workflow:write',
   'workflow:deploy',
   // Previewing and firing for real are different capabilities: a dry run changes nothing outside
-  // (ADR 0041), so a key can be trusted to preview without ever being able to fire.
+  // , so a key can be trusted to preview without ever being able to fire.
   'run:dry',
   'run:execute',
-  // Calling a PUBLISHED workflow as a tool (ADR 0053). Deliberately separate: a key holding only
+  // Calling a PUBLISHED workflow as a tool. Deliberately separate: a key holding only
   // this can invoke your live automations and read nothing about how they are built.
   'workflow:invoke',
   'connection:read',

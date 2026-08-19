@@ -5,7 +5,7 @@ import { TriggerSignalsModule } from '../triggers/trigger-signals.module';
 import { EnvironmentsController } from './environments.controller';
 import { EnvironmentsService } from './environments.service';
 
-/** Named environments (ADR 0014). Must stay near-leaf — workflows, triggers and connections all import it. */
+/** Named environments. Must stay near-leaf — workflows, triggers and connections all import it. */
 @Module({
   imports: [AuthModule, TriggerSignalsModule],
   controllers: [EnvironmentsController],

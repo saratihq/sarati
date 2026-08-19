@@ -1,7 +1,7 @@
 import { Column, Entity, PrimaryColumn } from 'typeorm';
 
 /**
- * The append-only outbox (ADR 0037): written in the SAME transaction as the mutation it describes,
+ * The append-only outbox: written in the SAME transaction as the mutation it describes,
  * and never updated or deleted by code.
  */
 @Entity('domain_events')

@@ -36,7 +36,7 @@ interface SideRun {
 }
 
 /**
- * Pre-merge "Test this branch" (ADR 0015): runs both branch heads on the SAME payload and stamps the
+ * Pre-merge "Test this branch": runs both branch heads on the SAME payload and stamps the
  * verdict on `review.last_test` (red iff the head fails where the baseline did not). REALLY executes.
  */
 @Injectable()

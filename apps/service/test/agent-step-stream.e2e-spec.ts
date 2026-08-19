@@ -87,7 +87,7 @@ function drainFrames(buffer: string): { frames: SseFrame[]; rest: string } {
   return { frames, rest };
 }
 
-/** The live agent step-stream side-channel (ADR 0045 §9); DBOS is OFF so the chat intake runs the direct path. */
+/** The live agent step-stream side-channel; DBOS is OFF so the chat intake runs the direct path. */
 describe('agent step stream — SSE side-channel (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
@@ -278,7 +278,7 @@ function collectSse(res: Response, sink: SseFrame[]): { done: Promise<void>; can
 }
 
 /**
- * ADR 0045 §9: the SSE `id` is a per-CHANNEL monotonic seq (never `step_index`), and the
+ * The SSE `id` is a per-CHANNEL monotonic seq (never `step_index`), and the
  * channel is scoped by `workflow:env:session` so no subscriber can cross-read another's steps.
  */
 describe('agent step stream — monotonic ids + tenant scoping (e2e, isolated DB)', () => {

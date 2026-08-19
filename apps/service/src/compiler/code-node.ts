@@ -5,7 +5,7 @@ import type { DagCodeNode, Guard } from '../runtime/dag-plan';
 import type { CodeNode } from '../runtime/run-plan';
 
 /**
- * Lower a `CodeNode` (ADR 0027) to its executable `DagCodeNode` — the ONE place both compilers turn
+ * Lower a `CodeNode` to its executable `DagCodeNode` — the ONE place both compilers turn
  * a snippet into runtime form, so the transpile + policy mapping never drifts. TypeScript is
  * transpiled HERE, at compile time, so the runtime only ever executes JS and a type error fails the
  * plan build. The caller attaches the error lane.

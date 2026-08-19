@@ -9,7 +9,7 @@ import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /**
- * The author-time gate and the compiler must agree on the SAME document (ADR 0052). Every case here
+ * The author-time gate and the compiler must agree on the SAME document. Every case here
  * is a document the gate once called valid and the compiler then silently mutilated — or a stored
  * document the diff could not read, which took invariant #3 ("a no-diff commit mints nothing") with it.
  */

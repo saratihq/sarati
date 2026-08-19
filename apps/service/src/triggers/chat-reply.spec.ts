@@ -3,7 +3,7 @@ import type { RunResult } from '../runtime/run-plan';
 import { extractChatReply } from '../runtime/terminal-output';
 
 /**
- * The deterministic chat-reply rule (ADR 0045 addendum): reply = the future respond
+ * The deterministic chat-reply rule: reply = the future respond
  * node's output if present, else the unique terminal leaf, else the LAST-EXECUTED leaf
  * (never an arbitrary output key). These pure-function tests pin that contract.
  */
@@ -43,7 +43,7 @@ function result(outputs: Record<string, unknown>, order: string[]): RunResult {
   return { planId: 'p', outputs, trace: order.map((nodeId) => ({ nodeId, output: outputs[nodeId] })) };
 }
 
-describe('extractChatReply — the deterministic terminal-node rule (ADR 0045 addendum)', () => {
+describe('extractChatReply — the deterministic terminal-node rule', () => {
   it('a single leaf downstream of the chat trigger is the reply', () => {
     const doc = ir(
       [node('chat', 'orchestr:chat'), node('step'), node('sink')],

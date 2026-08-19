@@ -4,7 +4,7 @@ import { rawQuery } from '../database/raw-query';
 import type { ProviderStore } from '../providers/provider-store';
 
 /**
- * The persistent KV (ProviderStore) for ONE trigger activation (ADR 0018) — cursors, webhook
+ * The persistent KV (ProviderStore) for ONE trigger activation — cursors, webhook
  * secret, subscription handle. Single-writer by construction (reconciler + poll sweep are both
  * pg-boss singletons), so per-key upsert atomicity suffices.
  */

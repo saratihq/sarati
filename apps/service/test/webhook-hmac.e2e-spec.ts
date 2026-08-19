@@ -52,7 +52,7 @@ const webhookDoc = (): Record<string, unknown> => ({
   metadata: {},
 });
 
-describe('webhook HMAC verification (ADR 0030, e2e, isolated DB)', () => {
+describe('webhook HMAC verification (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
   const userA = randomUUID();

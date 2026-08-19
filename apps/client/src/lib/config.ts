@@ -43,7 +43,7 @@ export const agentBaseUrl = resolvePublicUrl(
 );
 
 // Optional, unlike the URLs above: an absent key is a real deployment (self-host signs in with
-// email + password, ADR 0054), not a misconfiguration, so it must not fail the production build.
+// email + password), not a misconfiguration, so it must not fail the production build.
 export const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.trim() ?? "";
 
 /** Whether this build can run Clerk flows at all — false on a local-credential self-host. */

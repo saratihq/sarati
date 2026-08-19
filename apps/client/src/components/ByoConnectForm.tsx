@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import NodeIcon from "./NodeIcon";
 
-/** Bring-your-own-credentials connect surface (ADR 0042): app picker, then a form off its `authScheme`. */
+/** Bring-your-own-credentials connect surface: app picker, then a form off its `authScheme`. */
 export default function ByoConnectForm({
   apps,
   envProviders,

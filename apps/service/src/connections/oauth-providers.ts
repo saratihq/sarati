@@ -94,7 +94,7 @@ export interface OAuthProviderSummary {
   scopes: string[];
 }
 
-/** A user-supplied ("bring your own") OAuth client (ADR 0042) — stored Fernet-encrypted and never returned. */
+/** A user-supplied ("bring your own") OAuth client — stored Fernet-encrypted and never returned. */
 export interface ByoOAuthClient {
   clientId: string;
   clientSecret: string;
@@ -148,7 +148,7 @@ export function byoClientToConfig(
 }
 
 /**
- * STORE-TIME https + SSRF guard for a BYO OAuth endpoint (ADR 0042), throwing {@link DomainError}(400). It runs at
+ * STORE-TIME https + SSRF guard for a BYO OAuth endpoint, throwing {@link DomainError}(400). It runs at
  * input because the `auth_url` is only ever a browser redirect, so this is its ONLY guard;
  * ORCHESTR_HTTP_ALLOWED_HOSTS opts a host back in (and lifts https for it).
  */

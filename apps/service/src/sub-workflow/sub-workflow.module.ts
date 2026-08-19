@@ -6,7 +6,7 @@ import { WorkflowsModule } from '../workflows/workflows.module';
 import { SubWorkflowRunnerService } from './sub-workflow-runner.service';
 
 /**
- * Wires the sub-workflow-as-tool runner (ADR 0045 §3). A leaf module imported ONLY by AppModule, so
+ * Wires the sub-workflow-as-tool runner. A leaf module imported ONLY by AppModule, so
  * it can compose Runs/Runtime/Workflows without any of them depending back on it — no module cycle.
  */
 @Module({

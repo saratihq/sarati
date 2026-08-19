@@ -1,4 +1,4 @@
-/** Shapes for pre-merge "Test this branch" (ADR 0015), stored on `workflow_reviews.last_test`. */
+/** Shapes for pre-merge "Test this branch", stored on `workflow_reviews.last_test`. */
 
 export type TestVerdict = 'green' | 'red';
 

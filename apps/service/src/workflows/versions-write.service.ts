@@ -29,7 +29,7 @@ export interface CommitInput {
   commitMessage: string | null;
   author: string | null;
   actorId: string | null;
-  /** The caller — every bearer-facing call site passes it; a non-interactive one (API key: CI, an MCP agent) must then send `baseVersionId` (ADR 0052). */
+  /** The caller — every bearer-facing call site passes it; a non-interactive one (API key: CI, an MCP agent) must then send `baseVersionId`. */
   principal?: Principal;
   /** Optimistic-concurrency token: the head the client edited from; a moved branch is a 409, never a silent clobber. Omitted → no guard. */
   baseVersionId?: string | null;
@@ -284,7 +284,7 @@ export class VersionsWriteService {
         );
       }
 
-      // Demanded HERE because the same key is a bearer on this route AND on the tool wrapping it (ADR 0052).
+      // Demanded HERE because the same key is a bearer on this route AND on the tool wrapping it.
       if (branch.headVersionId && input.principal?.kind === 'api_key' && !input.baseVersionId) {
         throw new DomainError(BASE_VERSION_REQUIRED, 400, { code: 'base_version_id_required' });
       }
@@ -303,7 +303,7 @@ export class VersionsWriteService {
         }
       }
 
-      // The ONE author-time gate (ADR 0052): a doc that only fails at RUN must fail at SAVE, and a
+      // The ONE author-time gate: a doc that only fails at RUN must fail at SAVE, and a
       // hand-written document faces exactly what an ops-built one does. Write path only — reads of
       // an existing phantom stay open so the user can fix it.
       const report = assertAuthoredIrValid(irData, this.catalog.facts(), wf.id);
@@ -494,7 +494,7 @@ export class VersionsWriteService {
 
       return { status: opts.status, workflow_id: wf.id, live_version: target.versionNumber };
     });
-    // Prod pointer moved (committed) → reconcile this workflow's activations (ADR 0018).
+    // Prod pointer moved (committed) → reconcile this workflow's activations.
     await this.triggerSignals.enqueue(workflowId);
     return result;
   }

@@ -38,7 +38,7 @@ class NodeTypeOptionsDto {
 }
 
 /**
- * The editor's node-type catalog and live option picker. There is ONE catalog (ADR 0026): the
+ * The editor's node-type catalog and live option picker. There is ONE catalog: the
  * hand-coded control nodes plus the action catalog. Triggers aren't placeable steps and live on
  * their own catalog (`GET /api/triggers/catalog`), so no row here is a trigger.
  */

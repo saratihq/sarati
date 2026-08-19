@@ -64,7 +64,7 @@ function assertGuardsPrecede(plan: DagPlan): void {
 const byId = (plan: DagPlan, id: string): DagActionNode =>
   plan.nodes.find((n) => n.id === id) as DagActionNode;
 
-describe('compileWorkflowIrDag (ADR 0023 flat-DAG compiler, slice 1)', () => {
+describe('compileWorkflowIrDag (flat-DAG compiler, slice 1)', () => {
   it('flattens a linear chain into guarded nodes in dependency order', () => {
     const plan = compileWorkflowIrDag(ir([act('c'), act('a'), act('b')], [edge('a', 'b'), edge('b', 'c')]));
     expect(plan.nodes.map((n) => n.id)).toEqual(['a', 'b', 'c']);
@@ -130,7 +130,7 @@ describe('compileWorkflowIrDag (ADR 0023 flat-DAG compiler, slice 1)', () => {
     assertGuardsPrecede(plan);
   });
 
-  it('peels an ADR 0020 error output into a nested sub-DagPlan (the recursion)', () => {
+  it('peels an error output into a nested sub-DagPlan (the recursion)', () => {
     // main → after (main flow) ; main → handler (error output)
     const plan = compileWorkflowIrDag(
       ir([act('main'), act('after'), act('handler')], [edge('main', 'after'), errEdge('main', 'handler')]),
@@ -165,7 +165,7 @@ describe('compileWorkflowIrDag (ADR 0023 flat-DAG compiler, slice 1)', () => {
   });
 });
 
-describe('compileWorkflowIrDag — Loop-Over-Items (ADR 0023 slice 6)', () => {
+describe('compileWorkflowIrDag — Loop-Over-Items (slice 6)', () => {
   const forEachById = (plan: DagPlan, id: string): DagForEachNode =>
     plan.nodes.find((n) => n.id === id) as unknown as DagForEachNode;
 
@@ -231,7 +231,7 @@ describe('compileWorkflowIrDag — Loop-Over-Items (ADR 0023 slice 6)', () => {
     expect(inner.body.nodes.map((n) => n.id)).toEqual(['leaf']);
   });
 
-  it('peels an ADR 0020 error output INSIDE a forEach body (recursive peel; shared with while)', () => {
+  it('peels an error output INSIDE a forEach body (recursive peel; shared with while)', () => {
     // loop --body(0)--> boom ; boom --error--> recover : the error lane lives inside the body,
     // and the body node set must follow the error edge to pull `recover` into boom's error lane.
     const plan = compileWorkflowIrDag(
@@ -286,7 +286,7 @@ describe('compileWorkflowIrDag — Loop-Over-Items (ADR 0023 slice 6)', () => {
   });
 });
 
-describe('compileWorkflowIrDag — Loop while-mode (ADR 0029)', () => {
+describe('compileWorkflowIrDag — Loop while-mode', () => {
   const whileById = (plan: DagPlan, id: string): DagWhileNode =>
     plan.nodes.find((n) => n.id === id) as unknown as DagWhileNode;
   // A while loop shares the loop node; supply the while params (items is ignored in while mode).
@@ -351,7 +351,7 @@ describe('compileWorkflowIrDag — Loop while-mode (ADR 0029)', () => {
     expect(inner.body.nodes.map((n) => n.id)).toEqual(['leaf']);
   });
 
-  it('peels an ADR 0020 error output INSIDE a while body (recursive peel through the while)', () => {
+  it('peels an error output INSIDE a while body (recursive peel through the while)', () => {
     // loop --body(0)--> boom ; boom --error--> recover (the error lane lives inside the body)
     const plan = compileWorkflowIrDag(
       ir(
@@ -575,7 +575,7 @@ describe('compileWorkflowIrDag — the lane of an edge that omits port_type', ()
   });
 });
 
-describe('compileWorkflowIrDag — agent param round-trip (client↔service contract, ADR 0045)', () => {
+describe('compileWorkflowIrDag — agent param round-trip (client↔service contract)', () => {
   // The client commits EXACTLY this shape (snake_case keys, `model` as an object), so pin
   // that those params survive compilation and the casing can't silently drift.
   it('carries system_prompt, model {provider, model}, max_steps and binds the tool', () => {

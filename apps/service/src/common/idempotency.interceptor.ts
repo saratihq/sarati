@@ -38,7 +38,7 @@ function outcomeOf(err: unknown): { status: number; body: unknown } {
 }
 
 /**
- * Honors `Idempotency-Key` on mutating requests (ADR 0037): the first completed response is stored
+ * Honors `Idempotency-Key` on mutating requests: the first completed response is stored
  * per (user, key) and replayed on retry. Requires the principal AuthGuard sets, so it must run after.
  */
 @Injectable()

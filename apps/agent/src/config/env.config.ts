@@ -42,8 +42,8 @@ export interface EnvConfig {
   readonly clerkAuthorizedParties: string;
   /**
    * workflow-service's SECRET_KEY, non-null exactly when local-session auth is
-   * usable here: a self-host signs in with email + password (workflow-service
-   * ADR 0054) and carries an HS256 session JWT, so agent-service must share the
+   * usable here: a self-host signs in with email + password on workflow-service
+   * and carries an HS256 session JWT, so agent-service must share the
    * secret to verify it. Folded into one nullable field so "enabled" and "has a
    * key" cannot disagree. Null = this instance verifies no local sessions.
    */

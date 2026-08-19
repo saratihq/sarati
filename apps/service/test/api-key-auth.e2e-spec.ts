@@ -92,7 +92,7 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
       .expect(401);
   });
 
-  /** Key management is SESSION-ONLY (ADR 0051): `key:manage` is unsatisfiable by ANY key, legacy included. */
+  /** Key management is SESSION-ONLY: `key:manage` is unsatisfiable by ANY key, legacy included. */
   it('a key can NEVER manage keys — mint, list, or revoke (escalation closed)', async () => {
     for (const call of [
       request(app.getHttpServer()).post('/api/api-keys').send({ name: 'ci' }),

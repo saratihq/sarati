@@ -7,7 +7,7 @@ import { EncryptionService } from '../common/crypto/encryption.service';
 const NULL_ENV = '00000000-0000-0000-0000-000000000000';
 
 /**
- * The env-scoped, Fernet-encrypted store for webhook signing secrets (ADR 0030). Secrets
+ * The env-scoped, Fernet-encrypted store for webhook signing secrets. Secrets
  * never enter the version doc — read only on-fire by the trigger intake.
  */
 @Injectable()

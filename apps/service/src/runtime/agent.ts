@@ -1,11 +1,11 @@
 /**
- * The `orchestr:agent` runtime contract (ADR 0045 §1/§2) — the durable tool-calling loop's seams
+ * The `orchestr:agent` runtime contract (/§2) — the durable tool-calling loop's seams
  * and shapes, in ONE place so the compiler, the interpreter, and the model/tool providers agree.
  * Nothing here talks to a provider directly: everything goes through an injected port, keeping the
  * loop ours and every credential on the existing opaque-auth seam.
  */
 
-/** The provider families the agent's model call supports (ADR 0044 set). */
+/** The provider families the agent's model call supports (set). */
 export type AgentProvider = 'openai' | 'claude' | 'gemini' | 'mistral';
 
 /** A permissive JSON-schema shape — the tool `parameters` the model call is handed. */
@@ -65,10 +65,10 @@ export interface ModelCallRequest {
 }
 
 /**
- * The auth context the model call resolves its credential from (ADR 0045 §5): the opaque connection
- * reference, the run's tenant (the lookup is user-scoped), and the run's env scope (ADR 0014). In an
+ * The auth context the model call resolves its credential from: the opaque connection
+ * reference, the run's tenant (the lookup is user-scoped), and the run's env scope. In an
  * env-scoped run the env slot WINS; `connection` is only the Default/manual override. The loop never
- * reads the raw key — only the SDK transport does (ADR 0042).
+ * reads the raw key — only the SDK transport does.
  */
 export interface AgentModelAuth {
   /** The model's connection reference (opaque; `{ connectionId }` or an inline credential) — the Default/manual override. */
@@ -77,14 +77,14 @@ export interface AgentModelAuth {
   externalUserId: string;
   /** Env NAME (history) + the legacy pre-006 cluster key with `orgId`; null on a Default run. */
   environment?: string | null;
-  /** ADR-0014 env slot key — resolves `(environmentId, <provider>)` to the env's model connection; null on a Default run. */
+  /** Env slot key — resolves `(environmentId, <provider>)` to the env's model connection; null on a Default run. */
   environmentId?: string | null;
   /** The run's org — the legacy `(org, env, app)` cluster key with `environment`; null on a Default run. */
   orgId?: string | null;
 }
 
 /**
- * The tool-aware model-call seam (ADR 0045 §5) — a loop-internal engine primitive, NOT a catalog
+ * The tool-aware model-call seam — a loop-internal engine primitive, NOT a catalog
  * action; the per-provider bodies live in the SDK's `callAgentModel`.
  */
 export interface AgentModelPort {
@@ -95,7 +95,7 @@ export interface AgentModelPort {
 export const AGENT_MODEL_CALL = Symbol('AGENT_MODEL_CALL');
 
 /**
- * Optional seam describing an ACTION tool for the model call (ADR 0045 §4), derived from the
+ * Optional seam describing an ACTION tool for the model call, derived from the
  * action's existing prop schema. Behind a seam so the pure runtime never imports the SDK catalog.
  */
 export interface AgentToolCatalog {
@@ -104,13 +104,13 @@ export interface AgentToolCatalog {
 
 /**
  * Optional seam describing a SUB-WORKFLOW tool for the model call — the contract its
- * `orchestr:tool_trigger` declares (ADR 0053 §1). Behind a seam because resolving it reads the
+ * `orchestr:tool_trigger` declares. Behind a seam because resolving it reads the
  * published version, which the pure runtime must not do itself. `undefined` = nothing declared.
  */
 export interface AgentWorkflowCatalog {
   describeWorkflow(
     workflowId: string,
-    /** The caller's environment — the tool described must be the version that would run (ADR 0062). */
+    /** The caller's environment — the tool described must be the version that would run. */
     environmentId: string | null,
   ): Promise<{ description: string; parameters: JsonSchema } | undefined>;
 }
@@ -135,7 +135,7 @@ export interface DagAgentActionTool {
   description?: string;
 }
 
-/** A SUB-WORKFLOW tool (ADR 0045 §3): a bound `orchestr:call_workflow` node run nested by the runner. */
+/** A SUB-WORKFLOW tool: a bound `orchestr:call_workflow` node run nested by the runner. */
 export interface DagAgentWorkflowTool {
   kind: 'workflow';
   name: string;
@@ -148,7 +148,7 @@ export interface DagAgentWorkflowTool {
 
 export type DagAgentTool = DagAgentActionTool | DagAgentWorkflowTool;
 
-/** A recorded step of one agent run (ADR 0045 §9) — one shape for both the trace and the SSE event. */
+/** A recorded step of one agent run — one shape for both the trace and the SSE event. */
 export interface AgentStep {
   /** 0-based position within THIS loop invocation — resets per invocation, so it is NOT the stream
    *  dedup key (the SSE channel dedups on its own session-unique `id`). */
@@ -164,18 +164,18 @@ export interface AgentStep {
   text?: string;
 }
 
-/** The agent node's output (ADR 0045 §8): deterministic reply + trace + aggregate usage. */
+/** The agent node's output: deterministic reply + trace + aggregate usage. */
 export interface AgentResult {
   text: string;
   steps: AgentStep[];
   usage: Usage;
   /** Set when `max_steps` was hit without a natural final answer — `text` is then a synthesized
-   *  close-out from a final tool-less model pass (ADR 0045 §7), not a completion. */
+   *  close-out from a final tool-less model pass, not a completion. */
   truncated?: boolean;
 }
 
 /**
- * The live step-stream seam (ADR 0045 §9) — best-effort and fire-and-forget: `publish` never blocks
+ * The live step-stream seam — best-effort and fire-and-forget: `publish` never blocks
  * the loop and a failure never affects the durable run (the trace `steps[]` is the source of truth).
  * Keyed by the SCOPED `workflow:env:session` channel key, never a bare session id, so a subscriber
  * and the run feeding it rendezvous only within the same tenant's `(workflow, env)`.
@@ -189,7 +189,7 @@ export const AGENT_STEP_SINK = Symbol('AGENT_STEP_SINK');
 
 /**
  * Thrown when the loop hits `max_steps` without a natural final answer AND the node has an error
- * lane (ADR 0045 §7) — the hand-off path only; it carries the partial result so nothing is lost.
+ * lane — the hand-off path only; it carries the partial result so nothing is lost.
  */
 export class AgentStepsExhausted extends Error {
   constructor(

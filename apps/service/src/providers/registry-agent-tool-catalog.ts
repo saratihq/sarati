@@ -4,7 +4,7 @@ import type { AgentToolCatalog, JsonSchema } from '../runtime/agent';
 import { loadComposioCatalog, sdkAction } from './sdk-actions.registry';
 
 /**
- * The registry-backed {@link AgentToolCatalog} (ADR 0045): derives a tool's schema + description from the action's
+ * The registry-backed {@link AgentToolCatalog}: derives a tool's schema + description from the action's
  * EXISTING prop schema, so there is no second metadata surface. Unknown action → `undefined` (the loop opens up).
  */
 @Injectable()

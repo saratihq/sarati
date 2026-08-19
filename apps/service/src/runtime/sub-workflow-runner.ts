@@ -1,6 +1,6 @@
 /**
- * The seam that runs one workflow inside another — shared by BOTH callers (ADR 0062): an AI agent
- * picking a sub-workflow tool (ADR 0045 §3) and an authored `orchestr:call_workflow` step. A port
+ * The seam that runs one workflow inside another — shared by BOTH callers: an AI agent
+ * picking a sub-workflow tool and an authored `orchestr:call_workflow` step. A port
  * rather than a direct import, because the runner sits above the interpreter and importing it would
  * be a module cycle. Unbound → the call fails with an honest error.
  */
@@ -33,9 +33,9 @@ export interface SubWorkflowContext {
   /**
    * The tree-wide invocation counter, inherited by the nested run so every agent under it shares one
    * budget. Charged by the AGENT path only, where the number of calls is the model's choice — an
-   * authored step's fan-out is the loop the author wrote (ADR 0062).
+   * authored step's fan-out is the loop the author wrote.
    */
   budget: { remaining: number };
-  /** Parent-run dry-run flag (ADR 0041) — a preview parent runs the sub-workflow dry too. */
+  /** Parent-run dry-run flag — a preview parent runs the sub-workflow dry too. */
   dryRun: boolean;
 }

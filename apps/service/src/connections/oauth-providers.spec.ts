@@ -95,7 +95,7 @@ describe('OAuthProvidersService', () => {
   });
 });
 
-// ─── BYO OAuth own-client (ADR 0042) ───
+// ─── BYO OAuth own-client ───
 
 describe('byoClientToConfig', () => {
   const byo: ByoOAuthClient = {

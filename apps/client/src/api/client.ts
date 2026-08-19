@@ -211,7 +211,7 @@ export async function authMe(): Promise<MeResponse> {
   return request("/auth/me");
 }
 
-// ─── Local email + password auth (ADR 0054) ───
+// ─── Local email + password auth ───
 // The self-host front door. Registration is never open: the instance's FIRST account, or an invite.
 
 /** Mirrors the service's minimum, so the form can refuse a short password before submitting. */
@@ -863,7 +863,7 @@ export async function commitVersion(
     branch?: string;
     commit_message?: string;
     author?: string;
-    /** Optimistic-concurrency base (ADR 0034 B5): a moved branch head rejects with 409 `branch_moved`. */
+    /** Optimistic-concurrency base: a moved branch head rejects with 409 `branch_moved`. */
     base_version_id?: string | null;
   },
 ): Promise<WorkflowVersionSummary> {
@@ -985,7 +985,7 @@ export interface ReviewApproval {
   created_at?: string | null;
 }
 
-// ─── Pre-merge "Test this branch" (ADR 0015) ───
+// ─── Pre-merge "Test this branch" ───
 // One test really replays both sides: `base` = target branch, `head` = source. RED = head errors, baseline passed.
 
 /** One side of a test replay — a real run and how it landed. */
@@ -1028,7 +1028,7 @@ export interface ReviewDetail extends ReviewSummary {
   description?: string | null;
   comments: ReviewComment[];
   approvals: ReviewApproval[];
-  /** The most recent pre-merge test (ADR 0015), or null if never tested. */
+  /** The most recent pre-merge test, or null if never tested. */
   last_test?: ReviewTestSummary | null;
 }
 
@@ -1112,7 +1112,7 @@ export async function closeReview(
   });
 }
 
-/** Pre-merge test (ADR 0015). REALLY executes both branches — confirm live effects before calling. */
+/** Pre-merge test. REALLY executes both branches — confirm live effects before calling. */
 export async function testReviewBranch(
   workflowId: string,
   reviewId: string,
@@ -1153,7 +1153,7 @@ export interface RunIrOptions {
   workflowId?: string;
   /** Client-chosen run id — lets the caller poll GET /runs/:id while the sync call is in flight. */
   runId?: string;
-  /** True pinning (ADR 0021): `{ [nodeId]: output }` a step REPLAYS instead of executing (no provider hit). */
+  /** True pinning: `{ [nodeId]: output }` a step REPLAYS instead of executing (no provider hit). */
   pins?: Record<string, unknown>;
 }
 
@@ -1460,7 +1460,7 @@ export interface NodeTypeSupport {
   reason?: string;
 }
 
-/** The app's auth SHAPE (ADR 0042), driving the BYO-credentials form; SDK rows only — Composio rows carry none. */
+/** The app's auth SHAPE, driving the BYO-credentials form; SDK rows only — Composio rows carry none. */
 export type AuthScheme =
   | { type: "apiKey"; in: "header" | "query"; name: string; prefix: string }
   | { type: "oauth2"; authUrl?: string; tokenUrl?: string; scopes: string[] }
@@ -1560,7 +1560,7 @@ export async function createTokenConnection(body: {
   });
 }
 
-/** A user-supplied ("bring your own") OAuth app — ADR 0042 A2. */
+/** A user-supplied ("bring your own") OAuth app A2. */
 export interface ByoOAuthClient {
   client_id: string;
   client_secret: string;
@@ -1688,7 +1688,7 @@ export async function listTriggerCatalog(): Promise<{
   return request("/triggers/catalog");
 }
 
-/** Runtime health per live canvas-trigger activation (ADR 0018) — poll cursor + last error. */
+/** Runtime health per live canvas-trigger activation — poll cursor + last error. */
 export interface TriggerActivationHealth {
   /** The promoted env the activation runs under — canonical name (e.g. "production"). */
   environment: string;
@@ -1747,7 +1747,7 @@ export async function clearPlatformKey(name: PlatformKeyName): Promise<{ secret_
   return request(`/platform-keys/${name}`, { method: "DELETE" });
 }
 
-// ─── Webhook signing secret (native HMAC verification, ADR 0030) ───
+// ─── Webhook signing secret (native HMAC verification) ───
 // Env-scoped and stored OUT of the version doc, so it never enters a save/diff/review. Write-only: no read-back.
 
 /** Set the env-scoped signing secret for a webhook trigger node. */
@@ -1789,7 +1789,7 @@ export async function clearWebhookSecret(
   );
 }
 
-// ─── Chat trigger intake (orchestr:chat, ADR 0045) ───
+// ─── Chat trigger intake (orchestr:chat) ───
 // Synchronous front door: POST a message, the run executes, the terminal node's output returns as `reply`.
 // The server mints a session id when the caller omits one; thread it across turns.
 
@@ -1815,7 +1815,7 @@ export async function postChatMessage(
   );
 }
 
-// ─── Live agent step stream (ADR 0045) ───
+// ─── Live agent step stream ───
 // SSE frames keyed by session id: subscribe FIRST, then POST the chat message with the SAME session id.
 
 /** One agent step as it happens: a model turn, a tool call, or the final answer. */

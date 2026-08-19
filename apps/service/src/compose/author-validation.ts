@@ -15,7 +15,7 @@ type CategorizableNode = Pick<DocNode, 'node_type'> & { metadata?: Record<string
 
 /**
  * A node's category. "Is it a trigger?" is NOT re-answered here — `isTriggerNode` is the ONE
- * definition site (ADR 0018), so the whole family (`orchestr:tool_trigger`, any `*trigger` type, a
+ * definition site, so the whole family (`orchestr:tool_trigger`, any `*trigger` type, a
  * `metadata.trigger` app trigger) categorises exactly as the compiler peels it. Every other match
  * is on the EXACT `orchestr:*` type, never a substring: an app action merely CONTAINING "if"/"set"
  * (slack.set_topic, github.merge_pull_request) is a plain action.
@@ -269,7 +269,7 @@ export function connectionRequirements(
     }));
 }
 
-/** The subset that will 422 on its first real fire — a dry run deliberately does not catch these (ADR 0041). */
+/** The subset that will 422 on its first real fire — a dry run deliberately does not catch these. */
 export function unconfiguredConnections(
   ir: Record<string, unknown>,
   facts: CatalogFacts,
@@ -278,7 +278,7 @@ export function unconfiguredConnections(
 }
 
 /**
- * The ONE author-time gate (ADR 0052) — every path that PERSISTS a document runs it: `commit`
+ * The ONE author-time gate — every path that PERSISTS a document runs it: `commit`
  * (`versions-write.service.ts`), the two create paths (`workflow-lifecycle.service.ts`), and the
  * read-only `orchestr_validate` tool, so a hand-written document faces exactly what an ops-built
  * one does. `apply_ops` deliberately does NOT run it — it mutates a DRAFT mid-composition, where a

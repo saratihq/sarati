@@ -165,7 +165,7 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
         .send({ workflow_json: irDoc('v1') }),
     ).expect(201);
     wfId = deployed.body.workflow_id as string;
-    // Canvas triggers (ADR 0018): the fire URL is per-`(workflow, env)` and version-independent.
+    // Canvas triggers: the fire URL is per-`(workflow, env)` and version-independent.
     prodHookPath = `/api/hooks/${wfId}/production`;
     stagingHookPath = `/api/hooks/${wfId}/staging`;
 
@@ -211,7 +211,7 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
       http()
         .post(`/api/workflows/${wfId}/commit`)
         .set('X-Org-Id', orgId)
-        // An API key must name the head it edited from (ADR 0052) — sessions are unaffected.
+        // An API key must name the head it edited from — sessions are unaffected.
         .send({ workflow_ir: irDoc('v2'), commit_message: 'v2', base_version_id: v1Id }),
     ).expect(201);
     const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', orgId)).expect(
@@ -326,7 +326,7 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
   });
 
   it('gates (B3): a member 403s EVERY org env pointer move — staging AND prod (promote + publish); owner passes; bad env/version rejected', async () => {
-    // ADR 0006 mirror — a plain member cannot point an org env.
+    // Mirror — a plain member cannot point an org env.
     const denied = await asB(
       http()
         .post(`/api/workflows/${wfId}/promote`)

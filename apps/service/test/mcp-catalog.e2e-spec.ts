@@ -40,7 +40,7 @@ interface DescribeResult {
   schema_truncated?: { omitted_properties: string[]; omitted_count: number; note: string };
 }
 
-/** The catalog half of the MCP surface (ADR 0052), driven by the real MCP client. */
+/** The catalog half of the MCP surface, driven by the real MCP client. */
 describe('Platform MCP catalog tools (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;
@@ -89,7 +89,7 @@ describe('Platform MCP catalog tools (e2e, real client, isolated DB)', () => {
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
-    // Composio trigger projection OFF (ADR 0046): the catalog stays deterministic and makes no live call.
+    // Composio trigger projection OFF: the catalog stays deterministic and makes no live call.
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

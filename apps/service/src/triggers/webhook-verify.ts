@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
- * Native inbound-webhook signature verification (ADR 0030). The non-secret config lives on the
+ * Native inbound-webhook signature verification. The non-secret config lives on the
  * trigger params (diffable, in the version doc); the signing SECRET is stored out-of-doc, env-scoped.
  */
 

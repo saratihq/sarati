@@ -212,7 +212,7 @@ describe('EnvPointersService.promote', () => {
     await expect(svc.promote(WF, 'staging', V2, USER)).resolves.toMatchObject({ status: 'promoted' });
   });
 
-  it('ADR 0006 mirror + B3: a non-personal-org env pointer move needs owner/admin — for EVERY env incl. prod', async () => {
+  it(' mirror + B3: a non-personal-org env pointer move needs owner/admin — for EVERY env incl. prod', async () => {
     const orgWf = wf({ orgId: 'org-1' });
     const org = { id: 'org-1', isPersonal: false };
     const member = build({ wf: orgWf, versions, org }, { role: 'member' });

@@ -131,7 +131,7 @@ export class SdkActionsProvider {
   }
 }
 
-/** A step that stopped at a state-changing request: a real outcome (ADR 0041), never a failure. */
+/** A step that stopped at a state-changing request: a real outcome, never a failure. */
 function skippedResult(dryRun: DryRunHttpClient): RunActionResult {
   return {
     output: {

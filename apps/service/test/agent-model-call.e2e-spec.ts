@@ -16,10 +16,10 @@ const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 /**
- * ADR 0045 §5 — the agent model seam on the REAL {@link AgentModelCallProvider}: only the
+ * The agent model seam on the REAL {@link AgentModelCallProvider}: only the
  * provider HTTP hop is stubbed, so resolve → decrypt → auth-handle → SDK-call is real.
  */
-describe('AI agent model call — real binding + credential resolution (ADR 0045)', () => {
+describe('AI agent model call — real binding + credential resolution', () => {
   let app: INestApplication;
   let db: Client;
   /** Captures each stubbed provider request so the test can assert URL + injected credential. */

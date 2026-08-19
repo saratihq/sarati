@@ -67,7 +67,7 @@ describe('control-node schema parity — palette (node-types controller) vs comp
     expect(schemaOf(composer ?? {})).toEqual(schemaOf(palette ?? {}));
   });
 
-  it('the agent carries an OPTIONAL connectionId on both surfaces (ADR 0014 env-slot fallback)', async () => {
+  it('the agent carries an OPTIONAL connectionId on both surfaces (env-slot fallback)', async () => {
     const agent = await catalog.byType(SCOPE, 'orchestr:agent');
     const params = agent?.parameters as Record<string, { type: string; required: boolean }>;
     expect(params.connectionId).toBeDefined();

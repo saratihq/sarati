@@ -14,7 +14,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 type ToolResult = { structuredContent?: Record<string, unknown>; isError?: boolean };
 
-/** The workflow read tools, driven by the real MCP client over the real transport (ADR 0052). */
+/** The workflow read tools, driven by the real MCP client over the real transport. */
 describe('Platform MCP workflow reads (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;

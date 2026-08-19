@@ -87,13 +87,13 @@ import { PlatformModule } from './platform/platform.module';
     TriggersModule,
     // Managed-integration connections (credentials for actions).
     ConnectionsModule,
-    // ADR 0014: named environments (slots over the per-user connection pool).
+    // Named environments (slots over the per-user connection pool).
     EnvironmentsModule,
     // AI composer: draft apply-ops + catalog search for apps/agent.
     ComposeModule,
-    // ADR 0045 §3 (feature A): the sub-workflow-as-tool runner (binds the interpreter seam).
+    // (feature A): the sub-workflow-as-tool runner (binds the interpreter seam).
     SubWorkflowModule,
-    // ADR 0052: the Platform MCP surface (`/mcp`).
+    // The Platform MCP surface (`/mcp`).
     McpModule,
     // The two optional platform API keys, set from Settings rather than the environment.
     PlatformModule,

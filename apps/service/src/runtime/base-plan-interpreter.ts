@@ -39,22 +39,22 @@ export interface RunOptions {
   recorder?: RunRecorder;
   /** Seed values for the run scope; triggers put the firing event here as `trigger`. */
   initialScope?: Record<string, unknown>;
-  /** Execution-time output overrides keyed by node id (ADR 0021) — a pinned node replays instead
+  /** Execution-time output overrides keyed by node id — a pinned node replays instead
    *  of executing. Ephemeral run input: never enters the doc, IR, diff, merge, or `irContentKey`. */
   pins?: Record<string, unknown>;
   /** Display-name snapshot of the run's env (with `orgId`, the legacy pre-006 resolution key). */
   environment?: string | null;
-  /** Env-scoped run → steps resolve their account through the env's slots (ADR 0014); unset = personal pool. */
+  /** Env-scoped run → steps resolve their account through the env's slots; unset = personal pool. */
   environmentId?: string | null;
   /** Org scope for legacy pre-006 env resolution. */
   orgId?: string | null;
   /** Dry run (preview): no state-changing external call fires; delays/waits skip. Default false. */
   dryRun?: boolean;
-  /** Scoped `workflow:env:session` channel agent steps stream to (ADR 0045 §9); absent → publishes nothing. */
+  /** Scoped `workflow:env:session` channel agent steps stream to; absent → publishes nothing. */
   chatChannelKey?: string | null;
-  /** Sub-workflow-as-tool call depth (ADR 0045 §3); bounded by {@link MAX_SUB_WORKFLOW_DEPTH}. Absent → 0. */
+  /** Sub-workflow-as-tool call depth; bounded by {@link MAX_SUB_WORKFLOW_DEPTH}. Absent → 0. */
   subWorkflowDepth?: number;
-  /** The ONE tree-wide sub-workflow invocation budget (ADR 0045 §3); absent at a top level → a fresh one. */
+  /** The ONE tree-wide sub-workflow invocation budget; absent at a top level → a fresh one. */
   subWorkflowBudget?: { remaining: number };
 }
 
@@ -73,23 +73,23 @@ export interface RunContext {
   stepWarnings: Map<string, string[]>;
   /** Set only when recording is active (runId + recorder both provided). */
   record: { runId: string; recorder: RunRecorder } | null;
-  /** Execution-time node overrides (ADR 0021); null when the run carries none. */
+  /** Execution-time node overrides; null when the run carries none. */
   pins: Map<string, unknown> | null;
   /** Dry run (preview): no state-changing external call fires; delays/waits skip. */
   dryRun: boolean;
-  /** The scoped `workflow:env:session` channel agent steps stream to (ADR 0045 §9); null on non-chat runs. */
+  /** The scoped `workflow:env:session` channel agent steps stream to; null on non-chat runs. */
   chatChannelKey: string | null;
-  /** Sub-workflow call depth (ADR 0045 §3) — 0 at the top level, +1 per nested entry. */
+  /** Sub-workflow call depth — 0 at the top level, +1 per nested entry. */
   subWorkflowDepth: number;
-  /** ONE mutable invocation counter shared by reference across the whole run tree (ADR 0045 §3) —
+  /** ONE mutable invocation counter shared by reference across the whole run tree —
    *  bounds total sub-workflow WORK, which the per-branch depth cap cannot. */
   subWorkflowBudget: { remaining: number };
 }
 
-/** Run-time recursion bound on sub-workflow-as-tool nesting depth (ADR 0045 §3); exceeding it is a tool error. */
+/** Run-time recursion bound on sub-workflow-as-tool nesting depth; exceeding it is a tool error. */
 export const MAX_SUB_WORKFLOW_DEPTH = 8;
 
-/** Tree-wide cap on total sub-workflow invocations per root run (ADR 0045 §3) — the breadth guard depth can't give. */
+/** Tree-wide cap on total sub-workflow invocations per root run — the breadth guard depth can't give. */
 export const MAX_SUB_WORKFLOW_INVOCATIONS = 64;
 
 /** The action-payload subset the executor needs — shared by `ActionNode` and `DagActionNode`, minus the error lane. */
@@ -175,7 +175,7 @@ export interface ExecutableWhile {
   maxIterations: number;
 }
 
-/** Control sentinel (ADR 0020): thrown after a node's error lane runs to unwind the plan walk —
+/** Control sentinel: thrown after a node's error lane runs to unwind the plan walk —
  *  `runProgram()` catches it and finishes the run `completed`. Not a real error. */
 export class ErrorLaneHalt extends Error {
   constructor() {
@@ -185,25 +185,25 @@ export class ErrorLaneHalt extends Error {
 }
 
 /**
- * The per-node execution core (ADR 0023) beneath the gating-scheduler `DagInterpreter`: run
- * lifecycle, the durable provider seam, pin replay (ADR 0021), and retry/continue-on-fail/error-lane
- * (ADR 0020). Subclasses inject ONLY scheduling — per-node semantics live here alone (ADR 0016).
+ * The per-node execution core beneath the gating-scheduler `DagInterpreter`: run
+ * lifecycle, the durable provider seam, pin replay, and retry/continue-on-fail/error-lane
+ * . Subclasses inject ONLY scheduling — per-node semantics live here alone.
  */
 export abstract class BasePlanInterpreter {
   protected readonly logger = new Logger(this.constructor.name);
   protected readonly provider: ManagedIntegrationProvider;
-  /** Sandbox for `orchestr:code` leaves (ADR 0027); default-constructed when unwired. */
+  /** Sandbox for `orchestr:code` leaves; default-constructed when unwired. */
   protected readonly codeRunner: CodeRunner;
-  /** Tool-aware model call for `orchestr:agent` (ADR 0045 §5); unbound → an agent step fails loudly. */
+  /** Tool-aware model call for `orchestr:agent`; unbound → an agent step fails loudly. */
   protected readonly agentModel?: AgentModelPort;
-  /** Describes an action tool's JSON-schema/description from its prop schema (ADR 0045 §4); optional. */
+  /** Describes an action tool's JSON-schema/description from its prop schema; optional. */
   protected readonly agentToolCatalog?: AgentToolCatalog;
-  /** Live step-stream sink for `orchestr:agent` (ADR 0045 §9); unbound → the loop streams nothing. */
+  /** Live step-stream sink for `orchestr:agent`; unbound → the loop streams nothing. */
   protected readonly agentStepSink?: AgentStepSink;
-  /** Sub-workflow runner, shared by the agent tool and the authored step (ADR 0062); setter-injected
+  /** Sub-workflow runner, shared by the agent tool and the authored step; setter-injected
    *  because a constructor dep would be a module cycle. */
   protected subWorkflowRunner?: SubWorkflowRunner;
-  /** Declared contract for a sub-workflow tool (ADR 0053 §1); setter-injected for the same cycle. */
+  /** Declared contract for a sub-workflow tool; setter-injected for the same cycle. */
   protected agentWorkflowCatalog?: AgentWorkflowCatalog;
 
   constructor(
@@ -221,12 +221,12 @@ export abstract class BasePlanInterpreter {
     this.agentStepSink = agentStepSink;
   }
 
-  /** Bind the sub-workflow runner (ADR 0045 §3, ADR 0062) — called once by `RunsService`. */
+  /** Bind the sub-workflow runner — called once by `RunsService`. */
   setSubWorkflowRunner(runner: SubWorkflowRunner): void {
     this.subWorkflowRunner = runner;
   }
 
-  /** Bind the sub-workflow tool contract source (ADR 0053 §1) — called once by `RunsService`. */
+  /** Bind the sub-workflow tool contract source — called once by `RunsService`. */
   setAgentWorkflowCatalog(catalog: AgentWorkflowCatalog): void {
     this.agentWorkflowCatalog = catalog;
   }
@@ -262,7 +262,7 @@ export abstract class BasePlanInterpreter {
       try {
         await schedule(plan.nodes, scope, '', ctx);
       } catch (err) {
-        // An error lane ran to completion (ADR 0020) — the run is DONE and SUCCESSFUL.
+        // An error lane ran to completion — the run is DONE and SUCCESSFUL.
         if (err instanceof ErrorLaneHalt) {
           await ctx.record?.recorder.runFinished(ctx.record.runId, scope, null);
           return { planId: plan.id, outputs: scope, trace: ctx.trace };
@@ -305,7 +305,7 @@ export abstract class BasePlanInterpreter {
     );
   }
 
-  /** Execute ONE code leaf (ADR 0027) — run the snippet in the sandbox with the run scope as input. */
+  /** Execute ONE code leaf — run the snippet in the sandbox with the run scope as input. */
   protected executeCode(
     node: ExecutableCode,
     scope: Record<string, unknown>,
@@ -318,7 +318,7 @@ export abstract class BasePlanInterpreter {
     );
   }
 
-  /** Execute ONE agent leaf (ADR 0045) — run the durable tool-calling loop, writing `{ text, steps, usage }` to scope. */
+  /** Execute ONE agent leaf — run the durable tool-calling loop, writing `{ text, steps, usage }` to scope. */
   protected executeAgent(
     node: ExecutableAgent,
     scope: Record<string, unknown>,
@@ -334,7 +334,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Execute ONE call-workflow leaf (ADR 0062) — run the child nested and write its terminal output
+   * Execute ONE call-workflow leaf — run the child nested and write its terminal output
    * to scope, so `{{<node id>}}` reads it exactly like any other step's result.
    */
   protected executeCallWorkflow(
@@ -352,7 +352,7 @@ export abstract class BasePlanInterpreter {
   /**
    * Run ONE sub-workflow as the parent's single durable checkpoint. No invocation budget is passed:
    * an authored step's fan-out is bounded by the loop the author wrote, unlike an agent's, which is
-   * the model's choice (ADR 0062). Depth still applies, and is what bounds an indirect cycle.
+   * the model's choice. Depth still applies, and is what bounds an indirect cycle.
    */
   private runSubWorkflow(
     node: ExecutableCallWorkflow,
@@ -383,7 +383,7 @@ export abstract class BasePlanInterpreter {
 
   /**
    * The shared leaf execution core for every work-bearing leaf: duplicate-id guard, pin replay
-   * (ADR 0021), recording, and the ADR 0020 failure policy (error lane > `onError` > halt).
+   * , recording, and the failure policy (error lane > `onError` > halt).
    */
   private async executeLeaf(
     node: LeafPolicy,
@@ -398,7 +398,7 @@ export abstract class BasePlanInterpreter {
       throw new Error(`Duplicate node id "${node.id}" in plan ${ctx.planId}`);
     }
     const stepKey = `${path}${node.id}`;
-    // ADR 0021: a pinned node REPLAYS its captured output — the work never runs (no side
+    // A pinned node REPLAYS its captured output — the work never runs (no side
     // effects, no API hit), but the step is still recorded so downstream refs resolve.
     const isPinned = ctx.pins?.has(node.id) ?? false;
     try {
@@ -416,14 +416,14 @@ export abstract class BasePlanInterpreter {
     } catch (err) {
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
-      // read `{{node.text}}` (ADR 0045 §7: the partial answer is never discarded).
+      // read `{{node.text}}` (the partial answer is never discarded).
       const partial = err instanceof AgentStepsExhausted ? err.result : undefined;
       const captured = {
         ...(partial ?? {}),
         error: { message: errorMessage(err) },
         __errored: true,
       };
-      // ADR 0020: an error lane WINS over `onError` — it replaces the node's main
+      // An error lane WINS over `onError` — it replaces the node's main
       // successors and then ends the run. Never both lanes.
       if (runErrorLane) {
         scope[node.id] = captured;
@@ -432,7 +432,7 @@ export abstract class BasePlanInterpreter {
         await runErrorLane();
         throw new ErrorLaneHalt();
       }
-      // Continue-on-fail (ADR 0020): tolerate the throw; any other node halts the run.
+      // Continue-on-fail: tolerate the throw; any other node halts the run.
       if (node.onError !== 'continue') throw err;
       scope[node.id] = captured;
       ctx.trace.push({ nodeId: stepKey, output: captured });
@@ -535,7 +535,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * DO-WHILE iteration (ADR 0029): round 1 always runs, then `condition` is tested after each round
+   * DO-WHILE iteration: round 1 always runs, then `condition` is tested after each round
    * against that round's child scope; `maxIterations` is a hard clean stop (the infinite-loop guarantee).
    * Each round's scope is seeded with `{{<loop id>}}` (prior rounds), `{{loopRound}}` and `{{loopPrev}}`.
    */
@@ -619,7 +619,7 @@ export abstract class BasePlanInterpreter {
     // the resolved props or fails the step.
     const unresolved = new Set<string>();
     const props = resolveReferences(node.props, scope, (ref) => unresolved.add(ref));
-    // The retry loop lives INSIDE the single durable step body (ADR 0020): DBOS
+    // The retry loop lives INSIDE the single durable step body: DBOS
     // keeps one checkpoint per node and never memoises a mid-retry throw.
     const result = await ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
       this.runWithRetry(node.retry, stepKey, ctx, () =>
@@ -652,7 +652,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Execute one (non-pinned) code leaf (ADR 0027): hand the sandbox the run scope as `steps`
+   * Execute one (non-pinned) code leaf: hand the sandbox the run scope as `steps`
    * (+ a `trigger` alias). The runner JSON-copies the scope, so the snippet cannot mutate it.
    */
   private runCode(
@@ -668,7 +668,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * The durable tool-calling agent loop (ADR 0045 §6) — model call, then each requested tool, each
+   * The durable tool-calling agent loop — model call, then each requested tool, each
    * its own durable step keyed distinctly per round so a crash-resume never re-fires a side effect.
    * A throwing tool is fed back as an error (§7); only exhausting `max_steps` throws
    * {@link AgentStepsExhausted}, which the leaf machinery routes to the error lane.
@@ -762,8 +762,8 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * The auth context each model call receives (ADR 0045 §5): the node's connection + tenant + the
-   * run's env scope (ADR 0014). The model port, not the interpreter, owns the env-slot-wins decision.
+   * The auth context each model call receives: the node's connection + tenant + the
+   * run's env scope. The model port, not the interpreter, owns the env-slot-wins decision.
    */
   private agentModelAuth(node: ExecutableAgent, ctx: RunContext): AgentModelAuth {
     return {
@@ -776,7 +776,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Record ONE agent step and publish it to the live SSE side-channel (ADR 0045 §9). `step_index` is
+   * Record ONE agent step and publish it to the live SSE side-channel. `step_index` is
    * per-invocation, NOT the stream dedup key — the bus stamps its own session-unique `seq`.
    */
   private emitAgentStep(steps: AgentStep[], ctx: RunContext, step: Omit<AgentStep, 'step_index'>): void {
@@ -786,7 +786,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Publish one recorded step to the run's scoped chat channel (ADR 0045 §9) — best-effort live UX.
+   * Publish one recorded step to the run's scoped chat channel — best-effort live UX.
    * A publish failure is swallowed: the durable run's recorded `steps[]` is the source of truth.
    */
   private publishAgentStep(ctx: RunContext, step: AgentStep): void {
@@ -801,7 +801,7 @@ export abstract class BasePlanInterpreter {
 
   /**
    * Resolve + invoke ONE tool the model requested, as a durable step: an action tool through the
-   * provider seam, a sub-workflow tool through the injected runner (ADR 0045 §3). Throws on an
+   * provider seam, a sub-workflow tool through the injected runner. Throws on an
    * unknown tool name or unbound runner — the loop catches it and feeds it back.
    */
   private invokeAgentTool(
@@ -818,7 +818,7 @@ export abstract class BasePlanInterpreter {
     if (tool.kind === 'workflow') {
       const runner = this.subWorkflowRunner;
       if (!runner) throw new Error('sub-workflow tools are not available in this runtime');
-      // BREADTH guard (ADR 0062): charged HERE because this is where unbounded fan-out can come
+      // BREADTH guard: charged HERE because this is where unbounded fan-out can come
       // from — how often a MODEL calls is its own choice. One counter for the whole run tree;
       // check-then-decrement with NO await between, so concurrent tool calls can't both slip past.
       if (ctx.subWorkflowBudget.remaining <= 0) {
@@ -829,7 +829,7 @@ export abstract class BasePlanInterpreter {
       ctx.subWorkflowBudget.remaining -= 1;
       // The whole sub-run is the parent's single checkpoint and runs AS the caller (same tenant +
       // env scope). `callKey` + `parentRunId` seed a deterministic sub-run id so a crash re-run
-      // re-issues the SAME step idempotency keys — the SDK rail dedupes on them (ADR 0040), but the
+      // re-issues the SAME step idempotency keys — the SDK rail dedupes on them, but the
       // Composio rail carries none, so a non-idempotent Composio sub-step is at-least-once.
       return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
         runner.run(
@@ -875,7 +875,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Build the tool schemas the model call receives (ADR 0045 §4): an action tool's is derived from
+   * Build the tool schemas the model call receives: an action tool's is derived from
    * its prop schema via the optional catalog, a sub-workflow tool's is declared. Author text wins.
    */
   private async buildToolSchemas(tools: DagAgentTool[], ctx: RunContext): Promise<ToolSchema[]> {
@@ -883,7 +883,7 @@ export abstract class BasePlanInterpreter {
       tools.map(async (tool) => {
         if (tool.kind === 'workflow') {
           // What the sub-workflow DECLARES about being called; never inferred from its expressions,
-          // which would publish a contract nobody wrote down (ADR 0053 §1).
+          // which would publish a contract nobody wrote down.
           const declared = await this.agentWorkflowCatalog?.describeWorkflow(
             tool.workflowId,
             ctx.environmentId,
@@ -908,7 +908,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /**
-   * Run `attempt` under the ADR 0020 retry policy: up to `maxAttempts` tries with in-process
+   * Run `attempt` under the retry policy: up to `maxAttempts` tries with in-process
    * back-off. A crash re-runs the whole step body from attempt 1 (back-off is not crash-durable).
    */
   private async runWithRetry<T>(

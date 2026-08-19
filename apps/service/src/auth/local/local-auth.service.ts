@@ -23,7 +23,7 @@ export interface SessionGrant {
   user: { id: string; email: string; name: string };
 }
 
-/** Email + password for self-host (ADR 0054): bootstrap-or-invite registration, then signed sessions. */
+/** Email + password for self-host: bootstrap-or-invite registration, then signed sessions. */
 @Injectable()
 export class LocalAuthService {
   private readonly logger = new Logger(LocalAuthService.name);

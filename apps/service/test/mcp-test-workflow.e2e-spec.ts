@@ -18,7 +18,7 @@ interface ToolCall {
   text: string;
 }
 
-/** ADR 0052 tool 15: dry by default, and firing for real needs scope AND consent for THIS document. */
+/** Tool 15: dry by default, and firing for real needs scope AND consent for THIS document. */
 describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;
@@ -218,7 +218,7 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
   });
 
   it('hands back a handle to poll when the run outlives the wait', async () => {
-    // The stub server is what makes the run slow — a GET is not stubbed by a dry run (ADR 0041).
+    // The stub server is what makes the run slow — a GET is not stubbed by a dry run.
     const slow = {
       ...doc('slow'),
       nodes: [

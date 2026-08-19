@@ -47,7 +47,7 @@ const codeWf = (code: string): Record<string, unknown> => ({
   metadata: { engine: 'orchestr' },
 });
 
-describe('review pre-merge test — "Test this branch" (ADR 0015, e2e, isolated DB, mock auth)', () => {
+describe('review pre-merge test — "Test this branch" (e2e, isolated DB, mock auth)', () => {
   let app: INestApplication;
   let db: Client;
   let wfId = '';

@@ -352,7 +352,7 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
       .expect(400);
   });
 
-  // ─── BYO OAuth own-client (ADR 0042 A2) — `byoapp` is NOT env-configured ───
+  // ─── BYO OAuth own-client (A2) — `byoapp` is NOT env-configured ───
 
   const BYO_CLIENT = {
     client_id: 'byo-client',

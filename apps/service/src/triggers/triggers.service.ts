@@ -57,7 +57,7 @@ export interface InboundWebhook {
   headers: Record<string, string>;
 }
 
-/** One inbound chat message as the synchronous chat intake sees it (ADR 0045 addendum). */
+/** One inbound chat message as the synchronous chat intake sees it. */
 export interface InboundChat {
   /** The user's message — the run reads it as `{{trigger.chatInput}}`. */
   chatInput: string;
@@ -67,7 +67,7 @@ export interface InboundChat {
   action?: string;
 }
 
-/** The synchronous chat reply (ADR 0045 addendum) the intake returns in the same HTTP response. */
+/** The synchronous chat reply the intake returns in the same HTTP response. */
 export interface ChatReply {
   runId: string;
   sessionId: string;
@@ -80,11 +80,11 @@ export interface ChatReply {
 /** How long the chat intake awaits its run before returning 504 — the run itself keeps going. */
 const CHAT_RUN_TIMEOUT_MS = 30_000;
 
-/** Canvas-trigger ACTIVATION kinds the poll cycle drives (ADR 0018). */
+/** Canvas-trigger ACTIVATION kinds the poll cycle drives. */
 const ORCHESTR_SCHEDULE_KIND = 'schedule';
 const POLLING_KIND = 'polling';
 
-/** Composio orphan reaper (ADR 0046 backstop): run at the sweep cadence, not every poll tick. */
+/** Composio orphan reaper (backstop): run at the sweep cadence, not every poll tick. */
 const COMPOSIO_REAP_INTERVAL_MS = 15 * 60_000;
 /** How long a claimed `webhook-id` is remembered — must outlast any provider retry window. */
 const COMPOSIO_DELIVERY_TTL_DAYS = 7;
@@ -93,7 +93,7 @@ const COMPOSIO_DELIVERY_PRUNE_INTERVAL_MS = 60 * 60_000;
 /** Cap the reaper's best-effort deletes so a slow Composio call can't stall the poll cycle. */
 const COMPOSIO_REAP_CONCURRENCY = 5;
 
-/** One canvas-trigger activation's runtime health (ADR 0018), read off its `runtime_trigger_activations` row. */
+/** One canvas-trigger activation's runtime health, read off its `runtime_trigger_activations` row. */
 export interface ActivationHealth {
   /** The promoted env this activation runs under — canonical name (e.g. `production`). */
   environment: string;
@@ -111,7 +111,7 @@ export interface ActivationHealth {
 }
 
 /**
- * The canvas-trigger FIRE + READ surface (ADR 0018): webhook/chat intake, activation
+ * The canvas-trigger FIRE + READ surface: webhook/chat intake, activation
  * poll cycle, trigger catalog, activation health. Reconciliation lives in the reconciler.
  */
 @Injectable()
@@ -149,7 +149,7 @@ export class TriggersService {
   }
 
   /**
-   * Per-`(workflow, env)` webhook intake (ADR 0018): resolve the env pointer → PINNED
+   * Per-`(workflow, env)` webhook intake: resolve the env pointer → PINNED
    * version → its webhook node, and fire ONLY that version. Inert (404) when unpromoted.
    */
   async fireWorkflowEnvWebhook(
@@ -174,7 +174,7 @@ export class TriggersService {
       return this.fireRegisteredWebhookDelivery(wf, resolved, ir, node, inbound);
     }
 
-    // HMAC verification (ADR 0030): enforced ONLY when both a verification config and a
+    // HMAC verification: enforced ONLY when both a verification config and a
     // stored env-scoped secret exist — an unconfigured webhook keeps the unguessable-path model.
     const verification = (node.parameters as { verification?: WebhookVerification } | undefined)
       ?.verification;
@@ -191,7 +191,7 @@ export class TriggersService {
   }
 
   /**
-   * The SYNCHRONOUS chat intake (ADR 0045 addendum): resolves the env pointer → PINNED
+   * The SYNCHRONOUS chat intake: resolves the env pointer → PINNED
    * version → its `orchestr:chat` node, AWAITS the run, and returns the terminal-node
    * output as the reply. Auth is `none` — the unguessable URL is the capability.
    */
@@ -213,7 +213,7 @@ export class TriggersService {
 
     const sessionId =
       typeof inbound.sessionId === 'string' && inbound.sessionId.trim() ? inbound.sessionId : newId();
-    // The SCOPED live-stream channel (ADR 0045 §9) — must be built via the shared
+    // The SCOPED live-stream channel — must be built via the shared
     // `channelKey()` from the raw `(workflowId, environmentName)` so publish and subscribe agree.
     const chatChannelKey = channelKey(workflowId, environmentName, sessionId);
     const runId = newId();
@@ -309,7 +309,7 @@ export class TriggersService {
   }
 
   /**
-   * The GENERIC Composio trigger intake (ADR 0046) — one endpoint for every projected
+   * The GENERIC Composio trigger intake — one endpoint for every projected
    * trigger type: verify the signature, map `metadata.trigger_id` → the live activation(s)
    * subscribed to that instance, and fire each one (Composio shares a `ti_…` across holders).
    */
@@ -339,7 +339,7 @@ export class TriggersService {
       throw new DomainError('Invalid webhook signature', 401);
     }
 
-    // Inbound idempotency (ADR 0050): delivery is at-least-once, so claim the id before firing.
+    // Inbound idempotency: delivery is at-least-once, so claim the id before firing.
     // Deliberately AFTER verification — an unverified delivery must not burn a genuine one's id.
     if (!(await this.claimComposioDelivery(inbound.headers['webhook-id'], triggerId))) {
       return { fired: 0, duplicate: true };
@@ -502,7 +502,7 @@ export class TriggersService {
     } catch (err) {
       this.logger.error(`activation poll cycle failed: ${errorMessage(err)}`);
     }
-    // Orphan reaper (ADR 0046) — throttled to the sweep cadence, never throws.
+    // Orphan reaper — throttled to the sweep cadence, never throws.
     if (Date.now() - this.lastComposioReapAt >= COMPOSIO_REAP_INTERVAL_MS) {
       this.lastComposioReapAt = Date.now();
       await this.reapOrphanedComposioSubscriptions().catch((err) =>
@@ -512,7 +512,7 @@ export class TriggersService {
   }
 
   /**
-   * Delete every live Composio trigger instance no live activation references (ADR 0046).
+   * Delete every live Composio trigger instance no live activation references.
    * TWO-STRIKE grace is required: only reap an instance seen orphaned on the previous pass
    * too, so an in-flight subscribe (instance created, row not yet committed) is never killed.
    */
@@ -636,7 +636,7 @@ export class TriggersService {
     });
   }
 
-  /** A schedule activation's due tick — over the activation store (the ADR 0018 canvas schedule). */
+  /** A schedule activation's due tick — over the activation store (the canvas schedule). */
   private async scheduleActivationEvents(
     row: RuntimeTriggerActivationEntity,
     store: DbActivationStore,
@@ -699,7 +699,7 @@ export class TriggersService {
     );
   }
 
-  /** The single `orchestr:chat` trigger node of a version (ADR 0045 addendum); null if none. */
+  /** The single `orchestr:chat` trigger node of a version; null if none. */
   private findChatNode(ir: WorkflowIR): IRNode | null {
     return ir.nodes.find((n) => n.node_type === INCOMING_CHAT_PUBLIC) ?? null;
   }
@@ -736,7 +736,7 @@ export class TriggersService {
   }
 
   /**
-   * The runtime health of a workflow's canvas-trigger activations (ADR 0018) — the read
+   * The runtime health of a workflow's canvas-trigger activations — the read
    * counterpart of {@link pollActivation}'s writes. Authorized through the single policy point.
    */
   async activationHealth(principal: Principal, workflowId: string): Promise<ActivationHealth[]> {

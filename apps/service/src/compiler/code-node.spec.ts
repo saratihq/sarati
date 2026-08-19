@@ -5,8 +5,8 @@ import { compileWorkflowIrDag } from './compile-ir-dag';
 import { runPlanToDag } from './run-plan-to-dag';
 
 /**
- * Code node (ADR 0027) compilation: both producers must lower to the same `DagCodeNode` —
- * TS transpiled at compile time, guards attached, ADR 0020 policy carried, error edges peeled.
+ * Code node compilation: both producers must lower to the same `DagCodeNode` —
+ * TS transpiled at compile time, guards attached, policy carried, error edges peeled.
  */
 
 function codeIrNode(id: string, parameters: Record<string, unknown>): IRNode {
@@ -42,7 +42,7 @@ const ir = (nodes: IRNode[], edges: IREdge[] = []): WorkflowIR => ({
 const codeNodeOf = (plan: { nodes: { id: string; kind: string }[] }, id: string): DagCodeNode =>
   plan.nodes.find((n) => n.id === id && n.kind === 'code') as DagCodeNode;
 
-describe('code node compilation (ADR 0027)', () => {
+describe('code node compilation', () => {
   describe('IR path (compileWorkflowIrDag)', () => {
     it('lowers orchestr:code (js) to a DagCodeNode carrying the raw snippet + guards', () => {
       const plan = compileWorkflowIrDag(
@@ -68,7 +68,7 @@ describe('code node compilation (ADR 0027)', () => {
       expect(node.code).toContain('return n + 1');
     });
 
-    it('carries the ADR 0020 onError/retry policy, clamped like an action', () => {
+    it('carries the onError/retry policy, clamped like an action', () => {
       const plan = compileWorkflowIrDag(
         ir([
           codeIrNode('c', {
@@ -83,7 +83,7 @@ describe('code node compilation (ADR 0027)', () => {
       expect(node.retry).toEqual({ maxAttempts: 10, backoffMs: 10 }); // maxAttempts clamped to 10
     });
 
-    it('peels an error edge from a code node into its onErrorBranch (ADR 0020)', () => {
+    it('peels an error edge from a code node into its onErrorBranch', () => {
       const plan = compileWorkflowIrDag(
         ir(
           [

@@ -13,7 +13,7 @@ import { ComposioProxyTransport } from './composio-proxy-transport';
 
 /**
  * The ONE credential-resolution path shared by every in-process SDK rail (actions AND the agent model call) —
- * a second copy would drift from the ADR 0042 opaque-auth seam.
+ * a second copy would drift from the opaque-auth seam.
  */
 export interface SdkAuthContext {
   /** The tenant the connection belongs to. */

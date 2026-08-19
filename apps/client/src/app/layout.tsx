@@ -27,7 +27,7 @@ export default function RootLayout({
     <ClerkProvider
       publishableKey={clerkPublishableKey}
       afterSignOutUrl="/login"
-      // Self-host runs with no Clerk at all (ADR 0054); the provider still mounts so Clerk's hooks
+      // Self-host runs with no Clerk at all; the provider still mounts so Clerk's hooks
       // keep a context and report signed-out instead of throwing.
       __internal_bypassMissingPublishableKey={!clerkEnabled}
     >

@@ -429,7 +429,7 @@ export class OrgManagementService {
     return em.count(OrgMemberEntity, { where: { orgId, role: 'owner' } });
   }
 
-  /** Connections that would strand the org's envs if this member left: active cluster rows + env slots (ADR 0014). */
+  /** Connections that would strand the org's envs if this member left: active cluster rows + env slots. */
   private async countMemberOrgConnections(em: EntityManager, orgId: string, userId: string): Promise<number> {
     const rows = await rawQuery<{ count: number }>(
       em,

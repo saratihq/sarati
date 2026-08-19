@@ -28,7 +28,7 @@ import { SearchActionsTool } from './tools/search-actions.tool';
 import { TestWorkflowTool } from './tools/test-workflow.tool';
 import { ValidateTool } from './tools/validate.tool';
 
-/** Registration order is irrelevant — the handler sorts by name so `tools/list` is stable (ADR 0052). */
+/** Registration order is irrelevant — the handler sorts by name so `tools/list` is stable. */
 const TOOLS = [
   ContextTool,
   SearchActionsTool,

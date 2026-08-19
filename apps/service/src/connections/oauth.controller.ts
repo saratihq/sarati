@@ -12,7 +12,7 @@ import { OAuthExchangeError } from './oauth-token';
 import { OAuthProviderNotConfiguredError, OAuthService, OAuthStateError } from './oauth.service';
 import { Scope } from '../auth/scope.decorator';
 
-/** A user's OWN OAuth app (ADR 0042) — the secret is sent once here, stored Fernet-encrypted, and never returned. */
+/** A user's OWN OAuth app — the secret is sent once here, stored Fernet-encrypted, and never returned. */
 class ByoOAuthClientDto {
   @IsString()
   @IsNotEmpty()

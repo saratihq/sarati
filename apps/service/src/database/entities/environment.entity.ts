@@ -1,7 +1,7 @@
 import { Column, Entity, PrimaryColumn } from 'typeorm';
 
 /**
- * A named environment (ADR 0014); "Default" is the raw pool and has NO row. Names are stored
+ * A named environment; "Default" is the raw pool and has NO row. Names are stored
  * lowercase and unique case-insensitively per org; the `is_prod` row is non-renamable/non-deletable.
  */
 @Entity('environments')

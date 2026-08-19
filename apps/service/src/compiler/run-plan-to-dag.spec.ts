@@ -245,7 +245,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
     expect(result.outputs.right).toEqual({ ran: 'test.right', props: { s: 'R' } });
   });
 
-  it('error lane (ADR 0020): the lane runs, the main successor is skipped, the run completes', async () => {
+  it('error lane: the lane runs, the main successor is skipped, the run completes', async () => {
     const plan: RunPlan = {
       id: 'err',
       nodes: [
@@ -268,7 +268,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
     expect(result.outputs.after).toBeUndefined(); // never both lanes
   });
 
-  it('continue-on-fail (ADR 0020): a tolerated throw is captured; the run goes on', async () => {
+  it('continue-on-fail: a tolerated throw is captured; the run goes on', async () => {
     const plan: RunPlan = {
       id: 'cont',
       nodes: [
@@ -331,7 +331,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
     expect(sleeps).toEqual([{ name: 'd:wait', ms: 50 }]);
   });
 
-  it('pinning (ADR 0021): a pinned action replays its output and never calls the provider', async () => {
+  it('pinning: a pinned action replays its output and never calls the provider', async () => {
     const seen: string[] = [];
     const recording: DurableStep = {
       run: <T>(name: string, fn: () => Promise<T>) => {
@@ -382,7 +382,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
     expect(seen).toEqual(['p:seed', 'p:each#0/call', 'p:each#1/call', 'p:each#2/call']);
   });
 
-  it('retry-on-fail (ADR 0020): recovers after transient failures, then exhausts', async () => {
+  it('retry-on-fail: recovers after transient failures, then exhausts', async () => {
     let calls = 0;
     const flaky: ManagedIntegrationProvider = {
       key: 'mock',

@@ -32,7 +32,7 @@ export interface RunActionInput {
   /** Preview mode: the SDK rail stubs mutating HTTP (reads still run); the Composio rail skips the action entirely. */
   dryRun?: boolean;
   /**
-   * Per-env connection scoping (ADR 0014): set → the step resolves the env's SLOT, and a missing slot is a hard 428,
+   * Per-env connection scoping: set → the step resolves the env's SLOT, and a missing slot is a hard 428,
    * never a pool fallback. `environment` is the env NAME and, with `orgId`, the LEGACY pre-006 resolution key.
    */
   environment?: string | null;

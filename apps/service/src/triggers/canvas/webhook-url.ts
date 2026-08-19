@@ -2,7 +2,7 @@ import { isIdShape } from '../../database/ids';
 import { canonicalEnvName } from '../../environments/env-name';
 
 /**
- * The per-`(workflow, env)` webhook URL scheme `/api/hooks/<workflowId>/<env>` (ADR 0018) — STABLE
+ * The per-`(workflow, env)` webhook URL scheme `/api/hooks/<workflowId>/<env>` — STABLE
  * within an env, so it must never be re-keyed per version. Env names canonicalize here (invariant #7).
  */
 

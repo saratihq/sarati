@@ -7,7 +7,7 @@ import { SCOPE_METADATA } from './scope.decorator';
 import { type ApiScope, NON_GRANTABLE_SCOPE, scopeSatisfied } from './scopes';
 
 /**
- * Scope check for API keys (ADR 0051): sessions pass, keys need the route's scope, unannotated denies.
+ * Scope check for API keys: sessions pass, keys need the route's scope, unannotated denies.
  * Must be called from AuthGuard, NOT registered globally — Nest runs global guards before any principal exists.
  */
 @Injectable()

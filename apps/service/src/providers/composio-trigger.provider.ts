@@ -27,12 +27,12 @@ interface CatalogCache {
   /** How long this cache entry is fresh — the full TTL for a good catalog, the short negative TTL for a failed/empty refresh. */
   ttl: number;
   entries: ComposioProjectedCatalogEntry[];
-  /** PUBLIC type → the EXACT Composio trigger slug (ADR 0031 exact-slug: recorded, not re-derived). */
+  /** PUBLIC type → the EXACT Composio trigger slug (exact-slug: recorded, not re-derived). */
   slugByType: Map<string, string>;
 }
 
 /**
- * The Composio TRIGGER rail (ADR 0046) — projects Composio's trigger types into the picker and is the façade the
+ * The Composio TRIGGER rail — projects Composio's trigger types into the picker and is the façade the
  * reconciler/intake drive to make them fire. Owns projection, caching, verification, and public-type↔slug mapping;
  * HTTP lives once in {@link ComposioProvider}. Inert (empty catalog, no subscribe) when `COMPOSIO_API_KEY` is unset.
  */
@@ -96,7 +96,7 @@ export class ComposioTriggerProvider {
 
   /**
    * The EXACT Composio trigger slug for a PUBLIC `<app>.<trigger>` type — the recorded one from a warm catalog
-   * (ADR 0031), else the deterministic uppercase reversal so subscribe never forces a fetch; `null` only if malformed.
+   * , else the deterministic uppercase reversal so subscribe never forces a fetch; `null` only if malformed.
    */
   slugForPublicType(publicType: string): string | null {
     const dot = publicType.indexOf('.');
@@ -129,7 +129,7 @@ export class ComposioTriggerProvider {
   }
 
   /**
-   * Every LIVE Composio trigger-instance id — the truth the ADR 0046 reaper diffs against the activation rows.
+   * Every LIVE Composio trigger-instance id — the truth the reaper diffs against the activation rows.
    * A hiccup yields `[]` rather than throwing, so a transient failure can never read as "everything is orphaned".
    */
   async listActiveInstanceIds(scope: PlatformKeyScope): Promise<string[]> {

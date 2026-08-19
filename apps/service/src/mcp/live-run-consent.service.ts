@@ -17,7 +17,7 @@ interface Consent {
 
 /**
  * Firing for real requires the caller to have just dry-run *this document* and to quote the token that
- * dry run returned (ADR 0052). Single-use and in-memory: a restart — or a second instance — invalidates
+ * dry run returned. Single-use and in-memory: a restart — or a second instance — invalidates
  * outstanding consent, which fails closed by asking for another dry run.
  */
 @Injectable()

@@ -28,7 +28,7 @@ export default function ConnectCaptureBanner() {
   const nodes = useMemo(
     () =>
       ((workflowJson?.nodes as IrNodeShape[] | undefined) ?? []).filter(
-        // Action steps only: triggers (ADR 0018) resolve their connection from the environment slot,
+        // Action steps only: triggers resolve their connection from the environment slot,
         // and their types aren't in the action catalog, so the lookup below would never resolve.
         (n) => n.id && n.node_type?.includes(".") && n.metadata?.trigger !== true,
       ),

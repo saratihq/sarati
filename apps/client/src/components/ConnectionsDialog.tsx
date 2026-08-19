@@ -89,12 +89,12 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
   const [q, setQ] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<Connection | null>(null);
-  // Second-stage delete confirm (ADR 0014) after a 409: name the env slots holding it, then force.
+  // Second-stage delete confirm after a 409: name the env slots holding it, then force.
   const [forceRemove, setForceRemove] = useState<{ connection: Connection; references: ConnectionReference[] } | null>(
     null,
   );
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
-  // ADR 0042: `managedAvailable` picks the lead surface; `mode` stays null until known so nothing flashes.
+  // `managedAvailable` picks the lead surface; `mode` stays null until known so nothing flashes.
   const [managedAvailable, setManagedAvailable] = useState<boolean | null>(null);
   const [mode, setMode] = useState<"managed" | "byo" | null>(null);
   const [byoApps, setByoApps] = useState<ByoApp[] | null>(null);
@@ -128,7 +128,7 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
       .catch((e: unknown) => setAppsError(e instanceof Error ? e.message : "Failed to load apps"));
   }, []);
 
-  // Capabilities + BYO catalog (ADR 0042), all best-effort: a failure just leaves managed-first.
+  // Capabilities + BYO catalog, all best-effort: a failure just leaves managed-first.
   const fetchByo = useCallback(() => {
     api
       .getConnectionCapabilities()
@@ -176,7 +176,7 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
     [appNameBySlug],
   );
 
-  // A plain delete 409s while env slots reference the connection (ADR 0014); force only after confirm.
+  // A plain delete 409s while env slots reference the connection; force only after confirm.
   const remove = async (c: Connection, force = false) => {
     setConnections((prev) => prev.filter((x) => x.id !== c.id));
     try {

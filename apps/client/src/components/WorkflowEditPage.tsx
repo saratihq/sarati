@@ -361,7 +361,7 @@ export default function WorkflowEditPage() {
         />
       )}
 
-      {/* Optimistic-concurrency guard (ADR 0034): a 409 from either save path surfaces the same
+      {/* Optimistic-concurrency guard: a 409 from either save path surfaces the same
           rebase/discard dialog; resolving drops the now-stale autosaved draft. */}
       <BranchMovedDialog onResolved={() => clearDraft(userId, draftId ?? null)} />
     </div>

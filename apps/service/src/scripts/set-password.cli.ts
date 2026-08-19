@@ -4,7 +4,7 @@ import { MIN_PASSWORD_LENGTH, hashPassword } from '../auth/local/password';
 import { errorMessage } from '../common/error-message';
 
 /**
- * Set a local account's password from the machine running the instance (ADR 0054). Shell access to
+ * Set a local account's password from the machine running the instance. Shell access to
  * the box IS the proof of ownership, which is why this needs no email and no running service.
  *
  *   pnpm auth:set-password owner@example.com

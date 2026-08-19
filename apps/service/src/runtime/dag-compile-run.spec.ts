@@ -6,7 +6,7 @@ import type { DagPlan } from './dag-plan';
 import type { RunResult } from './run-plan';
 
 /**
- * Compile-and-run coverage for the ONE engine (`compileWorkflowIrDag → DagInterpreter`, ADR 0023),
+ * Compile-and-run coverage for the ONE engine (`compileWorkflowIrDag → DagInterpreter`),
  * asserting outputs against concrete expected values. The provider is a deterministic echo.
  */
 
@@ -65,7 +65,7 @@ function run(
   return new DagInterpreter(provider).run(plan, { externalUserId: 'u', initialScope });
 }
 
-describe('compileWorkflowIrDag → DagInterpreter (ADR 0023 the one engine)', () => {
+describe('compileWorkflowIrDag → DagInterpreter (the one engine)', () => {
   it('linear chain: a → b → c', async () => {
     const { outputs } = await run(
       ir(
@@ -147,7 +147,7 @@ describe('compileWorkflowIrDag → DagInterpreter (ADR 0023 the one engine)', ()
     expect(falsy.outputs.then).toBeUndefined();
   });
 
-  it('error output (ADR 0020): the error lane runs, the main successor is skipped, run completes', async () => {
+  it('error output: the error lane runs, the main successor is skipped, run completes', async () => {
     const { outputs } = await run(
       ir(
         [act('boom'), act('after', { m: 'MAIN' }), act('handler', { m: '{{boom.error.message}}' })],
@@ -160,7 +160,7 @@ describe('compileWorkflowIrDag → DagInterpreter (ADR 0023 the one engine)', ()
     expect(outputs.after).toBeUndefined(); // never both lanes
   });
 
-  it('continue-on-fail (ADR 0020): a tolerated throw is captured; the run goes on', async () => {
+  it('continue-on-fail: a tolerated throw is captured; the run goes on', async () => {
     const { outputs } = await run(
       ir(
         [act('boom', { onError: 'continue' }), act('after', { m: '{{boom.error.message}}' })],
@@ -173,7 +173,7 @@ describe('compileWorkflowIrDag → DagInterpreter (ADR 0023 the one engine)', ()
     expect((outputs.after as { props: { m: string } }).props.m).toContain('boom:test.boom');
   });
 
-  it('retry + continue (ADR 0020): retries exhaust, then the failure is tolerated', async () => {
+  it('retry + continue: retries exhaust, then the failure is tolerated', async () => {
     const { outputs } = await run(
       ir(
         [
@@ -245,7 +245,7 @@ describe('compileWorkflowIrDag → DagInterpreter (ADR 0023 the one engine)', ()
 
 // ─── Loop-Over-Items: `orchestr:loop` lowers to a forEach node (body peeled from
 //     port 0, continuation on port 1), run once per element. ───
-describe('compileWorkflowIrDag → DagInterpreter: Loop-Over-Items (ADR 0023 slice 6)', () => {
+describe('compileWorkflowIrDag → DagInterpreter: Loop-Over-Items (slice 6)', () => {
   it('runs the body once per element; {{item}}/{{itemIndex}} resolve; the loop output is the per-iteration array', async () => {
     const { outputs } = await run(
       ir(
@@ -316,9 +316,9 @@ describe('compileWorkflowIrDag → DagInterpreter: Loop-Over-Items (ADR 0023 sli
   });
 });
 
-// ─── Loop while-mode (ADR 0029): the SAME loop node with mode:'while' runs DO-WHILE —
+// ─── Loop while-mode: the SAME loop node with mode:'while' runs DO-WHILE —
 //     body ≥1×, then while the condition holds, bounded by max_iterations. ───
-describe('compileWorkflowIrDag → DagInterpreter: Loop while-mode (ADR 0029)', () => {
+describe('compileWorkflowIrDag → DagInterpreter: Loop while-mode', () => {
   const whileLoop = (id: string, params: Record<string, unknown>): IRNode =>
     node(id, 'orchestr:loop', { mode: 'while', ...params });
 
@@ -426,7 +426,7 @@ describe('compileWorkflowIrDag → DagInterpreter: Loop while-mode (ADR 0029)', 
 
   it('an error output inside a while body fires the error lane (recursive peel runs)', async () => {
     // loop --body--> boom (throws) ; boom --error--> recover. The error lane runs inside the
-    // round; ADR 0020 halt ends the run cleanly (the run resolves, recover is traced).
+    // round; halt ends the run cleanly (the run resolves, recover is traced).
     const res = await run(
       ir(
         [

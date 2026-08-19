@@ -3,7 +3,7 @@ import { DagInterpreter } from './dag-interpreter';
 import type { DagActionNode, DagNode, DagPlan, Guard } from './dag-plan';
 
 /**
- * The bounded concurrent wave scheduler (ADR 0023 slice 5), on three claims: OUTPUT-EQUIVALENCE
+ * The bounded concurrent wave scheduler (slice 5), on three claims: OUTPUT-EQUIVALENCE
  * (limit 8 deep-equals limit 1, the sequential reference, across every control shape); REAL
  * CONCURRENCY (independent branches overlap — a live in-flight gauge reaches 2, and wall-time is
  * ≈max(branch) not sum); and CONCURRENT ERROR HANDLING (a fatal error and an ErrorLaneHalt each

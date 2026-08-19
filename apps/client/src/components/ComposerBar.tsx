@@ -203,7 +203,7 @@ export default function ComposerBar({
       )}
       {offerPending && !streaming && (
         <div className="flex items-center gap-2" data-testid="composer-offer">
-          {/* The composer commits versions but never moves a live pointer (ADR 0032 B3). */}
+          {/* The composer commits versions but never moves a live pointer. */}
           <Button size="sm" disabled={accepting} onClick={() => void acceptOffer("live", workflowId)} data-testid="offer-save-live">
             {accepting ? <SaratiLoader size={13} /> : null} {workflowId ? "Save" : "Save and turn on"}
           </Button>

@@ -31,7 +31,7 @@ const nodeTypes = {
   addStepEmpty: EmptyStateNode,
 };
 
-// Tool-binding eligibility (ADR 0045, invariant #14) — must stay in lockstep with the compiler's
+// Tool-binding eligibility (invariant #14) — must stay in lockstep with the compiler's
 // tool-edge peel, so an invalid wiring can't be drawn rather than being rejected at compile.
 function isToolEligibleTarget(nodeType: string): boolean {
   return nodeType !== "orchestr:agent" && getNodeCategory(nodeType) === "action";
@@ -173,7 +173,7 @@ function parseFromIR(ir: Record<string, unknown>, editable: boolean): { nodes: N
       data: {
         label: name,
         color: getNodeColor(nodeType),
-        // App triggers are triggers by `metadata.trigger` marker, not by type name (ADR 0018).
+        // App triggers are triggers by `metadata.trigger` marker, not by type name.
         category: (n.metadata as { trigger?: unknown } | undefined)?.trigger === true ? "trigger" : getNodeCategory(nodeType),
         nodeType,
         parameters: (n.parameters as Record<string, unknown>) || {},
@@ -197,7 +197,7 @@ function parseFromIR(ir: Record<string, unknown>, editable: boolean): { nodes: N
   for (const e of rawEdges) {
     const source = (e.source_node_id as string) || "";
     const target = (e.target_node_id as string) || "";
-    // Error (ADR 0020) and tool (ADR 0045) edges key on port_type so neither collapses with a
+    // Error and tool edges key on port_type so neither collapses with a
     // main edge between the same pair of nodes.
     const isError = e.port_type === "error";
     const isTool = e.port_type === "tool";
@@ -705,7 +705,7 @@ function FlowCanvasInner({
         onConnectNodes?.(source, target, 0, "error");
         return;
       }
-      // The tool handle binds the target as a tool (ADR 0045), never a step in the main flow.
+      // The tool handle binds the target as a tool, never a step in the main flow.
       if (sourceHandle === "tool") {
         onConnectNodes?.(source, target, 0, "tool");
         return;

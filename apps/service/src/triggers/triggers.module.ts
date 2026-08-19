@@ -23,7 +23,7 @@ import { WebhookSecretsController } from './webhook-secrets.controller';
 import { WebhookSecretsService } from './webhook-secrets.service';
 
 /**
- * Canvas triggers (ADR 0018): triggers are NODES in the version doc, activated by env promotion.
+ * Canvas triggers: triggers are NODES in the version doc, activated by env promotion.
  * The reconciler (`canvas/*`) materializes the derived activations, the poll sweep fires the due
  * ones, and the public intakes live on `/api/hooks/<wf>/<env>` and `/api/chat/<wf>/<env>`.
  */
@@ -32,7 +32,7 @@ import { WebhookSecretsService } from './webhook-secrets.service';
     AuthModule,
     ProvidersModule,
     RunsModule,
-    // RuntimeModule provides RuntimeCompiler — the ONE IR→plan compile seam (ADR 0023).
+    // RuntimeModule provides RuntimeCompiler — the ONE IR→plan compile seam.
     RuntimeModule,
     JobsModule,
     WorkflowsModule,

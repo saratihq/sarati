@@ -268,7 +268,7 @@ export class ReviewsService {
           throw new DomainError('Target branch is protected — review must be approved before merging');
         }
 
-        // ADR 0015: a protected target blocks on a red pre-merge test only while it is FRESH
+        // A protected target blocks on a red pre-merge test only while it is FRESH
         // (tested heads still match the branch heads) — a stale red or an absent test never blocks.
         const test = review.lastTest;
         if (

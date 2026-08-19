@@ -1,4 +1,4 @@
-/** The pluggable-auth seam (ADR 0002): each verifier turns a bearer token into an identity claim, tried in order. */
+/** The pluggable-auth seam: each verifier turns a bearer token into an identity claim, tried in order. */
 export interface VerifiedIdentity {
   /** External auth subject (Clerk `sub`, or an OIDC `sub`) → users.clerk_user_id. */
   clerkUserId?: string;

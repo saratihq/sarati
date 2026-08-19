@@ -73,7 +73,7 @@ function approvalIr(topic: string): Record<string, unknown> {
 }
 
 /**
- * `orchestr_get_run` + `orchestr_list_connections` through the real MCP client (ADR 0052), with BOTH
+ * `orchestr_get_run` + `orchestr_list_connections` through the real MCP client, with BOTH
  * credential kinds live: `ork_` keys and OIDC sessions, so the api-key narrowing is provable against
  * the session behaviour it must not regress.
  */
@@ -306,7 +306,7 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
     expect(textOf(result)).not.toContain(markerB);
 
     // The same refusal on the REST route the same token bears — the narrowing is in the read
-    // path, not in the MCP layer a token walks around (ADR 0052 §4).
+    // path, not in the MCP layer a token walks around.
     const rest = await http()
       .get(`/api/runs/${encodeURIComponent(refB())}`)
       .set('Authorization', `Bearer ${keyA}`)

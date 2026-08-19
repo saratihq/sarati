@@ -27,7 +27,7 @@ const WF_NAME = 'Expense Triage';
 const SLACK = 'slack.send_channel_message';
 
 /**
- * The mutation half of the authoring loop (ADR 0052): `orchestr_edit_workflow` over the real MCP
+ * The mutation half of the authoring loop: `orchestr_edit_workflow` over the real MCP
  * client. Every assertion here is about a document in flight — the tool writes nothing.
  */
 describe('Platform MCP workflow editing (e2e, real client, isolated DB)', () => {
@@ -155,7 +155,7 @@ describe('Platform MCP workflow editing (e2e, real client, isolated DB)', () => 
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
-    // Composio projection OFF (ADR 0046): the trigger half of the vocabulary makes no live call.
+    // Composio projection OFF: the trigger half of the vocabulary makes no live call.
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });

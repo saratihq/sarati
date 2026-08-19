@@ -28,7 +28,7 @@ class InvokeDto {
 
 export { InvokeDto };
 
-/** Workflow-as-tool invocation (ADR 0053): the ONE route an agent calls a published workflow through. */
+/** Workflow-as-tool invocation: the ONE route an agent calls a published workflow through. */
 @Controller('api/workflows')
 @UseGuards(AuthGuard)
 export class WorkflowInvokeController {

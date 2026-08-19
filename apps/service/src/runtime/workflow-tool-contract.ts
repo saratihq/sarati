@@ -12,7 +12,7 @@ const RESERVED_PREFIX = 'orchestr_';
 
 const TYPES = new Set(['string', 'number', 'boolean', 'object']);
 
-/** One declared parameter of a workflow offered as a tool (ADR 0053 §1). */
+/** One declared parameter of a workflow offered as a tool. */
 export interface WorkflowToolInput {
   name: string;
   type: 'string' | 'number' | 'boolean' | 'object';
@@ -71,7 +71,7 @@ export function inputsOf(raw: unknown): WorkflowToolInput[] {
 
 /**
  * The contract a `tool_trigger` node's parameters declare, or null when it declares too little to
- * offer: a model picks a tool on its description alone, so an undescribed one is withheld (ADR 0053 §1).
+ * offer: a model picks a tool on its description alone, so an undescribed one is withheld.
  */
 export function contractOf(triggerParameters: unknown, fallbackName: string): WorkflowToolContract | null {
   const parameters = isRecord(triggerParameters) ? triggerParameters : {};
@@ -104,7 +104,7 @@ export function schemaOf(inputs: WorkflowToolInput[]): JsonSchema {
     type: 'object',
     properties,
     required: inputs.filter((i) => i.required).map((i) => i.name),
-    // The arguments ARE the firing event (ADR 0053 §1), which carries whatever the caller sends.
+    // The arguments ARE the firing event, which carries whatever the caller sends.
     additionalProperties: true,
   };
 }

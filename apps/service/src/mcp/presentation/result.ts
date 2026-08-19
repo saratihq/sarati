@@ -73,7 +73,7 @@ export function toToolResult(payload: unknown): CallToolResult {
 }
 
 /**
- * A tool failure the agent can act on — an `isError` result, never a protocol error (ADR 0052).
+ * A tool failure the agent can act on — an `isError` result, never a protocol error.
  * `details` carries the domain error's machine-readable fields so an agent can branch on a code
  * instead of parsing prose.
  */

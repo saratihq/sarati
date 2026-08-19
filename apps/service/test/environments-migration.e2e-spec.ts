@@ -9,8 +9,8 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 const MIGRATION = readFileSync(join(__dirname, '..', 'db', 'migrations', '006_environments.sql'), 'utf8');
 
 /**
- * Retrofit migration 006 (ADR 0014) proven against a scratch DB rolled back to the pre-006
- * shape — NEVER a live one. `runtime_triggers` is gone (ADR 0024), so that backfill no-ops.
+ * Retrofit migration 006 proven against a scratch DB rolled back to the pre-006
+ * shape — NEVER a live one. `runtime_triggers` is gone, so that backfill no-ops.
  */
 describe('migration 006 — environments model (scratch DB)', () => {
   let db: Client;
@@ -64,7 +64,7 @@ describe('migration 006 — environments model (scratch DB)', () => {
        VALUES ($1, 'prod', $2), ($1, 'staging', $2), ($3, 'staging', $4)`,
       [wfOrg, vOrg, wfLoose, vLoose],
     );
-    // A legacy per-env CLUSTER connection (ADR 0005 shape: org_id + environment).
+    // A legacy per-env CLUSTER connection (legacy shape: org_id + environment).
     await db.query(
       `INSERT INTO connections (id, user_id, provider, auth_type, credential, created_at, status, org_id, environment)
        VALUES ($1, $2, 'slack', 'managed', 'enc', now(), 'active', $3, 'prod')`,
