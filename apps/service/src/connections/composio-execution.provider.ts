@@ -4,6 +4,7 @@ import { DomainError } from '../common/domain-error';
 import type { RunActionResult } from '../providers/managed-integration-provider';
 import { ComposioProvider } from './composio.provider';
 import { directOverride, type DirectToolOverride } from './composio-direct-overrides';
+import { upstreamRejection } from './composio-upstream-rejection';
 import { requiredConstraintsFor } from './composio-required-constraints';
 import { matchTool, translateProps, type PropTranslation, type ToolMatch } from './composio-tool-mapping';
 import { toComposioSlug } from './managed-connections.service';
@@ -182,6 +183,9 @@ export class ComposioExecutionProvider {
     if (!result.successful) {
       throw new DomainError(`${label} failed: ${result.error ?? 'the managed action reported failure'}`, 422);
     }
+    // `successful` covers the HTTP call, not the API's answer to it.
+    const rejected = upstreamRejection(result.data);
+    if (rejected) throw new DomainError(`${label} failed: ${rejected}`, 422);
     return result.data;
   }
 
