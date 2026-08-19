@@ -11,6 +11,7 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowEnvPointerEntity } from '../database/entities/workflow-env-pointer.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { canonicalEnvName, ENV_NAME_SHAPE, PROD_ENV } from '../environments/env-name';
+import { assertEnvSlotsCover } from '../environments/env-slot-preflight';
 import { EnvironmentsService } from '../environments/environments.service';
 import { EventsService } from '../events/events.service';
 import { OrgsService } from '../orgs/orgs.service';
@@ -235,6 +236,7 @@ export class EnvPointersService {
       }
 
       await this.assertPointerMoveAllowed(em, wf, environment, actorUserId);
+      await this.assertEnvCanRun(em, wf, environment, version);
 
       const current = await em.findOne(WorkflowEnvPointerEntity, {
         where: { workflowId: wf.id, environment },
@@ -269,6 +271,23 @@ export class EnvPointersService {
     // Pointer moved (committed) → reconcile this workflow's activations (ADR 0018).
     await this.triggerSignals.enqueue(workflowId);
     return result;
+  }
+
+  /**
+   * Refuse to make a version live somewhere it cannot run: every app its steps resolve a connection
+   * for must have a slot in that environment. Deliberate acts only — publishing and promoting are
+   * where the author asserts "run this here", while CREATING a workflow must never require the
+   * environment to be configured first. Org-less has no env rows, so it passes.
+   */
+  async assertEnvCanRun(
+    em: EntityManager,
+    wf: WorkflowEntity,
+    environment: string,
+    version: WorkflowVersionEntity,
+  ): Promise<void> {
+    if (!wf.orgId) return;
+    const env = await this.environments.ensureEnvironment(em, wf.orgId, normalizeEnv(environment));
+    await assertEnvSlotsCover(em, env.id, env.name, version.workflowIr ?? version.workflowJson);
   }
 
   /**

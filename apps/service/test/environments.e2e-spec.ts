@@ -441,16 +441,16 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     )!;
     await asA(
       http()
-        .post(`/api/workflows/${gmailWfId}/promote`)
-        .set('X-Org-Id', orgId)
-        .send({ environment: 'staging', version_id: v1.id }),
-    ).expect(201);
-    await asA(
-      http()
         .put(`/api/environments/${stagingId}/slots/gmail`)
         .set('X-Org-Id', orgId)
         .send({ connection_id: slotConnId }),
     ).expect(200);
+    await asA(
+      http()
+        .post(`/api/workflows/${gmailWfId}/promote`)
+        .set('X-Org-Id', orgId)
+        .send({ environment: 'staging', version_id: v1.id }),
+    ).expect(201);
 
     // Canvas triggers (ADR 0018): the webhook node lives in the version doc — no trigger row.
     envHookPath = `/api/hooks/${gmailWfId}/staging`;
@@ -515,6 +515,13 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
       200,
     );
     const v1 = (versions.body.versions as Array<{ id: string; version_number: number }>)[0]!;
+    // An environment that cannot run the version refuses it, so give qa2 the gmail slot first.
+    await asA(
+      http()
+        .put(`/api/environments/${qaId}/slots/gmail`)
+        .set('X-Org-Id', orgId)
+        .send({ connection_id: slotConnId }),
+    ).expect(200);
     await asA(
       http()
         .post(`/api/workflows/${wfId}/promote`)

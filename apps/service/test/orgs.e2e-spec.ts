@@ -630,7 +630,27 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: connIr() }),
     ).expect(201);
     const connWfId = connDep.body.workflow_id as string;
+    // Promoting now REFUSES an environment that cannot run the version, so reach the resolver's
+    // hard-fail the way a user would: slot it, promote, then empty the slot.
+    const envs = await asA(http().get('/api/environments').set('X-Org-Id', orgId)).expect(200);
+    const stagingEnv = (envs.body.environments as Array<{ id: string; name: string }>).find(
+      (e) => e.name === 'staging',
+    )!;
+    const slackConn = await asA(
+      http()
+        .post('/api/connections')
+        .set('X-Org-Id', orgId)
+        .send({ provider: 'slack', credential: 'a-slack' }),
+    ).expect(201);
+    await db.query(
+      `INSERT INTO environment_connections (environment_id, app, connection_id) VALUES ($1, 'slack', $2)
+       ON CONFLICT (environment_id, app) DO UPDATE SET connection_id = EXCLUDED.connection_id`,
+      [stagingEnv.id, slackConn.body.id],
+    );
     await promoteStagingTo(connWfId);
+    await db.query(`DELETE FROM environment_connections WHERE environment_id = $1 AND app = 'slack'`, [
+      stagingEnv.id,
+    ]);
     const connFired = await http().post(`/api/hooks/${connWfId}/staging`).send({ title: 'x' }).expect(202);
 
     let errRow: { status: string; error: string | null } | undefined;
