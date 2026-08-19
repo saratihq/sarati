@@ -244,3 +244,70 @@ describe('DagInterpreter (gating scheduler)', () => {
     );
   });
 });
+
+/**
+ * A branch decided on a reference that resolved to nothing used to leave no trace at all: `if` and
+ * `switch` are pure routing and get no step, so the run took a path for a reason nobody could see.
+ */
+describe('a branch that could not resolve its condition says so', () => {
+  const interpreter = new DagInterpreter(echoProvider());
+
+  it('records the routing decision and names the reference behind it', async () => {
+    const result = await interpreter.run(
+      plan([
+        action('a'),
+        {
+          kind: 'if',
+          id: 'check',
+          condition: { left: '{{a.missingField}}', op: 'eq', right: 'x' },
+          guards: [guard('a')],
+        },
+        action('yes', {}, [guard('check', 0)]),
+        action('no', {}, [guard('check', 1)]),
+      ]),
+      { externalUserId: 'u' },
+    );
+
+    const routing = result.trace.find((entry) => entry.nodeId === 'check');
+    expect(routing?.warnings).toEqual(['Reference {{a.missingField}} resolved to nothing.']);
+    // The decision itself is still made and still routes — this is a note, not a failure.
+    expect(routing?.output).toEqual({ selected_port: 1 });
+    expect(result.outputs.no).toEqual({ ran: 'act.no', props: {} });
+  });
+
+  it('stays quiet for `falsy`, where a missing value IS the question being asked', async () => {
+    const result = await interpreter.run(
+      plan([
+        action('a'),
+        {
+          kind: 'if',
+          id: 'check',
+          condition: { left: '{{a.missingField}}', op: 'falsy' },
+          guards: [guard('a')],
+        },
+        action('yes', {}, [guard('check', 0)]),
+      ]),
+      { externalUserId: 'u' },
+    );
+    expect(result.trace.find((entry) => entry.nodeId === 'check')).toBeUndefined();
+    expect(result.outputs.yes).toEqual({ ran: 'act.yes', props: {} });
+  });
+
+  it('adds nothing when every operand resolves', async () => {
+    const result = await interpreter.run(
+      plan([
+        action('a'),
+        {
+          kind: 'if',
+          id: 'check',
+          condition: { left: '{{a.ran}}', op: 'eq', right: 'act.a' },
+          guards: [guard('a')],
+        },
+        action('yes', {}, [guard('check', 0)]),
+      ]),
+      { externalUserId: 'u' },
+    );
+    expect(result.trace.find((entry) => entry.nodeId === 'check')).toBeUndefined();
+    expect(result.outputs.yes).toEqual({ ran: 'act.yes', props: {} });
+  });
+});
