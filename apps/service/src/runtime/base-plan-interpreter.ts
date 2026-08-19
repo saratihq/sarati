@@ -354,7 +354,7 @@ export abstract class BasePlanInterpreter {
    * an authored step's fan-out is bounded by the loop the author wrote, unlike an agent's, which is
    * the model's choice. Depth still applies, and is what bounds an indirect cycle.
    */
-  private runSubWorkflow(
+  private async runSubWorkflow(
     node: ExecutableCallWorkflow,
     scope: Record<string, unknown>,
     stepKey: string,
@@ -362,7 +362,9 @@ export abstract class BasePlanInterpreter {
   ): Promise<unknown> {
     const runner = this.subWorkflowRunner;
     if (!runner) throw new Error('Sub-workflow steps are not available in this runtime');
-    const input = resolveReferences(node.input, scope);
+    const unresolved = new Set<string>();
+    const input = resolveReferences(node.input, scope, (ref) => unresolved.add(ref));
+    await this.warn(ctx, stepKey, [...unresolved].map(unresolvedNote));
     return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
       runner.run(
         { workflowId: node.workflowId, input },
@@ -638,16 +640,10 @@ export abstract class BasePlanInterpreter {
         }),
       ),
     );
-    // Both honesty sources fold into ONE list written ONCE — the recorder UPSERTs the whole
-    // `warnings` array per step, so a second write would overwrite the first.
-    const stepWarnings = [
-      ...[...unresolved].map((ref) => `Reference {{${ref}}} resolved to nothing.`),
+    await this.warn(ctx, stepKey, [
+      ...[...unresolved].map(unresolvedNote),
       ...(Array.isArray(result.warnings) ? result.warnings : []),
-    ];
-    if (stepWarnings.length > 0) {
-      ctx.stepWarnings.set(stepKey, stepWarnings);
-      await this.recordStepWarnings(ctx, stepKey, stepWarnings);
-    }
+    ]);
     return result.output;
   }
 
@@ -688,12 +684,14 @@ export abstract class BasePlanInterpreter {
     const buffer: AgentMessage[] = [];
     // First user message: the `input` expression resolved against scope, else the trigger
     // payload; `inputLiteral` (test runs) passes verbatim — a typed task is not an expression.
+    const unresolvedInput = new Set<string>();
     const inputValue =
       node.input !== undefined
         ? node.inputLiteral
           ? node.input
-          : resolveReference(node.input, scope)
+          : resolveReference(node.input, scope, (ref) => unresolvedInput.add(ref))
         : scope.trigger;
+    await this.warn(ctx, stepKey, [...unresolvedInput].map(unresolvedNote));
     buffer.push({ role: 'user', content: renderAgentContent(inputValue) });
 
     const steps: AgentStep[] = [];
@@ -804,7 +802,7 @@ export abstract class BasePlanInterpreter {
    * provider seam, a sub-workflow tool through the injected runner. Throws on an
    * unknown tool name or unbound runner — the loop catches it and feeds it back.
    */
-  private invokeAgentTool(
+  private async invokeAgentTool(
     node: ExecutableAgent,
     call: { id: string; name: string; input: unknown },
     scope: Record<string, unknown>,
@@ -855,7 +853,9 @@ export abstract class BasePlanInterpreter {
       call.input !== null && typeof call.input === 'object' && !Array.isArray(call.input)
         ? (call.input as Record<string, unknown>)
         : {};
-    const props = resolveReferences({ ...tool.props, ...modelInput }, scope);
+    const unresolved = new Set<string>();
+    const props = resolveReferences({ ...tool.props, ...modelInput }, scope, (ref) => unresolved.add(ref));
+    await this.warn(ctx, stepKey, [...unresolved].map(unresolvedNote));
     return ctx.durable
       .run(`${ctx.planId}:${stepKey}`, () =>
         this.provider.runAction({
@@ -940,12 +940,20 @@ export abstract class BasePlanInterpreter {
     if (ctx.record) await ctx.record.recorder.stepAttempts(ctx.record.runId, stepKey, attempts);
   }
 
-  /** Persist a step's non-fatal honesty warnings to run history; idempotent (the recorder UPSERTs by run+step). */
-  private async recordStepWarnings(ctx: RunContext, stepKey: string, warnings: string[]): Promise<void> {
-    if (warnings.length === 0 || !ctx.record) return;
-    await ctx.record.recorder.stepWarnings(ctx.record.runId, stepKey, warnings);
+  /**
+   * Add non-fatal honesty warnings to a step. The recorder UPSERTs the whole array per step, so a
+   * second write must carry the first's — every site funnels through here for that reason.
+   */
+  private async warn(ctx: RunContext, stepKey: string, notes: string[]): Promise<void> {
+    if (notes.length === 0) return;
+    const merged = [...(ctx.stepWarnings.get(stepKey) ?? []), ...notes];
+    ctx.stepWarnings.set(stepKey, merged);
+    if (ctx.record) await ctx.record.recorder.stepWarnings(ctx.record.runId, stepKey, merged);
   }
 }
+
+/** The one phrasing for a full-string `{{ref}}` that resolved to nothing. */
+const unresolvedNote = (ref: string): string => `Reference {{${ref}}} resolved to nothing.`;
 
 /** Render an agent message's content as text for the model (a string stays verbatim; else JSON). */
 function renderAgentContent(value: unknown): string {

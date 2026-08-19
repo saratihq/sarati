@@ -583,3 +583,90 @@ describe('orchestr:agent — non-empty tool descriptions (fix)', () => {
     expect(desc).toBe('slack.send_message');
   });
 });
+
+/**
+ * A full-string `{{ref}}` that resolves to nothing is recorded as a non-fatal warning on the step
+ * that read it. Only the action path did this before, so a typo in an agent's task or in the props
+ * its tool runs with produced a green run and an empty value.
+ */
+describe('references that resolve to nothing are recorded, not swallowed', () => {
+  const runWith = (doc: WorkflowIR, turns: ModelTurn[], provider: ManagedIntegrationProvider) => ({
+    interpreter: new DagInterpreter(provider, undefined, undefined, undefined, new ScriptedAgentModel(turns)),
+    plan: compileWorkflowIrDag(doc),
+  });
+
+  const warningsOn = (
+    result: { trace: Array<{ nodeId: string; warnings?: string[] }> },
+    node: string,
+  ): string[] => result.trace.find((entry) => entry.nodeId === node)?.warnings ?? [];
+
+  it("names the ref missing from the agent's task", async () => {
+    const doc = chatAgentIr({ input: '{{trigger.nothingHere}}' });
+    const { interpreter, plan } = runWith(doc, [modelTurn({ text: 'done' })], recordingProvider([]));
+
+    const result = await interpreter.run(plan, {
+      externalUserId: 'u',
+      initialScope: { trigger: { chatInput: 'go' } },
+    });
+
+    expect(warningsOn(result, 'agent')).toEqual(['Reference {{trigger.nothingHere}} resolved to nothing.']);
+  });
+
+  it('names the ref missing from the props an agent tool runs with, and still runs the tool', async () => {
+    const calls: ActionCall[] = [];
+    // A tool call is not a trace leaf, so read what would be PERSISTED against its step.
+    const persisted: Array<{ stepKey: string; warnings: string[] }> = [];
+    const recorder = {
+      runStarted: () => Promise.resolve(),
+      runFinished: () => Promise.resolve(),
+      stepStarted: () => Promise.resolve(),
+      stepFinished: () => Promise.resolve(),
+      stepAttempts: () => Promise.resolve(),
+      stepContinued: () => Promise.resolve(),
+      stepWarnings: (_runId: string, stepKey: string, warnings: string[]) => {
+        persisted.push({ stepKey, warnings });
+        return Promise.resolve();
+      },
+    } as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
+
+    const doc = chatAgentIr();
+    const { interpreter, plan } = runWith(
+      doc,
+      [
+        modelTurn({
+          toolCalls: [{ id: 't1', name: 'slack_send_message', input: { text: '{{trigger.missingField}}' } }],
+        }),
+        modelTurn({ text: 'all done' }),
+      ],
+      recordingProvider(calls, () => ({ ok: true })),
+    );
+
+    await interpreter.run(plan, {
+      externalUserId: 'u',
+      initialScope: { trigger: { chatInput: 'go' } },
+      runId: 'run-1',
+      recorder,
+    });
+
+    expect(persisted.map((p) => p.warnings).flat()).toContain(
+      'Reference {{trigger.missingField}} resolved to nothing.',
+    );
+    // The warning never blocks the call — the tool ran, with the unresolved prop simply absent.
+    expect(calls[0]).toEqual({
+      actionId: 'slack.send_message',
+      props: { channel: '#ops', text: undefined },
+    });
+  });
+
+  it('stays silent when every reference resolves', async () => {
+    const doc = chatAgentIr({ input: '{{trigger.chatInput}}' });
+    const { interpreter, plan } = runWith(doc, [modelTurn({ text: 'done' })], recordingProvider([]));
+
+    const result = await interpreter.run(plan, {
+      externalUserId: 'u',
+      initialScope: { trigger: { chatInput: 'go' } },
+    });
+
+    expect(warningsOn(result, 'agent')).toEqual([]);
+  });
+});
