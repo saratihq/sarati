@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 
 import { ConnectionsModule } from '../connections/connections.module';
+import { AuthModule } from '../auth/auth.module';
 import { ActionRouterProvider } from './action-router.provider';
+import { ConnectionAccountController } from './connection-account.controller';
+import { ConnectionIdentityService } from './connection-identity.service';
 import { AgentModelCallProvider, AGENT_MODEL_FETCH } from './agent-model-call.provider';
 import { ComposioTriggerProvider } from './composio-trigger.provider';
 import { MANAGED_INTEGRATION_PROVIDER } from './managed-integration-provider';
@@ -17,10 +20,11 @@ import { AGENT_MODEL_CALL, AGENT_TOOL_CATALOG } from '../runtime/agent';
  * catalog/inspector surfaces that address it directly.
  */
 @Module({
-  imports: [ConnectionsModule],
+  imports: [AuthModule, ConnectionsModule],
   providers: [
     SdkActionsProvider,
     ActionRouterProvider,
+    ConnectionIdentityService,
     SdkWebhookProvider,
     SdkPollingProvider,
     ComposioTriggerProvider,
@@ -36,6 +40,7 @@ import { AGENT_MODEL_CALL, AGENT_TOOL_CATALOG } from '../runtime/agent';
     { provide: AGENT_MODEL_CALL, useExisting: AgentModelCallProvider },
     { provide: AGENT_MODEL_FETCH, useValue: undefined },
   ],
+  controllers: [ConnectionAccountController],
   exports: [
     SdkActionsProvider,
     ActionRouterProvider,
