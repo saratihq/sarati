@@ -23,6 +23,7 @@ import type { BlobStore } from './blob-store';
 import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
+import { PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
 import type { RunResult, TraceEntry } from './run-plan';
@@ -450,11 +451,27 @@ export abstract class BasePlanInterpreter {
     ctx: RunContext,
   ): Promise<void> {
     const stepKey = `${path}${node.id}`;
+    const record = ctx.record;
     await this.recorded(ctx, stepKey, node.id, 'delay', async () => {
       // Dry run: don't actually make the preview wait.
       if (ctx.dryRun) return { dry_run: true, skipped_delay_ms: node.ms };
-      await ctx.durable.sleep(`${ctx.planId}:${stepKey}`, node.ms);
-      return null;
+      if (node.ms <= PARK_DELAY_ABOVE_MS) {
+        await ctx.durable.sleep(`${ctx.planId}:${stepKey}`, node.ms);
+        return null;
+      }
+      // A long wait PARKS: the run leaves flight, so the wall-clock cap that reaps a stuck run
+      // never applies to one that is deliberately asleep. Nobody can send to a timer topic — its
+      // own timeout is the wake.
+      const topic = timerTopicFor(stepKey);
+      const wake = new Date(Date.now() + node.ms);
+      const sleeping = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, topic, node.ms);
+      await record?.recorder.runWaiting(record.runId, node.id, topic, wake);
+      try {
+        await sleeping;
+      } finally {
+        await record?.recorder.runResumed(record.runId);
+      }
+      return { slept_until: wake.toISOString() };
     });
   }
 

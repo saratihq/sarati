@@ -12,6 +12,14 @@ import type { CodeNode, RunNode } from '../runtime/run-plan';
 // a durable wait-for-event, and a sandboxed code snippet.
 const ORCHESTR_IF = 'orchestr:if';
 const ORCHESTR_WAIT = 'orchestr:wait_for_event';
+const ORCHESTR_WAIT_FOR = 'orchestr:wait_for_duration';
+
+/** Author-facing units for a scheduled wait; days is the point of it. */
+const UNIT_MS: Record<string, number> = {
+  minutes: 60_000,
+  hours: 3_600_000,
+  days: 86_400_000,
+};
 const ORCHESTR_CODE = 'orchestr:code';
 const DEFAULT_WAIT_TIMEOUT_MS = 3_600_000; // 1h — approvals shouldn't park forever
 
@@ -74,6 +82,20 @@ function retryPolicyOf(
 
 /** The ONE IR-node → RunNode payload mapping (retry caps, onError, connectionId) — never duplicate it. */
 export function mapNode(node: IRNode, translate: (value: unknown) => unknown): RunNode {
+  if (node.node_type === ORCHESTR_WAIT_FOR) {
+    const amount = Number(node.parameters.amount);
+    const unit = typeof node.parameters.unit === 'string' ? node.parameters.unit : '';
+    const perUnit = UNIT_MS[unit];
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error(`Wait "${node.name}" needs an "amount" — how long to wait, as a positive number`);
+    }
+    if (perUnit === undefined) {
+      throw new Error(
+        `Wait "${node.name}" needs a "unit" of ${Object.keys(UNIT_MS).join(', ')} — got "${unit}"`,
+      );
+    }
+    return { kind: 'delay', id: node.id, ms: amount * perUnit };
+  }
   if (node.node_type === ORCHESTR_WAIT) {
     const topic =
       typeof node.parameters.topic === 'string' && node.parameters.topic ? node.parameters.topic : node.id;

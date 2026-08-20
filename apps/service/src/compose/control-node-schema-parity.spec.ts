@@ -19,6 +19,7 @@ const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } a
 const SHARED_CONTROL_TYPES = [
   'orchestr:if',
   'orchestr:switch',
+  'orchestr:wait_for_duration',
   'orchestr:wait_for_event',
   'orchestr:code',
   'orchestr:loop',
@@ -53,7 +54,7 @@ const stubTriggerCatalog = { list: () => Promise.resolve([]) } as unknown as Tri
 describe('control-node schema parity — palette (node-types controller) vs composer (compose-catalog)', () => {
   const catalog = new ComposeCatalogService(stubVectorStore, stubTriggerCatalog);
 
-  it('the palette serves exactly the 7 shared control constructs', () => {
+  it('the palette serves exactly the 8 shared control constructs', () => {
     expect([...CONTROL_NODE_SCHEMAS].map((s) => s.type).sort()).toEqual([...SHARED_CONTROL_TYPES].sort());
   });
 
