@@ -3364,6 +3364,46 @@ function LoopEditor({
 }
 
 /**
+ * WHICH account the picked connection is for. Health is not identity: a credential authorized
+ * against the wrong workspace passes every check, so the name belongs where the choice is made.
+ */
+function ConnectionAccountLine({ connectionId }: { connectionId: string }) {
+  // Keyed by the connection it describes, so a slower answer for a previous pick can never show.
+  const [answered, setAnswered] = useState<{
+    for: string;
+    account: { name: string | null; id: string | null } | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!connectionId) return;
+    let cancelled = false;
+    api
+      .connectionAccount(connectionId)
+      .then((res) => {
+        if (!cancelled) setAnswered({ for: connectionId, account: res.account });
+      })
+      .catch(() => {
+        /* additive — a connection that cannot be asked simply says nothing */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId]);
+  const account = answered?.for === connectionId ? answered.account : null;
+  if (!account) return null;
+  const named = account.name ?? account.id;
+  return (
+    <p
+      className="text-[10px] m-0 mt-1 leading-snug"
+      style={{ color: "var(--orchestr-ink-subtle)" }}
+      data-testid="connection-account-line"
+    >
+      Authorized against {named}
+      {account.name && account.id ? ` (${account.id})` : ""}.
+    </p>
+  );
+}
+
+/**
  * THE connection picker — never fork a second one. Purely presentational: the host owns loading,
  * auto-select, and the connectionId commit; `connections === null` means still loading.
  */
@@ -3444,6 +3484,7 @@ function ConnectionSelectField({
           )}
         </>
       )}
+      {value && <ConnectionAccountLine connectionId={value} />}
       <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
         {helpText ?? (
           <>

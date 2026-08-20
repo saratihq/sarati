@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, Param, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpException, Param, Query, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
@@ -31,13 +31,19 @@ export class ConnectionAccountController {
 
   @Scope('connection:read')
   @Get(':id/account')
-  async account(@Req() req: Request, @Param('id') id: string): Promise<ConnectionAccountResult> {
+  async account(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Query('refresh') refresh?: string,
+  ): Promise<ConnectionAccountResult> {
     const userId = requirePrincipal(req).user.id;
     const summary = (await this.connections.list(userId)).find((row) => row.id === id);
     if (!summary) throw new HttpException({ detail: 'Connection not found' }, 404);
     if (!this.identity.canProbe(summary.provider)) {
       return { account: null, detail: `Sarati cannot yet ask ${summary.provider} which account this is.` };
     }
+    // A re-authorization can point the same row at a different account, so a reconnect asks again.
+    if (refresh === '1') this.identity.forget(id);
     const account = await this.identity.probe(userId, id, summary.provider);
     return {
       account,
