@@ -26,6 +26,16 @@ type Tab = Tabs['sheets'][number];
 type Listing = Awaited<ReturnType<typeof actions.drive.listFiles.execute>>;
 type DriveFile = Awaited<ReturnType<typeof actions.drive.getFile.execute>>;
 type Rows = NonNullable<ReadRange['values']>;
+type Profile = Awaited<ReturnType<typeof actions.gmail.getProfile.execute>>;
+type Labels = Awaited<ReturnType<typeof actions.gmail.listLabels.execute>>;
+type Label = Labels['labels'][number];
+type Messages = Awaited<ReturnType<typeof actions.gmail.listMessages.execute>>;
+type MessageRef = Messages['messages'][number];
+type Calendars = Awaited<ReturnType<typeof actions.calendar.listCalendars.execute>>;
+type CalendarEntry = Calendars['calendars'][number];
+type Event = Awaited<ReturnType<typeof actions.calendar.createEvent.execute>>;
+type Events = Awaited<ReturnType<typeof actions.calendar.listEvents.execute>>;
+type Deleted = Awaited<ReturnType<typeof actions.calendar.deleteEvent.execute>>;
 
 type Props = Record<string, unknown>;
 type Shaper = (raw: unknown, props: Props) => object | null;
@@ -161,6 +171,128 @@ function getFile(raw: unknown): DriveFile | null {
   return driveFile(unwrapComposioEnvelope(raw));
 }
 
+function gmailProfile(raw: unknown): Profile | null {
+  const body = unwrapComposioEnvelope(raw);
+  if (!isRecord(body)) return null;
+  const emailAddress = str(body.emailAddress);
+  const historyId =
+    str(body.historyId) ?? (num(body.historyId) !== undefined ? String(body.historyId) : undefined);
+  const messagesTotal = num(body.messagesTotal);
+  const threadsTotal = num(body.threadsTotal);
+  if (emailAddress === undefined || historyId === undefined) return null;
+  if (messagesTotal === undefined || threadsTotal === undefined) return null;
+  return { emailAddress, messagesTotal, threadsTotal, historyId };
+}
+
+/** The picker's rows: an id and a name, not Gmail's visibility flags. */
+function labelOf(entry: unknown): Label | null {
+  if (!isRecord(entry)) return null;
+  const id = str(entry.id);
+  const name = str(entry.name);
+  if (id === undefined || name === undefined) return null;
+  const type = str(entry.type);
+  return { id, name, ...(type !== undefined ? { type } : {}) };
+}
+
+function gmailLabels(raw: unknown): Labels | null {
+  const body = unwrapComposioEnvelope(raw);
+  if (!isRecord(body) || !Array.isArray(body.labels)) return null;
+  const labels = body.labels.map(labelOf).filter((label): label is Label => label !== null);
+  return labels.length > 0 ? { labels, count: labels.length } : null;
+}
+
+/** Composio names the id `messageId`; the action declares `id`, and a ref is only id + thread. */
+function messageRefOf(entry: unknown): MessageRef | null {
+  if (!isRecord(entry)) return null;
+  const id = str(entry.id) ?? str(entry.messageId);
+  const threadId = str(entry.threadId) ?? str(entry.thread_id);
+  return id !== undefined && threadId !== undefined ? { id, threadId } : null;
+}
+
+function gmailMessages(raw: unknown): Messages | null {
+  const body = unwrapComposioEnvelope(raw);
+  if (!isRecord(body) || !Array.isArray(body.messages)) return null;
+  const messages = body.messages.map(messageRefOf).filter((ref): ref is MessageRef => ref !== null);
+  return messages.length === body.messages.length ? { messages, count: messages.length } : null;
+}
+
+function calendarEntryOf(entry: unknown): CalendarEntry | null {
+  if (!isRecord(entry)) return null;
+  const id = str(entry.id);
+  const summary = str(entry.summary);
+  if (id === undefined || summary === undefined) return null;
+  const description = str(entry.description);
+  const accessRole = str(entry.accessRole);
+  const timeZone = str(entry.timeZone);
+  return {
+    id,
+    summary,
+    ...(description !== undefined ? { description } : {}),
+    ...(entry.primary === true ? { primary: true } : {}),
+    ...(accessRole !== undefined ? { accessRole } : {}),
+    ...(timeZone !== undefined ? { timeZone } : {}),
+  };
+}
+
+function calendarList(raw: unknown): Calendars | null {
+  const body = unwrapComposioEnvelope(raw);
+  if (!isRecord(body) || !Array.isArray(body.calendars)) return null;
+  const calendars = body.calendars
+    .map(calendarEntryOf)
+    .filter((entry): entry is CalendarEntry => entry !== null);
+  return calendars.length > 0 ? { calendars, count: calendars.length } : null;
+}
+
+/** Google's Event resource carries etag/kind/sequence the action does not declare. */
+function eventOf(entry: unknown): Event | null {
+  if (!isRecord(entry)) return null;
+  const id = str(entry.id);
+  if (id === undefined) return null;
+  const pick = (key: string): Record<string, string> => {
+    const value = str(entry[key]);
+    return value !== undefined ? { [key]: value } : {};
+  };
+  const object = (key: string): Record<string, unknown> =>
+    isRecord(entry[key]) ? { [key]: entry[key] } : {};
+  return {
+    id,
+    ...pick('status'),
+    ...pick('htmlLink'),
+    ...pick('summary'),
+    ...pick('description'),
+    ...pick('location'),
+    ...pick('created'),
+    ...pick('updated'),
+    ...pick('recurringEventId'),
+    ...object('start'),
+    ...object('end'),
+    ...object('organizer'),
+    ...(Array.isArray(entry.attendees) ? { attendees: entry.attendees } : {}),
+  };
+}
+
+function calendarEvent(raw: unknown): Event | null {
+  return eventOf(unwrapComposioEnvelope(raw));
+}
+
+/** The events list answers with Google's `items`; the action declares `events` and a count. */
+function calendarEvents(raw: unknown): Events | null {
+  const body = unwrapComposioEnvelope(raw);
+  if (!isRecord(body) || !Array.isArray(body.items)) return null;
+  const events = body.items.map(eventOf).filter((event): event is Event => event !== null);
+  return events.length === body.items.length ? { events, count: events.length } : null;
+}
+
+/** Composio answers `{status: "success"}`; the action declares which event went. */
+function calendarDeleted(raw: unknown, props: Props): Deleted | null {
+  const body = unwrapComposioEnvelope(raw);
+  const eventId = str(props.eventId);
+  if (!isRecord(body) || eventId === undefined) return null;
+  const status = str(body.status);
+  if (status !== 'success' && body.deleted !== true) return null;
+  return { deleted: true, eventId };
+}
+
 const SHAPES: ReadonlyMap<string, Shaper> = new Map<string, Shaper>([
   ['sheets.create_spreadsheet', createSpreadsheet],
   ['sheets.read_range', readRange],
@@ -170,6 +302,14 @@ const SHAPES: ReadonlyMap<string, Shaper> = new Map<string, Shaper>([
   ['drive.list_files', listFiles],
   ['drive.get_file', getFile],
   ['drive.create_folder', getFile],
+  ['gmail.get_profile', gmailProfile],
+  ['gmail.list_labels', gmailLabels],
+  ['gmail.list_messages', gmailMessages],
+  ['calendar.list_calendars', calendarList],
+  ['calendar.create_google_calendar_event', calendarEvent],
+  ['calendar.update_event', calendarEvent],
+  ['calendar.google_calendar_get_events', calendarEvents],
+  ['calendar.delete_event', calendarDeleted],
 ]);
 
 /** The action's documented output, from whatever the Composio rail returned. Unmapped types pass through. */

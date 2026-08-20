@@ -138,8 +138,9 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     };
     const res = await request(app.getHttpServer()).post('/api/runs').send({ plan }).expect(201);
 
-    // The run returned the tool's payload (the live typed-execution shape).
-    expect(res.body.outputs.profile).toEqual({ response_data: GMAIL_PROFILE });
+    // The step answers in the ACTION's declared shape, not the rail's: Composio's `response_data`
+    // envelope is theirs, and a step's `{{refs}}` must not depend on how the user connected.
+    expect(res.body.outputs.profile).toEqual(GMAIL_PROFILE);
 
     // Typed execution got the call, bound to the managed account + our user id.
     expect(toolCalls).toHaveLength(1);
@@ -170,7 +171,8 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
       ],
     };
     const res = await request(app.getHttpServer()).post('/api/runs').send({ plan }).expect(201);
-    expect(res.body.outputs.list).toEqual({ messages: [], nextPageToken: null, resultSizeEstimate: 0 });
+    // `nextPageToken`/`resultSizeEstimate` are Gmail's paging, not the action's output.
+    expect(res.body.outputs.list).toEqual({ messages: [], count: 0 });
 
     // The curated override mapped our props onto GMAIL_FETCH_EMAILS arguments.
     expect(toolCalls).toHaveLength(1);

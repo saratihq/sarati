@@ -143,6 +143,156 @@ describe('Composio output alignment', () => {
     });
   });
 
+  it('gmail profile: the envelope comes off and nothing else changes', () => {
+    const live = {
+      response_data: {
+        emailAddress: 'huzefa@sarati.io',
+        historyId: '3267',
+        messagesTotal: 5,
+        threadsTotal: 5,
+      },
+    };
+    expect(alignComposioOutput('gmail.get_profile', live, {})).toEqual({
+      emailAddress: 'huzefa@sarati.io',
+      historyId: '3267',
+      messagesTotal: 5,
+      threadsTotal: 5,
+    });
+  });
+
+  it("gmail labels: the picker's id and name, not Gmail's visibility flags, plus a count", () => {
+    const live = {
+      labels: [
+        {
+          id: 'CHAT',
+          labelListVisibility: 'labelHide',
+          messageListVisibility: 'hide',
+          name: 'CHAT',
+          type: 'system',
+        },
+        { id: 'SENT', name: 'SENT', type: 'system' },
+      ],
+    };
+    expect(alignComposioOutput('gmail.list_labels', live, {})).toEqual({
+      labels: [
+        { id: 'CHAT', name: 'CHAT', type: 'system' },
+        { id: 'SENT', name: 'SENT', type: 'system' },
+      ],
+      count: 2,
+    });
+  });
+
+  it('gmail messages: `messageId` becomes the declared `id`, and a ref is only id + thread', () => {
+    const live = {
+      messages: [
+        {
+          attachmentList: [],
+          labelIds: ['UNREAD', 'INBOX'],
+          messageId: '1a01e98547b30c3e',
+          messageText: 'body text',
+          preview: {},
+          sender: 'a@b.com',
+          subject: 'hi',
+          threadId: '1a01e98547b30c3e',
+        },
+      ],
+      nextPageToken: 'x',
+      resultSizeEstimate: 1,
+    };
+    expect(alignComposioOutput('gmail.list_messages', live, {})).toEqual({
+      messages: [{ id: '1a01e98547b30c3e', threadId: '1a01e98547b30c3e' }],
+      count: 1,
+    });
+  });
+
+  it("calendar list: the entry the picker reads, without Google's colours and etags", () => {
+    const live = {
+      calendars: [
+        {
+          accessRole: 'owner',
+          backgroundColor: '#9fe1e7',
+          colorId: '14',
+          conferenceProperties: { allowedConferenceSolutionTypes: ['hangoutsMeet'] },
+          etag: '"abc"',
+          id: 'huzefa@sarati.io',
+          kind: 'calendar#calendarListEntry',
+          primary: true,
+          summary: 'huzefa@sarati.io',
+          timeZone: 'Asia/Dubai',
+        },
+      ],
+    };
+    expect(alignComposioOutput('calendar.list_calendars', live, {})).toEqual({
+      calendars: [
+        {
+          id: 'huzefa@sarati.io',
+          summary: 'huzefa@sarati.io',
+          primary: true,
+          accessRole: 'owner',
+          timeZone: 'Asia/Dubai',
+        },
+      ],
+      count: 1,
+    });
+  });
+
+  it('calendar create: the declared event, with the API envelope and its etag left behind', () => {
+    const live = {
+      response_data: {
+        created: '2026-08-20T21:40:00.000Z',
+        end: { dateTime: '2027-01-04T10:15:00Z' },
+        etag: '"3521"',
+        eventType: 'default',
+        htmlLink: 'https://calendar.google.com/event?eid=x',
+        iCalUID: 'x@google.com',
+        id: '5f9orusra3glg6sa946d6b4rps',
+        kind: 'calendar#event',
+        organizer: { email: 'huzefa@sarati.io', self: true },
+        sequence: 0,
+        start: { dateTime: '2027-01-04T10:00:00Z' },
+        status: 'confirmed',
+        summary: 'Sarati shape probe',
+      },
+    };
+    const shaped = alignComposioOutput('calendar.create_google_calendar_event', live, {}) as Record<
+      string,
+      unknown
+    >;
+    expect(shaped).toMatchObject({
+      id: '5f9orusra3glg6sa946d6b4rps',
+      status: 'confirmed',
+      summary: 'Sarati shape probe',
+      start: { dateTime: '2027-01-04T10:00:00Z' },
+    });
+    expect(shaped.etag).toBeUndefined();
+    expect(shaped.kind).toBeUndefined();
+  });
+
+  it('calendar update answers WITHOUT the envelope, and reads the same either way', () => {
+    const live = { id: 'evt-1', status: 'confirmed', summary: 'RENAMED', etag: '"9"' };
+    expect(alignComposioOutput('calendar.update_event', live, {})).toEqual({
+      id: 'evt-1',
+      status: 'confirmed',
+      summary: 'RENAMED',
+    });
+  });
+
+  it('calendar delete: `{status:"success"}` becomes the id that went', () => {
+    const live = { response_data: { status: 'success' } };
+    expect(alignComposioOutput('calendar.delete_event', live, { eventId: 'evt-1' })).toEqual({
+      deleted: true,
+      eventId: 'evt-1',
+    });
+  });
+
+  it("calendar events: Google's `items` becomes the declared `events`", () => {
+    const live = { accessRole: 'owner', items: [{ id: 'e1', summary: 'Standup' }], kind: 'calendar#events' };
+    expect(alignComposioOutput('calendar.google_calendar_get_events', live, {})).toEqual({
+      events: [{ id: 'e1', summary: 'Standup' }],
+      count: 1,
+    });
+  });
+
   it('passes an unmapped action through untouched rather than guessing at it', () => {
     const raw = { anything: true };
     expect(alignComposioOutput('slack.send_channel_message', raw, {})).toBe(raw);
