@@ -110,6 +110,13 @@ async function runConnect(linkFn: LinkFn): Promise<ConnectOutcome> {
 }
 
 /** connectManagedApp + the ONE set of outcome toasts; returns the connection id, or null (already toasted). */
+/** `Authorized against orchestr (T0BFMNPDEQ2)` — the pair someone can compare with the provider. */
+function describeAccount(account: { name: string | null; id: string | null }): string {
+  const named = account.name ?? account.id ?? "an unnamed account";
+  const suffix = account.name && account.id ? ` (${account.id})` : "";
+  return `Authorized against ${named}${suffix}.`;
+}
+
 export async function connectAppWithFeedback(
   app: string,
   appName: string,
@@ -119,7 +126,12 @@ export async function connectAppWithFeedback(
   const { toast } = await import("@/lib/toast");
   const outcome = await connectManagedApp(app, linkFn);
   if (outcome.ok) {
-    toast.success(`Connected ${appName}`);
+    // Say WHICH account was just linked: a connection authorized against the wrong workspace is
+    // healthy in every other respect, and this is the moment that mistake is cheapest to catch.
+    const named = await api
+      .connectionAccount(outcome.connectionId, true)
+      .catch(() => null);
+    toast.success(`Connected ${appName}`, named?.account ? describeAccount(named.account) : undefined);
     return outcome.connectionId;
   }
   switch (outcome.reason) {

@@ -1542,8 +1542,9 @@ export interface ConnectionAccount {
   detail: string;
 }
 
-export async function connectionAccount(id: string): Promise<ConnectionAccount> {
-  return request<ConnectionAccount>(`/connections/${encodeURIComponent(id)}/account`);
+export async function connectionAccount(id: string, refresh = false): Promise<ConnectionAccount> {
+  const query = refresh ? "?refresh=1" : "";
+  return request<ConnectionAccount>(`/connections/${encodeURIComponent(id)}/account${query}`);
 }
 
 export async function listConnections(): Promise<{

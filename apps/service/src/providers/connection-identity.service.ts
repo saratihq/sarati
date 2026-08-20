@@ -37,9 +37,13 @@ const PROBES: ReadonlyMap<string, IdentityProbe> = new Map<string, IdentityProbe
   ['drive', GOOGLE_ACCOUNT],
 ]);
 
+/** Long enough that opening a dialog is one call per connection, short enough that a re-auth surfaces. */
+const IDENTITY_TTL_MS = 10 * 60 * 1000;
+
 @Injectable()
 export class ConnectionIdentityService {
   private readonly logger = new Logger(ConnectionIdentityService.name);
+  private readonly cache = new Map<string, { at: number; identity: AccountIdentity | null }>();
 
   constructor(private readonly router: ActionRouterProvider) {}
 
@@ -47,6 +51,8 @@ export class ConnectionIdentityService {
   async probe(userId: string, connectionId: string, provider: string): Promise<AccountIdentity | null> {
     const probe = PROBES.get(provider);
     if (!probe) return null;
+    const cached = this.cache.get(connectionId);
+    if (cached && Date.now() - cached.at < IDENTITY_TTL_MS) return cached.identity;
     try {
       const result = await this.router.runAction({
         externalUserId: userId,
@@ -54,13 +60,20 @@ export class ConnectionIdentityService {
         props: { ...probe.props, connectionId },
         auth: { connectionId },
       });
-      return identityFrom(result.output, probe);
+      const identity = identityFrom(result.output, probe);
+      this.cache.set(connectionId, { at: Date.now(), identity });
+      return identity;
     } catch (err) {
       this.logger.warn(
         `Connection ${connectionId} (${provider}): identity probe failed: ${errorMessage(err)}`,
       );
       return null;
     }
+  }
+
+  /** Drop a cached answer — a reconnect can point the same row at a different account. */
+  forget(connectionId: string): void {
+    this.cache.delete(connectionId);
   }
 
   /** Whether this app can be asked at all — the caller says "unknown" rather than "no account". */

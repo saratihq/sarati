@@ -103,18 +103,39 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
 
   // The band shows EVERY connection with its status: pending/failed rows would otherwise be
   // invisible and unrecoverable. The grid's de-dup reads the same list.
+  /** Which account each connection answers as, once known — kept for the life of the dialog. */
+  const [accounts, setAccounts] = useState<Record<string, { name: string | null; id: string | null }>>({});
+
+  /**
+   * Which account each connection answers as. Filled in after the list lands rather than blocking
+   * it: each answer is a real provider call, cached service-side, and a chip without one is honest.
+   */
+  const fillAccounts = useCallback((rows: Connection[]) => {
+    for (const row of rows) {
+      void api
+        .connectionAccount(row.id)
+        .then(({ account }) => {
+          if (account) setAccounts((prev) => ({ ...prev, [row.id]: account }));
+        })
+        .catch(() => {
+          /* identity is additive — a connection that cannot answer just stays unlabelled */
+        });
+    }
+  }, []);
+
   const refreshConnections = useCallback(() => {
     api
       .listConnections()
       .then(({ connections: c }) => {
         setConnections(c);
         setConnectionsLoaded(true);
+        fillAccounts(c);
         useNodeIcons.getState().fetchIcons(c.map((x) => `${x.provider}.connection`));
       })
       .catch(() => {
         /* the connect toast already reported; list catches up next open */
       });
-  }, []);
+  }, [fillAccounts]);
 
   // The full catalog is fetched once and filtered client-side; the curation needs the whole list.
   const fetchApps = useCallback(() => {
@@ -194,8 +215,6 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
 
   // On-demand health check; the service's `detail` is already plain language, so it toasts verbatim.
   const [testingId, setTestingId] = useState<string | null>(null);
-  /** Which account each connection answered as, once tested — kept for the life of the dialog. */
-  const [accounts, setAccounts] = useState<Record<string, { name: string | null; id: string | null }>>({});
   const testConn = async (c: Connection) => {
     if (testingId) return;
     setTestingId(c.id);
