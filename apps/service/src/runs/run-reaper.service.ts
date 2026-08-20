@@ -6,6 +6,7 @@ import type { DataSource } from 'typeorm';
 import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import { rawMutate } from '../database/raw-query';
+import { TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
 
 export interface ReapResult {
   crashedRuns: number;
@@ -64,24 +65,34 @@ export class RunReaperService implements OnApplicationBootstrap {
     );
 
     // (B) `waiting` HITL runs past their approval window — the decision path already
-    //     rejects a late approval, so the run can never resume anyway.
+    //     rejects a late approval, so the run can never resume anyway. A TIMER wait is exempt:
+    //     its timeout is the wake, not a deadline someone missed. It is only stale once it is
+    //     that far past its own wake time, which means nothing brought it back.
     const timedOutWaits = await rawMutate(
       em,
       `UPDATE runtime_runs
           SET status = 'error', finished_at = now(),
-              error = COALESCE(error, 'Approval window expired before a decision was recorded.'),
+              error = COALESCE(error, CASE WHEN waiting_topic LIKE $2 || '%'
+                THEN 'The run never woke from a scheduled wait — the worker was down when it was due.'
+                ELSE 'Approval window expired before a decision was recorded.' END),
               waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
-        WHERE status = 'waiting' AND waiting_timeout_at IS NOT NULL AND waiting_timeout_at < now()`,
-      [],
+        WHERE status = 'waiting' AND waiting_timeout_at IS NOT NULL
+          AND waiting_timeout_at < CASE WHEN waiting_topic LIKE $2 || '%' THEN ${cutoff} ELSE now() END`,
+      [seconds, TIMER_TOPIC_SQL_PREFIX],
     );
 
-    // (C) orphan steps left `running` past the window — same time rule, no join needed.
+    // (C) orphan steps left `running` past the window. A step whose run is PARKED is not stale —
+    //     the wait step stays `running` for as long as the run is deliberately asleep, and reaping
+    //     it would mark a healthy run's step failed while the run itself waits on.
     const orphanSteps = await rawMutate(
       em,
-      `UPDATE runtime_run_steps
+      `UPDATE runtime_run_steps s
           SET status = 'error', finished_at = now(),
-              error = COALESCE(error, 'Step did not complete — the run was reaped.')
-        WHERE status = 'running' AND started_at < ${cutoff}`,
+              error = COALESCE(s.error, 'Step did not complete — the run was reaped.')
+        WHERE s.status = 'running' AND s.started_at < ${cutoff}
+          AND NOT EXISTS (
+            SELECT 1 FROM runtime_runs r WHERE r.id = s.run_id AND r.status = 'waiting'
+          )`,
       [seconds],
     );
 

@@ -66,6 +66,22 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     },
   },
   {
+    name: 'Wait',
+    type: 'orchestr:wait_for_duration',
+    category: 'control',
+    description:
+      'Pause the run for a set time, then carry on — minutes, hours or days. The run parks rather than staying in flight, so a wait of days costs nothing while it sleeps and is not cut short by the maximum run duration. Use it for a follow-up ("chase this in 3 days"), a drip sequence, or a cooling-off period. To wait for a PERSON instead, use the wait-for-event step.',
+    auth: 'none',
+    parameters: {
+      amount: { type: 'number', description: 'How long to wait, e.g. 3', required: true },
+      unit: {
+        type: 'string',
+        description: 'One of: minutes, hours, days',
+        required: true,
+      },
+    },
+  },
+  {
     name: 'Wait for event',
     type: 'orchestr:wait_for_event',
     category: 'control',

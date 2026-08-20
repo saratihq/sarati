@@ -201,6 +201,8 @@ function pinnedControlTypes(query: string): Array<Record<string, unknown>> {
     if (type === 'orchestr:if') return /\b(if|branch|condition|else|compare|threshold)\b/.test(q);
     if (type === 'orchestr:switch')
       return /\b(switch|route|router|case|cases|multi-?way|dispatch|by (status|type|value))\b/.test(q);
+    if (type === 'orchestr:wait_for_duration')
+      return /\b(wait|delay|pause|later|follow.?up|drip|days?|hours?|minutes?|sleep)\b/.test(q);
     if (type === 'orchestr:wait_for_event') return /\b(wait|approval|approve|pause|event)\b/.test(q);
     if (type === 'orchestr:loop')
       return /\b(loop|for ?each|iterate|repeat|per item|each item|while|until|poll)\b/.test(q);
