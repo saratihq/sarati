@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { repairDocumentLayout } from '../compose/apply-ops';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
@@ -123,6 +124,7 @@ export class WorkflowLifecycleService {
       await em.save(WorkflowEntity, wf);
 
       const branch = await this.versionsWrite.ensureDefaultBranch(em, wf);
+      repairDocumentLayout(irDoc);
       const version = em.create(WorkflowVersionEntity, {
         id: newId(),
         workflowId: wf.id,

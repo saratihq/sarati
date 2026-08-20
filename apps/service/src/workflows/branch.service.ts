@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { repairDocumentLayout } from '../compose/apply-ops';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
@@ -314,6 +315,7 @@ export class BranchService {
       // `author` is a display string, not an actor id — resolved here so BOTH merge entry points inherit it.
       const actingUser = userId ? await em.findOne(UserEntity, { where: { id: userId } }) : null;
 
+      repairDocumentLayout(mergedJson, result.merged as unknown as Record<string, unknown>);
       const mergeVersion = em.create(WorkflowVersionEntity, {
         id: newId(),
         workflowId,
