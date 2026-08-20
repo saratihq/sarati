@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { repairDocumentLayout } from '../compose/apply-ops';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
@@ -516,6 +517,7 @@ export class VersionsWriteService {
     },
   ): Promise<WorkflowVersionEntity> {
     const { wf, branch } = args;
+    repairDocumentLayout(args.workflowIr, args.workflowJson);
 
     const maxRow = await rawQuery<{ max: number }>(
       em,

@@ -422,6 +422,66 @@ function layoutNewNodes(ir: WorkflowIR, newIds: Set<string>): void {
   }
 }
 
+/**
+ * Whether two nodes are close enough to cover each other. `X_PITCH`/`Y_PITCH` are the grid a node
+ * is placed on, so anything tighter than one cell in both axes is an overlap by construction —
+ * no second copy of the node's on-screen size to keep in step with the client's.
+ */
+function overlapping(a: IRNode, b: IRNode): boolean {
+  return Math.abs(a.position.x - b.position.x) < X_PITCH && Math.abs(a.position.y - b.position.y) < Y_PITCH;
+}
+
+/**
+ * Re-place ONLY the nodes that sit on top of another, on the same grid a new node lands on.
+ * A document written elsewhere — by an agent, by the API, by hand — can arrive with coordinates
+ * tighter than a node is wide, and the canvas then renders the chain as one unreadable block.
+ * A deliberate layout never overlaps, so it is left byte-identical and the content key is unchanged.
+ */
+export function separateOverlappingNodes(ir: WorkflowIR): boolean {
+  const clashing = new Set<string>();
+  for (let i = 0; i < ir.nodes.length; i += 1) {
+    for (let j = i + 1; j < ir.nodes.length; j += 1) {
+      if (overlapping(ir.nodes[i]!, ir.nodes[j]!)) clashing.add(ir.nodes[j]!.id);
+    }
+  }
+  if (clashing.size === 0) return false;
+  layoutNewNodes(ir, clashing);
+  return true;
+}
+
+/**
+ * Repair overlap in a document as it lands, across both mirrors a version carries. Called wherever
+ * a version row is BUILT — commit, deploy and merge — because a document can arrive from an agent,
+ * the API or a hand-written IR with nodes closer than a node is wide, and the canvas then renders
+ * the chain as one unreadable block. A deliberate layout never overlaps and passes through
+ * byte-identical, so the content key never moves.
+ */
+export function repairDocumentLayout(...docs: Array<Record<string, unknown> | null | undefined>): void {
+  for (const doc of docs) {
+    const nodes = (doc as { nodes?: unknown } | null | undefined)?.nodes;
+    if (!Array.isArray(nodes) || nodes.length === 0) continue;
+    const ir = doc as unknown as WorkflowIR;
+    if (ir.nodes.every((n) => typeof n?.position?.x === 'number' && typeof n?.position?.y === 'number')) {
+      separateOverlappingNodes(ir);
+    }
+  }
+}
+
+/**
+ * Lay out EVERY node from scratch on the same grid a NEW node lands on. Roots seed the first
+ * column; the rest fall out of the same placement rules.
+ */
+export function layoutAllNodes(ir: WorkflowIR): void {
+  const targets = new Set(ir.edges.map((e) => e.target_node_id));
+  const roots = ir.nodes.filter((n) => !targets.has(n.id));
+  const seeded = roots.length > 0 ? roots : ir.nodes.slice(0, 1);
+  seeded.forEach((node, i) => {
+    node.position = { x: X0, y: CENTER_Y + i * Y_PITCH };
+  });
+  const seededIds = new Set(seeded.map((n) => n.id));
+  layoutNewNodes(ir, new Set(ir.nodes.filter((n) => !seededIds.has(n.id)).map((n) => n.id)));
+}
+
 function applyOne(ir: WorkflowIR, op: ComposeOp, ctx: ApplyContext): string {
   switch (op.op) {
     case 'add_node':
