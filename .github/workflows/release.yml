@@ -38,10 +38,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker Hub is the surface people SEARCH; ghcr is the one the compose file, the installer
+      # and `verify` use, because a public ghcr pull has no rate limit and Docker Hub caps
+      # anonymous pulls at 100/6h per IP — a shared NAT or CI runner would fail a first install.
+      # The `secrets` context is not available in a step `if`, so the org VARIABLE is the gate:
+      # unset it and the release still publishes to ghcr exactly as before.
+      - id: hub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/sarati-${{ matrix.app }}
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sarati-${{ matrix.app }}
+            ${{ steps.hub.outcome == 'success' && format('docker.io/{0}/sarati-{1}', vars.DOCKERHUB_USERNAME, matrix.app) || '' }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
