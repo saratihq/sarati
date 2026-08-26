@@ -1,7 +1,7 @@
 ---
 title: Sarati
 description: Build automations on a canvas. Branch, review and merge them like code. Run them on an engine that survives a restart.
-template: splash
+tableOfContents: false
 hero:
   tagline: Build automations on a canvas. Branch, review and merge them like code. Run them on an engine that survives a restart.
   actions:
@@ -11,13 +11,6 @@ hero:
       variant: primary
     - text: Your first workflow
       link: /start/first-workflow/
-      variant: minimal
-    - text: How Sarati works
-      link: /start/how-it-works/
-      variant: minimal
-    - text: GitHub
-      link: https://github.com/saratihq/sarati
-      icon: external
       variant: minimal
 ---
 
