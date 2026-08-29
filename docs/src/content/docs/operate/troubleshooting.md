@@ -136,6 +136,12 @@ installer.
 ## Reading the logs
 
 ```bash
+docker logs -f sarati
+```
+
+Under compose, per service:
+
+```bash
 cd sarati && docker compose logs -f service
 ```
 

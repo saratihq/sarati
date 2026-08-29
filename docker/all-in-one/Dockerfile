@@ -14,6 +14,7 @@ FROM node:24-alpine
 # Setting one here leaked 8001 into the agent and the two fought over the port.
 ENV NODE_ENV=production \
     PGDATA=/data/postgres \
+    SARATI_SERVICE_DIR=/opt/sarati/service \
     PATH=/usr/libexec/postgresql16:$PATH
 
 # Real Postgres, not an embedded stand-in: the engine runs two processes against one database and

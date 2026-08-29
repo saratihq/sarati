@@ -63,4 +63,10 @@ export PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-$SARATI_URL}"
 export WORKFLOW_SERVICE_URL="${WORKFLOW_SERVICE_URL:-http://127.0.0.1:8001}"
 export DATABASE_URL
 
+# `docker exec` starts from the image environment, so the recovery tools an operator runs that way
+# would not see anything computed above. Leave it where they can read it.
+printf 'DATABASE_URL=%s\n' "$DATABASE_URL" > /data/runtime.env
+chmod 600 /data/runtime.env
+chown node:node /data/runtime.env
+
 exec /usr/bin/supervisord -c /etc/supervisord.conf

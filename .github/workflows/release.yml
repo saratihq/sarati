@@ -267,5 +267,15 @@ jobs:
             -d '{"email":"ci@example.com","password":"a-long-enough-passphrase","name":"CI"}' >/dev/null
           curl -fsS http://localhost:8080/api/auth/local/status | grep -q '"awaiting_bootstrap":false'
           echo "the one-container install works from an empty volume"
+      # Account recovery is the documented way out of a lockout, and `docker exec` starts from the
+      # image environment rather than boot's — so it has to be exercised, not assumed.
+      - name: Walk the documented recovery command
+        run: |
+          printf 'a-different-long-passphrase\na-different-long-passphrase\n' \
+            | docker exec -i sarati-aio sarati-set-password ci@example.com
+          curl -fsS -X POST http://localhost:8080/api/auth/local/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"a-different-long-passphrase"}' >/dev/null
+          echo "the documented password reset works in the one-container install"
       - if: failure()
         run: docker logs sarati-aio 2>&1 | tail -100
