@@ -69,5 +69,11 @@ Passwords are at least 12 characters — length beats symbols. If someone is loc
 with shell access can reset one:
 
 ```bash
+docker exec -it sarati sarati-set-password someone@example.com
+```
+
+Under compose:
+
+```bash
 docker compose exec service sarati-set-password someone@example.com
 ```

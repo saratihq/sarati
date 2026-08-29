@@ -3,16 +3,22 @@ title: Configuration
 description: Every setting goes in your install's .env.
 ---
 
-Put settings in the `.env` file next to your `docker-compose.yaml`, then:
+In the one-container install, settings are `-e` flags:
+
+```bash
+docker run -d --name sarati -p 8080:8080 -v sarati:/data -e LOG_LEVEL=debug sarati/sarati
+```
+
+Under compose, they go in the `.env` file next to your `docker-compose.yaml`, then:
 
 ```bash
 docker compose up -d
 ```
 
-Anything in that file reaches the service and the composer. Six values are owned by compose and
-should not be set by hand: `DATABASE_URL`, `SECRET_KEY`, `FERNET_KEY`, `CORS_ORIGINS`,
-`FRONTEND_URL` and `PUBLIC_BASE_URL` — those follow `SARATI_URL` and the installer's generated
-secrets.
+Either way they reach the service and the composer. Six values are owned by the install and should
+not be set by hand: `DATABASE_URL`, `SECRET_KEY`, `FERNET_KEY`, `CORS_ORIGINS`, `FRONTEND_URL` and
+`PUBLIC_BASE_URL` — those follow `SARATI_URL` and the generated secrets. Set `SARATI_URL`, never the
+three URLs it derives.
 
 ## What the installer writes
 
@@ -91,6 +97,10 @@ Running the Docker stack, not from a clone:
 carries development defaults, not these.
 
 ## Checking a setting landed
+
+```bash
+docker exec sarati printenv THROTTLE_LIMIT
+```
 
 ```bash
 docker compose exec service printenv THROTTLE_LIMIT

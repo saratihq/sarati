@@ -6,14 +6,16 @@ survives a restart.
 ![The composer planning a workflow, asking which email account to watch, then building a Gmail trigger and a Slack step with Connect buttons on both.](.github/assets/agent-at-work.gif)
 
 ```bash
-curl -fsSL https://get.sarati.io | sh
+docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 ```
 
-Open <http://localhost:8080> and create your account — the first one is the owner, everyone after joins
-by invite. Docker is the only requirement, and re-running the installer keeps your keys and your data.
-Rather read it first? It only fetches [`docker-compose.yaml`](docker-compose.yaml), generates this
-install's secrets, and starts it. From there, [docs.sarati.io](https://docs.sarati.io) walks the
-first workflow end to end.
+Open <http://localhost:8080> and create your account — the first one is the owner, everyone after
+joins by invite. Docker is the only requirement, and the `sarati` volume holds your data and the keys
+that decrypt your credentials, so it outlives every upgrade.
+
+Want the pieces as separate containers instead? `curl -fsSL https://get.sarati.io | sh` fetches
+[`docker-compose.yaml`](docker-compose.yaml), generates this install's secrets, and starts five of
+them. From there, [docs.sarati.io](https://docs.sarati.io) walks the first workflow end to end.
 
 ## Why
 

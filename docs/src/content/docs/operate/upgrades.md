@@ -5,6 +5,22 @@ description: Move to a new version without losing anything, and be able to go ba
 
 ## Upgrade
 
+### One container
+
+```bash
+docker pull sarati/sarati
+```
+
+```bash
+docker rm -f sarati && docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
+```
+
+Removing the container removes nothing you care about — the database and the keys are in the
+`sarati` volume, and the new one picks them up. Pin a version by naming it, `sarati/sarati:0.2.4`,
+instead of tracking `latest`.
+
+### Five containers
+
 Stop the stack first, then re-run the installer in the same directory:
 
 ```bash
@@ -39,9 +55,59 @@ Pin a version instead of tracking `latest` with `SARATI_VERSION` in `.env`.
 
 Everything in the volumes: workflows, versions, branches, reviews, runs, users, and stored
 credentials. An upgrade over an existing install keeps the same workflow count and leaves connected
-accounts `active`, because `FERNET_KEY` in the untouched `.env` still decrypts them.
+accounts `active`, because the `FERNET_KEY` it already had still decrypts them.
 
-## Back up
+## Back up — one container
+
+Everything lives in one volume, so the complete backup is that volume. Stop the container first: a
+database copied while it is running is not a consistent copy.
+
+```bash
+docker stop sarati
+```
+
+```bash
+docker run --rm -v sarati:/data -v "$PWD":/backup alpine tar czf /backup/sarati-data.tgz -C /data .
+```
+
+```bash
+docker start sarati
+```
+
+Restore by unpacking into a fresh volume and starting a container on it:
+
+```bash
+docker run --rm -v sarati-restored:/data -v "$PWD":/backup alpine tar xzf /backup/sarati-data.tgz -C /data
+```
+
+```bash
+docker run -d --name sarati -p 8080:8080 -v sarati-restored:/data sarati/sarati
+```
+
+### Without stopping it
+
+A dump plus the keys, with no downtime. This covers workflows, versions, users and credentials, but
+not the checkpoints of runs that are in flight — those live in a second database the dump does not
+reach.
+
+```bash
+docker exec sarati pg_dump --clean --if-exists --exclude-schema=pgboss -h 127.0.0.1 -U sarati sarati > sarati-backup.sql
+```
+
+```bash
+docker cp sarati:/data/secrets.env sarati-secrets.env
+```
+
+**The dump is useless without that second file.** It holds `FERNET_KEY`, and no other key can
+decrypt the credentials inside the dump.
+
+Load one back, then restart so the engine reconnects:
+
+```bash
+docker exec -i sarati psql -h 127.0.0.1 -U sarati sarati < sarati-backup.sql && docker restart sarati
+```
+
+## Back up — five containers
 
 Two things, and you need both.
 
@@ -64,7 +130,7 @@ If the installer generated your keys onto the service's data volume instead of `
 unrecoverable — there is no reset.
 :::
 
-## Restore
+### Restore
 
 ```bash
 cd sarati && docker compose down
@@ -86,10 +152,16 @@ docker compose up -d
 
 ## Start over
 
-To wipe the instance and its data:
+To wipe a one-container instance and its data:
+
+```bash
+docker rm -f sarati && docker volume rm sarati
+```
+
+Or a compose one:
 
 ```bash
 cd sarati && docker compose down -v
 ```
 
-That deletes the volumes. Everything goes, including credentials.
+Either deletes the volumes. Everything goes, including credentials.
