@@ -258,7 +258,15 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
       const before = await runCount();
       const res = await deliverSignedWith(WEBHOOK_SECRET).expect(202);
       expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
-      expect(await runCount()).toBe(before + 1);
+      // 202 says the delivery was ACCEPTED and dispatched; the run row lands after. Poll for it,
+      // like every other assertion here — reading the count straight after the response is a race
+      // that only loses on a busy machine.
+      let created = 0;
+      for (let i = 0; i < 40 && created === 0; i++) {
+        created = (await runCount()) - before;
+        if (created === 0) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(created).toBe(1);
     });
 
     it("rejects a delivery signed with a DIFFERENT scope's secret", async () => {
