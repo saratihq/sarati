@@ -1,0 +1,34 @@
+# Same routing as the compose proxy, with the services on loopback instead of a network.
+# Order matters: the composer's routes are a subpath of the service's `/api`.
+
+:8080 {
+	handle /api/composer/* {
+		reverse_proxy 127.0.0.1:8010
+	}
+
+	# Service-to-service only: how agent-service reads the stored Anthropic key. No browser needs it.
+	handle /api/internal/* {
+		respond 404
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8001
+	}
+
+	# The agent-facing MCP endpoint — streams, so no buffering.
+	handle /mcp* {
+		reverse_proxy 127.0.0.1:8001 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	encode gzip
+	log {
+		output stdout
+		format console
+	}
+}

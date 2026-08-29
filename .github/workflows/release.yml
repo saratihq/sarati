@@ -73,10 +73,137 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.app }}
           cache-to: type=gha,mode=max,scope=${{ matrix.app }}
 
+  # The ONE image that is the product: `docker run -p 8080:8080 sarati/sarati`. Assembled from the
+  # three service images rather than rebuilt, so what ships here is what `verify` already proved.
+  all-in-one:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: hub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: version
+        run: |
+          V="${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}"
+          echo "value=${V#v}" >> "$GITHUB_OUTPUT"   # images are tagged 0.2.4, the ref is v0.2.4
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Named for the product, not a component: this is the one people type.
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sarati
+            ${{ steps.hub.outcome == 'success' && format('docker.io/{0}/sarati', vars.DOCKERHUB_USERNAME) || '' }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/all-in-one/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            REGISTRY=ghcr.io/${{ github.repository_owner }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # An image with an empty overview tells a visitor nothing — and Docker Hub does not read a GitHub
+  # README on its own; that only happened with Automated Builds, which are gone. The flagship gets
+  # the README, the component images get a line pointing at it (the shape n8n and activepieces use:
+  # `n8nio/base` has no overview at all, `activepieces/backend` carries only a pointer).
+  hub-description:
+    needs: all-in-one
+    if: vars.DOCKERHUB_USERNAME != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the README safe to render off GitHub
+        run: |
+          python3 docker/hub/hub-readme.py README.md > /tmp/hub-readme.md
+          printf '%s\n' \
+            'Part of [Sarati](https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/sarati) — run the whole product with one command:' \
+            '' \
+            '```bash' \
+            'docker run -p 8080:8080 -v sarati:/data ${{ vars.DOCKERHUB_USERNAME }}/sarati' \
+            '```' \
+            '' \
+            'This image is one service of that stack, for anyone running the [compose file](https://github.com/${{ github.repository }}/blob/main/docker-compose.yaml) instead.' \
+            > /tmp/component-readme.md
+
+      - name: The product image gets the README
+        uses: peter-evans/dockerhub-description@e98e4d1628a5f3be2be7c231e50981aee98723ae # v4.0.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/sarati
+          readme-filepath: /tmp/hub-readme.md
+          short-description: "Build automations on a canvas. Branch, review and merge them like code."
+
+      - name: Keep the component overviews for the next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-component-readme
+          path: /tmp/component-readme.md
+
+  # One per component image, so each says what it is and where the product lives.
+  hub-description-components:
+    needs: hub-description
+    if: vars.DOCKERHUB_USERNAME != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: service
+            summary: "Sarati's API and workflow engine — one service of the Sarati stack."
+          - app: client
+            summary: "Sarati's web UI — one service of the Sarati stack."
+          - app: agent
+            summary: "Sarati's AI composer — one service of the Sarati stack."
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-component-readme
+          path: /tmp
+      - uses: peter-evans/dockerhub-description@e98e4d1628a5f3be2be7c231e50981aee98723ae # v4.0.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/sarati-${{ matrix.app }}
+          readme-filepath: /tmp/component-readme.md
+          short-description: ${{ matrix.summary }}
+
   # Proves the published tag actually installs, using the compose file exactly as a
   # self-hoster gets it — a green build says nothing about whether the stack comes up.
   verify:
-    needs: images
+    needs: [images, all-in-one]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,3 +245,27 @@ jobs:
           echo "published stack installs and bootstraps"
       - if: failure()
         run: docker compose logs --no-color | tail -100
+
+      # The one-container install is a SUPPORTED install, so it is proved the same way: boot it
+      # with nothing but a port and walk the same first run. `docker compose down` first, because
+      # both want :8080.
+      - name: Start the published all-in-one, alone
+        run: |
+          docker compose down
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker run -d --name sarati-aio -p 8080:8080 -v sarati-aio:/data \
+            ghcr.io/${{ github.repository_owner }}/sarati:${VERSION:-latest}
+      - name: Wait for it to answer, then walk the first run
+        run: |
+          for i in $(seq 1 120); do
+            curl -fsS http://localhost:8080/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/health
+          curl -fsS -X POST http://localhost:8080/api/auth/local/register \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"a-long-enough-passphrase","name":"CI"}' >/dev/null
+          curl -fsS http://localhost:8080/api/auth/local/status | grep -q '"awaiting_bootstrap":false'
+          echo "the one-container install works from an empty volume"
+      - if: failure()
+        run: docker logs sarati-aio 2>&1 | tail -100
