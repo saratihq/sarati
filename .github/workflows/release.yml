@@ -129,6 +129,77 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+  # An image with an empty overview tells a visitor nothing — and Docker Hub does not read a GitHub
+  # README on its own; that only happened with Automated Builds, which are gone. The flagship gets
+  # the README, the component images get a line pointing at it (the shape n8n and activepieces use:
+  # `n8nio/base` has no overview at all, `activepieces/backend` carries only a pointer).
+  hub-description:
+    needs: all-in-one
+    if: vars.DOCKERHUB_USERNAME != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the README safe to render off GitHub
+        run: |
+          python3 docker/hub/hub-readme.py README.md > /tmp/hub-readme.md
+          printf '%s\n' \
+            'Part of [Sarati](https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/sarati) — run the whole product with one command:' \
+            '' \
+            '```bash' \
+            'docker run -p 8080:8080 -v sarati:/data ${{ vars.DOCKERHUB_USERNAME }}/sarati' \
+            '```' \
+            '' \
+            'This image is one service of that stack, for anyone running the [compose file](https://github.com/${{ github.repository }}/blob/main/docker-compose.yaml) instead.' \
+            > /tmp/component-readme.md
+
+      - name: The product image gets the README
+        uses: peter-evans/dockerhub-description@e98e4d1628a5f3be2be7c231e50981aee98723ae # v4.0.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/sarati
+          readme-filepath: /tmp/hub-readme.md
+          short-description: "Build automations on a canvas. Branch, review and merge them like code."
+
+      - name: Keep the component overviews for the next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-component-readme
+          path: /tmp/component-readme.md
+
+  # One per component image, so each says what it is and where the product lives.
+  hub-description-components:
+    needs: hub-description
+    if: vars.DOCKERHUB_USERNAME != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: service
+            summary: "Sarati's API and workflow engine — one service of the Sarati stack."
+          - app: client
+            summary: "Sarati's web UI — one service of the Sarati stack."
+          - app: agent
+            summary: "Sarati's AI composer — one service of the Sarati stack."
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hub-component-readme
+          path: /tmp
+      - uses: peter-evans/dockerhub-description@e98e4d1628a5f3be2be7c231e50981aee98723ae # v4.0.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/sarati-${{ matrix.app }}
+          readme-filepath: /tmp/component-readme.md
+          short-description: ${{ matrix.summary }}
+
   # Proves the published tag actually installs, using the compose file exactly as a
   # self-hoster gets it — a green build says nothing about whether the stack comes up.
   verify:
