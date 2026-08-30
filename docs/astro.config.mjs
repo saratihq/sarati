@@ -22,6 +22,8 @@ export default defineConfig({
       head: [
         // Safari and older browsers ignore an SVG favicon; the .ico is the fallback for them.
         { tag: 'link', attrs: { rel: 'icon', href: '/favicon.ico', sizes: '32x32' } },
+        // Saved to a home screen or a Safari bookmark, neither of the above is used.
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' } },
         {
           tag: 'script',
           attrs: {
