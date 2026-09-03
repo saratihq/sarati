@@ -1,0 +1,22 @@
+# Sarati — the whole product in one container.
+#
+#   curl -fsSL https://get.sarati.io | sh        (writes .env, then runs this)
+#
+# The sibling docker-compose.yaml runs the same product as five containers; the installer picks
+# this one for a fresh machine and keeps an existing install on whichever it was built with.
+name: sarati
+
+services:
+  sarati:
+    image: ghcr.io/saratihq/sarati:${SARATI_VERSION:-latest}
+    restart: unless-stopped
+    # Every documented setting reaches the product by being in .env. The keys are NOT here: the
+    # container generates them into the volume below, beside the database they decrypt.
+    env_file: [.env]
+    ports:
+      - '${SARATI_PORT:-8080}:8080'
+    volumes:
+      - data:/data
+
+volumes:
+  data:

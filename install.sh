@@ -1,8 +1,8 @@
 #!/bin/sh
-# Sarati installer.  curl -fsSL https://get.sarati.io | bash
+# Sarati installer.  curl -fsSL https://get.sarati.io | sh
 #
-# Fetches the stack definition, generates this install's secrets, and starts it. Re-running is
-# safe: an existing .env is never overwritten, so your keys and data survive an upgrade.
+# Fetches the stack definition, then starts it. Re-running is safe: an existing install keeps its
+# shape, its keys and its data.
 set -eu
 
 REPO="${SARATI_REPO:-saratihq/sarati}"
@@ -22,23 +22,56 @@ if command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
   die "Port $PORT is already in use. Re-run with SARATI_PORT=9090 (or any free port)."
 fi
 
-mkdir -p "$DIR/docker"
+mkdir -p "$DIR"
 cd "$DIR"
+
+# A fresh machine gets the one-container product. An install that already exists keeps the shape it
+# was built with — the two store their data differently, so switching underneath it would look
+# exactly like data loss. Anything installed before this existed is compose.
+project="${COMPOSE_PROJECT_NAME:-sarati}"
+if [ -n "${SARATI_STACK:-}" ]; then
+  stack="$SARATI_STACK"
+elif [ -f .env ] && grep -q '^SARATI_STACK=' .env; then
+  stack=$(sed -n 's/^SARATI_STACK=//p' .env | head -1)
+elif [ -f .env ] || docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
+  stack=compose
+else
+  stack=single
+fi
+case "$stack" in
+  single | compose) ;;
+  *) die "SARATI_STACK must be 'single' or 'compose', not '$stack'." ;;
+esac
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"
-for f in docker-compose.yaml docker/Caddyfile; do
-  curl -fsSL "$base/$f" -o "$f" || die "Could not download $f from $base"
-done
+if [ "$stack" = single ]; then
+  curl -fsSL "$base/docker-compose.single.yaml" -o docker-compose.yaml ||
+    die "Could not download docker-compose.single.yaml from $base"
+else
+  mkdir -p docker
+  for f in docker-compose.yaml docker/Caddyfile; do
+    curl -fsSL "$base/$f" -o "$f" || die "Could not download $f from $base"
+  done
+fi
 
 if [ -f .env ]; then
   say "Keeping the existing .env — your keys and data are untouched."
+elif [ "$stack" = single ]; then
+  # No secrets are generated here: the container writes its own into the data volume, beside the
+  # database they decrypt, so there is nothing that can be lost separately from the data.
+  cat > .env <<EOF
+SARATI_STACK=single
+SARATI_URL=http://localhost:${PORT}
+SARATI_PORT=${PORT}
+SARATI_VERSION=${SARATI_VERSION:-latest}
+EOF
+  chmod 600 .env
 else
   # The compose file pins one project name, so its volumes are shared by every install on this
   # machine unless COMPOSE_PROJECT_NAME says otherwise. Writing fresh secrets against an existing
   # database gives Postgres a password it never had (crash loop) and a FERNET_KEY that cannot
   # decrypt what the old one stored.
-  project="${COMPOSE_PROJECT_NAME:-sarati}"
   if docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
     die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
   Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
@@ -50,6 +83,7 @@ else
   # Base64url so the values are safe unquoted in an env file.
   rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"; }
   cat > .env <<EOF
+SARATI_STACK=compose
 SECRET_KEY=$(rand 48)
 FERNET_KEY=$(rand 43)=
 POSTGRES_PASSWORD=$(rand 32)
@@ -73,6 +107,9 @@ while [ "$i" -lt 90 ]; do
     say "Sarati is running at http://localhost:${PORT}"
     echo "Open it and create the owner account — the first account is yours, everyone after joins by invite."
     echo
+    if [ "$stack" = single ]; then
+      echo "  back up:  the ${project}_data volume — it holds your workflows AND the keys that decrypt your credentials."
+    fi
     echo "  logs:  cd $DIR && docker compose logs -f"
     echo "  stop:  cd $DIR && docker compose down"
     exit 0
