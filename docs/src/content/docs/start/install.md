@@ -3,87 +3,59 @@ title: Install
 description: Run Sarati locally or on a server with one command.
 ---
 
-Docker is the only requirement. Two supported shapes of the same product — pick by whether you want
-the pieces separate.
-
-## One container
-
-```bash
-docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
-```
-
-The first boot takes a minute or two while it creates its database. Then open
-<http://localhost:8080> and create the owner account — the first account is yours, everyone after
-joins by invite.
-
-`-v sarati:/data` is not optional. That volume holds the database **and** the keys that decrypt your
-stored credentials, so without it, removing the container destroys both.
-
-### A different port
-
-Map the port and tell it the URL it is reached on — webhook URLs and sign-in are minted from that:
-
-```bash
-docker run -d --name sarati -p 9090:8080 -e SARATI_URL=http://localhost:9090 -v sarati:/data sarati/sarati
-```
-
-### Your own Postgres
-
-`DATABASE_URL` replaces the bundled database, which then never starts. `/data` still has to persist
-— it holds `secrets.env`, and `FERNET_KEY` is what decrypts your credentials.
-
-```bash
-docker run -d --name sarati -p 8080:8080 -v sarati:/data \
-  -e DATABASE_URL=postgresql://user:password@host:5432/sarati sarati/sarati
-```
-
-### Everyday commands
-
-```bash
-docker logs -f sarati
-```
-
-```bash
-docker rm -f sarati
-```
-
-Removing the container leaves the volume alone — that is how you [upgrade](/operate/upgrades/).
-
-## Five containers
-
-Want the services apart — their own database container, per-service logs and restarts, and settings
-in a file instead of `-e` flags? The installer sets that up:
+Docker is the only requirement.
 
 ```bash
 curl -fsSL https://get.sarati.io | sh
 ```
 
-It downloads `docker-compose.yaml`, generates this install's secrets into `.env`, and starts five
-containers. When it prints the URL, open <http://localhost:8080> and create the owner account.
+That checks Docker is running, refuses a port that is already taken, writes a `sarati` directory to
+configure and upgrade from, starts the product, and waits until it answers. Open
+<http://localhost:8080> and create the owner account — the first account is yours, everyone after
+joins by invite.
 
 Prefer to read it first? It only fetches
-[`docker-compose.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.yaml) and
-[`install.sh`](https://github.com/saratihq/sarati/blob/main/install.sh).
+[`install.sh`](https://github.com/saratihq/sarati/blob/main/install.sh) and
+[`docker-compose.single.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.single.yaml).
 
-### Choose a different port
+## Without the installer
+
+The same product, one container, no script to trust:
+
+```bash
+docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
+```
+
+`-v sarati:/data` is not optional here. That volume holds the database **and** the keys that decrypt
+your stored credentials, so without it, removing the container destroys both. The installer is worth
+using mainly because it cannot get that wrong.
+
+## Choose a different port
 
 ```bash
 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
-The installer stops before doing anything if the port is already in use.
+Or, running it by hand, map the port and tell it the URL it is reached on — webhook URLs and sign-in
+are minted from that:
 
-### Back up `.env`
+```bash
+docker run -d --name sarati -p 9090:8080 -e SARATI_URL=http://localhost:9090 -v sarati:/data sarati/sarati
+```
 
-The installer writes `sarati/.env` and never overwrites it, so re-running the command is a safe
-[upgrade](/operate/upgrades/) — stop the stack first, or the port check turns it away.
+## Your own Postgres
 
-Back that file up. **Losing `FERNET_KEY` makes stored credentials unrecoverable** — no reset, no
-recovery. Rotating `SECRET_KEY` signs everyone out.
+`DATABASE_URL` replaces the bundled database, which then never starts. `/data` still has to persist
+— it holds `secrets.env`, and `FERNET_KEY` is what decrypts your credentials. Put it in the
+installer's `.env`, or pass it with `-e`.
 
-### Everyday commands
+```bash
+DATABASE_URL=postgresql://user:password@host:5432/sarati
+```
 
-Run these from the `sarati` directory the installer created.
+## Everyday commands
+
+From the `sarati` directory the installer created:
 
 ```bash
 docker compose logs -f
@@ -93,11 +65,10 @@ docker compose logs -f
 docker compose down
 ```
 
-```bash
-docker compose pull && docker compose up -d
-```
+Running it by hand instead, it is `docker logs -f sarati` and `docker rm -f sarati`. Removing the
+container leaves the volume alone — that is how you [upgrade](/operate/upgrades/).
 
-### Run a second instance
+## Run a second instance
 
 One machine can hold several installs, each with its own database:
 
@@ -105,19 +76,23 @@ One machine can hold several installs, each with its own database:
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
-The one-container equivalent is a second name, port and volume:
+## The pieces apart
+
+One container is the default because it is one thing to run, back up and move, and because it keeps
+the keys in the same volume as the database they decrypt. Some installs want the services separate
+— their own database container, per-service logs and restarts, independent images:
 
 ```bash
-docker run -d --name sarati-2 -p 9090:8080 -e SARATI_URL=http://localhost:9090 -v sarati-2:/data sarati/sarati
+SARATI_STACK=compose sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
-If a Sarati database already exists but its `.env` is gone, the installer refuses to start rather
-than write new secrets a `FERNET_KEY` can no longer decrypt. Restore the `.env`, or remove the
-volume and start over:
+That fetches [`docker-compose.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.yaml)
+instead and starts five containers, generating `SECRET_KEY`, `FERNET_KEY` and `POSTGRES_PASSWORD`
+into `.env`. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
 
-```bash
-docker volume rm sarati_db-data
-```
+An install that already exists keeps the shape it was built with, so re-running the installer over a
+five-container install stays on five. The two store their data differently; nothing switches
+underneath you.
 
 ## What is running
 

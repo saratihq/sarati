@@ -80,6 +80,7 @@ else
   if docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
     die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
   Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
+  To leave it alone and install the one-container product:  SARATI_STACK=single sh -c 'curl -fsSL https://get.sarati.io | sh'
   To run a SECOND instance alongside it:  COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
   To erase that database and start over:  docker volume rm ${project}_db-data"
   fi

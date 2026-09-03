@@ -3,24 +3,28 @@ title: Configuration
 description: Every setting goes in your install's .env.
 ---
 
-In the one-container install, settings are `-e` flags:
+Settings go in the `.env` file in the `sarati` directory the installer created — one container or
+five, the same file. Then:
+
+```bash
+cd sarati && docker compose up -d
+```
+
+Running it by hand without the installer, they are `-e` flags instead:
 
 ```bash
 docker run -d --name sarati -p 8080:8080 -v sarati:/data -e LOG_LEVEL=debug sarati/sarati
 ```
 
-Under compose, they go in the `.env` file next to your `docker-compose.yaml`, then:
-
-```bash
-docker compose up -d
-```
-
-Either way they reach the service and the composer. Six values are owned by the install and should
-not be set by hand: `DATABASE_URL`, `SECRET_KEY`, `FERNET_KEY`, `CORS_ORIGINS`, `FRONTEND_URL` and
-`PUBLIC_BASE_URL` — those follow `SARATI_URL` and the generated secrets. Set `SARATI_URL`, never the
-three URLs it derives.
+Six values are owned by the install and should not be set by hand: `DATABASE_URL`, `SECRET_KEY`,
+`FERNET_KEY`, `CORS_ORIGINS`, `FRONTEND_URL` and `PUBLIC_BASE_URL` — those follow `SARATI_URL` and
+the generated secrets. Set `SARATI_URL`, never the three URLs it derives.
 
 ## What the installer writes
+
+A one-container install needs no generated secrets at all — the container writes its own into the
+data volume, beside the database they decrypt. Only a five-container install has the three key rows
+below.
 
 | | |
 |---|---|
@@ -99,12 +103,11 @@ carries development defaults, not these.
 ## Checking a setting landed
 
 ```bash
-docker exec sarati printenv THROTTLE_LIMIT
+cd sarati && docker compose exec sarati printenv THROTTLE_LIMIT
 ```
 
-```bash
-docker compose exec service printenv THROTTLE_LIMIT
-```
+On a five-container install the service is its own container, so it is `docker compose exec service`
+instead.
 
 Nothing back means the setting is not reaching the service — check it is in the same directory's
 `.env` and that you ran `docker compose up -d` rather than restarting the container.
