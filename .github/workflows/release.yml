@@ -279,3 +279,17 @@ jobs:
           echo "the documented password reset works in the one-container install"
       - if: failure()
         run: docker logs sarati-aio 2>&1 | tail -100
+
+      # The installer is the front door the README and the docs give, so a release proves THAT
+      # command, not just the images underneath it.
+      - name: Walk the installer on a clean machine
+        run: |
+          docker rm -f sarati-aio
+          docker volume rm sarati-aio
+          VERSION="${GITHUB_REF_NAME#v}"
+          SARATI_REF="${GITHUB_REF_NAME}" SARATI_VERSION="${VERSION:-latest}" sh install.sh
+          test "$(cd sarati && docker compose ps --format '{{.Service}}' | wc -l)" -eq 1
+          curl -fsS http://localhost:8080/api/auth/local/status | grep -q '"awaiting_bootstrap":true'
+          echo "the installer installs one container and it bootstraps"
+      - if: failure()
+        run: cd sarati && docker compose logs --no-color | tail -100

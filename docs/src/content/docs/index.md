@@ -15,7 +15,7 @@ hero:
 ---
 
 ```bash
-docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
+curl -fsSL https://get.sarati.io | sh
 ```
 
 Docker is the only requirement. Open <http://localhost:8080> and create the owner account.

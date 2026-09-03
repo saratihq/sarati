@@ -21,8 +21,10 @@ error: A Sarati database already exists on this machine, but its .env is gone â€
 secrets would not match it.
 ```
 
-This is a guard, not a bug. Fresh secrets against an old database give Postgres a password it never
-had, and a new `FERNET_KEY` cannot decrypt what the old one stored.
+This is a guard, not a bug, and only a five-container install can reach it: fresh secrets against an
+old database give Postgres a password it never had, and a new `FERNET_KEY` cannot decrypt what the
+old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
+separated in the first place.
 
 Restore the `.env` if you have it. To run a **second** instance alongside the first:
 
