@@ -17,13 +17,18 @@ command -v docker >/dev/null 2>&1 || die "Docker is required — install it from
 docker compose version >/dev/null 2>&1 || die "This needs Docker Compose v2 (bundled with modern Docker Desktop and docker-ce)."
 docker info >/dev/null 2>&1 || die "Docker is installed but not running — start it and re-run this."
 
-# A port already in use is the single most common failure, and it is nicer to say so up front.
-if command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
-  die "Port $PORT is already in use. Re-run with SARATI_PORT=9090 (or any free port)."
-fi
-
 mkdir -p "$DIR"
 cd "$DIR"
+
+# A port already in use is the single most common failure, and it is nicer to say so up front —
+# but this install's OWN container holding it is an upgrade, not a conflict.
+ours=""
+if [ -f docker-compose.yaml ]; then
+  ours=$(docker compose ps --quiet 2>/dev/null | head -1)
+fi
+if [ -z "$ours" ] && command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
+  die "Port $PORT is already in use. Re-run with SARATI_PORT=9090 (or any free port)."
+fi
 
 # A fresh machine gets the one-container product. An install that already exists keeps the shape it
 # was built with — the two store their data differently, so switching underneath it would look
