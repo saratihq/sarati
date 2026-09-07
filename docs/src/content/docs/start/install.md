@@ -110,6 +110,14 @@ one supervisor in the single container.
 The AI composer is off until an owner or admin adds an Anthropic key in **Settings → Platform
 keys** — inside the running app, not in `.env`. Everything else works without it.
 
+## What it talks to
+
+A self-hosted Sarati sends no telemetry: no analytics, no crash reporting, no update checks. The
+installer fetches its stack definition from GitHub and pulls the image from the registry, and after
+that the instance only contacts what you connect — the accounts you link, Composio if you add a key,
+Clerk if you configure cloud sign-in, and the model provider behind the composer. The pages your
+browser loads come from your instance too, fonts included.
+
 ## Run it from source
 
 Building on Sarati itself rather than running it? The service, client and agent run directly from a
