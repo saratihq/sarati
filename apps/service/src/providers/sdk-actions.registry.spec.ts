@@ -1,5 +1,6 @@
 import {
   composioToolFor,
+  frozenClockArguments,
   isComposioCatalogType,
   isOfferable,
   isRoutableActionType,
@@ -134,6 +135,14 @@ describe('Composio universal-fallback catalog (data/composio_catalog.json)', () 
     const asana = composioToolFor('asana.get_team_memberships');
     expect(asana?.slug).toBe('ASANA_GET_TEAM_MEMBERSHIPS');
     expect(asana?.required).toEqual([]); // schema under-declares — the one-of table fills the gap
+  });
+
+  it('names the arguments a tool would fill with a frozen clock, and nothing else', () => {
+    expect([...frozenClockArguments('GOOGLECALENDAR_EVENTS_LIST')].sort()).toEqual(['timeMax', 'timeMin']);
+    expect([...frozenClockArguments('GOOGLESUPER_EVENTS_LIST')].sort()).toEqual(['timeMax', 'timeMin']);
+    // FIND_EVENT has plain defaults (a page size, a calendar id) — none of them a clock.
+    expect(frozenClockArguments('GOOGLECALENDAR_FIND_EVENT')).toEqual([]);
+    expect(frozenClockArguments('NO_SUCH_TOOL')).toEqual([]);
   });
 
   it('returns undefined for a type with no Composio catalog row', () => {

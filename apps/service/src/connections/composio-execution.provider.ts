@@ -9,6 +9,7 @@ import { requiredConstraintsFor } from './composio-required-constraints';
 import { matchTool, translateProps, type PropTranslation, type ToolMatch } from './composio-tool-mapping';
 import { toComposioSlug } from './managed-connections.service';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { frozenClockArguments } from '../providers/sdk-actions.registry';
 
 export interface ComposioExecuteInput {
   /** Whose Composio key runs this — the scope owning the connection/workflow. */
@@ -73,7 +74,7 @@ export class ComposioExecutionProvider {
     const base = translateProps(input.props, tool.inputProperties, tool.inputTypes);
     const warnings = this.warningsFromTranslation(publicType, tool.slug, base, base.dropped);
     // Pre-flight so a missing required input is a clean 400 before we burn a Composio call.
-    this.assertRequired(publicType, base.arguments, tool.required);
+    this.assertRequired(publicType, tool.slug, base.arguments, tool.required);
 
     const data = await this.runTool(input.scope, publicType, tool.slug, {
       connectedAccountId: input.connectedAccountId,
@@ -106,7 +107,7 @@ export class ComposioExecutionProvider {
       warnings.push(...this.warningsFromTranslation(publicType, override.toolSlug, base, genuinelyDropped));
     }
     // The tool's required flags apply only when the override targets that same tool; the one-of table always applies.
-    this.assertRequired(publicType, args, sameTool?.required);
+    this.assertRequired(publicType, override.toolSlug, args, sameTool?.required);
 
     const data = await this.runTool(input.scope, publicType, override.toolSlug, {
       connectedAccountId: input.connectedAccountId,
@@ -139,22 +140,29 @@ export class ComposioExecutionProvider {
   }
 
   /**
-   * Throw a clean 400 for a missing required input BEFORE the Composio call — the tool's declared required args plus
-   * the curated one-of groups. `arguments` never holds `undefined`/`null`, so an absent key IS a missing input.
+   * Throw a clean 400 for a missing required input BEFORE the Composio call — the tool's declared required args, the
+   * curated one-of groups, and any argument the tool would fill with a frozen clock. `arguments` never holds
+   * `undefined`/`null`, so an absent key IS a missing input.
    */
   private assertRequired(
     publicType: string,
+    toolSlug: string,
     args: Record<string, unknown>,
     toolRequired: string[] | undefined,
   ): void {
-    const missing = (toolRequired ?? []).filter((name) => args[name] === undefined || args[name] === null);
-    const unmetGroups = requiredConstraintsFor(publicType).filter((group) =>
-      group.oneOf.every((name) => args[name] === undefined || args[name] === null),
-    );
-    if (missing.length === 0 && unmetGroups.length === 0) return;
+    const absent = (name: string): boolean => args[name] === undefined || args[name] === null;
+    const missing = (toolRequired ?? []).filter(absent);
+    const unmetGroups = requiredConstraintsFor(publicType).filter((group) => group.oneOf.every(absent));
+    const frozen = frozenClockArguments(toolSlug).filter(absent);
+    if (missing.length === 0 && unmetGroups.length === 0 && frozen.length === 0) return;
     const parts: string[] = [];
     if (missing.length > 0) parts.push(`missing required input(s): ${missing.join(', ')}`);
     for (const group of unmetGroups) parts.push(`provide at least one of: ${group.label}`);
+    if (frozen.length > 0) {
+      parts.push(
+        `set ${frozen.join(' and ')} — left empty, the provider fills in a fixed past date and silently hides results`,
+      );
+    }
     throw new DomainError(`"${publicType}" can't run — ${parts.join('; ')}`, 400);
   }
 

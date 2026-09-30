@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { actions } from '@sarati/actions-sdk';
 
 import { dataFile } from '../generation/data-dir';
+import { frozenClockArguments } from '../providers/sdk-actions.registry';
 import { directOverride, directOverrideTypes } from './composio-direct-overrides';
 import { COMPOSIO_DIRECT_APPS } from './managed-app-rails';
 import { toComposioSlug } from './managed-connections.service';
@@ -75,6 +76,16 @@ describe('composio-direct-overrides — catalog consistency', () => {
           expect(Object.keys(args)).toContain(name); // required args all covered
         }
       }
+    }
+  });
+
+  it('no override leaves a frozen-clock default to the tool, even with every optional prop unset', () => {
+    for (const type of directOverrideTypes()) {
+      const override = directOverride(type);
+      if (!override) continue;
+      const sent = new Set(Object.keys(override.toArguments({})));
+      const leftToTool = frozenClockArguments(override.toolSlug).filter((name) => !sent.has(name));
+      expect({ type, leftToTool }).toEqual({ type, leftToTool: [] });
     }
   });
 
@@ -163,6 +174,40 @@ describe('composio-direct-overrides — argument mapping', () => {
       start: '2026-07-12T10:00:00Z',
     });
     expect(noEnd).not.toHaveProperty('event_duration_hour');
+  });
+
+  it('calendar.google_calendar_get_events sends the SDK request and never leaves a bound to the tool', () => {
+    const list = directOverride('calendar.google_calendar_get_events')!;
+    expect(list.toArguments({ calendarId: 'primary' })).toEqual({
+      calendarId: 'primary',
+      timeMin: '1970-01-01T00:00:00Z',
+      timeMax: '9999-12-31T23:59:59Z',
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 250,
+    });
+    expect(
+      list.toArguments({
+        calendarId: 'team@example.com',
+        timeMin: '2026-09-30T00:00:00Z',
+        timeMax: '2026-10-07T00:00:00Z',
+        query: 'standup',
+        limit: 10,
+      }),
+    ).toEqual({
+      calendarId: 'team@example.com',
+      timeMin: '2026-09-30T00:00:00Z',
+      timeMax: '2026-10-07T00:00:00Z',
+      q: 'standup',
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 10,
+    });
+    // A cleared field is unset, not an empty bound.
+    expect(list.toArguments({ calendarId: 'primary', timeMin: '  ', timeMax: '' })).toMatchObject({
+      timeMin: '1970-01-01T00:00:00Z',
+      timeMax: '9999-12-31T23:59:59Z',
+    });
   });
 
   it('docs.create_document supplies the tool-required empty text', () => {
