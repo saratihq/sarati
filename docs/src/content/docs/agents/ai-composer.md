@@ -68,8 +68,8 @@ It is a drafting tool, not an oracle.
 them in a code step; another did both in a single HTTP call with a query filter. Both work — read
 what it built.
 
-**It does not name the workflow.** However descriptive its plan, the workflow saves as *Untitled
-workflow* until you rename it.
+**It names the workflow from its plan.** Rename it in the header whenever you like — once you have,
+it never renames over you, however often it re-plans.
 
 ## Saving
 

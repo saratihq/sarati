@@ -73,20 +73,41 @@ The run and the failing step both carry the reason, for example
 If the worker came back, it resumes on its own. If it never comes back, the reaper moves the run to
 `error` once it passes `RUN_MAX_DURATION_SECONDS`, within five minutes.
 
-## The composer says it is unavailable
+## The composer is not there
 
-It tells you which of the two reasons it is.
+Without an Anthropic key the composer is absent, not broken: **New workflow** opens a bare canvas and
+the editor has no Composer panel. An empty dashboard says which of the two reasons it is.
 
-**"No Anthropic API key has been set"** — an owner or admin adds one in **Settings → Platform keys**.
-It takes effect immediately; reload the page if a tab was already open.
+**"AI composer needs an Anthropic API key — add one under Settings"** — an owner or admin adds one in
+**Settings → Platform keys**. It takes effect immediately; reload any other tab that was already open.
 
-**"Set SECRET_KEY to the same value the workflow service uses"** — the agent container is missing the
+**"AI composer isn't configured on this instance — see docs"** — the agent container is missing the
 shared secret, so it can neither verify your session nor read the stored key. `docker compose` passes
 it for you; a hand-rolled deployment has to. Check it landed:
 
 ```bash
 docker compose exec agent printenv SECRET_KEY
 ```
+
+## The composer answers with an error
+
+When Anthropic refuses a message, the composer says which refusal it was.
+
+**"Anthropic rejected the API key saved for the composer."** — the key is mistyped, revoked or
+expired. Replace it in **Settings → Platform keys**; the new one takes effect straight away.
+
+**"The Anthropic account behind the composer's API key is out of credit."** — add credit to that
+account, or replace the key.
+
+**"Anthropic is rate-limiting the composer's API key."**, **"Anthropic is overloaded right now."** and
+**"Anthropic returned a server error."** — nothing to fix on your side. Wait a minute and send the
+message again.
+
+**"The composer's model (…) is not available to the saved Anthropic API key."** — set
+[`COMPOSER_MODEL`](/operate/configuration/#commonly-set) to a model the key can use.
+
+Anything else reads **"The composer hit a problem — please try again."**, and the reason is in
+[the logs](#reading-the-logs).
 
 ## A step says it needs a connection
 

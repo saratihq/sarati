@@ -1,12 +1,13 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk';
 
 import type { EnvConfig } from '../config/env.config';
 import { buildComposerServer, COMPOSER_TOOL_NAMES, summarizeDraft } from './agent-tools';
 import { EventChannel } from './event-channel';
 import { anthropicParamCompleter, type ParamCompleteFn } from './param-filler';
 import { PendingAnswers } from './pending-answers';
+import { providerFailureMessage } from './provider-failure';
 import type { AttachEvent, ComposerEvent, SequencedComposerEvent, WorkflowIr } from './protocol';
 import {
   emitToSession,
@@ -62,7 +63,6 @@ const TURN_TIMEOUT_MS = 12 * 60 * 1000;
  */
 const ORPHAN_GRACE_MS = 90 * 1000;
 const MAX_TURNS = 40;
-const GENERIC_ERROR = 'The composer hit a problem — please try again.';
 
 @Injectable()
 export class ComposerService {
@@ -451,6 +451,8 @@ export class ComposerService {
 
     let sawResult = false;
     let sawText = false;
+    let providerError: SDKAssistantMessageError | null = null;
+    const failure = (): string => providerFailureMessage(providerError, this.env.composerModel);
     try {
       for await (const msg of q) {
         if (abort.aborted) break;
@@ -470,15 +472,21 @@ export class ComposerService {
             sawText = true;
             emit({ event: 'assistant_text', data: { text: event.delta.text } });
           }
+        } else if (msg.type === 'assistant' && msg.error) {
+          providerError = msg.error;
         } else if (msg.type === 'result') {
           sawResult = true;
-          const isError = msg.subtype !== 'success';
-          if (isError) {
+          if (msg.subtype !== 'success') {
             this.logger.error(`turn ended with ${msg.subtype} (session ${session.id})`);
             emit({
               event: 'error',
               data: { message: `The composer stopped early (${msg.subtype}).` },
             });
+          } else if (msg.is_error) {
+            this.logger.error(
+              `the provider refused the turn: ${providerError ?? 'no reason given'} (session ${session.id})`,
+            );
+            emit({ event: 'error', data: { message: failure() } });
           }
           emit({
             event: 'done',
@@ -497,7 +505,7 @@ export class ComposerService {
         emit({
           event: 'error',
           data: {
-            message: abort.aborted ? 'The conversation was interrupted — the build stopped.' : GENERIC_ERROR,
+            message: abort.aborted ? 'The conversation was interrupted — the build stopped.' : failure(),
           },
         });
         emit({
@@ -510,11 +518,14 @@ export class ComposerService {
         `agent turn failed (session ${session.id})`,
         err instanceof Error ? (err.stack ?? err.message) : String(err),
       );
-      emit({ event: 'error', data: { message: GENERIC_ERROR } });
-      emit({
-        event: 'done',
-        data: { session_id: session.id, duration_ms: Date.now() - startedAt },
-      });
+      // The SDK throws after an error result it has already delivered; that turn is closed.
+      if (!sawResult) {
+        emit({ event: 'error', data: { message: failure() } });
+        emit({
+          event: 'done',
+          data: { session_id: session.id, duration_ms: Date.now() - startedAt },
+        });
+      }
     } finally {
       abort.removeEventListener('abort', onAbort);
       session.turnAbort = null;
