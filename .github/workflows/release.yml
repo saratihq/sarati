@@ -277,6 +277,20 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"email":"ci@example.com","password":"a-different-long-passphrase"}' >/dev/null
           echo "the documented password reset works in the one-container install"
+      # Supervisord's `user=` switches only the uid, so HOME stays root's unless set — and the
+      # composer keeps each conversation under $HOME. One it cannot write fails every follow-up.
+      - name: Every program that runs as node can write its HOME
+        run: |
+          docker exec -u node sarati-aio sh -c '
+            supervisor=$(pgrep -o supervisord)
+            count=0
+            for pid in $(pgrep -P "$supervisor" -u node); do
+              count=$((count + 1))
+              home=$(tr "\0" "\n" < /proc/$pid/environ | sed -n "s/^HOME=//p")
+              test -w "$home" || { echo "::error::$(tr "\0" " " < /proc/$pid/cmdline) runs as node with HOME=$home, which it cannot write"; exit 1; }
+            done
+            test "$count" -eq 3 || { echo "::error::expected the service, agent and client under supervisord as node, found $count"; exit 1; }
+            echo "all $count programs that run as node can keep state under their HOME"'
       - if: failure()
         run: docker logs sarati-aio 2>&1 | tail -100
 
