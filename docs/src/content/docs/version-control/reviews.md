@@ -42,13 +42,14 @@ fetch_top_stories · stories[8]    {…} → null
 **This executes live steps.** Sarati asks first, in its own words:
 
 > Run a real test? … Live steps will execute. Real effects can fire: messages sent, data written,
-> external calls made. There is no dry-run yet.
+> external calls made.
 
 Point it at a non-production environment unless you mean it.
 :::
 
-An agent testing over [MCP](/agents/mcp/#testing-is-dry-unless-you-confirm) is the other way round:
-dry unless the run is confirmed.
+This test has no dry form. The editor's [Dry run](/build/testing/#the-whole-workflow) does, and an
+agent testing over [MCP](/agents/mcp/#testing-is-dry-unless-you-confirm) is dry unless the run is
+confirmed.
 
 An untested review says so — *"This review was never tested."*
 

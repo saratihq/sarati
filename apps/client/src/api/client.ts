@@ -1155,6 +1155,8 @@ export interface RunIrOptions {
   runId?: string;
   /** True pinning: `{ [nodeId]: output }` a step REPLAYS instead of executing (no provider hit). */
   pins?: Record<string, unknown>;
+  /** Dry run: reads execute, state-changing requests are withheld and reported per step. */
+  dryRun?: boolean;
 }
 
 /** Run a WorkflowIR document synchronously on the built-in runtime. */
@@ -1171,6 +1173,7 @@ export async function runWorkflowIr(
       workflow_id: opts?.workflowId,
       run_id: opts?.runId,
       pins: opts?.pins,
+      dry_run: opts?.dryRun,
     }),
   });
 }
@@ -1231,6 +1234,8 @@ export interface RunSummary {
   error: string | null;
   /** How the run started — e.g. "manual", "trigger", "webhook". */
   source: string | null;
+  /** A dry run fired no state-changing call — absent from a service that predates the field. */
+  dry_run?: boolean;
   /** Environment the run executed under — null = Default (the user's own connections). */
   environment?: string | null;
   /** Workflow version the run executed — absent until the service reports it. */
@@ -1244,6 +1249,8 @@ export interface RunStepInfo {
   status: string;
   started_at?: string | null;
   finished_at?: string | null;
+  /** The stored step output — a dry run's marker when the step was not carried out. */
+  output?: unknown;
   /** Truncated step output — string preview or a small JSON value. */
   output_preview?: unknown;
   /** Set when the output was too large to store whole: `output_preview` is its head. */

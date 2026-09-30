@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
@@ -122,5 +122,78 @@ describe("EditorRunButton watching a run whose call is still open", () => {
     await act(async () => answerFirst({ run_id: "r-1", outputs: { post: { first: true } } }));
     expect(screen.getByText(/"second": true/)).toBeInTheDocument();
     expect(screen.queryByText(/"first": true/)).not.toBeInTheDocument();
+  });
+});
+
+describe("EditorRunButton dry run", () => {
+  // The trace is a dry run's own answer, as a live instance returned it for this shape of draft.
+  it("asks for a dry run, and says what each withheld step would have done", async () => {
+    runWorkflowIr.mockResolvedValue({
+      run_id: "r-dry",
+      outputs: { trigger: {}, post: { dry_run: true, withheld: "write" } },
+      trace: [
+        { nodeId: "approve", output: { dry_run: true, withheld: "wait", skipped: "wait-for-event (dry run)" } },
+        {
+          nodeId: "post",
+          output: {
+            dry_run: true,
+            withheld: "write",
+            skipped: "state-changing request (not sent in a dry run)",
+            would_call: [{ method: "POST", url: "https://slack.com/api/chat.postMessage" }],
+          },
+        },
+      ],
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+
+    await user.click(screen.getByRole("button", { name: "Dry run" }));
+
+    expect(runWorkflowIr.mock.calls[0]![2]).toMatchObject({ workflowId: "wf-1", dryRun: true });
+    expect(await screen.findByText("Dry run complete")).toBeInTheDocument();
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+    expect(screen.getByText(/Writes \(POST, PUT, PATCH, DELETE\) are not sent/)).toBeInTheDocument();
+    const withheld = within(screen.getByTestId("dry-run-withheld")).getAllByRole("listitem");
+    expect(withheld.map((li) => li.textContent)).toEqual([
+      "Ask first Not waited for — a dry run does not pause for an event",
+      "Post the summary Not sent — would call POST https://slack.com/api/chat.postMessage",
+    ]);
+  });
+
+  it("a real run does not ask for a dry one, and says real effects can fire", async () => {
+    runWorkflowIr.mockResolvedValue({ run_id: "r-live", outputs: { trigger: {}, post: { status: 200 } } });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    expect(runWorkflowIr.mock.calls[0]![2]?.dryRun).toBeUndefined();
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText(/Real effects can fire/)).toBeInTheDocument();
+    expect(screen.queryByTestId("dry-run-withheld")).not.toBeInTheDocument();
+  });
+
+  // A dry run never parks, so its record is not polled — a poll could settle it as a real run's result.
+  it("is never watched, however long it takes", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+
+    await user.click(screen.getByRole("button", { name: "Dry run" }));
+    await act(() => vi.advanceTimersByTimeAsync(9500));
+
+    expect(getRun).not.toHaveBeenCalled();
+    expect(screen.getByText("Dry run in progress…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+  });
+
+  it("a dry run that fails says so as a dry run", async () => {
+    runWorkflowIr.mockRejectedValue(new api.ApiError("Workflow can't run: step \"post\" has no url", 400));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+
+    await user.click(screen.getByRole("button", { name: "Dry run" }));
+
+    expect(await screen.findByText("Dry run failed")).toBeInTheDocument();
+    expect(screen.getByText(/has no url/)).toBeInTheDocument();
   });
 });

@@ -200,7 +200,7 @@ describe('ActionRouterProvider', () => {
     const { router, execute } = build({}); // no managed connection at all
     const dry: RunActionInput = { ...input('jira.search_issues'), dryRun: true };
     const out = await router.runAction(dry);
-    expect(out.output).toMatchObject({ dry_run: true });
+    expect(out.output).toMatchObject({ dry_run: true, withheld: 'managed_step' });
     expect(execute).not.toHaveBeenCalled();
   });
 

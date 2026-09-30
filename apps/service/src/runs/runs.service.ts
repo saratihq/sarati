@@ -671,12 +671,13 @@ export class RunsService {
       status: string;
       error: string | null;
       source: string | null;
+      dry_run: boolean;
       started_at: Date | null;
       finished_at: Date | null;
     }> = await this.dataSource.query(
       `SELECT r.run_id, r.plan_id, r.workflow_id, w.name AS workflow_name, r.status, r.error,
-              r.source, r.started_at, r.finished_at, r.environment, r.environment_id, r.workflow_version_id,
-              v.version_number
+              r.source, r.dry_run, r.started_at, r.finished_at, r.environment, r.environment_id,
+              r.workflow_version_id, v.version_number
          FROM runtime_runs r
          LEFT JOIN workflows w ON w.id = r.workflow_id
          LEFT JOIN workflow_versions v ON v.id = r.workflow_version_id
@@ -697,6 +698,7 @@ export class RunsService {
       status: r.status,
       error: r.error,
       source: r.source,
+      dry_run: r.dry_run,
       started_at: r.started_at?.toISOString() ?? null,
       finished_at: r.finished_at?.toISOString() ?? null,
       duration_ms: durationMs(r.started_at, r.finished_at),

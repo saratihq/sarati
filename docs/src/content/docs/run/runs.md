@@ -29,6 +29,21 @@ While a run is still going the list refreshes on its own and stops once everythi
 
 Link straight to a run by adding `?run=<run-id>` to the Runs URL.
 
+## Dry runs
+
+A [dry run](/build/testing/#the-whole-workflow) is listed with the rest, as **Dry run** rather than
+Completed — it sent nothing, so it never reads as a run that did. Open it and each step it did not
+carry out says what it did instead:
+
+```
+post_summary   Not sent — would call POST https://slack.com/api/chat.postMessage
+pause          Wait skipped — 48h 0m
+approve        Not waited for — a dry run does not pause for an event
+```
+
+Over the API the run carries `dry_run: true`, and each such step's output carries `withheld`:
+`write`, `managed_step`, `delay` or `wait`.
+
 ## Durability
 
 Runs are durable. If the engine is killed or redeployed mid-flight, the run resumes when it comes

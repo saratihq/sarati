@@ -3,9 +3,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CornerDownRight, CornerUpLeft, User, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleDashed,
+  CornerDownRight,
+  CornerUpLeft,
+  User,
+  X,
+} from "lucide-react";
 import * as api from "@/api/client";
 import type { RunDetail, RunStepInfo, RunSummary } from "@/api/client";
+import { DRY_RUN_EXPLAINED, dryRunMarkerOf, withheldSummary } from "@/lib/dryRun";
 import { formatDuration, timeAgo } from "@/lib/format";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import { SaratiLoader } from "./SaratiLogo";
@@ -22,23 +33,26 @@ const STATUS_META: Record<api.RunStatus, { label: string; color: string }> = {
   waiting: { label: "Waiting", color: "var(--orchestr-warning)" },
 };
 
-function statusMeta(status: string) {
-  return (
-    (STATUS_META as Record<string, { label: string; color: string }>)[status] ?? {
-      label: status,
-      color: "var(--orchestr-ink-muted)",
-    }
-  );
+// A dry run sent nothing, so it never borrows the word or the green of a run that did.
+function statusMeta(status: string, dry = false) {
+  const meta = (STATUS_META as Record<string, { label: string; color: string }>)[status] ?? {
+    label: status,
+    color: "var(--orchestr-ink-muted)",
+  };
+  if (!dry) return meta;
+  if (status === "completed") return { label: "Dry run", color: "var(--orchestr-ink-muted)" };
+  if (status === "error") return { label: "Dry run failed", color: meta.color };
+  return meta;
 }
 
 function isActive(status: string): boolean {
   return status === "running" || status === "waiting";
 }
 
-function StatusDot({ status }: { status: string }) {
-  const meta = statusMeta(status);
+function StatusDot({ status, dry = false }: { status: string; dry?: boolean }) {
+  const meta = statusMeta(status, dry);
   return (
-    <span className="flex items-center gap-1.5 min-w-0">
+    <span className="flex items-center gap-1.5 min-w-0" title={dry ? DRY_RUN_EXPLAINED : undefined}>
       <span
         className={`w-1.5 h-1.5 rounded-full shrink-0 ${isActive(status) ? "animate-pulse" : ""}`}
         style={{ background: meta.color }}
@@ -75,16 +89,20 @@ function stepDuration(step: RunStepInfo): string | null {
   return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : null;
 }
 
-function StepRow({ step }: { step: RunStepInfo }) {
+function StepRow({ step, dry }: { step: RunStepInfo; dry: boolean }) {
   const failed = step.status === "failed" || step.status === "error" || step.status === "crashed";
-  const succeeded = step.status === "completed" || step.status === "success";
-  const output = previewText(step.output_preview);
+  // Only a dry run leaves markers; a real step is free to return an object that looks like one.
+  const withheld = dry ? dryRunMarkerOf(step.output) : null;
+  const succeeded = !withheld && (step.status === "completed" || step.status === "success");
+  const output = withheld ? null : previewText(step.output_preview);
   const truncated = truncationNote(step);
   const duration = stepDuration(step);
 
   return (
     <li className="flex items-start gap-2.5 py-2">
-      {succeeded ? (
+      {withheld ? (
+        <CircleDashed size={14} className="mt-0.5 shrink-0" style={{ color: "var(--orchestr-ink-subtle)" }} />
+      ) : succeeded ? (
         <Check size={14} className="mt-0.5 shrink-0" style={{ color: "var(--orchestr-success)" }} />
       ) : failed ? (
         <X size={14} className="mt-0.5 shrink-0" style={{ color: "var(--orchestr-danger)" }} />
@@ -113,6 +131,15 @@ function StepRow({ step }: { step: RunStepInfo }) {
         {step.error && (
           <p className="text-[12px] m-0 mt-1 break-words" style={{ color: "var(--orchestr-danger)" }}>
             {step.error}
+          </p>
+        )}
+        {withheld && (
+          <p
+            className="text-[12px] m-0 mt-1 break-words"
+            style={{ color: "var(--orchestr-ink-muted)" }}
+            data-testid="run-step-withheld"
+          >
+            {withheldSummary(withheld)}
           </p>
         )}
         {/* Non-fatal honesty notes: the step ran, but the rail ignored an input or
@@ -228,6 +255,11 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
   return (
     <div className="px-3.5 pb-3">
       <div className="pt-1 border-t" style={{ borderColor: "var(--orchestr-line)" }}>
+        {detail.dry_run && (
+          <p className="text-[12px] m-0 mt-2" style={{ color: "var(--orchestr-ink-muted)" }}>
+            A dry run. {DRY_RUN_EXPLAINED}
+          </p>
+        )}
         {/* The run error usually copies the failing step's — only render it when it adds something. */}
         {detail.error && !detail.steps.some((s) => s.error === detail.error) && (
           <div
@@ -244,7 +276,7 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
         ) : (
           <ul className="list-none m-0 p-0 divide-y divide-white/5">
             {detail.steps.map((step, i) => (
-              <StepRow key={`${step.node_id}:${i}`} step={step} />
+              <StepRow key={`${step.node_id}:${i}`} step={step} dry={detail.dry_run === true} />
             ))}
           </ul>
         )}
@@ -427,7 +459,7 @@ export default function WorkflowRunsPage() {
                     className="w-full grid grid-cols-[110px_90px_90px_60px_90px_80px_1fr_20px] gap-3 items-center py-2.5 px-3.5 bg-transparent border-none cursor-pointer text-left hover:bg-[var(--orchestr-accent-tint)] transition-colors"
                     aria-expanded={isOpen}
                   >
-                    <StatusDot status={run.status} />
+                    <StatusDot status={run.status} dry={run.dry_run === true} />
                     <span className="min-w-0">
                       {run.source && (
                         <span
