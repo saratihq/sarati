@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
+import { DomainError } from '../common/domain-error';
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
@@ -9,6 +10,9 @@ import { EventsService } from '../events/events.service';
 import { now } from '../database/ids';
 import type { MergeResolution } from '../ir/merge';
 import { BranchService } from './branch.service';
+
+/** Machine code for a merge whose target already has every change on the source. */
+export const NOTHING_TO_MERGE = 'nothing_to_merge';
 
 /** The branches-page merge entry point: merge, then delete the source branch + its tags. The reviews-page entry deliberately does NOT clean up. */
 @Injectable()
@@ -48,6 +52,15 @@ export class MergeOrchestrationService {
           ancestor_value: c.ancestor_value,
         })),
       };
+    }
+
+    // Refused before the cleanup below, which would otherwise delete a branch that merged nothing.
+    if (result.mergedVersionId === null) {
+      throw new DomainError(
+        `'${sourceBranchName}' has no changes that '${targetBranchName}' doesn't already have — there is nothing to merge.`,
+        409,
+        { code: NOTHING_TO_MERGE },
+      );
     }
 
     // An active review for the same (source → target) pair must be resolved and the branch cleanup

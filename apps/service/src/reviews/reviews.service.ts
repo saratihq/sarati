@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { In, Not, type DataSource } from 'typeorm';
+import { In, Not, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
@@ -22,6 +22,9 @@ const PG_LOCK_NOT_AVAILABLE = '55P03';
 
 /** Machine code a caller can branch on, rather than matching prose. */
 export const REVIEW_ALREADY_OPEN = 'review_already_open';
+
+/** Machine code for a review of a branch whose every change the target already has. */
+export const NOTHING_TO_REVIEW = 'nothing_to_review';
 
 /**
  * Reviews: one open review per (source, target) pair, status derived from approvals (any rejection is
@@ -58,6 +61,14 @@ export class ReviewsService {
             `'${targetBranchName}' — review ${existing.id}. Read that review instead of opening another.`,
           409,
           { code: REVIEW_ALREADY_OPEN, review_id: existing.id },
+        );
+      }
+
+      if (await this.targetHasSource(em, source, target)) {
+        throw new DomainError(
+          `'${sourceBranchName}' has no changes that '${targetBranchName}' doesn't already have — there is nothing to review.`,
+          409,
+          { code: NOTHING_TO_REVIEW },
         );
       }
 
@@ -133,9 +144,16 @@ export class ReviewsService {
     const userIds = [...new Set([...comments.map((c) => c.authorId), ...approvals.map((a) => a.reviewerId)])];
     const users = userIds.length ? await em.find(UserEntity, { where: { id: In(userIds) } }) : [];
     const nameOf = new Map(users.map((u) => [u.id, u.name]));
+    const [source, target] = await Promise.all([
+      em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } }),
+      em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } }),
+    ]);
 
     return {
       ...summary,
+      source_head_version_id: source?.headVersionId ?? null,
+      target_head_version_id: target?.headVersionId ?? null,
+      up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
       description: review.description,
       last_test: review.lastTest ?? null,
       comments: comments.map((c) => ({
@@ -348,6 +366,16 @@ export class ReviewsService {
         subjectId: review.id,
       });
     });
+  }
+
+  private async targetHasSource(
+    em: EntityManager,
+    source: WorkflowBranchEntity,
+    target: WorkflowBranchEntity,
+  ): Promise<boolean> {
+    if (!source.headVersionId) return true;
+    if (!target.headVersionId) return false;
+    return this.branches.historyContains(em, target.headVersionId, source.headVersionId);
   }
 
   private async toSummary(review: WorkflowReviewEntity): Promise<Record<string, unknown>> {

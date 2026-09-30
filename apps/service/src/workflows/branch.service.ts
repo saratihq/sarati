@@ -18,6 +18,7 @@ import type { WorkflowIR } from '../ir/models';
 import { rawQuery } from '../database/raw-query';
 export interface BranchMergeOutcome {
   success: boolean;
+  /** Null on success means the target already had every change on the source, so nothing was minted. */
   mergedVersionId: string | null;
   conflicts: ConflictEntry[];
 }
@@ -194,6 +195,25 @@ export class BranchService {
     });
   }
 
+  /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */
+  async historyContains(em: EntityManager, headId: string, versionId: string): Promise<boolean> {
+    const rows = await rawQuery<{ found: number }>(
+      em,
+      `WITH RECURSIVE history(id) AS (
+         SELECT $1::uuid
+         UNION
+         SELECT parent.id
+           FROM history h
+           JOIN workflow_versions v ON v.id = h.id
+           CROSS JOIN LATERAL (VALUES (v.parent_id), (v.merge_parent_id)) AS parent(id)
+          WHERE parent.id IS NOT NULL
+       )
+       SELECT 1 AS found FROM history WHERE id = $2::uuid LIMIT 1`,
+      [headId, versionId],
+    );
+    return rows.length > 0;
+  }
+
   /** Walk A's ancestry, then return the first hit on B's chain. Follows parent_id ONLY (merge parents are not walked). */
   async findCommonAncestor(
     em: EntityManager,
@@ -282,7 +302,7 @@ export class BranchService {
         }
       }
 
-      if (source.headVersionId === target.headVersionId) {
+      if (await this.historyContains(em, target.headVersionId, source.headVersionId)) {
         return { success: true, mergedVersionId: null, conflicts: [] };
       }
 

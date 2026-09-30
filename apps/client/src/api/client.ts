@@ -1030,6 +1030,12 @@ export interface ReviewDetail extends ReviewSummary {
   approvals: ReviewApproval[];
   /** The most recent pre-merge test, or null if never tested. */
   last_test?: ReviewTestSummary | null;
+  /** The source branch's head — the version the review proposes. */
+  source_head_version_id?: string | null;
+  /** The target branch's head — the version the review is held against. */
+  target_head_version_id?: string | null;
+  /** True when the target already has every change on the source: nothing is left to review. */
+  up_to_date?: boolean;
 }
 
 export interface ReviewListResponse {

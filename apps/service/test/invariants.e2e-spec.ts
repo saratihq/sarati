@@ -254,6 +254,32 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
+  it('a merge the target already contains mints nothing, through BOTH entry points', async () => {
+    const wf = await seed('inv contained');
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'idle' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: ir(['v2']), branch: 'main' })
+      .expect(201);
+
+    const merge = await http()
+      .post(`/api/workflows/${wf}/branches/idle/merge`)
+      .send({ target_branch: 'main' })
+      .expect(409);
+    const review = await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'idle', title: 'nothing' })
+      .expect(409);
+
+    expect(merge.body.code).toBe('nothing_to_merge');
+    expect(review.body.code).toBe('nothing_to_review');
+    const versions = await http().get(`/api/workflows/${wf}/versions?branch=main`).expect(200);
+    expect(versions.body.versions).toHaveLength(2);
+    const branches = await http().get(`/api/workflows/${wf}/branches`).expect(200);
+    expect(branches.body.branches.map((b: { name: string }) => b.name)).toContain('idle');
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
   it('field-level conflicts: same-field edits collide, different-field edits merge clean', async () => {
     const wf = await seed('inv conflicts');
     await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
