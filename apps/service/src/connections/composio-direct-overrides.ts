@@ -20,6 +20,17 @@ function compact(args: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/** A blank string is an unset field, never a value. */
+function given(value: unknown): unknown {
+  return typeof value === 'string' && value.trim() === '' ? undefined : value;
+}
+
+/** "No bound" for a calendar listing, spelled out so the tool never supplies its own. */
+const CALENDAR_EARLIEST = '1970-01-01T00:00:00Z';
+const CALENDAR_LATEST = '9999-12-31T23:59:59Z';
+/** The SDK action's default `limit`. */
+const CALENDAR_PAGE_SIZE = 250;
+
 /** Mirror the SDK's Gmail query grammar (quote terms containing whitespace). */
 function quoteIfNeeded(value: string): string {
   const trimmed = value.trim();
@@ -233,13 +244,17 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
     'calendar.google_calendar_get_events',
     {
       toolSlug: 'GOOGLECALENDAR_EVENTS_LIST',
+      // The SDK action's request: recurrences expanded, ordered by start. Both bounds are always sent
+      // because the tool's own defaults for them are a frozen clock.
       toArguments: (p) =>
         compact({
           calendarId: p.calendarId,
-          timeMin: p.timeMin,
-          timeMax: p.timeMax,
+          timeMin: given(p.timeMin) ?? CALENDAR_EARLIEST,
+          timeMax: given(p.timeMax) ?? CALENDAR_LATEST,
           q: p.query,
-          maxResults: p.limit,
+          singleEvents: true,
+          orderBy: 'startTime',
+          maxResults: p.limit ?? CALENDAR_PAGE_SIZE,
         }),
     },
   ],

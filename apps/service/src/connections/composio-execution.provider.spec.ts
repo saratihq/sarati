@@ -290,6 +290,59 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     expect(executeCalls).toHaveLength(0); // never burned a Composio call
   });
 
+  it('refuses to leave a frozen-clock argument to the tool — a clean 400 naming them, before any call', async () => {
+    const eventsList = {
+      slug: 'GOOGLESUPER_EVENTS_LIST',
+      inputProperties: ['calendarId', 'timeMin', 'timeMax', 'maxResults'],
+      required: ['calendarId'],
+    };
+    await expect(
+      provider.execute({
+        scope: SCOPE,
+        appSlug: 'googlesuper',
+        actionName: 'events_list',
+        props: { calendarId: 'primary', timeMin: '2026-09-01T00:00:00Z' },
+        connectedAccountId: 'ca_1',
+        userId: 'u1',
+        tool: eventsList,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('set timeMax — left empty, the provider fills in a fixed past date'),
+    });
+    expect(executeCalls).toHaveLength(0);
+
+    await provider.execute({
+      scope: SCOPE,
+      appSlug: 'googlesuper',
+      actionName: 'events_list',
+      props: { calendarId: 'primary', timeMin: '2026-09-01T00:00:00Z', timeMax: '2026-10-01T00:00:00Z' },
+      connectedAccountId: 'ca_1',
+      userId: 'u1',
+      tool: eventsList,
+    });
+    expect(executeCalls).toHaveLength(1);
+  });
+
+  it('calendar.google_calendar_get_events with no bounds still sends both, so the tool fills in neither', async () => {
+    await provider.execute({
+      scope: SCOPE,
+      appSlug: 'calendar',
+      actionName: 'google_calendar_get_events',
+      props: { calendarId: 'primary' },
+      connectedAccountId: 'ca_1',
+      userId: 'u1',
+    });
+    expect(executeCalls).toHaveLength(1);
+    expect(executeCalls[0]!.slug).toBe('GOOGLECALENDAR_EVENTS_LIST');
+    expect(executeCalls[0]!.body.arguments).toMatchObject({
+      timeMin: '1970-01-01T00:00:00Z',
+      timeMax: '9999-12-31T23:59:59Z',
+      singleEvents: true,
+      orderBy: 'startTime',
+    });
+  });
+
   it('enforces the curated one-of table (asana team/workspace/user) with a clean 400', async () => {
     await expect(
       provider.execute({

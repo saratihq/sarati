@@ -199,6 +199,34 @@ export function composioToolFor(type: string): ComposioCatalogTool | undefined {
   return composioToolCache.get(type);
 }
 
+/** A literal date as a parameter default: a clock frozen when the tool's schema was generated. */
+const FROZEN_CLOCK_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}|$)/;
+
+let frozenClockCache: Map<string, string[]> | null = null;
+
+/**
+ * The arguments of Composio tool `slug` whose recorded default is a frozen clock. Left unset, the tool fills them
+ * with that past date and silently filters its results — so callers must always send them.
+ */
+export function frozenClockArguments(slug: string): readonly string[] {
+  if (!frozenClockCache) {
+    frozenClockCache = new Map();
+    for (const row of loadComposioCatalog()) {
+      const params = row.parameters && typeof row.parameters === 'object' ? row.parameters : {};
+      const frozen = Object.entries(params as Record<string, unknown>)
+        .filter(([, schema]) => {
+          const value =
+            schema && typeof schema === 'object' ? (schema as { default?: unknown }).default : undefined;
+          return typeof value === 'string' && FROZEN_CLOCK_RE.test(value);
+        })
+        .map(([name]) => name);
+      if (frozen.length > 0 && typeof row.composioSlug === 'string')
+        frozenClockCache.set(row.composioSlug, frozen);
+    }
+  }
+  return frozenClockCache.get(slug) ?? [];
+}
+
 /**
  * Whether `type` is an executable Composio-catalog action — the router's general-fallback gate.
  * Permissive by design (it covers EVERY managed-toolkit tool); the conservative SURFACING rule is {@link mergeComposioCatalog}.
