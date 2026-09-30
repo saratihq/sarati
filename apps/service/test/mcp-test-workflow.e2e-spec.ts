@@ -241,6 +241,40 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     expect(typeof res.data.run_id).toBe('string');
   });
 
+  it('a key that cannot read runs is told so, not pointed at a tool it does not hold', async () => {
+    // `/mcp` itself takes `workflow:read` or `workflow:invoke`, so this is the key that can preview without reading.
+    const dryOnly = 'ork_tw_dry_only_dddddddddddddddddd';
+    await db.query(
+      `INSERT INTO api_keys (id,user_id,org_id,name,key_hash,prefix,scopes,created_at)
+       VALUES (gen_random_uuid(),$1,$2,'dry-only',$3,'ork_tw_dry_o',$4,now())`,
+      [userId, orgId, hash(dryOnly), JSON.stringify(['workflow:invoke', 'run:dry'])],
+    );
+    const client = await connect(dryOnly);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).not.toContain('orchestr_get_run');
+    await client.close();
+
+    const slow = {
+      ...doc('slow'),
+      nodes: [
+        {
+          id: 'wait',
+          name: 'Wait',
+          node_type: 'http.send_request',
+          type_version: 1,
+          parameters: { method: 'GET', url: `${hitUrl}/slow` },
+          position: { x: 0, y: 0 },
+          metadata: {},
+        },
+      ],
+    };
+    const res = await call(dryOnly, { workflow_ir: slow, await_ms: 100 });
+    if (!res.ok) throw new Error(`handle run failed: ${res.text}`);
+    expect(res.data.status).toBe('running');
+    expect(res.data.poll_with).toBeUndefined();
+    expect(res.data.note).toContain('workflow:read');
+  });
+
   it('refuses an ambiguous request rather than guessing which document to run', async () => {
     const res = await call(dryKey, { workflow_ir: doc('x'), workflow_id: randomUUID() });
     expect(res.ok).toBe(false);

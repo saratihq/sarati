@@ -5,6 +5,7 @@ import { principalScopes } from '../../auth/principal';
 import type { ApiScope } from '../../auth/scopes';
 import { scopeSatisfied } from '../../auth/scopes';
 import { DomainError } from '../../common/domain-error';
+import { CANNOT_POLL_NOTE, mayReadRuns } from '../../runs/run-read-access';
 import { RunsService } from '../../runs/runs.service';
 import type { RunHandle, RunOutcome, RunResult } from '../../runtime/run-plan';
 import { WorkflowsReadService } from '../../workflows/workflows-read.service';
@@ -66,6 +67,7 @@ const Output = z.object({
   /** Present only after a dry run: quote it to fire the same document for real. */
   confirmation_token: z.string().optional(),
   poll_with: z.string().optional(),
+  note: z.string().optional(),
 });
 
 /** A run that outlived the wait carries only a handle; everything else is a finished result. */
@@ -179,7 +181,8 @@ export class TestWorkflowTool implements McpTool {
       output_summary: running ? null : outcome.outputs,
       // A fresh dry run is what licenses the next live one, so the token rides its result.
       ...(dryRun ? { confirmation_token: this.consent.issue(ctx.principal.user.id, ir) } : {}),
-      ...(running ? { poll_with: 'orchestr_get_run' } : {}),
+      ...(running && mayReadRuns(ctx.principal) ? { poll_with: 'orchestr_get_run' } : {}),
+      ...(running && !mayReadRuns(ctx.principal) ? { note: CANNOT_POLL_NOTE } : {}),
     };
   }
 }

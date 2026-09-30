@@ -19,6 +19,7 @@ const Output = z.object({
   status: z.string(),
   result: z.unknown().nullable().describe("The workflow's answer — its Respond node, or its last step."),
   poll_with: z.string().optional(),
+  note: z.string().optional(),
 });
 
 function fieldOf(input: WorkflowToolInput): z.ZodTypeAny {
@@ -84,8 +85,9 @@ export class WorkflowInvokeTool {
             run_id: outcome.run_id,
             status: outcome.status,
             result: outcome.output ?? null,
-            // The REST path returns a URL; over MCP the caller polls with the tool it already has.
-            ...(outcome.status === 'running' ? { poll_with: 'orchestr_get_run' } : {}),
+            // The REST path returns a URL; over MCP the caller polls with a tool — when it holds one.
+            ...(outcome.poll_with ? { poll_with: 'orchestr_get_run' } : {}),
+            ...(outcome.note ? { note: outcome.note } : {}),
           });
         } catch (err) {
           const message = errorMessage(err);

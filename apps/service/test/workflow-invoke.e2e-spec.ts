@@ -410,4 +410,35 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
     expect(detail.body.source).toBe('mcp');
     expect((detail.body.outputs as { wait: { status: number } }).wait.status).toBe(200);
   }, 30_000);
+
+  it('a key that can only invoke is told it cannot read the run, not handed a URL it cannot open', async () => {
+    const slowId = (
+      await asA(
+        http()
+          .post('/api/deploy')
+          .send({ workflow_json: slowToolDoc(stubUrl) }),
+      ).expect(201)
+    ).body.workflow_id as string;
+    const asInvokeOnly = (r: request.Test): request.Test =>
+      r.set('Authorization', `Bearer ${invokeOnlyKey}`).set('X-Org-Id', orgA);
+
+    const res = await asInvokeOnly(
+      http().post(`/api/workflows/${slowId}/invoke`).send({ arguments: {}, await_ms: BOUNDED_WAIT_MS }),
+    ).expect(200);
+    expect(res.body).toEqual({
+      run_id: expect.any(String) as unknown,
+      status: 'running',
+      note: expect.stringContaining('workflow:read') as unknown,
+    });
+    // The pointer would have been a dead end: this key cannot read the run it just started.
+    await asInvokeOnly(http().get(`/api/runs/${res.body.run_id}`)).expect(403);
+
+    const deadline = Date.now() + 15_000;
+    let detail = await asA(http().get(`/api/runs/${res.body.run_id}`)).expect(200);
+    while (detail.body.status === 'running' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      detail = await asA(http().get(`/api/runs/${res.body.run_id}`)).expect(200);
+    }
+    expect(detail.body.status).toBe('completed');
+  }, 30_000);
 });
