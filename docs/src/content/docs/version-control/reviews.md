@@ -47,6 +47,9 @@ fetch_top_stories · stories[8]    {…} → null
 Point it at a non-production environment unless you mean it.
 :::
 
+An agent testing over [MCP](/agents/mcp/#testing-is-dry-unless-you-confirm) is the other way round:
+dry unless the run is confirmed.
+
 An untested review says so — *"This review was never tested."*
 
 ## Approve
