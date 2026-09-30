@@ -131,7 +131,7 @@ export class TestWorkflowTool implements McpTool {
     const scopes = principalScopes(ctx.principal);
     if (!scopeSatisfied(scopes, 'run:execute')) {
       throw new DomainError(
-        'This credential may preview a workflow but not fire it — firing for real needs the "run:execute" scope.',
+        'This credential may dry-run a workflow but not fire it — firing for real needs the "run:execute" scope.',
         403,
         { code: 'live_run_not_permitted' },
       );
