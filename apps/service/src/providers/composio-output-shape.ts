@@ -1,6 +1,7 @@
 import { actions } from '@sarati/actions-sdk';
 
 import { isRecord } from '../common/json-util';
+import { gmailSearchQuery } from '../connections/composio-direct-overrides';
 
 /**
  * One output shape per action, whichever rail ran it.
@@ -31,6 +32,7 @@ type Labels = Awaited<ReturnType<typeof actions.gmail.listLabels.execute>>;
 type Label = Labels['labels'][number];
 type Messages = Awaited<ReturnType<typeof actions.gmail.listMessages.execute>>;
 type MessageRef = Messages['messages'][number];
+type Found = Awaited<ReturnType<typeof actions.gmail.findEmail.execute>>;
 type Calendars = Awaited<ReturnType<typeof actions.calendar.listCalendars.execute>>;
 type CalendarEntry = Calendars['calendars'][number];
 type Event = Awaited<ReturnType<typeof actions.calendar.createEvent.execute>>;
@@ -216,6 +218,12 @@ function gmailMessages(raw: unknown): Messages | null {
   return messages.length === body.messages.length ? { messages, count: messages.length } : null;
 }
 
+/** Composio answers with the matches only; the search string is ours to report, as the action declares. */
+function gmailFound(raw: unknown, props: Props): Found | null {
+  const listed = gmailMessages(raw);
+  return listed ? { query: gmailSearchQuery(props) ?? '', ...listed } : null;
+}
+
 function calendarEntryOf(entry: unknown): CalendarEntry | null {
   if (!isRecord(entry)) return null;
   const id = str(entry.id);
@@ -305,6 +313,7 @@ const SHAPES: ReadonlyMap<string, Shaper> = new Map<string, Shaper>([
   ['gmail.get_profile', gmailProfile],
   ['gmail.list_labels', gmailLabels],
   ['gmail.list_messages', gmailMessages],
+  ['gmail.gmail_search_mail', gmailFound],
   ['calendar.list_calendars', calendarList],
   ['calendar.create_google_calendar_event', calendarEvent],
   ['calendar.update_event', calendarEvent],

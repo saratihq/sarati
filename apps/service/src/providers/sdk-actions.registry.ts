@@ -33,6 +33,23 @@ export function sdkAction(type: string): AnyAction | undefined {
   return REGISTRY.get(type);
 }
 
+const declaredDefaultsCache = new Map<string, Readonly<Record<string, unknown>>>();
+
+/** The defaults SDK action `type` declares — what its own rail fills in for a prop left unset. */
+export function declaredDefaults(type: string): Readonly<Record<string, unknown>> {
+  let defaults = declaredDefaultsCache.get(type);
+  if (!defaults) {
+    const props = REGISTRY.get(type)?.toManifest().props ?? {};
+    defaults = Object.fromEntries(
+      Object.entries(props)
+        .filter(([, prop]) => prop.defaultValue !== undefined)
+        .map(([name, prop]) => [name, prop.defaultValue]),
+    );
+    declaredDefaultsCache.set(type, defaults);
+  }
+  return defaults;
+}
+
 /** The platform catalog-row shape (name/type/category/description/parameters/auth). */
 export type CatalogEntry = Record<string, unknown>;
 

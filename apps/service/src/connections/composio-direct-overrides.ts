@@ -1,7 +1,10 @@
+import { actions } from '@sarati/actions-sdk';
+
 /**
  * Curated action → Composio tool overrides for the COMPOSIO-DIRECT apps, where the generic name-matcher
  * misroutes or drops load-bearing props. A correction layer, not a parallel catalog: actions the matcher
  * already resolves are NOT listed, and `null` marks an action with no faithful equivalent (→ honest 400).
+ * An override sends what the SDK action sends, its constants included — a tool's own default is never the contract.
  */
 
 export interface DirectToolOverride {
@@ -28,26 +31,19 @@ function given(value: unknown): unknown {
 /** "No bound" for a calendar listing, spelled out so the tool never supplies its own. */
 const CALENDAR_EARLIEST = '1970-01-01T00:00:00Z';
 const CALENDAR_LATEST = '9999-12-31T23:59:59Z';
-/** The SDK action's default `limit`. */
-const CALENDAR_PAGE_SIZE = 250;
 
-/** Mirror the SDK's Gmail query grammar (quote terms containing whitespace). */
-function quoteIfNeeded(value: string): string {
-  const trimmed = value.trim();
-  return /\s/.test(trimmed) ? `"${trimmed}"` : trimmed;
-}
-
-/** from/to/subject/raw-query → one Gmail search string (the SDK's buildSearchQuery). */
-function gmailSearchQuery(props: Record<string, unknown>): string | undefined {
-  const terms: string[] = [];
-  if (typeof props.from === 'string' && props.from) terms.push(`from:${quoteIfNeeded(props.from)}`);
-  if (typeof props.to === 'string' && props.to) terms.push(`to:${quoteIfNeeded(props.to)}`);
-  if (typeof props.subject === 'string' && props.subject) {
-    terms.push(`subject:${quoteIfNeeded(props.subject)}`);
-  }
-  if (typeof props.query === 'string' && props.query) terms.push(props.query.trim());
-  const query = terms.join(' ').trim();
-  return query || undefined;
+/** The SDK action's own search string, built from the same four props. */
+export function gmailSearchQuery(props: Record<string, unknown>): string | undefined {
+  const text = (value: unknown): string | undefined =>
+    typeof value === 'string' && value ? value : undefined;
+  const parts = {
+    from: text(props.from),
+    to: text(props.to),
+    subject: text(props.subject),
+    query: text(props.query),
+  };
+  const given = Object.fromEntries(Object.entries(parts).filter(([, value]) => value !== undefined));
+  return actions.gmail.buildSearchQuery(given) || undefined;
 }
 
 /** A single label id (the SDK label dropdown's value) → the tool's `label_ids` array. */
@@ -108,7 +104,12 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
     {
       toolSlug: 'GMAIL_FETCH_EMAILS',
       toArguments: (p) =>
-        compact({ query: p.query, label_ids: labelIdList(p.labelIds), max_results: p.limit }),
+        compact({
+          query: p.query,
+          label_ids: labelIdList(p.labelIds),
+          max_results: p.limit,
+          ids_only: true, // the action lists refs; without this the tool fetches every message in full
+        }),
     },
   ],
   [
@@ -120,6 +121,7 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
           query: gmailSearchQuery(p),
           label_ids: labelIdList(p.label), // the SDK dropdown's value IS the label id
           max_results: p.max,
+          ids_only: true,
         }),
     },
   ],
@@ -254,7 +256,7 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
           q: p.query,
           singleEvents: true,
           orderBy: 'startTime',
-          maxResults: p.limit ?? CALENDAR_PAGE_SIZE,
+          maxResults: p.limit,
         }),
     },
   ],
@@ -289,7 +291,15 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
     'drive.list_files',
     {
       toolSlug: 'GOOGLEDRIVE_LIST_FILES',
-      toArguments: (p) => compact({ q: p.query, pageSize: p.limit }),
+      toArguments: (p) =>
+        compact({
+          q: given(p.query) ?? 'trashed=false',
+          pageSize: p.limit,
+          orderBy: 'modifiedTime desc',
+          fields: `nextPageToken,files(${actions.drive.DRIVE_FILE_FIELDS})`,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        }),
     },
   ],
   [
