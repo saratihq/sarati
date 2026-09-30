@@ -165,6 +165,16 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     return Number(res.rows[0]?.n ?? '0');
   };
 
+  /** A delivery's run starts after the 202 (fast ack), so its record is waited for, never read once. */
+  const runsCreatedSince = async (before: number): Promise<number> => {
+    let created = 0;
+    for (let i = 0; i < 40 && created === 0; i++) {
+      created = (await runCount()) - before;
+      if (created === 0) await new Promise((r) => setTimeout(r, 100));
+    }
+    return created;
+  };
+
   it('a VALID signed delivery fans out to the activation and fires a run', async () => {
     const raw = JSON.stringify({
       type: 'composio.trigger.message',
@@ -174,13 +184,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     const res = await deliver(raw, 'auto').expect(202);
     expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
 
-    // The run is fire-and-forget (fast ack) — poll briefly for its record.
-    let created = 0;
-    for (let i = 0; i < 40 && created === 0; i++) {
-      created = await runCount();
-      if (created === 0) await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(created).toBe(1);
+    expect(await runsCreatedSince(0)).toBe(1);
   });
 
   /** Delivery is at-least-once by contract, so the intake claims the stable Svix id before firing. */
@@ -201,13 +205,8 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     const second = await deliver(raw, 'auto', id).expect(202);
     expect(second.body).toMatchObject({ status: 'accepted', fired: 0, duplicate: true });
 
-    // Exactly ONE new run, not two. Poll: the fire is fire-and-forget.
-    let created = 0;
-    for (let i = 0; i < 40 && created === 0; i++) {
-      created = (await runCount()) - before;
-      if (created === 0) await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(created).toBe(1);
+    // Exactly ONE new run, not two.
+    expect(await runsCreatedSince(before)).toBe(1);
     await new Promise((r) => setTimeout(r, 300)); // let a wrongly-fired second run surface
     expect((await runCount()) - before).toBe(1);
   });
@@ -258,15 +257,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
       const before = await runCount();
       const res = await deliverSignedWith(WEBHOOK_SECRET).expect(202);
       expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
-      // 202 says the delivery was ACCEPTED and dispatched; the run row lands after. Poll for it,
-      // like every other assertion here — reading the count straight after the response is a race
-      // that only loses on a busy machine.
-      let created = 0;
-      for (let i = 0; i < 40 && created === 0; i++) {
-        created = (await runCount()) - before;
-        if (created === 0) await new Promise((r) => setTimeout(r, 100));
-      }
-      expect(created).toBe(1);
+      expect(await runsCreatedSince(before)).toBe(1);
     });
 
     it("rejects a delivery signed with a DIFFERENT scope's secret", async () => {
@@ -304,7 +295,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
       const before = await runCount();
       const ok = await post(WEBHOOK_SECRET).expect(202);
       expect(ok.body).toMatchObject({ fired: 1 });
-      expect(await runCount()).toBe(before + 1);
+      expect(await runsCreatedSince(before)).toBe(1);
 
       // ...and the SAME id a second time is still deduped (migration 022 behaviour intact).
       const dup = await post(WEBHOOK_SECRET).expect(202);
@@ -361,11 +352,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
       });
       const res = await deliver(raw, 'auto').expect(202);
       expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
-      // Let the fire-and-forget run settle (its history write) before teardown.
-      for (let i = 0; i < 40 && (await runCount()) === before; i++) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      expect(await runCount()).toBe(before + 1);
+      expect(await runsCreatedSince(before)).toBe(1);
     });
   });
 });
