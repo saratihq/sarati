@@ -1,6 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { DBOS } from '@dbos-inc/dbos-sdk';
+import { DBOS, Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
+import { errorMessage } from '../common/error-message';
 import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import { RunRecorderService } from '../runtime/run-recorder.service';
@@ -28,24 +29,40 @@ interface PlanWorkflowArgs {
   chatChannelKey?: string | null;
 }
 
+/** Whether a durable run's rejection is the cancel someone asked for, not a failure. */
+export function isDurableCancellation(err: unknown): boolean {
+  return (
+    err instanceof DbosErrors.DBOSWorkflowCancelledError ||
+    err instanceof DbosErrors.DBOSAwaitedWorkflowCancelledError
+  );
+}
+
 const runPlanWorkflow = DBOS.registerWorkflow(
-  (args: PlanWorkflowArgs): Promise<RunResult> => {
+  async (args: PlanWorkflowArgs): Promise<RunResult> => {
     if (!activeInterpreter) throw new Error('DbosRuntime is not initialized (no interpreter bound)');
-    return activeInterpreter.run(args.plan, {
-      externalUserId: args.externalUserId,
-      durable: durableStep,
-      runId: args.runId,
-      recorder: activeRecorder ?? undefined,
-      initialScope: args.initialScope,
-      // Pins ride the checkpointed args so a crash-resume replays the same pinned steps.
-      pins: args.pins,
-      // Checkpointed too, so a crash-resume rehydrates the env and re-resolves the slot connection.
-      environment: args.environment,
-      environmentId: args.environmentId,
-      orgId: args.orgId,
-      // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
-      chatChannelKey: args.chatChannelKey,
-    });
+    try {
+      return await activeInterpreter.run(args.plan, {
+        externalUserId: args.externalUserId,
+        durable: durableStep,
+        runId: args.runId,
+        recorder: activeRecorder ?? undefined,
+        initialScope: args.initialScope,
+        // Pins ride the checkpointed args so a crash-resume replays the same pinned steps.
+        pins: args.pins,
+        // Checkpointed too, so a crash-resume rehydrates the env and re-resolves the slot connection.
+        environment: args.environment,
+        environmentId: args.environmentId,
+        orgId: args.orgId,
+        // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
+        chatChannelKey: args.chatChannelKey,
+      });
+    } catch (err) {
+      // The interpreter records any unwinding as the run's failure; a cancel is not one.
+      if (isDurableCancellation(err) && args.runId) {
+        await activeRecorder?.runUnwoundByCancel(args.runId, errorMessage(err));
+      }
+      throw err;
+    }
   },
   { name: 'orchestr.runPlan' },
 );

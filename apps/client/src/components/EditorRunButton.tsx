@@ -15,7 +15,7 @@ const RUN_POLL_MS = 3000;
 const RUN_POLL_CAP_MS = 5 * 60_000;
 
 interface RunView {
-  status: "running" | "waiting" | "completed" | "failed";
+  status: "running" | "waiting" | "completed" | "failed" | "cancelled";
   outputs?: Record<string, unknown>;
   error?: string | null;
 }
@@ -25,6 +25,7 @@ const VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
   waiting: { label: "Waiting for a decision", color: "var(--orchestr-warning)" },
   completed: { label: "Completed", color: "var(--orchestr-success)" },
   failed: { label: "Failed", color: "var(--orchestr-danger)" },
+  cancelled: { label: "Cancelled", color: "var(--orchestr-ink-muted)" },
 };
 
 /**
@@ -63,9 +64,14 @@ export default function EditorRunButton() {
           if (activeRun.current === activeRunId) setView({ status: "waiting" });
         } else if (d.status === "completed") {
           settle(activeRunId, { status: "completed", outputs: d.outputs ?? undefined });
-        } else if (d.status === "error" || d.status === "cancelled") {
-          const stopped = d.status === "cancelled" ? "The run was cancelled." : "The run failed.";
-          settle(activeRunId, { status: "failed", outputs: d.outputs ?? undefined, error: d.error ?? stopped });
+        } else if (d.status === "cancelled") {
+          settle(activeRunId, { status: "cancelled" });
+        } else if (d.status === "error") {
+          settle(activeRunId, {
+            status: "failed",
+            outputs: d.outputs ?? undefined,
+            error: d.error ?? "The run failed.",
+          });
         }
       } catch {
         // Run row not written yet, or a transient failure — keep trying.
@@ -96,7 +102,13 @@ export default function EditorRunButton() {
       });
       settle(runId, { status: "completed", outputs: res.outputs });
     } catch (e) {
-      settle(runId, { status: "failed", error: e instanceof Error ? e.message : "Run failed" });
+      const cancelled = e instanceof api.ApiError && e.code === "run_cancelled";
+      settle(
+        runId,
+        cancelled
+          ? { status: "cancelled" }
+          : { status: "failed", error: e instanceof Error ? e.message : "Run failed" },
+      );
     }
   };
 
@@ -181,7 +193,7 @@ export default function EditorRunButton() {
             </pre>
           )}
 
-          {workflowId && (view.status === "completed" || view.status === "failed") && (
+          {workflowId && view.status !== "running" && view.status !== "waiting" && (
             <p className="text-[11px] m-0 mt-2">
               <Link
                 href={`/workflows/${workflowId}/runs`}

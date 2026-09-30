@@ -11,6 +11,8 @@ const MAX_STORED_JSON_CHARS = 16_000;
 
 /** How much of an oversized value's JSON is kept as a readable head. */
 const TRUNCATED_HEAD_CHARS = 2_000;
+/** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
+const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
 
 /** An oversized stored value: the head of its JSON, plus the size it actually had. */
 export interface TruncatedValue {
@@ -90,6 +92,8 @@ export interface RunRecorder {
   runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void>;
   /** Mark a non-terminal run `cancelled` (user cancel, B7). No-op if already terminal. */
   runCancelled(scopedRunId: string): Promise<void>;
+  /** A cancel unwinds the run as a failure `runFinished` has just recorded; restore what actually ended it. */
+  runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void>;
 }
 
 /**
@@ -228,6 +232,21 @@ export class RunRecorderService implements RunRecorder {
               waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
         WHERE id = $1 AND status IN ('running', 'waiting')`,
       [scopedRunId],
+    ]);
+  }
+
+  async runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void> {
+    await this.write('runUnwoundByCancel', scopedRunId, [
+      `UPDATE runtime_runs
+          SET status = 'cancelled', error = NULL, finished_at = COALESCE(finished_at, now()),
+              waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
+        WHERE id = $1 AND status <> 'completed'`,
+      [scopedRunId],
+    ]);
+    // Only the step that carried this very error: the one the cancel interrupted.
+    await this.write('runUnwoundByCancel', scopedRunId, [
+      `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
+      [scopedRunId, unwindError, CANCELLED_STEP_ERROR],
     ]);
   }
 

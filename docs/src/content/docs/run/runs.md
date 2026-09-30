@@ -73,6 +73,9 @@ curl -X POST http://localhost:8080/api/runs/<run-id>/cancel
 
 Idempotent — cancelling an already-finished run is not an error.
 
+The run is listed as **Cancelled**, and the step it was on says *Cancelled before it finished*. A
+caller still waiting on the run's answer gets `409` with the code `run_cancelled`.
+
 ## When a worker dies
 
 Durable resume covers a worker that comes back. A worker that does not come back would otherwise
