@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 
-import { actions } from '@sarati/actions-sdk';
+import { actions, createDirectAuth, HttpClient } from '@sarati/actions-sdk';
+import type { HttpMethod, HttpResponse, RequestOptions } from '@sarati/actions-sdk';
 
 import { dataFile } from '../generation/data-dir';
-import { frozenClockArguments } from '../providers/sdk-actions.registry';
+import { frozenClockArguments, sdkAction } from '../providers/sdk-actions.registry';
 import { directOverride, directOverrideTypes } from './composio-direct-overrides';
 import { COMPOSIO_DIRECT_APPS } from './managed-app-rails';
 import { toComposioSlug } from './managed-connections.service';
@@ -250,4 +251,36 @@ describe('composio-direct-overrides — argument mapping', () => {
       { folder_name: 'Reports', parent_id: 'root' },
     );
   });
+
+  it('sheets.insert_row inserts rows instead of writing over what sits below the table, as the SDK action does', async () => {
+    const props = { spreadsheetId: 's1', range: 'Sheet1!A1:B3', values: [['c', 3]] };
+    const sent = directOverride('sheets.insert_row')!.toArguments(props);
+    expect(sent).toEqual({ ...props, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS' });
+
+    // The two choices the SDK action puts on its own request, read off that request rather than copied.
+    const recorded = await sdkRequest('sheets.insert_row', props);
+    expect(recorded.query).toEqual({
+      valueInputOption: sent.valueInputOption,
+      insertDataOption: sent.insertDataOption,
+    });
+  });
 });
+
+/** Run an SDK action for real against a transport that records its one request instead of sending it. */
+async function sdkRequest(type: string, props: Record<string, unknown>): Promise<RequestOptions> {
+  const requests: RequestOptions[] = [];
+  class Recorder extends HttpClient {
+    override request<T = unknown>(
+      _method: HttpMethod,
+      _url: string,
+      options: RequestOptions,
+    ): Promise<HttpResponse<T>> {
+      requests.push(options);
+      return Promise.resolve({ status: 200, headers: {}, data: { updates: {} } as T });
+    }
+  }
+  const auth = createDirectAuth(sdkAction(type)!.auth, { type: 'bearer', token: 'not-a-real-token' });
+  await sdkAction(type)!.execute({ auth, props, http: new Recorder() });
+  expect(requests).toHaveLength(1);
+  return requests[0]!;
+}
