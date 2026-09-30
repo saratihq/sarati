@@ -12,7 +12,7 @@ import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
-import { DbosRuntime } from '../dbos/dbos-runtime';
+import { DbosRuntime, isDurableCancellation } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
 import { PassThroughDurableStep } from '../providers/durable-step';
 import type { AgentWorkflowCatalog } from '../runtime/agent';
@@ -163,6 +163,9 @@ export class RunsService {
       const details = await this.failureDetails(scoped, runId);
       if (err instanceof DomainError) {
         throw new DomainError(err.message, err.status, { ...details, ...(err.details ?? {}) });
+      }
+      if (isDurableCancellation(err)) {
+        throw new DomainError(`Run ${runId} was cancelled`, 409, { code: 'run_cancelled', ...details });
       }
       throw new DomainError(`Run ${runId} failed: ${errorMessage(err)}`, 422, {
         code: 'run_failed',

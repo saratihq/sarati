@@ -74,12 +74,25 @@ describe("EditorRunButton watching a run whose call is still open", () => {
     expect(getRun).toHaveBeenCalledTimes(1);
   });
 
-  it("a cancelled run says it was cancelled", async () => {
+  it("a cancelled run reads Cancelled, not Failed", async () => {
     getRun.mockResolvedValue(watched({ status: "cancelled" }));
     await startAndWatchOnce();
 
-    expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText("The run was cancelled.")).toBeInTheDocument();
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+  });
+
+  it("the open call answering that the run was cancelled reads the same", async () => {
+    runWorkflowIr.mockRejectedValue(
+      new api.ApiError("Run 0d5f0c1e was cancelled", 409, "run_cancelled"),
+    );
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    expect(await screen.findByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
   it("a run parked on an approval says it is waiting, and keeps being watched", async () => {
