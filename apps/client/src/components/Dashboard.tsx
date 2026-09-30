@@ -316,7 +316,7 @@ export default function Dashboard() {
                 )}
               </p>
               <Button
-                variant={composerHere ? "ai" : "default"}
+                variant="ai"
                 className="mt-auto"
                 onClick={() => router.push("/workflows/compose")}
               >

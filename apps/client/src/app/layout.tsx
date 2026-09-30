@@ -12,8 +12,8 @@ const inter = Inter({
   weight: ["400", "500", "600"],
 });
 
+// No `title` here: <DocumentTitle /> owns the tab title.
 export const metadata: Metadata = {
-  title: "Sarati",
   description: "Build-and-run automation platform with version control for your workflows.",
 };
 

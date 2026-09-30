@@ -4,7 +4,7 @@ import { Slot } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 
-// THE button: one implementation, variants not forks — `ai` is for AI touchpoints only.
+// THE button: one implementation, variants not forks — `ai` is the brand blue: AI touchpoints and a screen's hero action.
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[10px] text-sm font-medium cursor-pointer transition-all duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)]",
   {

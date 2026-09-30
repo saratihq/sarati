@@ -99,6 +99,7 @@ export default function BranchSelector({
       setCreating(false);
       await fetchBranches();
       onBranchChange(newName.trim());
+      setOpen(false);
       onBranchesChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create branch");
