@@ -101,4 +101,26 @@ describe("WorkflowRunsPage", () => {
     expect(screen.getByText('{"status":200}')).toBeInTheDocument();
     expect(screen.queryByText(/"withheld"/)).not.toBeInTheDocument();
   });
+
+  it("a real run's step that returns an object shaped like a marker is shown as its output", async () => {
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-live" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-live" }),
+      steps: [
+        {
+          node_id: "validate",
+          status: "completed",
+          output: { dry_run: true, accepted: 3 },
+          output_preview: '{"dry_run":true,"accepted":3}',
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect(await screen.findByText('{"dry_run":true,"accepted":3}')).toBeInTheDocument();
+    expect(screen.queryByTestId("run-step-withheld")).not.toBeInTheDocument();
+  });
 });

@@ -89,9 +89,10 @@ function stepDuration(step: RunStepInfo): string | null {
   return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : null;
 }
 
-function StepRow({ step }: { step: RunStepInfo }) {
+function StepRow({ step, dry }: { step: RunStepInfo; dry: boolean }) {
   const failed = step.status === "failed" || step.status === "error" || step.status === "crashed";
-  const withheld = dryRunMarkerOf(step.output);
+  // Only a dry run leaves markers; a real step is free to return an object that looks like one.
+  const withheld = dry ? dryRunMarkerOf(step.output) : null;
   const succeeded = !withheld && (step.status === "completed" || step.status === "success");
   const output = withheld ? null : previewText(step.output_preview);
   const truncated = truncationNote(step);
@@ -275,7 +276,7 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
         ) : (
           <ul className="list-none m-0 p-0 divide-y divide-white/5">
             {detail.steps.map((step, i) => (
-              <StepRow key={`${step.node_id}:${i}`} step={step} />
+              <StepRow key={`${step.node_id}:${i}`} step={step} dry={detail.dry_run === true} />
             ))}
           </ul>
         )}
