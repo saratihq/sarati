@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { ArrowUp, Check, CircleDot, Database, MessageSquare, Paperclip, Plus, Table2, X } from "lucide-react";
+import { useComposerAvailable } from "@/lib/useComposerAvailable";
 import { useComposer, type ThreadEntry } from "@/store/useComposer";
 import { useWorkflow } from "@/store/useWorkflow";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,8 @@ export default function ComposerBar({
   const acceptOffer = useComposer((s) => s.acceptOffer);
   const connectionNeeds = useComposer((s) => s.connectionNeeds);
   const clearThread = useComposer((s) => s.clearThread);
+  // Both pages mount this bar before the probe answers; an instance without the composer is never asked.
+  const composerReady = useComposerAvailable()?.available === true;
   const [confirmClear, setConfirmClear] = useState(false);
 
   // One chip per app, however many steps wait on it (a connection is per-provider).
@@ -58,11 +61,14 @@ export default function ComposerBar({
 
   // A refresh mid-conversation reattaches to the stored session and replays the thread.
   useEffect(() => {
-    if (useComposer.getState().thread.length === 0) void attach(workflowId);
+    if (composerReady && useComposer.getState().thread.length === 0) void attach(workflowId);
+  }, [attach, composerReady, workflowId]);
+
+  useEffect(() => {
     return () => {
       reset();
     };
-  }, [attach, reset, workflowId]);
+  }, [reset, workflowId]);
 
   // Dev-only hooks so a proof script can drive co-editing without the inspector UI.
   useEffect(() => {
