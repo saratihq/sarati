@@ -14,15 +14,21 @@ import { useWorkflowContext } from "./WorkflowDetail";
 const LIST_POLL_MS = 3000;
 
 // Status presentation — one source for the dot, label, and text color.
-const STATUS_META: Record<string, { label: string; color: string }> = {
+const STATUS_META: Record<api.RunStatus, { label: string; color: string }> = {
   completed: { label: "Completed", color: "var(--orchestr-success)" },
-  failed: { label: "Failed", color: "var(--orchestr-danger)" },
+  error: { label: "Failed", color: "var(--orchestr-danger)" },
+  cancelled: { label: "Cancelled", color: "var(--orchestr-ink-muted)" },
   running: { label: "Running", color: "var(--orchestr-ai-bright)" },
   waiting: { label: "Waiting", color: "var(--orchestr-warning)" },
 };
 
 function statusMeta(status: string) {
-  return STATUS_META[status] ?? { label: status, color: "var(--orchestr-ink-muted)" };
+  return (
+    (STATUS_META as Record<string, { label: string; color: string }>)[status] ?? {
+      label: status,
+      color: "var(--orchestr-ink-muted)",
+    }
+  );
 }
 
 function isActive(status: string): boolean {

@@ -1175,24 +1175,6 @@ export async function runWorkflowIr(
   });
 }
 
-/** Start a durable (async) WorkflowIR run and return immediately; poll getRun() for the outcome. */
-export async function runWorkflowIrAsync(
-  workflowIr: Record<string, unknown>,
-  triggerPayload?: Record<string, unknown>,
-  opts?: RunIrOptions,
-): Promise<{ run_id: string; status: string }> {
-  return request(`/runs/from-ir/async`, {
-    method: "POST",
-    body: JSON.stringify({
-      workflow_ir: workflowIr,
-      trigger_payload: triggerPayload ?? {},
-      workflow_id: opts?.workflowId,
-      run_id: opts?.runId,
-      pins: opts?.pins,
-    }),
-  });
-}
-
 /** The single IR node the editor sends to test one step in isolation. */
 export interface TestStepNode {
   id: string;
@@ -1235,7 +1217,8 @@ export async function testAgentStep(body: {
 
 // ─── Run history & approvals (built-in runtime) ───
 
-export type RunStatus = "completed" | "failed" | "running" | "waiting";
+/** The service's own words: `error` is a run that failed, `cancelled` one a person stopped. */
+export type RunStatus = "running" | "waiting" | "completed" | "error" | "cancelled";
 
 export interface RunSummary {
   run_id: string;
