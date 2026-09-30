@@ -8,7 +8,7 @@
     "dev": "astro dev --port 4321",
     "build": "astro build",
     "preview": "astro preview --port 4321",
-    "check": "astro check && astro build"
+    "check": "astro check && astro build && node --test"
   },
   "dependencies": {
     "@astrojs/starlight": "0.41.7",
