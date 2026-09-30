@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SignJWT } from 'jose';
@@ -15,6 +17,8 @@ const INTERNAL_ISSUER = 'orchestr:internal';
 /** Carried BESIDE the caller's own Authorization — the process credential, not the user's. */
 const INTERNAL_TOKEN_HEADER = 'X-Internal-Token';
 const TOKEN_TTL_SECONDS = 60;
+/** Matches workflow-service's audience for this read; a token is minted for one purpose. */
+const PLATFORM_KEYS_AUDIENCE = 'platform-keys:anthropic';
 /** The composer status probe runs on page load — a slow service must not hang it. */
 const REQUEST_TIMEOUT_MS = 5_000;
 
@@ -27,7 +31,7 @@ const REQUEST_TIMEOUT_MS = 5_000;
  * Two credentials go out. The CALLER's own bearer decides whose key comes back — workflow-service
  * resolves it exactly as it would any request, including the active org. The short-lived HS256
  * token signed with the shared SECRET_KEY proves this is the agent process, so a user token alone
- * can never read a key back out.
+ * can never read a key back out; it names the caller and the purpose it was minted for.
  */
 @Injectable()
 export class PlatformKeysClient {
@@ -49,7 +53,7 @@ export class PlatformKeysClient {
       res = await fetch(`${this.base}/api/internal/platform-keys/anthropic`, {
         headers: {
           Authorization: `Bearer ${caller.token}`,
-          [INTERNAL_TOKEN_HEADER]: await this.token(this.secret),
+          [INTERNAL_TOKEN_HEADER]: await this.token(this.secret, caller.token),
           ...(caller.orgId ? { 'X-Org-Id': caller.orgId } : {}),
         },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -66,10 +70,13 @@ export class PlatformKeysClient {
     return typeof body?.api_key === 'string' && body.api_key ? body.api_key : null;
   }
 
-  private token(secret: string): Promise<string> {
+  // Bound to the caller it is sent beside, by digest, so a leaked one is no use with any other session.
+  private token(secret: string, callerToken: string): Promise<string> {
     return new SignJWT({})
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuer(INTERNAL_ISSUER)
+      .setAudience(PLATFORM_KEYS_AUDIENCE)
+      .setSubject(createHash('sha256').update(callerToken).digest('base64url'))
       .setIssuedAt()
       .setExpirationTime(Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS)
       .sign(new TextEncoder().encode(secret));
