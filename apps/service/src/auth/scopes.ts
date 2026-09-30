@@ -3,8 +3,7 @@ export const API_SCOPES = [
   'workflow:read',
   'workflow:write',
   'workflow:deploy',
-  // Previewing and firing for real are different capabilities: a dry run changes nothing outside
-  // , so a key can be trusted to preview without ever being able to fire.
+  // Separate grants, so a key can dry-run without ever being able to fire for real.
   'run:dry',
   'run:execute',
   // Calling a PUBLISHED workflow as a tool. Deliberately separate: a key holding only

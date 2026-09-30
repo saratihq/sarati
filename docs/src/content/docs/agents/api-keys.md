@@ -29,7 +29,7 @@ scope strings.
 | Read workflows | `workflow:read` |
 | Create and edit workflows | `workflow:write` |
 | Publish, promote and merge | `workflow:deploy` |
-| Preview runs — changes nothing outside | `run:dry` |
+| [Dry runs](/build/testing/#the-whole-workflow) — reads run for real | `run:dry` |
 | Run for real | `run:execute` |
 | Call published workflows | `workflow:invoke` |
 | See connected accounts | `connection:read` |

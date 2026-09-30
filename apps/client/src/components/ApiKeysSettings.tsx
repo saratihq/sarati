@@ -16,7 +16,7 @@ const SCOPE_LABELS: Record<string, string> = {
   "workflow:read": "Read workflows",
   "workflow:write": "Create and edit workflows",
   "workflow:deploy": "Publish, promote and merge",
-  "run:dry": "Preview runs — changes nothing outside",
+  "run:dry": "Dry runs — reads run for real",
   "run:execute": "Run for real",
   "workflow:invoke": "Call published workflows",
   "connection:read": "See connected accounts",

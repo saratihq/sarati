@@ -47,6 +47,14 @@ describe("ApiKeysSettings", () => {
     expect(screen.queryByRole("checkbox", { name: "Manage the organization" })).not.toBeInTheDocument();
   });
 
+  it("says a dry-run key's reads are real, never that it changes nothing", async () => {
+    listApiKeys.mockResolvedValue({ api_keys: [], grantable_scopes: ["run:dry", "run:execute"] });
+    render(<ApiKeysSettings />);
+
+    expect(await screen.findByRole("checkbox", { name: "Dry runs — reads run for real" })).toBeInTheDocument();
+    expect(screen.queryByText(/nothing outside/)).not.toBeInTheDocument();
+  });
+
   it("refuses to create until the key is named and given at least one power", async () => {
     render(<ApiKeysSettings />);
     await screen.findByRole("checkbox", { name: "Read workflows" });
