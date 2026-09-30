@@ -1,6 +1,6 @@
 ---
 title: MCP for agents
-description: Let an agent read and propose changes to your workflows — without letting it ship them.
+description: Let an agent read, test and propose changes to your workflows — without letting it ship them.
 ---
 
 Sarati exposes an MCP endpoint at `/mcp`. An agent can read workflows, search actions, open a
@@ -42,18 +42,13 @@ Both variables are required. `SARATI_BASE_URL` may include `/mcp` or omit it.
 The tool list is filtered by the [key's scopes](/agents/api-keys/), and the server refuses anything
 beyond them whether or not a tool was listed.
 
-A `workflow:read` + `run:execute` key sees eight:
-
-```
-orchestr_context          orchestr_get_run
-orchestr_describe_action  orchestr_get_workflow
-orchestr_diff             orchestr_list_workflows
-orchestr_search_actions   orchestr_validate
-```
-
-Adding `workflow:write` brings the total to thirteen — `orchestr_commit`,
-`orchestr_create_branch`, `orchestr_create_workflow`, `orchestr_edit_workflow` and
-`orchestr_open_review`.
+| Scope | Tools it adds |
+|---|---|
+| `workflow:read` | `orchestr_context` `orchestr_describe_action` `orchestr_diff` `orchestr_get_run` `orchestr_get_workflow` `orchestr_list_workflows` `orchestr_search_actions` `orchestr_validate` |
+| `workflow:write` | `orchestr_commit` `orchestr_create_branch` `orchestr_create_workflow` `orchestr_edit_workflow` `orchestr_open_review` |
+| `run:dry` | `orchestr_test_workflow` |
+| `connection:read` | `orchestr_list_connections` — ids and status, never credential material |
+| `workflow:invoke` | one tool for each [callable workflow](#published-workflows-as-tools) live in production |
 
 Nothing in the surface merges, promotes or publishes.
 
@@ -61,6 +56,31 @@ Nothing in the surface merges, promotes or publishes.
 
 Read the workflow, search the action catalog, validate a document, open a branch, commit to it, and
 open a review. A human then reviews the diff and merges — the same gate a person goes through.
+
+## Testing is dry unless you confirm
+
+`orchestr_test_workflow` runs a document to show what it does. By default the run is dry: writes
+over HTTP are stubbed and steps on a managed connection are skipped. Reads are not — a `GET` still
+reaches the real system with real credentials. It uses the key owner's own connections, not an
+environment's, so a passing test does not prove the workflow runs in production.
+
+Firing for real takes three things together: the `run:execute` scope, `dry_run: false`, and the
+confirmation token a dry run of that exact document returned. A credential may fire 20 live runs an
+hour; dry runs are not counted.
+
+## Published workflows as tools
+
+A workflow whose production version starts with the **Called by another workflow**
+[trigger](/build/triggers/) appears to a `workflow:invoke` key as a tool of its own, with the name,
+description and inputs that trigger declares. Committing never changes the list — only publishing
+does.
+
+Calling one **runs the live automation**. That is what it is for, so it counts against the same 20
+an hour. The call waits 15 seconds for an answer; a longer run returns a run id, and reading that
+run takes `workflow:read`.
+
+A key holding only `workflow:invoke` can run those automations and see nothing of how they are
+built.
 
 ## Payloads are data, not instructions
 
