@@ -57,6 +57,12 @@ workflow
 A change travels: **edit → save (new version) → review → merge → promote**. Each arrow is
 deliberate, and none of them happen because someone was editing a canvas.
 
+<video class="shot" src="/shots/platform-branch-review.mp4" poster="/shots/platform-branch-review-poster.webp" width="1440" height="900" controls preload="metadata" playsinline aria-label="The composer builds a Dubai weather summary from one sentence, runs it and makes v1 live; a person then branches it, edits the summary step, opens a review, tests both versions, approves, merges and promotes v2 to production."></video>
+
+One take: the composer builds the workflow and makes v1 live, then a person carries one change
+through a branch, a review, a test of both versions, a merge and a promotion. The composer edits
+`main` only, so the change on the branch is typed by hand.
+
 ## Two rails for steps
 
 Steps come from exactly two places:
