@@ -497,6 +497,46 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   }, 30_000);
 
+  it('invariant 11: a reconcile never resolves while an earlier one for the same workflow is still applying', async () => {
+    const wf = await seedDoc(scheduleIr('v1', { interval_minutes: 60 }, 'inv11 overlap'));
+    const v1 = await versionId(wf, 1);
+
+    type Materialize = (...args: unknown[]) => Promise<void>;
+    const target = reconciler as unknown as { materialize: Materialize };
+    const real = target.materialize.bind(reconciler);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    const applying = new Promise<void>((resolve) => (entered = resolve));
+    const spy = jest.spyOn(target, 'materialize').mockImplementationOnce(async (...args) => {
+      entered();
+      await gate;
+      return real(...args);
+    });
+
+    try {
+      await http()
+        .post(`/api/workflows/${wf}/promote`)
+        .send({ environment: 'staging', version_id: v1 })
+        .expect(201);
+      await applying; // the promote's own reconcile has saved the row and not yet seeded the cursor
+
+      let settled = false;
+      const second = reconciler.reconcile(wf).then(() => (settled = true));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled).toBe(false);
+
+      release();
+      await second;
+      const staging = await activationRow(wf, 'staging');
+      expect(await scheduleCursor(staging.id)).toBeTruthy();
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  }, 30_000);
+
   it('invariant 12: error output routes the error lane, never both, as a distinct edge', () => {
     const concat = (id: string, texts: string[]) => ({
       id,

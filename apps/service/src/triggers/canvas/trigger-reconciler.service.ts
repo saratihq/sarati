@@ -89,6 +89,9 @@ export class TriggerReconcilerService {
     private readonly platformKeys: PlatformKeysService,
   ) {}
 
+  /** The last queued reconcile per workflow; absent when none is in flight. In-process only. */
+  private readonly tails = new Map<string, Promise<void>>();
+
   /** Wire the inline reconcile path so pointer/slot moves converge even when pg-boss is off. */
   registerInline(): void {
     // Inline reconciles do NOT run the self-heal re-verify pass — that is sweep-only.
@@ -99,8 +102,21 @@ export class TriggerReconcilerService {
    * Converge ONE workflow's activations to its desired set — total + idempotent. Reads
    * COMMITTED pointers, so callers must enqueue after their move's transaction commits.
    * `selfHeal` is sweep-only: it costs a Composio round trip per subscription row.
+   * Reconciles of one workflow run one at a time, so a caller that awaits this sees converged state.
    */
   async reconcile(workflowId: string, opts: { selfHeal?: boolean } = {}): Promise<void> {
+    const previous = this.tails.get(workflowId) ?? Promise.resolve();
+    const run = previous.then(() => this.reconcileOnce(workflowId, opts));
+    const tail = run.catch(() => undefined);
+    this.tails.set(workflowId, tail);
+    try {
+      await run;
+    } finally {
+      if (this.tails.get(workflowId) === tail) this.tails.delete(workflowId);
+    }
+  }
+
+  private async reconcileOnce(workflowId: string, opts: { selfHeal?: boolean }): Promise<void> {
     const em = this.dataSource.manager;
     const pointers = await rawQuery<PointerRow>(
       em,
