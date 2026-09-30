@@ -178,6 +178,8 @@ const OVERRIDES = new Map<string, DirectToolOverride | null>([
           range: p.range,
           values: rows2d(p.values),
           valueInputOption: 'USER_ENTERED', // required by the tool; matches the SDK's write mode
+          // The tool's default overwrites whatever sits below the table (a totals row, a note).
+          insertDataOption: 'INSERT_ROWS',
         }),
     },
   ],
