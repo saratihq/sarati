@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOSSARY, Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
+import { branchHasNothingNew } from "@/lib/branchChanges";
 import { timeAgo } from "@/lib/format";
 import { getTagColor } from "@/lib/envPresentation";
 import { toast } from "@/lib/toast";
@@ -237,6 +238,7 @@ function ReviewFeedCard({
 
   const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
   const actionable = review.status !== "merged" && review.status !== "closed";
+  const nothingToReview = actionable && detail?.up_to_date === true;
   // Comments/approvals are rejected server-side once a review is merged/closed.
   const canCollaborate = actionable;
   // The thread's own length is the truth once loaded; the summary count covers the gap before that.
@@ -319,9 +321,13 @@ function ReviewFeedCard({
             </div>
           )}
 
-          {diffUnavailable ? (
+          {nothingToReview ? (
+            <div className="text-[12px] text-[var(--orchestr-ink-subtle)] py-2">
+              Nothing to review — {review.target_branch} already has every change on {review.source_branch}.
+            </div>
+          ) : diffUnavailable ? (
             <div className="text-[12px] text-[var(--orchestr-ink-subtle)] py-2">Changes couldn&apos;t be loaded for these branches.</div>
-          ) : !diffVersions ? (
+          ) : !diffVersions || (!detail && !detailError) ? (
             <div className="flex items-center justify-center py-4">
               <SaratiLoader size={24} />
             </div>
@@ -330,20 +336,24 @@ function ReviewFeedCard({
               workflowId={workflowId}
               fromVersion={diffVersions.from}
               toVersion={diffVersions.to}
+              fromVersionId={detail?.target_head_version_id}
+              toVersionId={detail?.source_head_version_id}
               fromBranch={review.target_branch}
               toBranch={review.source_branch}
             />
           )}
 
           {/* Pre-merge "Test this branch" */}
-          <ReviewTestPanel
-            workflowId={workflowId}
-            reviewId={review.id}
-            environments={environments}
-            result={testResult}
-            onResult={setTestResult}
-            canRun={actionable}
-          />
+          {!nothingToReview && (
+            <ReviewTestPanel
+              workflowId={workflowId}
+              reviewId={review.id}
+              environments={environments}
+              result={testResult}
+              onResult={setTestResult}
+              canRun={actionable}
+            />
+          )}
 
           {/* ─── Conversation: reviewer verdicts + comment thread + input ─── */}
           <div className="mt-3 pt-3 space-y-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>
@@ -412,15 +422,17 @@ function ReviewFeedCard({
 
           {actionable && (
             <div className="mt-3 pt-3 space-y-2" style={{ borderTop: "1px solid var(--orchestr-line)" }}>
-              <textarea
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="Optional note — why you're approving or requesting changes"
-                rows={2}
-                className="w-full py-1.5 px-2.5 rounded text-[12px] border-none outline-none resize-none"
-                style={{ background: "var(--orchestr-accent-tint)", color: "var(--orchestr-ink)" }}
-              />
-              {review.status === "approved" && testResult?.verdict === "red" && (
+              {!nothingToReview && (
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Optional note — why you're approving or requesting changes"
+                  rows={2}
+                  className="w-full py-1.5 px-2.5 rounded text-[12px] border-none outline-none resize-none"
+                  style={{ background: "var(--orchestr-accent-tint)", color: "var(--orchestr-ink)" }}
+                />
+              )}
+              {!nothingToReview && review.status === "approved" && testResult?.verdict === "red" && (
                 <div
                   className="text-[11px] py-1.5 px-2.5 rounded"
                   style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
@@ -430,16 +442,25 @@ function ReviewFeedCard({
                 </div>
               )}
               <div className="flex gap-2">
-                <Button variant="success" size="sm" onClick={() => submitApproval("approved")} disabled={busy}>
-                  Approve
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => submitApproval("rejected")} disabled={busy}>
-                  Request changes
-                </Button>
-                {review.status === "approved" && (
-                  <Button variant="secondary" size="sm" onClick={() => onMergeRequest(review)} disabled={busy}>
-                    Merge
-                  </Button>
+                {!nothingToReview && (
+                  <>
+                    <Button variant="success" size="sm" onClick={() => submitApproval("approved")} disabled={busy}>
+                      Approve
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => submitApproval("rejected")}
+                      disabled={busy}
+                    >
+                      Request changes
+                    </Button>
+                    {review.status === "approved" && (
+                      <Button variant="secondary" size="sm" onClick={() => onMergeRequest(review)} disabled={busy}>
+                        Merge
+                      </Button>
+                    )}
+                  </>
                 )}
                 <Button variant="ghost" size="sm" onClick={() => onCloseReview(review)} disabled={busy}>
                   Close
@@ -585,6 +606,7 @@ export default function ActivityFeed({
   // Every workflow runs on the built-in engine.
   const builtIn = true;
   const headVersionNumber = (versions ?? []).reduce((m, v) => Math.max(m, v.version_number), 0);
+  const nothingNew = !isMain && branchHasNothingNew(versions ?? []);
 
   // Gate: the Promote menu is the only pointer-mover, so gating this one button covers both
   // directions; a plain org member would otherwise hit a 403.
@@ -1287,16 +1309,21 @@ export default function ActivityFeed({
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setCreating(true)}>
+              <Button variant="ghost" size="sm" onClick={() => setCreating(true)} disabled={nothingNew}>
                 <Plus size={12} />
                 New review
               </Button>
               <Tooltip content={GLOSSARY.merge}>
-                <Button variant="ghost" size="sm" onClick={handleMergeBranchRequest} disabled={busy}>
+                <Button variant="ghost" size="sm" onClick={handleMergeBranchRequest} disabled={busy || nothingNew}>
                   <GitMerge size={13} />
                   Merge into main
                 </Button>
               </Tooltip>
+              {nothingNew && (
+                <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                  No changes on {branch} yet — save one to review or merge it.
+                </span>
+              )}
             </div>
           )}
         </div>

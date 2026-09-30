@@ -9,7 +9,7 @@ import { Client as PgClient } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
-import { REVIEW_ALREADY_OPEN } from '../src/reviews/reviews.service';
+import { NOTHING_TO_REVIEW, REVIEW_ALREADY_OPEN } from '../src/reviews/reviews.service';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -402,6 +402,37 @@ describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
     );
     expect(rows.rows[0]?.count).toBe('1');
     expect(await repoState()).toEqual(before);
+  });
+
+  it('a branch main already has cannot be proposed — the code says why, and no review is created', async () => {
+    const idleId = randomUUID();
+    await db.query(
+      `INSERT INTO workflow_branches (id, workflow_id, name, head_version_id, is_default, is_protected, created_at)
+       VALUES ($1, $2, 'idle', $3, false, false, now())`,
+      [idleId, wfId, mainV1],
+    );
+    try {
+      const before = await repoState();
+
+      const { text } = await refusal({
+        workflow_id: wfId,
+        source_branch: 'idle',
+        target_branch: 'main',
+        title: 'Nothing here',
+      });
+
+      expect(NOTHING_TO_REVIEW).toBe('nothing_to_review');
+      expect(text).toContain(NOTHING_TO_REVIEW);
+      expect(text).toContain("'idle'");
+      const rows = await db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM workflow_reviews WHERE source_branch_id = $1`,
+        [idleId],
+      );
+      expect(rows.rows[0]?.count).toBe('0');
+      expect(await repoState()).toEqual(before);
+    } finally {
+      await db.query(`DELETE FROM workflow_branches WHERE id = $1`, [idleId]);
+    }
   });
 
   it('the review is visible to a human at the API behind the returned URL', async () => {
