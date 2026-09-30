@@ -21,9 +21,25 @@ what it returned.
 
 ## The whole workflow
 
-**Run** executes the workflow you are editing, top to bottom.
+Two buttons run the workflow you are editing, top to bottom. Both run your unsaved editor state —
+neither touches the version that is live in production.
 
-This runs your unsaved editor state — it does not touch the version that is live in production.
+**Dry run** shows what the workflow would do without doing the parts that change anything:
+
+- Reads run for real. A `GET` reaches the real system with your real credentials.
+- Writes are not sent. A step that would `POST`, `PUT`, `PATCH` or `DELETE` stops there and lists the
+  call it would have made.
+- Waits are skipped: a delay does not delay, and an approval is not waited for.
+- Steps on a [managed connection](/build/connections/) are not run at all.
+- An AI Agent step still calls its model; the tools it picks follow the same rules.
+
+The rule is the HTTP method, not the intent. A search an API exposes as `POST` is withheld, and a
+`GET` that changes something is sent. A step after a withheld one gets nothing from it, so a dry run
+proves less the more of a workflow hangs on its writes.
+
+**Run** does all of it for real: messages sent, data written, approvals waited for.
+
+Both land in [run history](/run/runs/#dry-runs), where a dry run is marked as one.
 
 ## Testing a change against what is live
 

@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
+import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
 import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import {
@@ -452,9 +453,9 @@ export abstract class BasePlanInterpreter {
   ): Promise<void> {
     const stepKey = `${path}${node.id}`;
     const record = ctx.record;
-    await this.recorded(ctx, stepKey, node.id, 'delay', async () => {
+    const waited = await this.recorded(ctx, stepKey, node.id, 'delay', async () => {
       // Dry run: don't actually make the preview wait.
-      if (ctx.dryRun) return { dry_run: true, skipped_delay_ms: node.ms };
+      if (ctx.dryRun) return withheldDelay(node.ms);
       if (node.ms <= PARK_DELAY_ABOVE_MS) {
         await ctx.durable.sleep(`${ctx.planId}:${stepKey}`, node.ms);
         return null;
@@ -473,6 +474,8 @@ export abstract class BasePlanInterpreter {
       }
       return { slept_until: wake.toISOString() };
     });
+    // Still no scope output, but a dry run's trace accounts for every step it did not carry out.
+    if (ctx.dryRun) ctx.trace.push({ nodeId: stepKey, output: waited });
   }
 
   /** Human-in-the-loop wait leaf — identical across interpreters. */
@@ -489,7 +492,7 @@ export abstract class BasePlanInterpreter {
     const record = ctx.record;
     const payload = await this.recorded(ctx, stepKey, node.id, 'waitForEvent', async () => {
       // Dry run: don't park the preview waiting for a human — return a stub.
-      if (ctx.dryRun) return { dry_run: true, skipped: 'wait-for-event (dry run)' };
+      if (ctx.dryRun) return withheldWait();
       // Register the receiver BEFORE persisting the pause, so anyone who observes the
       // waiting row is guaranteed a receiver already exists to deliver to.
       const wait = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, node.topic, node.timeoutMs);

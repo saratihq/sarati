@@ -5091,7 +5091,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
                 appear in the data picker of later steps.
               </p>
             )}
-            {/* A test hits the provider for real — there is no dry-run — so say so, in the shared wording. */}
+            {/* A step test hits the provider for real, so say so, in the shared wording. */}
             {needsConnection && (
               <p
                 className="text-[10px] m-0 mt-1 leading-snug flex items-start gap-1"

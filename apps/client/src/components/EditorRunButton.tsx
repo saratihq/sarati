@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Play, X } from "lucide-react";
+import { CircleDashed, Play, X } from "lucide-react";
 import * as api from "@/api/client";
 import { useWorkflow } from "@/store/useWorkflow";
 import { runPinsFor, useStepSamples } from "@/store/useStepSamples";
 import { Button } from "@/components/ui/button";
+import { DRY_RUN_EXPLAINED, dryRunMarkerOf, withheldSummary } from "@/lib/dryRun";
 import { REAL_RUN_CONSEQUENCE } from "@/lib/realRun";
 import { useMissingRequired } from "@/lib/workflow-validation";
 
@@ -16,7 +17,10 @@ const RUN_POLL_CAP_MS = 5 * 60_000;
 
 interface RunView {
   status: "running" | "waiting" | "completed" | "failed" | "cancelled";
+  dry: boolean;
   outputs?: Record<string, unknown>;
+  /** The ordered step log — a dry run's accounts for steps that have no output, such as a wait. */
+  trace?: api.RunTraceEntry[];
   error?: string | null;
 }
 
@@ -28,9 +32,18 @@ const VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
   cancelled: { label: "Cancelled", color: "var(--orchestr-ink-muted)" },
 };
 
+// A dry run sent nothing, so it never borrows the word or the green of a run that did.
+const DRY_VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
+  ...VIEW_META,
+  running: { label: "Dry run in progress…", color: "var(--orchestr-ai-bright)" },
+  completed: { label: "Dry run complete", color: "var(--orchestr-ink-muted)" },
+  failed: { label: "Dry run failed", color: "var(--orchestr-danger)" },
+};
+
 /**
- * Runs the WORKING DRAFT on the canvas, not a committed version: one sync `runWorkflowIr` call, which
- * stays open while the run is parked on an approval — `getRun` is polled meanwhile so the panel can say so.
+ * Runs the WORKING DRAFT on the canvas, not a committed version — for real, or as a dry run. A real run
+ * is one sync `runWorkflowIr` call, which stays open while the run is parked on an approval; `getRun` is
+ * polled meanwhile so the panel can say so. A dry run never parks, so it is that call alone.
  */
 export default function EditorRunButton() {
   const workflowJson = useWorkflow((s) => s.workflowJson);
@@ -42,33 +55,35 @@ export default function EditorRunButton() {
   const [view, setView] = useState<RunView | null>(null);
   const [open, setOpen] = useState(false);
   // The run in flight. The ref is the same fact for the sync call's continuation, which outlives renders.
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [active, setActive] = useState<{ id: string; dry: boolean } | null>(null);
   const activeRun = useRef<string | null>(null);
 
   // Whichever learns the outcome first settles the run: the sync call, or the watcher below.
   const settle = useCallback((runId: string, outcome: RunView) => {
     if (activeRun.current !== runId) return;
     activeRun.current = null;
-    setActiveRunId(null);
+    setActive(null);
     setView(outcome);
   }, []);
 
-  // Watches the run while the sync call is still open; that call settles the common case itself.
+  // Watches a real run while its sync call is still open; that call settles the common case itself.
   useEffect(() => {
-    if (!activeRunId) return;
+    if (!active || active.dry) return;
+    const runId = active.id;
     const startedAt = Date.now();
     const interval = setInterval(async () => {
       try {
-        const d = await api.getRun(activeRunId);
+        const d = await api.getRun(runId);
         if (d.status === "waiting") {
-          if (activeRun.current === activeRunId) setView({ status: "waiting" });
+          if (activeRun.current === runId) setView({ status: "waiting", dry: false });
         } else if (d.status === "completed") {
-          settle(activeRunId, { status: "completed", outputs: d.outputs ?? undefined });
+          settle(runId, { status: "completed", dry: false, outputs: d.outputs ?? undefined });
         } else if (d.status === "cancelled") {
-          settle(activeRunId, { status: "cancelled" });
+          settle(runId, { status: "cancelled", dry: false });
         } else if (d.status === "error") {
-          settle(activeRunId, {
+          settle(runId, {
             status: "failed",
+            dry: false,
             outputs: d.outputs ?? undefined,
             error: d.error ?? "The run failed.",
           });
@@ -79,15 +94,15 @@ export default function EditorRunButton() {
       if (Date.now() - startedAt >= RUN_POLL_CAP_MS) clearInterval(interval);
     }, RUN_POLL_MS);
     return () => clearInterval(interval);
-  }, [activeRunId, settle]);
+  }, [active, settle]);
 
-  const run = async () => {
+  const run = async (dry: boolean) => {
     if (!workflowJson || activeRun.current || missing.length > 0) return;
     const runId = crypto.randomUUID();
     activeRun.current = runId;
-    setActiveRunId(runId);
+    setActive({ id: runId, dry });
     setOpen(true);
-    setView({ status: "running" });
+    setView({ status: "running", dry });
     // True pinning: pinned steps replay their captured output, scope-guarded to this doc.
     const samples = useStepSamples.getState();
     const scopeKey =
@@ -99,37 +114,43 @@ export default function EditorRunButton() {
         workflowId: workflowId ?? undefined,
         runId,
         pins,
+        dryRun: dry || undefined,
       });
-      settle(runId, { status: "completed", outputs: res.outputs });
+      settle(runId, { status: "completed", dry, outputs: res.outputs, trace: res.trace });
     } catch (e) {
       const cancelled = e instanceof api.ApiError && e.code === "run_cancelled";
       settle(
         runId,
         cancelled
-          ? { status: "cancelled" }
-          : { status: "failed", error: e instanceof Error ? e.message : "Run failed" },
+          ? { status: "cancelled", dry }
+          : { status: "failed", dry, error: e instanceof Error ? e.message : "Run failed" },
       );
     }
   };
 
-  const inFlight = activeRunId !== null;
-  const meta = view ? VIEW_META[view.status] : null;
+  const blocked = active !== null || !workflowJson || missing.length > 0;
+  const missingTitle =
+    missing.length > 0
+      ? `Fill ${missing.length} required field${missing.length !== 1 ? "s" : ""} before running`
+      : undefined;
+  const meta = view ? (view.dry ? DRY_VIEW_META : VIEW_META)[view.status] : null;
+  const withheld = view?.dry ? withheldSteps(view.trace, workflowJson) : [];
 
   return (
-    <div className="relative shrink-0">
+    <div className="relative shrink-0 flex items-center gap-2">
       <Button
         variant="secondary"
         size="sm"
-        onClick={run}
-        disabled={inFlight || !workflowJson || missing.length > 0}
-        title={
-          missing.length > 0
-            ? `Fill ${missing.length} required field${missing.length !== 1 ? "s" : ""} before running`
-            : undefined
-        }
+        onClick={() => run(true)}
+        disabled={blocked}
+        title={missingTitle ?? DRY_RUN_EXPLAINED}
       >
+        <CircleDashed size={12} />
+        {active?.dry ? "Dry run…" : "Dry run"}
+      </Button>
+      <Button variant="secondary" size="sm" onClick={() => run(false)} disabled={blocked} title={missingTitle}>
         <Play size={12} />
-        {inFlight ? "Running…" : "Run"}
+        {active && !active.dry ? "Running…" : "Run"}
       </Button>
 
       {open && view && meta && (
@@ -161,8 +182,14 @@ export default function EditorRunButton() {
           </div>
 
           <p className="text-[11px] m-0 mt-1.5" style={{ color: "var(--orchestr-ink-subtle)" }}>
-            Runs the draft on your canvas for real on your connected accounts — it just isn&apos;t saved as
-            a version. {REAL_RUN_CONSEQUENCE}
+            {view.dry ? (
+              <>A dry run of the draft on your canvas. {DRY_RUN_EXPLAINED}</>
+            ) : (
+              <>
+                Runs the draft on your canvas for real on your connected accounts — it just isn&apos;t saved
+                as a version. {REAL_RUN_CONSEQUENCE}
+              </>
+            )}
           </p>
 
           {view.error && (
@@ -182,6 +209,19 @@ export default function EditorRunButton() {
               </Link>
               .
             </p>
+          )}
+
+          {withheld.length > 0 && (
+            <ul className="list-none m-0 mt-2 p-0 space-y-1" data-testid="dry-run-withheld">
+              {withheld.map((step) => (
+                <li key={step.id} className="text-[11px] leading-snug break-words">
+                  <span className="font-medium" style={{ color: "var(--orchestr-ink)" }}>
+                    {step.name}
+                  </span>{" "}
+                  <span style={{ color: "var(--orchestr-ink-muted)" }}>{step.summary}</span>
+                </li>
+              ))}
+            </ul>
           )}
 
           {view.outputs && Object.keys(view.outputs).length > 0 && (
@@ -208,4 +248,28 @@ export default function EditorRunButton() {
       )}
     </div>
   );
+}
+
+/** The steps a dry run did not carry out, in the order it reached them, each with what it did instead. */
+function withheldSteps(
+  trace: api.RunTraceEntry[] | undefined,
+  workflowJson: Record<string, unknown> | null,
+): Array<{ id: string; name: string; summary: string }> {
+  const nodes = Array.isArray(workflowJson?.nodes)
+    ? (workflowJson.nodes as Array<{ id?: unknown; name?: unknown }>)
+    : [];
+  const nameOf = new Map(
+    nodes.map((n) => [String(n.id), typeof n.name === "string" && n.name ? n.name : String(n.id)]),
+  );
+  return (trace ?? []).flatMap((entry, i) => {
+    const marker = dryRunMarkerOf(entry.output);
+    if (!marker) return [];
+    return [
+      {
+        id: `${entry.nodeId}:${i}`,
+        name: nameOf.get(entry.nodeId) ?? entry.nodeId,
+        summary: withheldSummary(marker),
+      },
+    ];
+  });
 }

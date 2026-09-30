@@ -13,6 +13,7 @@ import {
 import type { EnvConfig } from '../config/env.config';
 import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
 import { connectionIdOf } from './sdk-auth';
+import { withheldManagedStep } from './dry-run-marker';
 import { alignComposioOutput } from './composio-output-shape';
 import { composioToolFor, isRoutableActionType, validatedAppSlug } from './sdk-actions.registry';
 import { SdkActionsProvider } from './sdk-actions.provider';
@@ -99,7 +100,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   ): Promise<RunActionResult> {
     // Composio typed execution runs on their side and can't be partially simulated — a dry run returns a stub.
     if (input.dryRun) {
-      return { output: { dry_run: true, skipped: 'composio typed execution (not simulated in a dry run)' } };
+      return { output: withheldManagedStep() };
     }
     const connectionId = connectionIdOf(input.auth);
     if (!connectionId) {

@@ -9,6 +9,7 @@ import type { EnvConfig } from '../config/env.config';
 import { sdkAction, isSdkActionType } from './sdk-actions.registry';
 import { IdempotencyHttpClient } from './idempotency-http-client';
 import { DryRunHttpClient } from './dry-run-http-client';
+import { withheldWrite } from './dry-run-marker';
 import { PlatformKeysService } from '../platform/platform-keys.service';
 import { resolveSdkAuthHandle } from './sdk-auth';
 import type { RunActionInput, RunActionResult } from './managed-integration-provider';
@@ -133,11 +134,5 @@ export class SdkActionsProvider {
 
 /** A step that stopped at a state-changing request: a real outcome, never a failure. */
 function skippedResult(dryRun: DryRunHttpClient): RunActionResult {
-  return {
-    output: {
-      dry_run: true,
-      skipped: 'state-changing request (not sent in a dry run)',
-      would_call: dryRun.skipped.map(({ method, url }) => ({ method, url })),
-    },
-  };
+  return { output: withheldWrite(dryRun.skipped) };
 }

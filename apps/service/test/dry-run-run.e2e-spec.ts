@@ -79,6 +79,7 @@ describe('dry run (e2e, isolated DB, mock auth)', () => {
     // The step reports the request it did not make, rather than a fabricated 200 body.
     expect(res.body.outputs.write).toMatchObject({
       dry_run: true,
+      withheld: 'write',
       skipped: 'state-changing request (not sent in a dry run)',
       would_call: [{ method: 'POST', url: `${hitUrl}/write` }],
     });
@@ -127,5 +128,50 @@ describe('dry run (e2e, isolated DB, mock auth)', () => {
     expect(hits).toEqual(['POST']); // fired for real
     const detail = await request(app.getHttpServer()).get('/api/runs/real-1').expect(200);
     expect(detail.body.dry_run).toBe(false);
+  });
+
+  it('a dry run neither waits out a delay nor parks on an approval, and each step says which it was', async () => {
+    const plan = {
+      id: 'plan-waits',
+      nodes: [
+        { kind: 'delay', id: 'pause', ms: 172_800_000 },
+        { kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: 60_000 },
+        {
+          kind: 'action',
+          id: 'read',
+          actionId: 'http.send_request',
+          props: { method: 'GET', url: `${hitUrl}/read` },
+        },
+      ],
+    };
+    hits = [];
+    const res = await request(app.getHttpServer())
+      .post('/api/runs')
+      .send({ plan, run_id: 'dry-waits', dry_run: true })
+      .expect(201);
+    // A delay has no output, yet the answer itself accounts for it — no second request needed.
+    expect((res.body.trace as Array<{ nodeId: string }>).map((t) => t.nodeId)).toEqual([
+      'pause',
+      'approve',
+      'read',
+    ]);
+    expect(res.body.outputs).not.toHaveProperty('pause');
+
+    const detail = await request(app.getHttpServer()).get('/api/runs/dry-waits').expect(200);
+    expect(detail.body.status).toBe('completed');
+    const outputs = Object.fromEntries(
+      (detail.body.steps as Array<{ node_id: string; output: unknown }>).map((s) => [s.node_id, s.output]),
+    );
+    expect(outputs.pause).toEqual({ dry_run: true, withheld: 'delay', skipped_delay_ms: 172_800_000 });
+    expect(outputs.approve).toMatchObject({ dry_run: true, withheld: 'wait' });
+    expect(hits).toEqual(['GET']); // the read ran for real
+  });
+
+  it('the run history says which runs were dry, so a preview never reads as a run that sent something', async () => {
+    const list = await request(app.getHttpServer()).get('/api/runs').expect(200);
+    const dryByRun = Object.fromEntries(
+      (list.body.runs as Array<{ run_id: string; dry_run: boolean }>).map((r) => [r.run_id, r.dry_run]),
+    );
+    expect(dryByRun).toMatchObject({ 'dry-1': true, 'dry-envelope': true, 'real-1': false });
   });
 });
