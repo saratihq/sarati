@@ -58,11 +58,12 @@ const ENV = {
   localSessionSecret: null as string | null,
 };
 
-function scriptedQuery(messages: Array<Record<string, unknown>>): QueryFn {
+function scriptedQuery(messages: Array<Record<string, unknown>>, thenThrow?: Error): QueryFn {
   const fn = (): AsyncGenerator<Record<string, unknown>> & { close: () => void } => {
     const gen = (async function* () {
       await Promise.resolve();
       for (const m of messages) yield m;
+      if (thenThrow) throw thenThrow;
     })() as AsyncGenerator<Record<string, unknown>> & { close: () => void };
     gen.close = () => undefined;
     return gen;
@@ -332,6 +333,47 @@ describe('ComposerService.stream', () => {
     expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
     const sessionId = (events[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(sessionId)!.busy).toBe(false);
+  });
+
+  // The order the SDK delivers a rejected key in, captured live: the refusal, an error result, then a throw.
+  it('a key Anthropic rejects is reported once, with where to replace it', async () => {
+    const refused = 'Invalid API key · Fix external API key';
+    const { service } = await makeService(
+      scriptedQuery(
+        [
+          { type: 'system', subtype: 'init', session_id: 's' },
+          {
+            type: 'assistant',
+            error: 'authentication_failed',
+            message: { content: [{ type: 'text', text: refused }] },
+          },
+          { type: 'result', subtype: 'success', is_error: true, result: refused },
+        ],
+        new Error(`Claude Code returned an error result: ${refused}`),
+      ),
+    );
+
+    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
+    expect((events[1]!.data as { message: string }).message).toMatch(
+      /Anthropic rejected the API key.*Settings → Platform keys/,
+    );
+  });
+
+  it('a refusal with no result still ends the turn with its reason', async () => {
+    const { service } = await makeService(
+      scriptedQuery(
+        [
+          { type: 'system', subtype: 'init', session_id: 's' },
+          { type: 'assistant', error: 'rate_limit', message: { content: [] } },
+        ],
+        new Error('subprocess died'),
+      ),
+    );
+
+    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
+    expect((events[1]!.data as { message: string }).message).toMatch(/rate-limiting/);
   });
 
   it('rejects an unknown session and a busy session with error events', async () => {

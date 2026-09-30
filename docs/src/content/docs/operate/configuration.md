@@ -58,6 +58,9 @@ THROTTLE_TTL_MS=60000
 TRUST_PROXY_HEADERS=false
 
 MAX_REQUEST_BODY_BYTES=2097152
+
+# The Claude model the AI composer calls — change it when your Anthropic key cannot use this one.
+COMPOSER_MODEL=claude-opus-4-8
 ```
 
 ## Not here: the two platform API keys
