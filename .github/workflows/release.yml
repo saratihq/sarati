@@ -247,11 +247,11 @@ jobs:
         run: docker compose logs --no-color | tail -100
 
       # The one-container install is a SUPPORTED install, so it is proved the same way: boot it
-      # with nothing but a port and walk the same first run. `docker compose down` first, because
-      # both want :8080.
+      # with nothing but a port and walk the same first run. `docker compose down -v` first: both want
+      # :8080, and the installer leg below must find no database left behind or it rightly refuses.
       - name: Start the published all-in-one, alone
         run: |
-          docker compose down
+          docker compose down -v
           VERSION="${GITHUB_REF_NAME#v}"
           docker run -d --name sarati-aio -p 8080:8080 -v sarati-aio:/data \
             ghcr.io/${{ github.repository_owner }}/sarati:${VERSION:-latest}
