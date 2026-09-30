@@ -205,6 +205,42 @@ describe('Composio output alignment', () => {
     });
   });
 
+  it('gmail search: the ids-only answer becomes the declared refs, with the search string the action reports', () => {
+    // GMAIL_FETCH_EMAILS with ids_only, as captured live on 2026-09-30 — ids replaced, everything else as answered.
+    const entry = (messageId: string, threadId: string) => ({
+      attachmentList: [],
+      labelIds: [],
+      messageId,
+      messageText: '',
+      messageTimestamp: '',
+      payload: null,
+      preview: null,
+      sender: '',
+      subject: '',
+      threadId,
+      to: '',
+    });
+    const live = {
+      messages: [
+        entry('19a0c0ffee000001', '19a0c0ffee000001'),
+        entry('19a0c0ffee000002', '19a0c0ffee000001'),
+      ],
+      nextPageToken: '01234567890123456789',
+      resultSizeEstimate: 201,
+    };
+    const props = { from: 'boss@corp.com', subject: 'quarterly report' };
+    expect(alignComposioOutput('gmail.gmail_search_mail', live, props)).toEqual({
+      query: 'from:boss@corp.com subject:"quarterly report"',
+      messages: [
+        { id: '19a0c0ffee000001', threadId: '19a0c0ffee000001' },
+        { id: '19a0c0ffee000002', threadId: '19a0c0ffee000001' },
+      ],
+      count: 2,
+    });
+    // The same answer serves the plain listing.
+    expect(alignComposioOutput('gmail.list_messages', live, {})).toMatchObject({ count: 2 });
+  });
+
   it("calendar list: the entry the picker reads, without Google's colours and etags", () => {
     const live = {
       calendars: [

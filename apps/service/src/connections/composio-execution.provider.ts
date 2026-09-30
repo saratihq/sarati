@@ -9,7 +9,7 @@ import { requiredConstraintsFor } from './composio-required-constraints';
 import { matchTool, translateProps, type PropTranslation, type ToolMatch } from './composio-tool-mapping';
 import { toComposioSlug } from './managed-connections.service';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
-import { frozenClockArguments } from '../providers/sdk-actions.registry';
+import { declaredDefaults, frozenClockArguments } from '../providers/sdk-actions.registry';
 
 export interface ComposioExecuteInput {
   /** Whose Composio key runs this — the scope owning the connection/workflow. */
@@ -94,16 +94,17 @@ export class ComposioExecutionProvider {
     override: DirectToolOverride,
     input: ComposioExecuteInput,
   ): Promise<RunActionResult> {
-    const overlay = override.toArguments(input.props);
+    const props = withDeclaredDefaults(publicType, input.props);
+    const overlay = override.toArguments(props);
     const sameTool = input.tool?.slug === override.toolSlug ? input.tool : undefined;
 
     let args: Record<string, unknown> = overlay;
     const warnings: string[] = [];
     if (sameTool) {
-      const base = translateProps(input.props, sameTool.inputProperties, sameTool.inputTypes);
+      const base = translateProps(props, sameTool.inputProperties, sameTool.inputTypes);
       args = { ...base.arguments, ...overlay };
       // Only a prop the base couldn't place AND the overlay didn't rescue is a genuine silent drop.
-      const genuinelyDropped = base.dropped.filter((name) => !overrideConsumes(override, name, input.props));
+      const genuinelyDropped = base.dropped.filter((name) => !overrideConsumes(override, name, props));
       warnings.push(...this.warningsFromTranslation(publicType, override.toolSlug, base, genuinelyDropped));
     }
     // The tool's required flags apply only when the override targets that same tool; the one-of table always applies.
@@ -215,6 +216,15 @@ export class ComposioExecutionProvider {
     this.toolCache.set(key, match);
     return match;
   }
+}
+
+/** The SDK rail fills a prop's declared default before it runs; an override has to map those same props. */
+function withDeclaredDefaults(publicType: string, props: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...props };
+  for (const [name, value] of Object.entries(declaredDefaults(publicType))) {
+    if (out[name] === undefined || out[name] === null) out[name] = value;
+  }
+  return out;
 }
 
 /** Whether the override consumes prop `name`, by differential probe: re-run `toArguments` with it present vs removed. */

@@ -1,5 +1,6 @@
 import {
   composioToolFor,
+  declaredDefaults,
   frozenClockArguments,
   isComposioCatalogType,
   isOfferable,
@@ -18,6 +19,14 @@ describe('sdk-actions registry', () => {
     expect(sdkAction('gmail.get_profile')?.type).toBe('gmail.get_profile');
     expect(isSdkActionType('salesforce.definitely_not_real')).toBe(false);
     expect(sdkAction('nope.nope')).toBeUndefined();
+  });
+
+  it("exposes each action's declared defaults, and only those", () => {
+    expect(declaredDefaults('gmail.list_messages')).toEqual({ limit: 100 });
+    expect(declaredDefaults('gmail.gmail_search_mail')).toMatchObject({ max: 10 });
+    expect(declaredDefaults('calendar.create_google_calendar_event')).toEqual({ sendUpdates: 'all' });
+    expect(declaredDefaults('drive.create_folder')).toEqual({});
+    expect(declaredDefaults('nope.unknown')).toEqual({});
   });
 
   it('projects every action to the platform catalog shape (name/type/category/parameters/auth)', () => {

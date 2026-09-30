@@ -177,7 +177,7 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     // The curated override mapped our props onto GMAIL_FETCH_EMAILS arguments.
     expect(toolCalls).toHaveLength(1);
     expect(toolCalls[0]?.tool).toBe('GMAIL_FETCH_EMAILS');
-    expect(toolCalls[0]?.payload.arguments).toEqual({ query: 'is:unread', max_results: 5 });
+    expect(toolCalls[0]?.payload.arguments).toEqual({ query: 'is:unread', max_results: 5, ids_only: true });
     expect(proxyCalls).toHaveLength(0);
   }, 30_000);
 

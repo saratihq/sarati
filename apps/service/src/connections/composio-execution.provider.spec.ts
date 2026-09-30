@@ -324,6 +324,35 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     expect(executeCalls).toHaveLength(1);
   });
 
+  it("an override maps the SDK action's declared defaults — the props its own rail would run with", async () => {
+    const run = async (actionName: string, props: Record<string, unknown>) => {
+      executeCalls = [];
+      const [appSlug, name] = actionName.split('.') as [string, string];
+      await provider.execute({
+        scope: SCOPE,
+        appSlug,
+        actionName: name,
+        props,
+        connectedAccountId: 'ca_1',
+        userId: 'u1',
+      });
+      return executeCalls[0]!.body.arguments as Record<string, unknown>;
+    };
+    // Left unset, the tool's own page size is 1; the SDK action's is 100 and 10.
+    expect(await run('gmail.list_messages', {})).toEqual({ max_results: 100, ids_only: true });
+    expect(await run('gmail.gmail_search_mail', { subject: 'invoice' })).toEqual({
+      query: 'subject:invoice',
+      max_results: 10,
+      ids_only: true,
+    });
+    expect((await run('calendar.google_calendar_get_events', { calendarId: 'primary' })).maxResults).toBe(
+      250,
+    );
+    // A value the user set always wins over the declared default, and an explicit null is an unset prop.
+    expect((await run('gmail.list_messages', { limit: 7 })).max_results).toBe(7);
+    expect((await run('gmail.list_messages', { limit: null })).max_results).toBe(100);
+  });
+
   it('calendar.google_calendar_get_events with no bounds still sends both, so the tool fills in neither', async () => {
     await provider.execute({
       scope: SCOPE,

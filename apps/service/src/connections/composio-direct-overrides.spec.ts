@@ -89,6 +89,16 @@ describe('composio-direct-overrides — catalog consistency', () => {
     }
   });
 
+  it("the tool defaults an override relies on are the SDK action's own values", () => {
+    const recorded = (slug: string, name: string): unknown =>
+      (tools.get(slug)!.params[name] as { default?: unknown } | undefined)?.default;
+    // No end time → the tool's default length; the SDK action's is start + 30 minutes.
+    expect(recorded('GOOGLECALENDAR_CREATE_EVENT', 'event_duration_hour')).toBe(0);
+    expect(recorded('GOOGLECALENDAR_CREATE_EVENT', 'event_duration_minutes')).toBe(30);
+    // Gmail's own default, which the SDK action never overrides.
+    expect(recorded('GMAIL_FETCH_EMAILS', 'include_spam_trash')).toBe(false);
+  });
+
   it('marks the known-unmappable actions as unsupported (never a silently wrong tool)', () => {
     expect(directOverride('docs.append_text')).toBeNull();
     expect(directOverride('calendar.google_calendar_get_event_by_id')).toBeNull();
@@ -125,13 +135,14 @@ describe('composio-direct-overrides — argument mapping', () => {
       query: 'from:boss@corp.com subject:"quarterly report" is:unread',
       label_ids: ['Label_42'],
       max_results: 10,
+      ids_only: true,
     });
   });
 
   it('gmail.list_messages: labelIds multi-select and limit map to label_ids / max_results', () => {
     expect(
       directOverride('gmail.list_messages')!.toArguments({ labelIds: ['INBOX', 'UNREAD'], limit: 7 }),
-    ).toEqual({ label_ids: ['INBOX', 'UNREAD'], max_results: 7 });
+    ).toEqual({ label_ids: ['INBOX', 'UNREAD'], max_results: 7, ids_only: true });
   });
 
   it('sheets.read_range wraps the single range; sheets.update_row parses A1 into sheet + first cell', () => {
@@ -184,7 +195,6 @@ describe('composio-direct-overrides — argument mapping', () => {
       timeMax: '9999-12-31T23:59:59Z',
       singleEvents: true,
       orderBy: 'startTime',
-      maxResults: 250,
     });
     expect(
       list.toArguments({
@@ -217,10 +227,25 @@ describe('composio-direct-overrides — argument mapping', () => {
     });
   });
 
-  it('drive: query/limit → q/pageSize; folder name/parent → folder_name/parent_id', () => {
-    expect(directOverride('drive.list_files')!.toArguments({ query: "name contains 'x'", limit: 3 })).toEqual(
-      { q: "name contains 'x'", pageSize: 3 },
-    );
+  it('drive.list_files asks what the SDK action asks: live files, newest first, shared drives included', () => {
+    const list = directOverride('drive.list_files')!;
+    const always = {
+      orderBy: 'modifiedTime desc',
+      fields: 'nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink,parents)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    };
+    expect(list.toArguments({ limit: 3 })).toEqual({ q: 'trashed=false', pageSize: 3, ...always });
+    // A query the user wrote is passed through verbatim — it replaces the default filter, as on the SDK rail.
+    expect(list.toArguments({ query: "name contains 'x'", limit: 3 })).toEqual({
+      q: "name contains 'x'",
+      pageSize: 3,
+      ...always,
+    });
+    expect(list.toArguments({ query: '   ' })).toMatchObject({ q: 'trashed=false' });
+  });
+
+  it('drive.create_folder: folder name/parent → folder_name/parent_id', () => {
     expect(directOverride('drive.create_folder')!.toArguments({ name: 'Reports', parentId: 'root' })).toEqual(
       { folder_name: 'Reports', parent_id: 'root' },
     );
