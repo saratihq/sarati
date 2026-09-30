@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -54,10 +55,15 @@ beforeAll(async () => {
         return;
       }
       try {
-        await jwtVerify(internal, new TextEncoder().encode(SECRET), {
+        // As workflow-service verifies it: minted for this purpose, and for the caller it rides beside.
+        const { payload } = await jwtVerify(internal, new TextEncoder().encode(SECRET), {
           issuer: 'orchestr:internal',
+          audience: 'platform-keys:anthropic',
           algorithms: ['HS256'],
         });
+        const bearer = caller.slice('Bearer '.length);
+        if (payload.sub !== createHash('sha256').update(bearer).digest('base64url'))
+          throw new Error('unbound');
       } catch {
         res.writeHead(401).end();
         return;

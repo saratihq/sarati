@@ -9,7 +9,12 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
-import { INTERNAL_ISSUER, INTERNAL_TOKEN_HEADER } from '../src/platform/internal-token';
+import {
+  callerBinding,
+  INTERNAL_ISSUER,
+  INTERNAL_TOKEN_HEADER,
+  PLATFORM_KEYS_AUDIENCE,
+} from '../src/platform/internal-token';
 import { PLATFORM_KEY_NAMES, PlatformKeysService } from '../src/platform/platform-keys.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -137,14 +142,21 @@ describe('platform keys (e2e, isolated DB)', () => {
       .set('X-Org-Id', orgId)
       .set(INTERNAL_TOKEN_HEADER, internal);
 
-  async function internalToken(secret = SECRET, issuer = INTERNAL_ISSUER): Promise<string> {
+  /** What the agent mints: signed with the shared secret, for `keyOwner` and for this read unless told otherwise. */
+  async function internalToken(
+    secret = SECRET,
+    issuer = INTERNAL_ISSUER,
+    bound: { bearer?: string; audience?: string } = { bearer: keyOwner, audience: PLATFORM_KEYS_AUDIENCE },
+  ): Promise<string> {
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({})
+    const jwt = new SignJWT({})
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuer(issuer)
       .setIssuedAt(now)
-      .setExpirationTime(now + 60)
-      .sign(new TextEncoder().encode(secret));
+      .setExpirationTime(now + 60);
+    if (bound.audience) jwt.setAudience(bound.audience);
+    if (bound.bearer) jwt.setSubject(callerBinding(bound.bearer));
+    return jwt.sign(new TextEncoder().encode(secret));
   }
 
   describe('the store is the only source', () => {
@@ -322,6 +334,23 @@ describe('platform keys (e2e, isolated DB)', () => {
     it('refuses the raw secret as a bearer, and an absent one', async () => {
       await internalRead(keyOwner, SECRET).expect(401);
       await internalRead(keyOwner, '').expect(401);
+    });
+
+    it('refuses a token minted for a different caller — a leaked one is no use beside another session', async () => {
+      const forSomeoneElse = await internalToken(SECRET, INTERNAL_ISSUER, {
+        bearer: 'ork_some_other_callers_key_0000000',
+        audience: PLATFORM_KEYS_AUDIENCE,
+      });
+      await internalRead(keyOwner, forSomeoneElse).expect(401);
+    });
+
+    it('refuses a token minted for another purpose, and one bound to nothing', async () => {
+      const otherPurpose = await internalToken(SECRET, INTERNAL_ISSUER, {
+        bearer: keyOwner,
+        audience: 'something-else',
+      });
+      await internalRead(keyOwner, otherPurpose).expect(401);
+      await internalRead(keyOwner, await internalToken(SECRET, INTERNAL_ISSUER, {})).expect(401);
     });
 
     it('is not reachable with a normal user credential', async () => {

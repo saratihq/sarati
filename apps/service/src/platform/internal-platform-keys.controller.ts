@@ -7,7 +7,7 @@ import { requirePrincipal } from '../auth/principal';
 import { Scope } from '../auth/scope.decorator';
 import { DomainError } from '../common/domain-error';
 import type { EnvConfig } from '../config/env.config';
-import { INTERNAL_TOKEN_HEADER, verifyInternalToken } from './internal-token';
+import { INTERNAL_TOKEN_HEADER, PLATFORM_KEYS_AUDIENCE, verifyInternalToken } from './internal-token';
 import { PlatformKeysService } from './platform-keys.service';
 
 /**
@@ -18,7 +18,8 @@ import { PlatformKeysService } from './platform-keys.service';
  * header, so `AuthGuard` resolves exactly the identity and active org the rest of the API would
  * — which is what makes the key it returns the caller's, not someone else's. The PROCESS proves
  * itself with a short-lived HS256 token signed with the SECRET_KEY both already share, so a user
- * token alone can never read a key back out.
+ * token alone can never read a key back out — and that token is minted for this caller and this
+ * route, so it is no use beside another session.
  *
  * The reverse proxy does not route `/api/internal/*`; this is reachable on the internal network.
  */
@@ -43,7 +44,9 @@ export class InternalPlatformKeysController {
     const secret = this.config.get('env', { infer: true }).secretKey;
     const raw = req.headers[INTERNAL_TOKEN_HEADER];
     const token = (Array.isArray(raw) ? raw[0] : raw)?.trim() ?? '';
-    if (!token || !(await verifyInternalToken(token, secret))) {
+    const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '') ?? '';
+    const binding = { bearer, audience: PLATFORM_KEYS_AUDIENCE };
+    if (!token || !bearer || !(await verifyInternalToken(token, secret, binding))) {
       throw new DomainError('Not an internal caller', 401);
     }
   }
