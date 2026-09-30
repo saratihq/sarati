@@ -55,8 +55,14 @@ Nothing in the surface merges, promotes or publishes.
 
 ## What an agent can actually do
 
-Read the workflow, search the action catalog, validate a document, open a branch, commit to it, and
-open a review. A human then reviews the diff and merges — the same gate a person goes through.
+Read the workflow, search the action catalog, validate a document, test it dry, open a branch,
+commit to it, and open a review. A human then reviews the diff and merges — the same gate a person
+goes through.
+
+<video class="shot" src="/shots/agent-review-merge.mp4" poster="/shots/agent-review-merge-poster.webp" width="1280" height="800" controls preload="metadata" playsinline aria-label="Claude Code, connected over MCP, changes a Hacker News digest on a branch, dry-runs it and opens a review; a person tests both versions, approves, merges and promotes the new version to production."></video>
+
+Claude Code on a key with `workflow:read`, `workflow:write` and `run:dry`, in one take. Merging makes
+the change the head of `main`; production runs it only once it is promoted — the last step.
 
 ## Testing is dry unless you confirm
 

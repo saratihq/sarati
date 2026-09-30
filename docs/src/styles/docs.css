@@ -32,7 +32,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  video.shot {
+  video.shot[autoplay] {
     display: none;
   }
 }
