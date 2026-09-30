@@ -8,6 +8,7 @@ import type { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { EnvironmentsService } from '../environments/environments.service';
 import type { WorkflowIR } from '../ir/models';
+import { CANNOT_POLL_NOTE, mayReadRuns } from '../runs/run-read-access';
 import { RunsService } from '../runs/runs.service';
 import type { RunOutcome } from '../runtime/run-plan';
 import { extractChatReply } from '../runtime/terminal-output';
@@ -27,8 +28,10 @@ export interface InvokeResult {
   status: 'completed' | 'running';
   /** The terminal-node output ({@link extractChatReply}) — absent while the run is still going. */
   output?: unknown;
-  /** Where to read the run once it outlives the bounded wait. */
+  /** Where to read the run once it outlives the bounded wait — only when this credential may read it. */
   poll_with?: string;
+  /** Why there is no `poll_with`: the run is still going, and this credential cannot read runs. */
+  note?: string;
 }
 
 /** The published target an invocation fires: the pinned version plus the env its steps resolve in. */
@@ -90,7 +93,7 @@ export class WorkflowInvokeService {
         : {}),
       awaitMs,
     });
-    return this.answer(ir, outcome);
+    return this.answer(ir, outcome, mayReadRuns(principal));
   }
 
   /**
@@ -149,9 +152,11 @@ export class WorkflowInvokeService {
   }
 
   /** The workflow's ANSWER, never its whole output scope — one rule, shared with chat and sub-workflows. */
-  private answer(ir: WorkflowIR, outcome: RunOutcome): InvokeResult {
+  private answer(ir: WorkflowIR, outcome: RunOutcome, canPoll: boolean): InvokeResult {
     if ('status' in outcome) {
-      return { run_id: outcome.run_id, status: 'running', poll_with: `/api/runs/${outcome.run_id}` };
+      return canPoll
+        ? { run_id: outcome.run_id, status: 'running', poll_with: `/api/runs/${outcome.run_id}` }
+        : { run_id: outcome.run_id, status: 'running', note: CANNOT_POLL_NOTE };
     }
     return {
       run_id: outcome.run_id ?? '',

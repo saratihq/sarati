@@ -40,7 +40,8 @@ Both variables are required. `SARATI_BASE_URL` may include `/mcp` or omit it.
 ## The key decides the tool list
 
 The tool list is filtered by the [key's scopes](/agents/api-keys/), and the server refuses anything
-beyond them whether or not a tool was listed.
+beyond them whether or not a tool was listed. Connecting at all takes `workflow:read` or
+`workflow:invoke`; the other scopes add tools to a key that holds one of those.
 
 | Scope | Tools it adds |
 |---|---|
@@ -77,7 +78,8 @@ does.
 
 Calling one **runs the live automation**. That is what it is for, so it counts against the same 20
 an hour. The call waits 15 seconds for an answer; a longer run returns a run id, and reading that
-run takes `workflow:read`.
+run takes `workflow:read` — a key without it is told so instead of being pointed at a tool it
+cannot see.
 
 A key holding only `workflow:invoke` can run those automations and see nothing of how they are
 built.
