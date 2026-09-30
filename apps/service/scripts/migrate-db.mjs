@@ -12,7 +12,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
+import { connectOrExit } from './connect.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(here, '..', 'db', 'migrations');
@@ -36,8 +36,7 @@ const files = readdirSync(MIGRATIONS_DIR)
   .filter((f) => f.endsWith('.sql'))
   .sort();
 
-const client = new pg.Client({ connectionString: url });
-await client.connect();
+const client = await connectOrExit(url);
 try {
   for (const file of files) {
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');

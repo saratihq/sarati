@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import pg from 'pg';
+import { connectOrExit } from './connect.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(here, '..', 'db', 'schema.sql');
@@ -32,12 +32,9 @@ if (!url) {
   process.exit(1);
 }
 
-const client = new pg.Client({ connectionString: url });
-await client.connect();
+const client = await connectOrExit(url);
 try {
-  const existing = await client.query(
-    `SELECT to_regclass('public.users') IS NOT NULL AS present`,
-  );
+  const existing = await client.query(`SELECT to_regclass('public.users') IS NOT NULL AS present`);
   if (existing.rows[0]?.present) {
     // Already initialized — skip (idempotent) rather than clobber. `db:migrate`
     // (run next by `db:release`) evolves an older schema forward.
