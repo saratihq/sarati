@@ -16,9 +16,10 @@ Running it by hand without the installer, they are `-e` flags instead:
 docker run -d --name sarati -p 8080:8080 -v sarati:/data -e LOG_LEVEL=debug sarati/sarati
 ```
 
-Six values are owned by the install and should not be set by hand: `DATABASE_URL`, `SECRET_KEY`,
-`FERNET_KEY`, `CORS_ORIGINS`, `FRONTEND_URL` and `PUBLIC_BASE_URL` — those follow `SARATI_URL` and
-the generated secrets. Set `SARATI_URL`, never the three URLs it derives.
+Five values are owned by the install and should not be set by hand: `DATABASE_URL`, `SECRET_KEY`,
+`FERNET_KEY`, `CORS_ORIGINS` and `FRONTEND_URL` — those follow `SARATI_URL` and the generated
+secrets. `PUBLIC_BASE_URL` follows `SARATI_URL` as well, and is the one address you may
+[set apart](#commonly-set).
 
 ## What the installer writes
 
@@ -38,8 +39,12 @@ below.
 ## Commonly set
 
 ```bash
-# Where webhook URLs are minted from — set this when you put Sarati behind a domain.
-PUBLIC_BASE_URL=https://sarati.example.com
+# The one address everything is reached through — change it when you put Sarati behind a domain.
+SARATI_URL=https://sarati.example.com
+
+# Where third parties send webhooks. It follows SARATI_URL; set it only when inbound traffic
+# arrives somewhere else, such as a tunnel in front of a laptop instance.
+PUBLIC_BASE_URL=https://your-tunnel.example.com
 
 # trace | debug | info | warn | error. Empty → info.
 LOG_LEVEL=

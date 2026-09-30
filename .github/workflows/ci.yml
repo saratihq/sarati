@@ -69,6 +69,7 @@ jobs:
           SARATI_URL=http://localhost:8080
           SARATI_PORT=8080
           LOG_LEVEL=debug
+          PUBLIC_BASE_URL=https://hooks.example.com
           EOF
           docker compose up -d
       - name: A documented setting in .env must reach the service
@@ -82,6 +83,14 @@ jobs:
             || { echo "::error::.env settings do not reach the service (got '$got')"; exit 1; }
           docker compose exec -T service printenv DATABASE_URL | grep -q '@db:5432/sarati' \
             || { echo "::error::compose environment: no longer overrides .env"; exit 1; }
+          # The one address the docs tell people to set apart (a tunnel for inbound webhooks): compose
+          # used to overwrite it with SARATI_URL, which still owns the browser-facing origin.
+          got=$(docker compose exec -T service printenv PUBLIC_BASE_URL || true)
+          test "$got" = 'https://hooks.example.com' \
+            || { echo "::error::PUBLIC_BASE_URL in .env does not reach the service (got '$got')"; exit 1; }
+          got=$(docker compose exec -T service printenv FRONTEND_URL || true)
+          test "$got" = 'http://localhost:8080' \
+            || { echo "::error::FRONTEND_URL no longer follows SARATI_URL (got '$got')"; exit 1; }
           echo "config reaches the service, and compose still wins where it must"
           for i in $(seq 1 90); do
             curl -fsS http://localhost:8080/api/health >/dev/null 2>&1 && break

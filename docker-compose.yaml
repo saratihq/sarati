@@ -1,6 +1,6 @@
 # Sarati — the whole stack, one command.
 #
-#   curl -fsSL https://get.sarati.io | bash        (generates .env, then runs this)
+#   SARATI_STACK=compose sh -c 'curl -fsSL https://get.sarati.io | sh'   (generates .env, then runs this)
 #   docker compose up -d                          (if you already have a .env)
 #
 # Everything is reached through one origin on ${SARATI_PORT} — the browser never talks to a
@@ -42,7 +42,8 @@ services:
       # One origin fronts everything, so the browser's origin is the only one CORS ever sees.
       CORS_ORIGINS: ${SARATI_URL:-http://localhost:8080}
       FRONTEND_URL: ${SARATI_URL:-http://localhost:8080}
-      PUBLIC_BASE_URL: ${SARATI_URL:-http://localhost:8080}
+      # Where third parties send webhooks: the same origin unless a tunnel fronts inbound traffic.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-${SARATI_URL:-http://localhost:8080}}
     volumes:
       - service-data:/data
 
