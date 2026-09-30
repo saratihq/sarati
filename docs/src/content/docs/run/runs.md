@@ -7,7 +7,7 @@ description: What ran, on which version, and what each step produced.
 
 | Column | |
 |---|---|
-| Status | `running`, `waiting`, `completed`, `error` or `cancelled`. |
+| Status | Running, Waiting, Completed, Failed or Cancelled. Over the API a failed run is `error`. |
 | Source | What started it — webhook, schedule, manual, chat. |
 | Environment | Which environment's pointer was used. |
 | Version | The exact version that ran. |

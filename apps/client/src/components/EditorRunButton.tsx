@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Play, X } from "lucide-react";
 import * as api from "@/api/client";
@@ -28,8 +28,8 @@ const VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
 };
 
 /**
- * Runs the WORKING DRAFT on the canvas, not a committed version: sync `runWorkflowIr`, falling back
- * to the durable route when the plan parks on an approval, then polling `getRun` to a terminal state.
+ * Runs the WORKING DRAFT on the canvas, not a committed version: one sync `runWorkflowIr` call, which
+ * stays open while the run is parked on an approval — `getRun` is polled meanwhile so the panel can say so.
  */
 export default function EditorRunButton() {
   const workflowJson = useWorkflow((s) => s.workflowJson);
@@ -40,42 +40,48 @@ export default function EditorRunButton() {
 
   const [view, setView] = useState<RunView | null>(null);
   const [open, setOpen] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [pollRunId, setPollRunId] = useState<string | null>(null);
+  // The run in flight. The ref is the same fact for the sync call's continuation, which outlives renders.
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const activeRun = useRef<string | null>(null);
 
-  // Watches a parked/async run until it resolves; the sync call already handled the common case.
+  // Whichever learns the outcome first settles the run: the sync call, or the watcher below.
+  const settle = useCallback((runId: string, outcome: RunView) => {
+    if (activeRun.current !== runId) return;
+    activeRun.current = null;
+    setActiveRunId(null);
+    setView(outcome);
+  }, []);
+
+  // Watches the run while the sync call is still open; that call settles the common case itself.
   useEffect(() => {
-    if (!pollRunId) return;
-    let cancelled = false;
+    if (!activeRunId) return;
     const startedAt = Date.now();
     const interval = setInterval(async () => {
       try {
-        const d = await api.getRun(pollRunId);
-        if (cancelled) return;
+        const d = await api.getRun(activeRunId);
         if (d.status === "waiting") {
-          setView((v) => (v?.status === "completed" || v?.status === "failed" ? v : { status: "waiting" }));
-        } else if (d.status === "completed" || d.status === "failed") {
-          setView({ status: d.status, outputs: d.outputs ?? undefined, error: d.error });
-          setPollRunId(null);
+          if (activeRun.current === activeRunId) setView({ status: "waiting" });
+        } else if (d.status === "completed") {
+          settle(activeRunId, { status: "completed", outputs: d.outputs ?? undefined });
+        } else if (d.status === "error" || d.status === "cancelled") {
+          const stopped = d.status === "cancelled" ? "The run was cancelled." : "The run failed.";
+          settle(activeRunId, { status: "failed", outputs: d.outputs ?? undefined, error: d.error ?? stopped });
         }
       } catch {
         // Run row not written yet, or a transient failure — keep trying.
       }
-      if (!cancelled && Date.now() - startedAt >= RUN_POLL_CAP_MS) setPollRunId(null);
+      if (Date.now() - startedAt >= RUN_POLL_CAP_MS) clearInterval(interval);
     }, RUN_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [pollRunId]);
+    return () => clearInterval(interval);
+  }, [activeRunId, settle]);
 
   const run = async () => {
-    if (!workflowJson || running || missing.length > 0) return;
+    if (!workflowJson || activeRun.current || missing.length > 0) return;
     const runId = crypto.randomUUID();
-    setRunning(true);
+    activeRun.current = runId;
+    setActiveRunId(runId);
     setOpen(true);
     setView({ status: "running" });
-    setPollRunId(runId);
     // True pinning: pinned steps replay their captured output, scope-guarded to this doc.
     const samples = useStepSamples.getState();
     const scopeKey =
@@ -88,39 +94,13 @@ export default function EditorRunButton() {
         runId,
         pins,
       });
-      setView({ status: "completed", outputs: res.outputs });
-      setPollRunId(null);
+      settle(runId, { status: "completed", outputs: res.outputs });
     } catch (e) {
-      // Both patterns must match, or a compile-error 400 that merely mentions a wait node
-      // would false-trigger the durable-route fallback.
-      if (
-        e instanceof api.ApiError &&
-        e.status === 400 &&
-        /async/i.test(e.message) &&
-        /approval|wait|human/i.test(e.message)
-      ) {
-        try {
-          const started = await api.runWorkflowIrAsync(workflowJson, undefined, {
-            workflowId: workflowId ?? undefined,
-            runId,
-            pins,
-          });
-          setView({ status: "running" });
-          setPollRunId(started.run_id || runId);
-        } catch (e2) {
-          setView({ status: "failed", error: e2 instanceof Error ? e2.message : "Run failed" });
-          setPollRunId(null);
-        }
-      } else {
-        setView({ status: "failed", error: e instanceof Error ? e.message : "Run failed" });
-        setPollRunId(null);
-      }
-    } finally {
-      setRunning(false);
+      settle(runId, { status: "failed", error: e instanceof Error ? e.message : "Run failed" });
     }
   };
 
-  const inFlight = running || pollRunId !== null;
+  const inFlight = activeRunId !== null;
   const meta = view ? VIEW_META[view.status] : null;
 
   return (
