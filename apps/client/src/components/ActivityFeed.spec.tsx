@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import * as environments from "@/api/environments";
@@ -77,5 +78,28 @@ describe("ActivityFeed review card", () => {
     expect(screen.getByText("closed")).toBeInTheDocument();
     expect(screen.queryByText(/no longer blocks merging/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Test this branch" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ActivityFeed promote menu", () => {
+  it("keeps production and uat main-only off main even when the environments list can't load", async () => {
+    vi.mocked(api.listVersions).mockResolvedValue({
+      workflow_id: "wf",
+      env_pointers: [],
+      versions: [
+        { id: "v-lane", version_number: 1, workflow_json: {}, tags: ["latest"], parent_id: "v-main", branch_name: "lane" },
+      ],
+    });
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
+    vi.mocked(environments.listEnvironments).mockRejectedValue(new Error("environments are down"));
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Promote" }));
+
+    expect(screen.getByRole("button", { name: /Promote to production/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Promote to uat/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Promote to staging/ })).toBeEnabled();
   });
 });

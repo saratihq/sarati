@@ -43,5 +43,6 @@ Promoting an older version still works, so protection can never leave you unable
 
 ## Delete
 
-Delete a branch from the selector once its change has landed. Its versions go with it, so delete
+Delete a branch from the selector once its change has landed. Its reviews are deleted with it and
+its versions drop out of the feed — an environment already running one keeps running it — so delete
 after merging, not before.

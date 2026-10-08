@@ -407,6 +407,48 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await asB(http().get(`/api/workflows/${wfId}`)).expect(200);
   });
 
+  it('creating a live workflow asks the policy: a role without deploy is refused and nothing is made', async () => {
+    const { role } = (
+      await db.query<{ role: string }>(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+      ])
+    ).rows[0]!;
+    const deployAsB = (): request.Test =>
+      asB(
+        http()
+          .post('/api/deploy')
+          .set('X-Org-Id', orgId)
+          .send({
+            workflow_json: {
+              name: 'Read-only Flow',
+              nodes: [{ id: 'n1', node_type: 'text.concat', name: 'Step', parameters: {} }],
+              edges: [],
+            },
+          }),
+      );
+    // The org API never hands out `viewer`; it is the role matrix's read-only seat for ee roles.
+    await db.query(`UPDATE org_members SET role = 'viewer' WHERE org_id = $1 AND user_id = $2`, [
+      orgId,
+      userB,
+    ]);
+    try {
+      const refused = await deployAsB().expect(403);
+      expect(refused.body.detail).toBe('Not authorised to create workflows in this organisation');
+      const made = await db.query(`SELECT 1 FROM workflows WHERE org_id = $1 AND name = 'Read-only Flow'`, [
+        orgId,
+      ]);
+      expect(made.rowCount).toBe(0);
+    } finally {
+      await db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+        role,
+      ]);
+    }
+    await deployAsB().expect(201);
+  });
+
   /** Org-wide approvals are a SESSION capability (proven in mcp-runs.e2e-spec); a key reaches only its own runs. */
   it('a KEY gets no org-wide reach: another member cannot see or resume a parked run through one', async () => {
     // The run is NOT awaited — it parks on the wait node. Its owner is A.

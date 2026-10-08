@@ -1348,24 +1348,6 @@ export async function sendRunEvent(
   });
 }
 
-export async function rollbackVersion(
-  workflowId: string,
-  versionNumber: number,
-  branch?: string,
-): Promise<{
-  status: string;
-  new_version_number: number;
-  rolled_back_to: number;
-}> {
-  const params = branch ? `?branch=${encodeURIComponent(branch)}` : "";
-  return request(
-    `/workflows/${workflowId}/versions/${versionNumber}/rollback${params}`,
-    {
-      method: "POST",
-    },
-  );
-}
-
 // ─── Publish / Restore (Save ≠ Live) ───
 // Save (commit) advances `latest` but never what runs; publish/restore move the live POINTER, minting no version.
 

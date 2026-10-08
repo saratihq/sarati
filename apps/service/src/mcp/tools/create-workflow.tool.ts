@@ -2,8 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
 import type { ApiScope } from '../../auth/scopes';
-import { DomainError } from '../../common/domain-error';
-import { PolicyService } from '../../policy/policy.service';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 import { WorkflowLifecycleService } from '../../workflows/workflow-lifecycle.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
@@ -56,18 +55,12 @@ export class CreateWorkflowTool implements McpTool {
 
   constructor(
     private readonly lifecycle: WorkflowLifecycleService,
-    private readonly policy: PolicyService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const args = Input.parse(input);
-    const orgId = ctx.principal.activeOrgId;
-    // Org membership decides inside an org; outside one, the caller owns what they create.
-    const allowed = await this.policy.can(ctx.principal, 'write', {
-      orgId,
-      ownerUserId: orgId ? null : ctx.principal.user.id,
-    });
-    if (!allowed) throw new DomainError('Not authorised to create workflows in this organisation', 403);
+    await this.access.requireCreate(ctx.principal, 'write');
 
     const created = await this.lifecycle.createDraft({
       principal: ctx.principal,
