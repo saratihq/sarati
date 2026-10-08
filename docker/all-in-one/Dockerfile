@@ -12,7 +12,9 @@ FROM ${REGISTRY}/sarati-client:${VERSION} AS client
 FROM node:24-alpine
 # No global PORT: each service sets its own in supervisord, exactly as its own image does.
 # Setting one here leaked 8001 into the agent and the two fought over the port.
+# ENV does not carry over from the images above, so production mode is switched on here again.
 ENV NODE_ENV=production \
+    ENVIRONMENT=production \
     PGDATA=/data/postgres \
     SARATI_SERVICE_DIR=/opt/sarati/service \
     PATH=/usr/libexec/postgresql16:$PATH

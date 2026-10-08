@@ -100,5 +100,32 @@ jobs:
           curl -fsS http://localhost:8080/api/composer/status | grep -q '"status"'
           curl -fsS -o /dev/null http://localhost:8080/login
           echo "stack up: service, agent and client all reachable through the proxy"
+      - name: The one-container install runs in production mode, on its own database and on yours
+        run: |
+          # Assembled FROM the images above, and ENV does not carry over: without its own
+          # ENVIRONMENT=production a DATABASE_URL on another host is refused and the service never starts.
+          test "$(docker compose exec -T agent printenv ENVIRONMENT)" = 'production' \
+            || { echo "::error::the agent image does not run in production mode"; exit 1; }
+          docker build -f docker/all-in-one/Dockerfile -t sarati-one:ci .
+          ready() {
+            for i in $(seq 1 90); do
+              curl -fsS "http://localhost:$1/api/ready" >/dev/null 2>&1 && return 0
+              sleep 2
+            done
+            echo "::error::$2"
+            docker logs "$3" 2>&1 | tail -60
+            return 1
+          }
+          docker run -d --name one-bundled -p 8093:8080 sarati-one:ci
+          ready 8093 'the one-container install does not come up on its bundled database' one-bundled
+          test "$(docker exec one-bundled printenv ENVIRONMENT)" = 'production'
+          pw=$(openssl rand -hex 12)
+          docker network create byo
+          docker run -d --name byo-db --network byo --network-alias pg-elsewhere \
+            -e POSTGRES_USER=sarati -e POSTGRES_PASSWORD="$pw" -e POSTGRES_DB=sarati postgres:16-alpine
+          docker run -d --name one-byo --network byo -p 8094:8080 \
+            -e DATABASE_URL="postgresql://sarati:$pw@pg-elsewhere:5432/sarati" sarati-one:ci
+          ready 8094 'the one-container install does not come up on a Postgres of your own' one-byo
+          echo "one-container install: production mode, on its bundled database and on your own"
       - if: failure()
         run: docker compose logs --no-color | tail -100
