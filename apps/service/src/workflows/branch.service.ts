@@ -289,21 +289,28 @@ export class BranchService {
 
       // Enforced here, not per caller, so BOTH merge entry points inherit it (constitution rows 5, 15).
       if (target.isProtected) {
+        // Every review of the pair, closed ones included: closing a review must not erase a test it ran.
         const reviews = await em
           .createQueryBuilder(WorkflowReviewEntity, 'r')
           .where('r.workflow_id = :workflowId', { workflowId })
           .andWhere('r.source_branch_id = :sourceId', { sourceId: source.id })
           .andWhere('r.target_branch_id = :targetId', { targetId: target.id })
-          .andWhere('r.status IN (:...statuses)', { statuses: ['open', 'approved'] })
           .getMany();
         if (!reviews.some((r) => r.status === 'approved')) {
           throw new DomainError(
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
         }
-        const heads = { source: source.headVersionId, target: target.headVersionId };
-        if (reviews.some((r) => failsOnTheseHeads(r.lastTest, heads))) {
-          throw new DomainError(PROTECTED_TARGET_TEST_FAILING);
+        const failing = latestFailingTest(reviews, {
+          source: source.headVersionId,
+          target: target.headVersionId,
+        });
+        if (failing) {
+          throw new DomainError(
+            `${PROTECTED_TARGET_TEST_FAILING} The latest test of these versions is on review "${failing.title}".`,
+            400,
+            { code: MERGE_TEST_FAILING, review_id: failing.id },
+          );
         }
       }
 
@@ -415,18 +422,26 @@ export class BranchService {
   }
 }
 
-/** Refusal when a current test of the very heads being merged is failing (constitution row 15). */
+/** Refusal when the latest test of the very heads being merged failed (constitution row 15). */
 export const PROTECTED_TARGET_TEST_FAILING =
   'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging.';
 
-/** A red test of exactly these two heads; once either head has moved, it says nothing about this merge. */
-function failsOnTheseHeads(
-  test: ReviewTestSummary | null,
+/** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
+export const MERGE_TEST_FAILING = 'merge_test_failing';
+
+/**
+ * The review whose test of exactly these two heads is the most recent, when that test failed. Any review of
+ * the pair counts — a newer passing test lifts an older failure; a test of other heads says nothing (#15).
+ */
+export function latestFailingTest(
+  reviews: Array<Pick<WorkflowReviewEntity, 'id' | 'title' | 'lastTest'>>,
   heads: { source: string; target: string },
-): boolean {
-  return (
-    test?.verdict === 'red' &&
-    test.source_version_id === heads.source &&
-    test.target_version_id === heads.target
-  );
+): Pick<WorkflowReviewEntity, 'id' | 'title'> | null {
+  let latest: { review: Pick<WorkflowReviewEntity, 'id' | 'title'>; test: ReviewTestSummary } | null = null;
+  for (const review of reviews) {
+    const test = review.lastTest;
+    if (!test || test.source_version_id !== heads.source || test.target_version_id !== heads.target) continue;
+    if (!latest || Date.parse(test.tested_at) > Date.parse(latest.test.tested_at)) latest = { review, test };
+  }
+  return latest && latest.test.verdict === 'red' ? latest.review : null;
 }

@@ -68,10 +68,11 @@ Merging into a protected branch before approval is refused:
 
 > Target branch is protected — review must be approved before merging
 
-Into a protected branch, a failing test also blocks the merge — from the review or from the branch
-selector alike. A test fails when a step errors on your branch but not on the target. The block holds
-only while neither branch has moved since that test: a new commit on either side, or a passing
-re-test, lifts it.
+Into a protected branch, a failing test also blocks the merge — from the review or with **Merge into
+main** on the workflow overview alike. A test fails when a step errors on your branch but not on the
+target. What counts is the latest test of exactly the two versions being merged, run from any review
+of that pair; the refusal names the review that ran it. A passing re-test, or a new commit on either
+side, lifts it. Closing that review does not.
 
 After a successful merge the target branch has a new version — the merge commit — and the review is
 marked merged in the feed.

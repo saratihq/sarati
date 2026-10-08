@@ -145,6 +145,14 @@ Branch 'main' is protected — merge it through an approved review
 Working as intended. Open a review and get it approved. Committing straight to a protected branch is
 refused the same way.
 
+```
+Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging. The latest test of these versions is on review "…".
+```
+
+Also intended: the latest test of the two versions found a step that errors on your branch but not
+on the target. Fix the step and commit, or re-test once it passes — see
+[Reviews](/version-control/reviews/#merge).
+
 ## A setting is not taking effect
 
 ```bash
