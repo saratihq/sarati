@@ -104,11 +104,8 @@ export class ReviewTestService {
     return summary;
   }
 
-  /**
-   * Keep the result by the versions it tested — what the merge gate reads — even if its review has gone, and
-   * show it on the review when it is the newest there. The review is locked first, so stores queue on it.
-   */
-  private async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
+  /** Keep a finished test by its versions — even once its review is gone — and show it there if newest; locks the review first. */
+  async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
     await this.dataSource.transaction(async (em) => {
       const review = await em.findOne(WorkflowReviewEntity, {
         where: { id: reviewId },

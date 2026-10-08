@@ -240,10 +240,7 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
       .expect(201);
     await http().delete(`/api/workflows/${wf}/branches/gone`).expect(200);
     // The run outlived its review: what the test service stores at the end of a run.
-    const store = (
-      app.get(ReviewTestService)
-    ).storeTest.bind(app.get(ReviewTestService));
-    await store(wf, doomed.body.id as string, {
+    await app.get(ReviewTestService).storeTest(wf, doomed.body.id as string, {
       verdict: 'red',
       tested_at: '2026-10-08T10:00:00.000Z',
       environment_id: null,
