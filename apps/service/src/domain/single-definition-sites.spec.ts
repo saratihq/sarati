@@ -63,7 +63,8 @@ describe('vault: one definition site per load-bearing question', () => {
 
   /** Constitution #15: a failing pre-merge test blocks a protected merge in `mergeBranchIn` alone, so no entry point can skip it. */
   it('only mergeBranchIn decides a merge on a pre-merge test', () => {
-    const verdictChecks = /verdict\s*[!=]==?\s*['"](?:red|green)['"]|['"](?:red|green)['"]\s*[!=]==?\s*\S*verdict/;
+    const verdictChecks =
+      /verdict\s*[!=]==?\s*['"](?:red|green)['"]|['"](?:red|green)['"]\s*[!=]==?\s*\S*verdict/;
     const deciders = sources()
       .filter((f) => verdictChecks.test(f.text) || /\blatestFailingTest\s*\(/.test(f.text))
       .map((f) => f.rel);
