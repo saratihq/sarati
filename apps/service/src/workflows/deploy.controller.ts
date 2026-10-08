@@ -33,11 +33,6 @@ export class DeployController {
   async deploy(@Req() req: Request, @Body() body: DeployDto): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
     await this.access.requireCreate(principal, 'deploy');
-    return this.lifecycle.deployCreateOnSarati(
-      principal.user.id,
-      principal.activeOrgId,
-      body.workflow_json,
-      principal.user.name,
-    );
+    return this.lifecycle.deployCreateOnSarati(principal, body.workflow_json);
   }
 }

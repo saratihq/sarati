@@ -5,6 +5,7 @@ import { ArrowUp, Check, CircleDot, Database, MessageSquare, Paperclip, Plus, Ta
 import { useComposerAvailable } from "@/lib/useComposerAvailable";
 import { useComposer, type ThreadEntry } from "@/store/useComposer";
 import { useWorkflow } from "@/store/useWorkflow";
+import { canMoveEnvPointers, useOrgs } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 import ConnectAppButton from "./ConnectAppButton";
 import { SaratiLoader } from "./SaratiLogo";
@@ -25,6 +26,8 @@ export default function ComposerBar({
   const attach = useComposer((s) => s.attach);
   const reset = useComposer((s) => s.reset);
   const offerPending = useComposer((s) => s.offerPending);
+  // A member of a shared org saves a new workflow; turning it on is an owner's or admin's call.
+  const canTurnOn = useOrgs(canMoveEnvPointers);
   const accepting = useComposer((s) => s.accepting);
   const acceptOffer = useComposer((s) => s.acceptOffer);
   const connectionNeeds = useComposer((s) => s.connectionNeeds);
@@ -211,7 +214,7 @@ export default function ComposerBar({
         <div className="flex items-center gap-2" data-testid="composer-offer">
           {/* The composer commits versions but never moves a live pointer. */}
           <Button size="sm" disabled={accepting} onClick={() => void acceptOffer("live", workflowId)} data-testid="offer-save-live">
-            {accepting ? <SaratiLoader size={13} /> : null} {workflowId ? "Save" : "Save and turn on"}
+            {accepting ? <SaratiLoader size={13} /> : null} {workflowId || !canTurnOn ? "Save" : "Save and turn on"}
           </Button>
           <Button
             size="sm"

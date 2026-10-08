@@ -50,7 +50,8 @@ Rename the workflow to `Daily digest`, then **Save**.
 > Daily digest is under version control — v1 on main
 
 Saving is a commit. The first version of a new workflow goes live on production immediately; every
-version after this one needs an explicit publish.
+version after this one needs an explicit publish. In a shared organization, a member's new workflow
+is only saved — an owner or admin publishes it.
 
 ## 7. Fire it
 

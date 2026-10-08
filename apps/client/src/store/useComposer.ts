@@ -415,17 +415,15 @@ export const useComposer = create<ComposerStore>((set, get) => {
     acceptOffer: async (choice: OfferChoice, workflowId?: string) => {
       set({ offerPending: false });
       if (choice === "tweak") return;
-      // Accept = SAVE only: the composer commits versions but NEVER moves a live pointer.
+      // An existing workflow is only saved; a new one goes live only for someone who may publish.
       set({ accepting: true });
       try {
         if (!workflowId) {
           // The agent's own document carries the seeded name, so the plan's name is stamped on
           // before the create — this chip saves without the compose page's header in the loop.
           nameUnsavedWorkflow(get().suggestedName);
-          // Creating isn't promoting — there's no existing pointer to move — so a composer-first
-          // workflow may still be brought into being here.
           await useWorkflow.getState().deploy();
-          const { workflowId: createdId, error: deployError } = useWorkflow.getState();
+          const { workflowId: createdId, error: deployError, createdLive } = useWorkflow.getState();
           if (deployError || !createdId) {
             set({ failure: deployError ?? "Couldn't create the workflow." });
             return;
@@ -434,7 +432,12 @@ export const useComposer = create<ComposerStore>((set, get) => {
           forgetSession(undefined);
           const sid = get().sessionId;
           if (sid) rememberSession(createdId, sid);
-          await get().send("Created it.", createdId);
+          await get().send(
+            createdLive === false
+              ? "Saved it. It isn't on yet — an owner or admin of this organization turns it on."
+              : "Created it.",
+            createdId,
+          );
           return;
         }
         // Save ≠ Live: commit a new version, never publish.

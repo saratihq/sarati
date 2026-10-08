@@ -60,6 +60,8 @@ interface WorkflowState {
   workflowId: string | null;
   workflowUrl: string | null;
   workflowName: string | null;
+  /** Whether the workflow just created went live; false when a member saved it for an owner or admin to publish. */
+  createdLive: boolean | null;
   isLoading: boolean;
   error: string | null;
   warning: string | null;
@@ -459,6 +461,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   workflowId: null,
   workflowUrl: null,
   workflowName: null,
+  createdLive: null,
   isLoading: false,
   error: null,
   warning: null,
@@ -502,15 +505,20 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
         workflowId: deployResult.workflow_id,
         workflowUrl: deployResult.workflow_url,
         workflowName: deployResult.name,
+        createdLive: deployResult.is_live !== false,
         highlightedWorkflowId: deployResult.workflow_id,
         isLoading: false,
         step: "execute",
       });
+      warnBrokenRefs(deployResult.ref_warnings);
+      if (deployResult.is_live === false) {
+        toast.success("Saved on Sarati", `"${deployResult.name}" v1 is saved on main — an owner or admin turns it on`);
+        return;
+      }
       toast.success(
         "Created on Sarati",
         `"${deployResult.name}" is under version control — v1 on main`,
       );
-      warnBrokenRefs(deployResult.ref_warnings);
       warnInactiveTrigger(deployResult);
     } catch (e) {
       // Restore the strip so Deploy stays reachable after a failure.
@@ -544,6 +552,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       workflowId: null,
       workflowUrl: null,
       workflowName: null,
+      createdLive: null,
       isLoading: false,
       error: null,
       warning: null,

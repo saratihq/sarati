@@ -484,6 +484,8 @@ export interface DeployResult {
   workflow_url: string;
   name: string;
   version_number?: number;
+  /** False when a member of a shared org created it: saved, and an owner or admin publishes it. */
+  is_live?: boolean;
   activated?: boolean;
   activation_error?: string | null;
   ref_warnings?: string[];

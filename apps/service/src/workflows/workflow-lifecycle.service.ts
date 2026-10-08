@@ -95,12 +95,13 @@ export class WorkflowLifecycleService {
     return { workflow: wf, branchName, version, refWarnings };
   }
 
-  /** Create a workflow from an IR document; v1 goes live on create (the one exception to Save ≠ Live). */
+  /**
+   * Create a workflow from an IR document. v1 goes live on create (the one exception to Save ≠ Live) — for
+   * someone who may change what runs; a member of a shared org saves it, and an owner or admin publishes it.
+   */
   async deployCreateOnSarati(
-    userId: string,
-    orgId: string | null,
+    principal: Principal,
     irDoc: Record<string, unknown>,
-    author?: string | null,
   ): Promise<Record<string, unknown>> {
     if (!Array.isArray(irDoc.nodes) || irDoc.nodes.length === 0) {
       throw new DomainError('workflow_json must be a WorkflowIR document with a non-empty nodes array');
@@ -109,6 +110,23 @@ export class WorkflowLifecycleService {
     // otherwise a document refused at save is accepted straight into production here.
     assertAuthoredIrValid(irDoc, this.catalog.facts());
     const name = typeof irDoc.name === 'string' && irDoc.name ? irDoc.name : 'Generated Workflow';
+    const userId = principal.user.id;
+    const orgId = principal.activeOrgId;
+    const author = principal.user.name;
+
+    if (!(await this.envPointers.mayMovePointers(this.dataSource.manager, orgId, userId))) {
+      const draft = await this.createDraft({ principal, name, irDoc, commitMessage: 'Initial version' });
+      return {
+        workflow_id: draft.workflow.id,
+        workflow_url: '',
+        name,
+        version_number: draft.version.versionNumber,
+        is_live: false,
+        activated: false,
+        activation_error: null,
+        ref_warnings: draft.refWarnings,
+      };
+    }
 
     const workflowId = await this.dataSource.transaction(async (em) => {
       const wf = em.create(WorkflowEntity, {
@@ -178,6 +196,7 @@ export class WorkflowLifecycleService {
       workflow_url: '',
       name,
       version_number: 1,
+      is_live: true,
       activated: activation.activated,
       activation_error: activation.error,
       // Broken data refs surface at save, not at run time.
