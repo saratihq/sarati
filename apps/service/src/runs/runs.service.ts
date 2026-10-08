@@ -24,7 +24,7 @@ import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.se
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
-import type { RunAccess } from './run-access';
+import { reachesRunWorkflow, runReachSql, type RunAccess } from './run-access';
 import { failedNodeIdOf, type RunFailureDetails } from './run-failure';
 
 /** ~2KB cap for the per-step `output_preview` the runs panel renders. */
@@ -645,15 +645,26 @@ export class RunsService {
     };
   }
 
+  /** {@link latestRunOutputs} for a caller who must still be able to reach the workflow's runs. */
+  async sampleFor(access: RunAccess, workflowId: string): Promise<Record<string, unknown> | null> {
+    if (!this.dataSource) return null;
+    const rows: Array<{ org_id: string | null }> = await this.dataSource.query(
+      `SELECT org_id FROM workflows WHERE id = $1`,
+      [workflowId],
+    );
+    if (!reachesRunWorkflow(access, rows[0] ? rows[0].org_id : null)) return null;
+    return this.latestRunOutputs(access.userId, workflowId);
+  }
+
   /** The caller's run history, newest first (optionally per workflow). */
   async listRuns(
-    externalUserId: string,
+    access: RunAccess,
     opts: { limit?: number; workflowId?: string } = {},
   ): Promise<Array<Record<string, unknown>>> {
     if (!this.dataSource) return [];
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-    const params: unknown[] = [externalUserId];
-    let where = 'r.user_id = $1';
+    const params: unknown[] = [access.userId, access.orgIds, access.pinned];
+    let where = `r.user_id = $1 AND ${runReachSql(2, 3)}`;
     if (opts.workflowId) {
       params.push(opts.workflowId);
       where += ` AND r.workflow_id = $${params.length}`;
@@ -710,10 +721,16 @@ export class RunsService {
     if (!this.dataSource) return [];
     // Org-wide approvals: own runs plus every run parked in the ACTIVE org. A non-interactive
     // caller (and a personal scope, where `w.org_id = $2` is a NULL compare) sees only its own.
-    const params: unknown[] = [access.userId, access.orgWide ? access.activeOrgId : null];
+    const params: unknown[] = [
+      access.userId,
+      access.orgWide ? access.activeOrgId : null,
+      access.orgIds,
+      access.pinned,
+    ];
     let where = `r.status = 'waiting'
         AND (r.waiting_timeout_at IS NULL OR r.waiting_timeout_at > now())
-        AND (r.user_id = $1 OR w.org_id = $2)`;
+        AND (r.user_id = $1 OR w.org_id = $2)
+        AND ${runReachSql(3, 4)}`;
     if (workflowId) {
       params.push(workflowId);
       where += ` AND r.workflow_id = $${params.length}`;
@@ -861,8 +878,12 @@ export class RunsService {
   ): Promise<RuntimeRunEntity | null> {
     // Resolve the inbox's UNIQUE row id (`<owner>:<run>`) EXACTLY — the PK allows the same
     // run_id across users, so matching on run_id could pick the wrong run.
-    const exact = await em.findOne(RuntimeRunEntity, { where: { id: runRef } });
+    const exact =
+      (await em.findOne(RuntimeRunEntity, { where: { id: runRef } })) ??
+      // Back-compat: a bare run_id, scoped to the caller so it can never resolve another user's run.
+      (await em.findOne(RuntimeRunEntity, { where: { id: this.scopedRunId(access.userId, runRef) } }));
     if (exact) {
+      if (!reachesRunWorkflow(access, await this.workflowOrgOf(em, exact.workflowId))) return null;
       if (exact.userId === access.userId) return exact;
       if (access.orgWide && access.activeOrgId && exact.workflowId) {
         const inOrg: unknown[] = await em.query(
@@ -873,8 +894,20 @@ export class RunsService {
       }
       return null; // exists but not the caller's to touch → indistinguishable 404
     }
-    // Back-compat: a bare run_id, scoped to the caller so it can never resolve another user's run.
-    return em.findOne(RuntimeRunEntity, { where: { id: this.scopedRunId(access.userId, runRef) } });
+    return null;
+  }
+
+  /** The org of a run's workflow: `undefined` when the run has no workflow, null when it is org-less or gone. */
+  private async workflowOrgOf(
+    em: EntityManager,
+    workflowId: string | null,
+  ): Promise<string | null | undefined> {
+    if (!workflowId) return undefined;
+    const rows: Array<{ org_id: string | null }> = await em.query(
+      `SELECT org_id FROM workflows WHERE id = $1`,
+      [workflowId],
+    );
+    return rows[0] ? rows[0].org_id : null;
   }
 
   private requireDbos(): void {

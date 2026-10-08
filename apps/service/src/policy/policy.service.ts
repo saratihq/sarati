@@ -43,4 +43,13 @@ export class PolicyService {
     if (subject.ownerUserId) return subject.ownerUserId === userId;
     return false;
   }
+
+  /** The orgs this principal may act in at all: its current memberships, narrowed to a key's pin. */
+  async reachableOrgIds(principal: Principal): Promise<string[]> {
+    const memberships = await this.dataSource.manager.find(OrgMemberEntity, {
+      where: { userId: principal.user.id },
+      select: { orgId: true },
+    });
+    return memberships.map((m) => m.orgId).filter((orgId) => reachesOrg(principal, orgId));
+  }
 }

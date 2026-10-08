@@ -51,10 +51,13 @@ Three: `owner`, `admin`, `member`.
 | Create branches, commit, open reviews | ✅ | ✅ |
 | Approve a review | ✅ | ✅ |
 | **Publish, promote or un-promote — to any environment** | ❌ | ✅ |
+| Delete a workflow, protect or unprotect a branch | ❌ | ✅ |
 | Invite and remove people, org settings | ❌ | ✅ |
-| Change roles, transfer ownership, delete the organization | ❌ | owner only |
+| Change roles, transfer ownership, invite or remove an owner, delete the organization | ❌ | owner only |
 
-A member is a full contributor who cannot ship. The refusals name the reason:
+A member is a full contributor who cannot ship. Creating a workflow gives no extra rights over it:
+the role decides, and leaving the organization, or being removed, ends access to its workflows and
+their runs, including the ones you created. The refusals name the reason:
 
 > Only owners and admins can move the 'staging' pointer in an organization
 

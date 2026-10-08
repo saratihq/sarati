@@ -182,8 +182,8 @@ export class OrgsController {
     @Req() req: Request,
     @Param('id') orgId: string,
   ): Promise<{ invites: Array<Record<string, unknown>> }> {
-    const { org } = await this.requireManager(orgId, requirePrincipal(req));
-    return { invites: await this.mgmt.listInvites(org.id) };
+    const { org, role } = await this.requireManager(orgId, requirePrincipal(req));
+    return { invites: await this.mgmt.listInvites(org.id, role) };
   }
 
   @Scope('org:manage')

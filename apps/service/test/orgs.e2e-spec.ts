@@ -563,6 +563,109 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await asB(http().delete(`/api/workflows/${acmeFlow}/webhook-secret?node_id=n1`)).expect(200);
   });
 
+  it('a run is reachable exactly when its workflow is: not after leaving the org, not with a key pinned elsewhere', async () => {
+    const made = await asB(
+      http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: concatIr() }),
+    ).expect(201);
+    const theirs = made.body.workflow_id as string;
+    const acme = await db.query<{ id: string }>(
+      `SELECT id FROM workflows WHERE org_id = $1 AND name = 'Acme Flow'`,
+      [orgId],
+    );
+    const acmeFlow = acme.rows[0]!.id;
+    const seedRun = async (owner: string, workflowId: string, status: string): Promise<string> => {
+      const runId = `reach-${randomUUID()}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, outputs, workflow_id, waiting_topic, finished_at)
+         VALUES ($1, $2, $3, 'p', $4, '{"trigger":{"secret":"acme"}}'::json, $5, $6, now())`,
+        [`${owner}:${runId}`, runId, owner, status, workflowId, status === 'waiting' ? 'approve' : null],
+      );
+      return `${owner}:${runId}`;
+    };
+    const done = await seedRun(userB, theirs, 'completed');
+    const parked = await seedRun(userB, theirs, 'waiting');
+    const aliceRun = await seedRun(userA, acmeFlow, 'completed');
+
+    expect((await asB(http().get(`/api/runs/${done}`)).expect(200)).body.status).toBe('completed');
+    const listed = await asB(http().get(`/api/runs?workflow_id=${theirs}`)).expect(200);
+    expect(listed.body.runs.length).toBeGreaterThan(0);
+
+    const { role } = (
+      await db.query<{ role: string }>(
+        `DELETE FROM org_members WHERE org_id = $1 AND user_id = $2 RETURNING role`,
+        [orgId, userB],
+      )
+    ).rows[0]!;
+    try {
+      const gone = await asB(http().get(`/api/runs/${done}`)).expect(200);
+      expect(gone.body).toMatchObject({ status: 'not_found', workflow_id: null });
+      expect(gone.body.outputs ?? null).toBeNull();
+      expect((await asB(http().get(`/api/runs?workflow_id=${theirs}`)).expect(200)).body.runs).toEqual([]);
+      expect(
+        (await asB(http().get(`/api/runs/samples?workflow_id=${theirs}`)).expect(200)).body.sample,
+      ).toBeNull();
+      const waiting = await asB(http().get('/api/runs/waiting')).expect(200);
+      expect(waiting.body.runs.map((r: { id: string }) => r.id)).not.toContain(parked);
+      await asB(http().post(`/api/runs/${parked}/events`).send({ topic: 'approve' })).expect(404);
+      await asB(http().post(`/api/runs/${parked}/cancel`).send({})).expect(404);
+    } finally {
+      await db.query(
+        `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, $3, now())`,
+        [orgId, userB, role],
+      );
+    }
+
+    const pinned = 'ork_e2e_pinned_pppppppppppppppppppppp';
+    const asPinned = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${pinned}`);
+    expect((await asA(http().get(`/api/runs/${aliceRun}`)).expect(200)).body.status).toBe('completed');
+    expect((await asPinned(http().get(`/api/runs/${aliceRun}`)).expect(200)).body.status).toBe('not_found');
+    expect((await asPinned(http().get(`/api/runs?workflow_id=${acmeFlow}`)).expect(200)).body.runs).toEqual(
+      [],
+    );
+  });
+
+  it("an owner invite's link is an owner's to hand out, and only an owner removes an owner", async () => {
+    const userC = randomUUID();
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'owner-c@e2e.local', 'Owner C', now(), now())`,
+      [userC],
+    );
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
+      [orgId, userC],
+    );
+    const setB = (role: string) =>
+      db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [orgId, userB, role]);
+    const { role } = (
+      await db.query<{ role: string }>(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+      ])
+    ).rows[0]!;
+    const invite = await asA(
+      http().post(`/api/orgs/${orgId}/invites`).send({ email: 'next-owner@e2e.local', role: 'owner' }),
+    ).expect(201);
+    await setB('admin');
+    try {
+      const tokenFor = async (as: (r: request.Test) => request.Test) =>
+        (
+          (await as(http().get(`/api/orgs/${orgId}/invites`)).expect(200)).body.invites as Array<{
+            id: string;
+            token: string | null;
+          }>
+        ).find((i) => i.id === invite.body.id)!.token;
+      expect(await tokenFor(asB)).toBeNull();
+      expect(await tokenFor(asA)).toBe(invite.body.token);
+
+      const refused = await asB(http().delete(`/api/orgs/${orgId}/members/${userC}`)).expect(403);
+      expect(refused.body.detail).toBe('Only an owner can remove an owner');
+    } finally {
+      await setB(role);
+      await asA(http().delete(`/api/orgs/${orgId}/invites/${invite.body.id as string}`)).expect(200);
+      await db.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`, [orgId, userC]);
+    }
+  });
+
   /** Org-wide approvals are a SESSION capability (proven in mcp-runs.e2e-spec); a key reaches only its own runs. */
   it('a KEY gets no org-wide reach: another member cannot see or resume a parked run through one', async () => {
     // The run is NOT awaited — it parks on the wait node. Its owner is A.

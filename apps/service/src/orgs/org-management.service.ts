@@ -230,6 +230,10 @@ export class OrgManagementService {
     const isSelf = actorId === targetUserId;
     await this.dataSource.transaction(async (em) => {
       const target = await this.memberForUpdate(em, orgId, targetUserId);
+      if (!isSelf && target.role === 'owner') {
+        const actor = await em.findOne(OrgMemberEntity, { where: { orgId, userId: actorId } });
+        if (actor?.role !== 'owner') throw new DomainError('Only an owner can remove an owner', 403);
+      }
       if (target.role === 'owner' && (await this.ownerCount(em, orgId)) <= 1) {
         throw new DomainError(
           isSelf ? 'The last owner cannot leave the organization' : 'Cannot remove the last owner',
@@ -258,7 +262,8 @@ export class OrgManagementService {
   }
 
   /** Pending = not yet accepted and not expired. */
-  async listInvites(orgId: string): Promise<Array<Record<string, unknown>>> {
+  /** Pending invites; an owner invite's link is shown only to an owner, or an admin could accept it themselves. */
+  async listInvites(orgId: string, viewerRole: OrgRole): Promise<Array<Record<string, unknown>>> {
     const invites = await this.dataSource
       .createQueryBuilder(OrgInviteEntity, 'i')
       .where('i.org_id = :orgId', { orgId })
@@ -269,7 +274,7 @@ export class OrgManagementService {
     return invites.map((i) => ({
       id: i.id,
       // The token IS the delivery mechanism in OSS (no mailer) — the link must stay re-copyable.
-      token: i.token,
+      token: i.role === 'owner' && viewerRole !== 'owner' ? null : i.token,
       email: i.email,
       role: i.role,
       created_at: i.createdAt?.toISOString() ?? null,
