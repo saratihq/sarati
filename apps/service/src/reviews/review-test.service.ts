@@ -13,7 +13,7 @@ import { WorkflowVersionEntity } from '../database/entities/workflow-version.ent
 import { now } from '../database/ids';
 import type { WorkflowIR } from '../ir/models';
 import { RunsService } from '../runs/runs.service';
-import { isDecisiveTest } from '../workflows/branch.service';
+import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
 import type { ReviewTestSide, ReviewTestSummary, TestVerdict } from './review-test.types';
@@ -105,16 +105,20 @@ export class ReviewTestService {
   }
 
   /**
-   * Keep the result by the versions it tested — what the merge gate reads — and show it on the review. Only
-   * `last_test` is written there: a merge, approval or close made while the test ran must survive.
+   * Keep the result by the versions it tested — what the merge gate reads — even if its review has gone, and
+   * show it on the review when it is the newest there. The review is locked first, so stores queue on it.
    */
   private async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
     await this.dataSource.transaction(async (em) => {
+      const review = await em.findOne(WorkflowReviewEntity, {
+        where: { id: reviewId },
+        lock: { mode: 'pessimistic_write' },
+      });
       if (summary.source_version_id && summary.target_version_id) {
         const result = new ReviewTestResultEntity();
         result.id = randomUUID();
         result.workflowId = workflowId;
-        result.reviewId = reviewId;
+        result.reviewId = review ? review.id : null;
         result.sourceVersionId = summary.source_version_id;
         result.targetVersionId = summary.target_version_id;
         result.verdict = summary.verdict;
@@ -123,11 +127,7 @@ export class ReviewTestService {
         result.summary = summary;
         await em.save(ReviewTestResultEntity, result);
       }
-      const review = await em.findOne(WorkflowReviewEntity, {
-        where: { id: reviewId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!review) return;
+      if (!review || (review.lastTest && !isNewerTest(summary, review.lastTest))) return;
       review.lastTest = summary;
       review.updatedAt = now();
       await em.save(WorkflowReviewEntity, review);

@@ -29,6 +29,7 @@ import { toast } from "@/lib/toast";
 import ConflictResolver from "./ConflictResolver";
 import DiffView from "./DiffView";
 import { SaratiLoader } from "./SaratiLogo";
+import MergeBlockedNote from "./MergeBlockedNote";
 import PromoteDialog from "./PromoteDialog";
 import ReviewTestPanel from "./ReviewTestPanel";
 
@@ -148,40 +149,6 @@ function ApprovalRow({ approval }: { approval: ReviewApproval }) {
   );
 }
 
-/** Why a protected merge is refused right now, naming — and linking — the review whose test it is. */
-function MergeBlockedNote({
-  workflowId,
-  review,
-  blocking,
-}: {
-  workflowId: string;
-  review: ReviewSummary;
-  blocking: { review_id: string | null; title: string | null; source_branch: string | null };
-}) {
-  const query = new URLSearchParams({ branch: review.target_branch, review: blocking.review_id ?? "" });
-  return (
-    <div
-      className="text-[11px] py-1.5 px-2.5 rounded"
-      style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
-    >
-      {blocking.review_id === review.id ? (
-        "The latest test of these versions is failing"
-      ) : blocking.review_id === null ? (
-        "The latest test of these versions failed on a review that has since been deleted"
-      ) : (
-        <>
-          {"The latest test of these versions — on review "}
-          <a href={`/workflows/${workflowId}/overview?${query.toString()}`} className="underline" style={{ color: "inherit" }}>
-            {blocking.title}
-          </a>
-          {` (${blocking.source_branch ?? "a deleted branch"} → ${review.target_branch}) — is failing`}
-        </>
-      )}
-      {`, so merging into ${review.target_branch} is blocked. Commit a fix, or re-test once the cause is resolved.`}
-    </div>
-  );
-}
-
 interface ReviewFeedCardProps {
   workflowId: string;
   review: ReviewSummary;
@@ -195,6 +162,8 @@ interface ReviewFeedCardProps {
   /** Bumped after any pre-merge test in the feed: a test on one review can change whether another may merge. */
   testEpoch: number;
   onTested: () => void;
+  /** Bumped by the page after any change — a protection toggle or a merge can change the gate's answer too. */
+  refreshKey: number;
 }
 
 function ReviewFeedCard({
@@ -208,6 +177,7 @@ function ReviewFeedCard({
   onCloseReview,
   testEpoch,
   onTested,
+  refreshKey,
 }: ReviewFeedCardProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
   // Each branch's newest version, resolved once on first expand.
@@ -273,7 +243,7 @@ function ReviewFeedCard({
     return () => {
       cancelled = true;
     };
-  }, [expanded, workflowId, review.id, review.updated_at, testEpoch]);
+  }, [expanded, workflowId, review.id, review.updated_at, testEpoch, refreshKey]);
 
   const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
   const actionable = review.status !== "merged" && review.status !== "closed";
@@ -389,6 +359,13 @@ function ReviewFeedCard({
               reviewId={review.id}
               environments={environments}
               result={testResult}
+              current={
+                !detail ||
+                !testResult ||
+                (testResult.source_version_id === detail.source_head_version_id &&
+                  testResult.target_version_id === detail.target_head_version_id)
+              }
+              gate={detail?.target_protected ? { blocked: !!detail.merge_blocked_by_test } : null}
               onResult={(result) => {
                 setTestResult(result);
                 onTested();
@@ -477,7 +454,8 @@ function ReviewFeedCard({
               {!nothingToReview && detail?.merge_blocked_by_test && (
                 <MergeBlockedNote
                   workflowId={workflowId}
-                  review={review}
+                  reviewId={review.id}
+                  targetBranch={review.target_branch}
                   blocking={detail.merge_blocked_by_test}
                 />
               )}
@@ -1411,6 +1389,7 @@ export default function ActivityFeed({
                 onCloseReview={handleCloseRequest}
                 testEpoch={testEpoch}
                 onTested={bumpTestEpoch}
+                refreshKey={refreshKey}
               />
             ),
           )}

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ConflictInfo, MergeResultResponse } from "@/api/client";
+import { ApiError, type ConflictInfo, type MergeResultResponse } from "@/api/client";
 import ConflictResolver from "@/components/ConflictResolver";
 
 const fieldConflict = (over: Partial<ConflictInfo> = {}): ConflictInfo =>
@@ -116,6 +116,16 @@ describe("ConflictResolver", () => {
     await userEvent.click(completeButton());
 
     expect(await screen.findByText("Code cannot take a custom value")).toBeInTheDocument();
+  });
+
+  it("keeps a failing-test refusal on the whole merge, even when its text names a node", async () => {
+    const refusal = 'Target branch is protected — the pre-merge test is failing. The latest conclusive test of these versions is on review "Code tweaks" (lane → main).';
+    const rejects = vi.fn().mockRejectedValue(new ApiError(refusal, 400, "merge_test_failing"));
+    setup([fieldConflict()], rejects);
+    await userEvent.click(screen.getByRole("radio", { name: /Use theirs/ }));
+    await userEvent.click(completeButton());
+
+    expect((await screen.findByText(refusal)).tagName).toBe("SPAN");
   });
 
   it("escape cancels without merging", async () => {

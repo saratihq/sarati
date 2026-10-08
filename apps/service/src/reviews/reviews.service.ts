@@ -154,6 +154,7 @@ export class ReviewsService {
       source_head_version_id: source?.headVersionId ?? null,
       target_head_version_id: target?.headVersionId ?? null,
       up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
+      target_protected: target?.isProtected ?? false,
       merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
@@ -359,11 +360,11 @@ export class ReviewsService {
     });
   }
 
-  /** The failing test that refuses this merge right now, as the merge gate itself would answer. */
+  /** The conclusive failing test that refuses this merge right now, as the merge gate itself would answer. */
   private async mergeBlockedByTest(
     em: EntityManager,
     review: WorkflowReviewEntity,
-  ): Promise<{ review_id: string | null; title: string | null; source_branch: string | null } | null> {
+  ): Promise<MergeBlockedByTest | null> {
     if (review.status === 'merged' || review.status === 'closed') return null;
     const blocking = await this.branches.testBlockingMerge(
       em,
@@ -371,9 +372,15 @@ export class ReviewsService {
       review.sourceBranchId,
       review.targetBranchId,
     );
-    return blocking
-      ? { review_id: blocking.reviewId, title: blocking.title, source_branch: blocking.sourceBranch }
-      : null;
+    if (!blocking) return null;
+    return {
+      review_id: blocking.review?.id ?? null,
+      title: blocking.review?.title ?? null,
+      source_branch: blocking.review?.sourceBranch ?? null,
+      target_branch: blocking.review?.targetBranch ?? null,
+      error: blocking.error,
+      tested_at: blocking.testedAt,
+    };
   }
 
   private async targetHasSource(
@@ -409,4 +416,14 @@ export class ReviewsService {
       approval_count: approvalCount,
     };
   }
+}
+
+/** Why a protected merge is refused right now; the review fields are null once that review's branch is gone. */
+interface MergeBlockedByTest {
+  review_id: string | null;
+  title: string | null;
+  source_branch: string | null;
+  target_branch: string | null;
+  error: string | null;
+  tested_at: string;
 }

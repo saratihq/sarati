@@ -8,6 +8,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ReviewTestService } from '../src/reviews/review-test.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -186,12 +187,21 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
       .send({ source_branch: 'fork', target_branch: 'main', title: 'fork → main' })
       .expect(201);
     await record(wf, fork.body.id as string, { source: lane, target: main }, 'red', '2026-10-08T10:00:00Z');
-    expect(await blocked(wf, review)).toMatchObject({ review_id: fork.body.id, source_branch: 'fork' });
+    expect(await blocked(wf, review)).toMatchObject({
+      review_id: fork.body.id,
+      source_branch: 'fork',
+      target_branch: 'main',
+    });
 
     await http().delete(`/api/workflows/${wf}/branches/fork`).expect(200);
-    expect(await blocked(wf, review)).toEqual({ review_id: null, title: null, source_branch: null });
+    expect(await blocked(wf, review)).toMatchObject({
+      review_id: null,
+      title: null,
+      source_branch: null,
+      target_branch: null,
+    });
     const refused = await http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({}).expect(400);
-    expect(refused.body.detail).toContain('was run on a review that has since been deleted');
+    expect(refused.body.detail).toContain('was run from a branch that has since been deleted');
 
     // Only a newer passing test of the same versions lifts it.
     await record(wf, review, { source: lane, target: main }, 'green', '2026-10-08T11:00:00Z');
@@ -200,16 +210,11 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
     ).toBe('merged');
   });
 
-  it('records every test run from a review, and a closed review keeps its own', async () => {
+  it('records every test run from a review — two at once included — and a closed review keeps its own', async () => {
     const { wf, review, lane, main } = await setUp();
-    await http()
-      .post(`/api/workflows/${wf}/reviews/${review}/test`)
-      .send({ trigger_payload: {} })
-      .expect(201);
-    await http()
-      .post(`/api/workflows/${wf}/reviews/${review}/test`)
-      .send({ trigger_payload: {} })
-      .expect(201);
+    const runTest = () =>
+      http().post(`/api/workflows/${wf}/reviews/${review}/test`).send({ trigger_payload: {} }).expect(201);
+    await Promise.all([runTest(), runTest()]);
     const rows = await db.query<{ review_id: string; source_version_id: string; target_version_id: string }>(
       `SELECT review_id, source_version_id, target_version_id FROM review_test_results WHERE workflow_id = $1`,
       [wf],
@@ -221,5 +226,39 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
     await http().post(`/api/workflows/${wf}/reviews/${review}/close`).send({}).expect(201);
     const after = await db.query(`SELECT 1 FROM review_test_results WHERE review_id = $1`, [review]);
     expect(after.rowCount).toBe(2);
+  });
+
+  it('keeps a test that finishes after its review is gone, with no review to name', async () => {
+    const { wf, lane, main } = await setUp();
+    await http()
+      .post(`/api/workflows/${wf}/branches`)
+      .send({ name: 'gone', from_version_id: lane })
+      .expect(201);
+    const doomed = await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'gone', target_branch: 'main', title: 'gone → main' })
+      .expect(201);
+    await http().delete(`/api/workflows/${wf}/branches/gone`).expect(200);
+    // The run outlived its review: what the test service stores at the end of a run.
+    const store = (
+      app.get(ReviewTestService) as unknown as {
+        storeTest: (workflowId: string, reviewId: string, summary: Record<string, unknown>) => Promise<void>;
+      }
+    ).storeTest.bind(app.get(ReviewTestService));
+    await store(wf, doomed.body.id as string, {
+      verdict: 'red',
+      tested_at: '2026-10-08T10:00:00.000Z',
+      environment_id: null,
+      source_version_id: lane,
+      target_version_id: main,
+      base: { run_id: 'b', status: 'completed', error: null },
+      head: { run_id: 'h', status: 'error', error: 'boom' },
+      regression: { changed: [], added: [], removed: [] },
+    });
+    const kept = await db.query<{ review_id: string | null; verdict: string }>(
+      `SELECT review_id, verdict FROM review_test_results WHERE workflow_id = $1`,
+      [wf],
+    );
+    expect(kept.rows).toEqual([{ review_id: null, verdict: 'red' }]);
   });
 });

@@ -1639,6 +1639,8 @@ CREATE TABLE public.review_test_results (
 
 CREATE INDEX ix_review_test_results_versions ON public.review_test_results USING btree (workflow_id, source_version_id, target_version_id, tested_at DESC);
 
+CREATE INDEX ix_review_test_results_review ON public.review_test_results USING btree (review_id);
+
 
 --
 -- PostgreSQL database dump complete

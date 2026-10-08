@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS public.review_test_results (
 CREATE INDEX IF NOT EXISTS ix_review_test_results_versions
     ON public.review_test_results (workflow_id, source_version_id, target_version_id, tested_at DESC);
 
+CREATE INDEX IF NOT EXISTS ix_review_test_results_review
+    ON public.review_test_results (review_id);
+
 INSERT INTO public.review_test_results
     (id, workflow_id, review_id, source_version_id, target_version_id, verdict, decisive, tested_at, summary)
 SELECT gen_random_uuid(), r.workflow_id, r.id,
@@ -38,4 +41,6 @@ SELECT gen_random_uuid(), r.workflow_id, r.id,
  WHERE r.last_test IS NOT NULL
    AND r.last_test->>'source_version_id' IS NOT NULL
    AND r.last_test->>'target_version_id' IS NOT NULL
-   AND NOT EXISTS (SELECT 1 FROM public.review_test_results t WHERE t.review_id = r.id);
+   AND NOT EXISTS (
+       SELECT 1 FROM public.review_test_results t
+        WHERE t.review_id = r.id AND t.tested_at = (r.last_test->>'tested_at')::timestamptz);

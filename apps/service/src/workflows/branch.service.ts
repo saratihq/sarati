@@ -225,15 +225,20 @@ export class BranchService {
   ): Promise<FailingTest | null> {
     const rows = await rawQuery<{
       verdict: string;
+      tested_at: Date;
+      error: string | null;
       review_id: string | null;
       title: string | null;
       source_branch: string | null;
+      target_branch: string | null;
     }>(
       em,
-      `SELECT t.verdict, t.review_id, r.title, b.name AS source_branch
+      `SELECT t.verdict, t.tested_at, t.summary->'head'->>'error' AS error, t.review_id, r.title,
+              s.name AS source_branch, d.name AS target_branch
          FROM review_test_results t
          LEFT JOIN workflow_reviews r ON r.id = t.review_id
-         LEFT JOIN workflow_branches b ON b.id = r.source_branch_id
+         LEFT JOIN workflow_branches s ON s.id = r.source_branch_id
+         LEFT JOIN workflow_branches d ON d.id = r.target_branch_id
         WHERE t.workflow_id = $1 AND t.source_version_id = $2 AND t.target_version_id = $3 AND t.decisive
         ORDER BY t.tested_at DESC, (t.verdict = 'red') DESC
         LIMIT 1`,
@@ -241,7 +246,16 @@ export class BranchService {
     );
     const latest = rows[0];
     if (latest?.verdict !== 'red') return null;
-    return { reviewId: latest.review_id, title: latest.title, sourceBranch: latest.source_branch };
+    const review =
+      latest.review_id && latest.title && latest.source_branch && latest.target_branch
+        ? {
+            id: latest.review_id,
+            title: latest.title,
+            sourceBranch: latest.source_branch,
+            targetBranch: latest.target_branch,
+          }
+        : null;
+    return { review, error: latest.error, testedAt: new Date(latest.tested_at).toISOString() };
   }
 
   /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */
@@ -350,14 +364,10 @@ export class BranchService {
           target: target.headVersionId,
         });
         if (failing) {
-          throw new DomainError(
-            `${PROTECTED_TARGET_TEST_FAILING} ${whereItRan(failing, targetBranchName)}`,
-            400,
-            {
-              code: MERGE_TEST_FAILING,
-              review_id: failing.reviewId,
-            },
-          );
+          throw new DomainError(`${PROTECTED_TARGET_TEST_FAILING} ${whereItRan(failing)}`, 400, {
+            code: MERGE_TEST_FAILING,
+            review_id: failing.review?.id ?? null,
+          });
         }
       }
 
@@ -476,17 +486,27 @@ export const PROTECTED_TARGET_TEST_FAILING =
 /** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
 export const MERGE_TEST_FAILING = 'merge_test_failing';
 
-/** A failing test that blocks a protected merge, and the review it was run from while that review exists. */
+/** The conclusive failing test that blocks a protected merge. */
 export interface FailingTest {
-  reviewId: string | null;
-  title: string | null;
-  sourceBranch: string | null;
+  /** The review it was run from; null once that review's branch has been deleted. */
+  review: { id: string; title: string; sourceBranch: string; targetBranch: string } | null;
+  /** Why the change failed, as the run reported it. */
+  error: string | null;
+  testedAt: string;
 }
 
-function whereItRan(test: FailingTest, targetBranchName: string): string {
-  return test.title === null
-    ? 'The latest test of these versions was run on a review that has since been deleted.'
-    : `The latest test of these versions is on review "${test.title}" (${test.sourceBranch ?? 'a deleted branch'} → ${targetBranchName}).`;
+function whereItRan(test: FailingTest): string {
+  const where = test.review
+    ? `The latest conclusive test of these versions is on review "${test.review.title}" (${test.review.sourceBranch} → ${test.review.targetBranch}).`
+    : 'The latest conclusive test of these versions was run from a branch that has since been deleted.';
+  return test.error ? `${where} It failed with: ${test.error.slice(0, 200)}` : where;
+}
+
+/** Whether `a` comes after `b` in the order the merge gate reads tests: later, or as late and failing. */
+export function isNewerTest(a: ReviewTestSummary, b: ReviewTestSummary): boolean {
+  const at = Date.parse(a.tested_at);
+  const bt = Date.parse(b.tested_at);
+  return at > bt || (at === bt && a.verdict === 'red' && b.verdict !== 'red');
 }
 
 /** Whether a test can decide a merge: one where the target failed too neither shows nor rules out a new failure. */

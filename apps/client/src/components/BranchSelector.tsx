@@ -196,7 +196,7 @@ export default function BranchSelector({
                     aria-label={b.is_protected ? `Unprotect ${b.name}` : `Protect ${b.name}`}
                     title={
                       b.is_protected
-                        ? "Protected — merges need an approved review and no failing latest test. Click to unprotect."
+                        ? "Protected — merges need an approved review, and not a failing latest conclusive test. Click to unprotect."
                         : "Not protected — anyone can merge into it. Click to protect."
                     }
                     className="shrink-0 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-accent-tint)]"
@@ -232,7 +232,7 @@ export default function BranchSelector({
             className="py-1.5 px-3 text-[10px] leading-snug"
             style={{ borderTop: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink-subtle)" }}
           >
-            Protected branches merge only through an approved review, and not while the latest test is failing.
+            Protected branches merge only through an approved review, and not while the latest conclusive test fails.
           </div>
 
           <div className="py-2 px-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>

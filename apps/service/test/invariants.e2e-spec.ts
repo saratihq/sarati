@@ -480,7 +480,7 @@ describe('domain invariants (the constitution)', () => {
       expect(refused.body.detail).toContain('the pre-merge test is failing');
       expect(refused.body).toMatchObject({ code: 'merge_test_failing', review_id: review });
     }
-    expect(await blockedOnCard(wf, review)).toEqual({
+    expect(await blockedOnCard(wf, review)).toMatchObject({
       review_id: review,
       title: 'lane → main',
       source_branch: 'lane',
@@ -499,7 +499,7 @@ describe('domain invariants (the constitution)', () => {
     expect(await test(wf, siblingId, {})).toBe('green');
     expect(await blockedOnCard(wf, review)).toBeNull();
     expect(await test(wf, siblingId, { fail: true })).toBe('red');
-    expect(await blockedOnCard(wf, review)).toEqual({
+    expect(await blockedOnCard(wf, review)).toMatchObject({
       review_id: siblingId,
       title: 'second look',
       source_branch: 'lane',

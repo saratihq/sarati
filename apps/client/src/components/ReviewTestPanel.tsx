@@ -24,8 +24,12 @@ interface ReviewTestPanelProps {
   environments: EnvironmentSummary[] | null;
   /** The persisted / latest test result to render, or null if never tested. */
   result: ReviewTestSummary | null;
-  /** Lift a fresh result up so the card's merge-gate warning stays in sync. */
+  /** Lift a fresh result up, so every card asks the service for the gate's answer again. */
   onResult: (r: ReviewTestSummary) => void;
+  /** Whether `result` tested the branches as they are now; false once either has moved on. */
+  current?: boolean;
+  /** For a protected target: whether a conclusive failing test blocks this merge right now. */
+  gate?: { blocked: boolean } | null;
   /** False once the review is merged/closed — the result stays, running is off. */
   canRun: boolean;
 }
@@ -127,7 +131,17 @@ function RunSideRow({
   );
 }
 
-function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflowId: string }) {
+function TestResult({
+  result,
+  workflowId,
+  current,
+  gate,
+}: {
+  result: ReviewTestSummary;
+  workflowId: string;
+  current: boolean;
+  gate: { blocked: boolean } | null;
+}) {
   const inconclusive = isInconclusive(result);
   const green = result.verdict === "green" && !inconclusive;
   const { changed, added, removed } = result.regression;
@@ -139,6 +153,14 @@ function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflo
     : inconclusive
       ? "var(--orchestr-warning-tint)"
       : "var(--orchestr-danger-tint)";
+  // Where this result stands for merging: the gate reads the newest conclusive test of the current versions.
+  const standing = !current
+    ? "This tested earlier versions of these branches — re-test to check them as they are now."
+    : inconclusive && gate?.blocked
+      ? "An earlier failing result of these versions still blocks merging."
+      : !green && !inconclusive && gate && !gate.blocked
+        ? "A newer passing test of these versions has lifted this, so it no longer blocks merging."
+        : null;
 
   return (
     <div className="space-y-2.5">
@@ -154,6 +176,12 @@ function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflo
           Tested {timeAgo(result.tested_at)}
         </span>
       </div>
+
+      {standing && (
+        <p className="text-[11px] m-0" style={{ color: "var(--orchestr-ink-subtle)" }} data-testid="test-standing">
+          {standing}
+        </p>
+      )}
 
       {inconclusive && (
         <div
@@ -244,6 +272,8 @@ export default function ReviewTestPanel({
   result,
   onResult,
   canRun,
+  current = true,
+  gate = null,
 }: ReviewTestPanelProps) {
   const [envId, setEnvId] = useState<string>(DEFAULT_ENV);
   const [payloadSource, setPayloadSource] = useState<"latest" | "paste">("latest");
@@ -417,7 +447,7 @@ export default function ReviewTestPanel({
 
       {result && (
         <div className={canRun ? "mt-3" : ""}>
-          <TestResult result={result} workflowId={workflowId} />
+          <TestResult result={result} workflowId={workflowId} current={current} gate={gate} />
         </div>
       )}
 
