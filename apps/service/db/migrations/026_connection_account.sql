@@ -1,4 +1,4 @@
--- 025 — which account a connection is authorized against, as the provider answers it.
+-- 026 — which account a connection is authorized against, as the provider answers it.
 --
 -- A connection only knew its app, so nothing could say whose Gmail it was and a
 -- step had no way to send "to me". The provider's own who-am-I answer is stored

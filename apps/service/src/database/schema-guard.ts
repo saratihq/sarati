@@ -122,7 +122,7 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe: "SELECT 1 FROM pg_constraint WHERE conname='composio_auth_configs_project_pkey'",
   },
   {
-    migration: '025_connection_account.sql',
+    migration: '026_connection_account.sql',
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='connections' AND column_name='account_checked_at'",
   },
