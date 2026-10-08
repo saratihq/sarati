@@ -103,7 +103,8 @@ async function boot(overrides: Record<string, string>): Promise<INestApplication
   process.env = { PATH: process.env.PATH, ...BASE_ENV, WORKFLOW_SERVICE_URL: serviceUrl, ...overrides };
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication();
-  await app.init();
+  // An exclusive loopback port: supertest's own listen(0) on the IPv6 wildcard can collide with a 127.0.0.1 socket.
+  await app.listen(0, '127.0.0.1');
   return app;
 }
 
