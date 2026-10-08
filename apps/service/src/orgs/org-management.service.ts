@@ -230,6 +230,10 @@ export class OrgManagementService {
     const isSelf = actorId === targetUserId;
     await this.dataSource.transaction(async (em) => {
       const target = await this.memberForUpdate(em, orgId, targetUserId);
+      if (!isSelf && target.role === 'owner') {
+        const actor = await em.findOne(OrgMemberEntity, { where: { orgId, userId: actorId } });
+        if (actor?.role !== 'owner') throw new DomainError('Only an owner can remove an owner', 403);
+      }
       if (target.role === 'owner' && (await this.ownerCount(em, orgId)) <= 1) {
         throw new DomainError(
           isSelf ? 'The last owner cannot leave the organization' : 'Cannot remove the last owner',
@@ -257,8 +261,8 @@ export class OrgManagementService {
     });
   }
 
-  /** Pending = not yet accepted and not expired. */
-  async listInvites(orgId: string): Promise<Array<Record<string, unknown>>> {
+  /** Pending (unaccepted, unexpired) invites; an owner invite's link is shown only to an owner. */
+  async listInvites(orgId: string, viewerRole: OrgRole): Promise<Array<Record<string, unknown>>> {
     const invites = await this.dataSource
       .createQueryBuilder(OrgInviteEntity, 'i')
       .where('i.org_id = :orgId', { orgId })
@@ -268,8 +272,8 @@ export class OrgManagementService {
       .getMany();
     return invites.map((i) => ({
       id: i.id,
-      // The token IS the delivery mechanism in OSS (no mailer) — the link must stay re-copyable.
-      token: i.token,
+      // The token IS the delivery mechanism in OSS (no mailer), so it stays re-copyable — except an owner's to an admin.
+      token: i.role === 'owner' && viewerRole !== 'owner' ? null : i.token,
       email: i.email,
       role: i.role,
       created_at: i.createdAt?.toISOString() ?? null,
@@ -338,13 +342,22 @@ export class OrgManagementService {
     });
   }
 
+  /** Whether an invite can still be redeemed: unused, unexpired, and an owner invite only while its creator is an owner. */
+  async isRedeemable(em: EntityManager, invite: OrgInviteEntity): Promise<boolean> {
+    if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) return false;
+    if (invite.role !== 'owner') return true;
+    const creator = invite.createdBy
+      ? await em.findOne(OrgMemberEntity, { where: { orgId: invite.orgId, userId: invite.createdBy } })
+      : null;
+    return creator?.role === 'owner';
+  }
+
   /** Peek an invite's org + role WITHOUT consuming it; same indistinguishable 404s as accept. */
   async previewInvite(token: string): Promise<{ org_id: string; org_name: string; role: OrgRole }> {
-    const invite = await this.dataSource.manager.findOne(OrgInviteEntity, { where: { token } });
-    const org = invite
-      ? await this.dataSource.manager.findOne(OrganizationEntity, { where: { id: invite.orgId } })
-      : null;
-    if (!invite || !org || invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) {
+    const em = this.dataSource.manager;
+    const invite = await em.findOne(OrgInviteEntity, { where: { token } });
+    const org = invite ? await em.findOne(OrganizationEntity, { where: { id: invite.orgId } }) : null;
+    if (!invite || !org || !(await this.isRedeemable(em, invite))) {
       throw new DomainError('Invite not found or expired', 404);
     }
     // No invitee email: the token is link-bound, so the holder must not learn who it was addressed to.
@@ -362,9 +375,7 @@ export class OrgManagementService {
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
         if (existing) return { org_id: org.id, name: org.name };
 
-        if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) {
-          throw new DomainError('Invite not found or expired', 404);
-        }
+        if (!(await this.isRedeemable(em, invite))) throw new DomainError('Invite not found or expired', 404);
 
         await em.insert(OrgMemberEntity, {
           id: newId(),

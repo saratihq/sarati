@@ -58,6 +58,8 @@ export interface RunStartMeta {
   parentRunId?: string | null;
   /** The calling step's `step_key` in the parent run. */
   parentStepKey?: string | null;
+  /** The caller's org, recorded when the run has no workflow of its own to take it from. */
+  orgId?: string | null;
 }
 
 /**
@@ -115,8 +117,9 @@ export class RunRecorderService implements RunRecorder {
     meta?: RunStartMeta,
   ): Promise<void> {
     await this.write('runStarted', scopedRunId, [
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key)
-       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
+       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12, $13, $14,
+               COALESCE((SELECT org_id FROM workflows WHERE id = $6), $15))
        ON CONFLICT (id) DO NOTHING`,
       [
         scopedRunId,
@@ -133,6 +136,7 @@ export class RunRecorderService implements RunRecorder {
         meta?.dryRun ?? false,
         meta?.parentRunId ?? null,
         meta?.parentStepKey ?? null,
+        meta?.orgId ?? null,
       ],
     ]);
   }

@@ -186,7 +186,13 @@ describe('DBOS durable execution (Phase 1b)', () => {
     expect(requestCount).toBe(before + 1);
 
     // Alice can poll her run; the same id under Bob resolves NOTHING (no IDOR).
-    const access = (userId: string): RunAccess => ({ userId, activeOrgId: null, orgWide: true });
+    const access = (userId: string): RunAccess => ({
+      userId,
+      activeOrgId: null,
+      orgWide: true,
+      orgIds: [],
+      pinned: false,
+    });
     expect((await runs.getRun(runId, access('alice'))).status).toBe('completed');
     expect((await runs.getRun(runId, access('bob'))).status).toBe('not_found');
 

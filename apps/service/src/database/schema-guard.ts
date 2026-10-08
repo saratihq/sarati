@@ -130,6 +130,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '027_review_test_results.sql',
     probe: "SELECT 1 FROM information_schema.tables WHERE table_name='review_test_results'",
   },
+  {
+    migration: '028_runtime_run_org.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='org_id'",
+  },
 ];
 
 /**

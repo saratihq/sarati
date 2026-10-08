@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import type { ApiScope } from '../../auth/scopes';
 import { DomainError } from '../../common/domain-error';
+import { PolicyService } from '../../policy/policy.service';
 import { runAccessOf } from '../../runs/run-access';
 import { RunsService } from '../../runs/runs.service';
 import { failedNodeIdOf } from '../../runs/run-failure';
@@ -113,12 +114,15 @@ export class GetRunTool implements McpTool {
     openWorldHint: false,
   };
 
-  constructor(private readonly runs: RunsService) {}
+  constructor(
+    private readonly runs: RunsService,
+    private readonly policy: PolicyService,
+  ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { run_id, include_step_outputs } = Input.parse(input);
     // The flag is a READ option, not a filter over an already-assembled payload.
-    const detail = await this.runs.getRun(run_id, runAccessOf(ctx.principal), {
+    const detail = await this.runs.getRun(run_id, await runAccessOf(ctx.principal, this.policy), {
       includeStepOutputs: include_step_outputs,
     });
     if (detail.status === 'not_found') {

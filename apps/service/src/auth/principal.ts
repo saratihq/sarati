@@ -20,6 +20,14 @@ export type ApiKeyPrincipal = PrincipalBase & {
 
 export type Principal = UserPrincipal | ApiKeyPrincipal;
 
+/** The refusal when a key issued for one org is used against another. */
+export const KEY_SCOPED_TO_OTHER_ORG = 'This API key is scoped to a different organization';
+
+/** Whether the principal may act in this org at all: a key issued for one org reaches nothing outside it. */
+export function reachesOrg(principal: Principal, orgId: string | null): boolean {
+  return principal.kind !== 'api_key' || !principal.keyOrgId || principal.keyOrgId === orgId;
+}
+
 /** The scopes to hold this principal to; a session is not scope-limited, so it holds them all. */
 export function principalScopes(principal: Principal): string[] | null {
   return principal.kind === 'api_key' ? principal.scopes : null;

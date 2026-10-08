@@ -9,6 +9,7 @@ import { CANNOT_POLL_NOTE, mayReadRuns } from '../../runs/run-read-access';
 import { RunsService } from '../../runs/runs.service';
 import type { RunHandle, RunOutcome, RunResult } from '../../runtime/run-plan';
 import { WorkflowsReadService } from '../../workflows/workflows-read.service';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 import { LiveRunConsentService } from '../live-run-consent.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
@@ -104,12 +105,13 @@ export class TestWorkflowTool implements McpTool {
     private readonly runs: RunsService,
     private readonly reads: WorkflowsReadService,
     private readonly consent: LiveRunConsentService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const args = Input.parse(input);
     const dryRun = args.dry_run !== false;
-    const ir = await this.documentFor(args);
+    const ir = await this.documentFor(args, ctx);
 
     if (!dryRun) this.authorizeLiveRun(ctx, args.confirmation_token, ir);
 
@@ -141,7 +143,10 @@ export class TestWorkflowTool implements McpTool {
   }
 
   /** The document to run: the one given, or the head of the named workflow/branch. */
-  private async documentFor(args: z.infer<typeof Input>): Promise<Record<string, unknown>> {
+  private async documentFor(
+    args: z.infer<typeof Input>,
+    ctx: McpCallContext,
+  ): Promise<Record<string, unknown>> {
     if (args.workflow_ir && args.workflow_id) {
       throw new DomainError(
         'Give either workflow_ir or workflow_id, not both — otherwise which document runs is ambiguous.',
@@ -155,6 +160,7 @@ export class TestWorkflowTool implements McpTool {
         code: 'no_document',
       });
     }
+    await this.access.require(ctx.principal, args.workflow_id, 'read');
     const head = await this.reads.getBranchHead(args.workflow_id, args.branch ?? null);
     if (!head.head) {
       throw new DomainError(`Branch "${head.branch.name}" has no committed version to run yet.`, 404, {

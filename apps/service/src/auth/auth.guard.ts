@@ -15,7 +15,7 @@ import type { UserEntity } from '../database/entities/user.entity';
 import { OrgsService } from '../orgs/orgs.service';
 import { InvalidTokenError, TokenExpiredError } from './auth.errors';
 import { ScopeEnforcer } from './scope-enforcer';
-import { attachPrincipal, type Principal } from './principal';
+import { attachPrincipal, KEY_SCOPED_TO_OTHER_ORG, type Principal } from './principal';
 import { TOKEN_VERIFIERS, type TokenVerifier } from './token-verifier';
 import { UserProvisioningService } from './user-provisioning.service';
 
@@ -97,7 +97,7 @@ export class AuthGuard implements CanActivate {
     const requested = Array.isArray(raw) ? raw[0] : raw;
 
     if (apiKey?.orgId && requested?.trim() && requested.trim() !== apiKey.orgId) {
-      throw new DomainError('This API key is scoped to a different organization', 403);
+      throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
     }
 
     const active = await this.orgs.resolveActiveOrg(user.id, apiKey?.orgId ?? requested);

@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
@@ -26,8 +29,12 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
     throw new Error(`run ${runId} never reached "${status}"`);
   }
 
+  let db: Client;
+
   beforeAll(async () => {
     process.env.DATABASE_URL = await createE2eDatabase(ADMIN_URL);
+    db = new Client({ connectionString: process.env.DATABASE_URL });
+    await db.connect();
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
@@ -42,6 +49,7 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
   }, 60_000);
 
   afterAll(async () => {
+    await db.end();
     await app.close();
     process.env.DATABASE_URL = ADMIN_URL;
     process.env.MOCK_AUTH = 'false';
@@ -86,5 +94,21 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
 
     const detail = await until('fails-alone', 'error');
     expect(String(detail.error)).toContain('no such thing');
+  }, 60_000);
+
+  it('a run the caller can no longer reach answers not_found, never its stored result from the engine', async () => {
+    const plan = {
+      id: 'plan-reach',
+      nodes: [{ kind: 'code', id: 'answer', language: 'js', code: 'return { secret: 42 };' }],
+    };
+    await request(app.getHttpServer()).post('/api/runs').send({ plan, run_id: 'out-of-reach' }).expect(201);
+    expect((await until('out-of-reach', 'completed')).outputs).toBeTruthy();
+
+    // The run now belongs to an org the caller is not in, as after leaving it.
+    await db.query(`UPDATE runtime_runs SET org_id = $2 WHERE run_id = $1`, ['out-of-reach', randomUUID()]);
+
+    const refused = await request(app.getHttpServer()).get('/api/runs/out-of-reach').expect(200);
+    expect(refused.body.status).toBe('not_found');
+    expect(refused.body.outputs ?? null).toBeNull();
   }, 60_000);
 });

@@ -22,6 +22,7 @@ import type { WorkflowIR } from '../ir/models';
 import { channelKey } from '../runtime/agent-step-bus';
 import type { RunHandle, RunOutcome, RunPlan, RunResult } from '../runtime/run-plan';
 import { runAccessOf, type RunAccess } from './run-access';
+import { PolicyService } from '../policy/policy.service';
 import { RunsService, type IrRunOptions } from './runs.service';
 import { Scope } from '../auth/scope.decorator';
 import { DomainError } from '../common/domain-error';
@@ -190,14 +191,17 @@ function asyncRunSource(body: StartAsyncDto): { plan: RunPlan } | { ir: Workflow
 @Controller('api/runs')
 @UseGuards(AuthGuard)
 export class RunsController {
-  constructor(private readonly runs: RunsService) {}
+  constructor(
+    private readonly runs: RunsService,
+    private readonly policy: PolicyService,
+  ) {}
 
   private userId(req: Request): string {
     return requirePrincipal(req).user.id;
   }
 
-  private access(req: Request): RunAccess {
-    return runAccessOf(requirePrincipal(req));
+  private access(req: Request): Promise<RunAccess> {
+    return runAccessOf(requirePrincipal(req), this.policy);
   }
 
   /**
@@ -318,7 +322,7 @@ export class RunsController {
       throw new HttpException({ detail: 'limit must be a positive integer' }, 400);
     }
     return {
-      runs: await this.runs.listRuns(this.userId(req), {
+      runs: await this.runs.listRuns(await this.access(req), {
         limit: parsed,
         workflowId: this.parsedWorkflowId(workflowId),
       }),
@@ -334,7 +338,7 @@ export class RunsController {
   ): Promise<Record<string, unknown>> {
     const parsed = this.parsedWorkflowId(workflowId);
     if (!parsed) throw new HttpException({ detail: 'workflow_id is required' }, 400);
-    return { sample: await this.runs.latestRunOutputs(this.userId(req), parsed) };
+    return { sample: await this.runs.sampleFor(await this.access(req), parsed) };
   }
 
   /** The approvals inbox: runs parked on a `waitForEvent` node. Must stay declared before `:runId` so the literal path wins. */
@@ -345,7 +349,7 @@ export class RunsController {
     @Query('workflow_id') workflowId?: string,
   ): Promise<Record<string, unknown>> {
     return {
-      runs: await this.runs.listWaitingRuns(this.access(req), this.parsedWorkflowId(workflowId)),
+      runs: await this.runs.listWaitingRuns(await this.access(req), this.parsedWorkflowId(workflowId)),
     };
   }
 
@@ -353,7 +357,7 @@ export class RunsController {
   @Scope('workflow:read')
   @Get(':runId')
   async getRun(@Req() req: Request, @Param('runId') runId: string): Promise<Record<string, unknown>> {
-    const s = await this.runs.getRun(runId, this.access(req));
+    const s = await this.runs.getRun(runId, await this.access(req));
     return {
       run_id: s.runId,
       workflow_id: s.workflow_id,
@@ -391,7 +395,7 @@ export class RunsController {
     @Param('runId') runId: string,
     @Body() body: SendEventDto,
   ): Promise<{ status: string }> {
-    await this.runs.sendEvent(runId, body.topic, body.payload, this.access(req));
+    await this.runs.sendEvent(runId, body.topic, body.payload, await this.access(req));
     return { status: 'sent' };
   }
 
@@ -401,7 +405,7 @@ export class RunsController {
   @Scope('run:execute')
   @Post(':runId/cancel')
   async cancel(@Req() req: Request, @Param('runId') runId: string): Promise<{ status: string }> {
-    const result = await this.runs.cancelRun(runId, this.access(req));
+    const result = await this.runs.cancelRun(runId, await this.access(req));
     return { status: result.status };
   }
 

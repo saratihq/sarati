@@ -118,10 +118,9 @@ export class LocalAuthService {
 
     const invite = token ? await em.findOne(OrgInviteEntity, { where: { token: token.trim() } }) : null;
     const live =
-      invite &&
-      invite.acceptedBy === null &&
+      invite !== null &&
       normalizeEmail(invite.email ?? '') === email &&
-      (!invite.expiresAt || invite.expiresAt.getTime() > Date.now());
+      (await this.orgManagement.isRedeemable(em, invite));
     if (!live) {
       throw new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
         code: 'signup_closed',
