@@ -1042,6 +1042,8 @@ export interface ReviewDetail extends ReviewSummary {
   up_to_date?: boolean;
   /** Whether the target branch is protected — only then can a test block the merge. */
   target_protected?: boolean;
+  /** Whether the approval covers the source's current head; a later commit needs approving again. */
+  approval_current?: boolean;
   /** The conclusive failing test that refuses this merge right now, as the service's merge gate answers it. */
   merge_blocked_by_test?: {
     /** The review it ran from, and its branches — null once that review's branch has been deleted. */
@@ -1114,6 +1116,26 @@ export async function approveReview(
 }
 
 /** Merge an approved review; like mergeBranch, a `conflicts` result is re-called with `resolutions`. */
+/** The outcome of bringing another branch's changes into a branch: merged, nothing to bring, or conflicts to resolve. */
+export interface UpdateBranchResult {
+  status: "merged" | "conflicts" | "up_to_date";
+  merged_version_id?: string | null;
+  conflicts?: ConflictInfo[];
+}
+
+/** Bring `fromBranch`'s changes into `branch` — where a merge into a protected branch has its conflicts resolved. */
+export async function updateBranch(
+  workflowId: string,
+  branch: string,
+  fromBranch: string,
+  resolutions?: MergeResolution[],
+): Promise<UpdateBranchResult> {
+  return request(`/workflows/${workflowId}/branches/${encodeURIComponent(branch)}/update`, {
+    method: "POST",
+    body: JSON.stringify({ from_branch: fromBranch, resolutions }),
+  });
+}
+
 export async function mergeReview(
   workflowId: string,
   reviewId: string,

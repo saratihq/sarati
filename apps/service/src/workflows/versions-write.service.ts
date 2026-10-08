@@ -390,6 +390,24 @@ export class VersionsWriteService {
       const branch = targetBranch ?? (await this.ensureDefaultBranch(em, wf));
       await this.lockBranchById(em, branch.id);
 
+      // Like a no-diff commit (invariant #3): a fresh id for the head's own content would make its test look stale.
+      const locked = await em.findOne(WorkflowBranchEntity, { where: { id: branch.id } });
+      const head = locked?.headVersionId
+        ? await em.findOne(WorkflowVersionEntity, { where: { id: locked.headVersionId } })
+        : null;
+      if (
+        head?.workflowIr &&
+        target.workflowIr &&
+        diffAgainstHead(head.workflowIr, target.workflowIr).entries.length === 0
+      ) {
+        return {
+          status: 'no_changes',
+          new_version_number: head.versionNumber,
+          rolled_back_to: versionNumber,
+          no_changes: true,
+        };
+      }
+
       const version = await this.insertVersion(em, {
         wf,
         branch,

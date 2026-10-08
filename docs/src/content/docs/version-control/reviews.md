@@ -61,6 +61,10 @@ Approve, or request changes.
 **You cannot approve your own review while there is anyone else in the workspace.** Working alone,
 you can — otherwise a solo instance could never merge anything.
 
+An approval covers the version it was given on. Into a protected branch, a commit to your branch
+after approval needs approving again — the card says *Approved before the latest changes*, and
+Merge waits until then.
+
 ## Merge
 
 Merge from the review once it is approved.
@@ -86,4 +90,5 @@ when you want it live — see [Save, version, publish](/version-control/save-ver
 ## Conflicts
 
 If both branches changed the same field of the same step, the merge stops and opens the resolver —
-see [Merge conflicts](/version-control/conflicts/).
+see [Merge conflicts](/version-control/conflicts/). Into a protected branch it is refused instead, and
+you resolve them on your branch with **Update *your-branch* from main**.

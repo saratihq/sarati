@@ -155,6 +155,11 @@ export class ReviewsService {
       target_head_version_id: target?.headVersionId ?? null,
       up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
       target_protected: target?.isProtected ?? false,
+      // An approval covers the source version it was given on; a later commit needs approving again.
+      approval_current:
+        review.status === 'approved' && source && target
+          ? await this.branches.approvedAtHead(em, review.workflowId, source, target)
+          : false,
       merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
@@ -231,6 +236,7 @@ export class ReviewsService {
         }
       }
 
+      const sourceBranch = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
       const approval = em.create(ReviewApprovalEntity, {
         id: newId(),
         reviewId: review.id,
@@ -238,6 +244,7 @@ export class ReviewsService {
         decision,
         comment,
         createdAt: now(),
+        sourceVersionId: sourceBranch?.headVersionId ?? null,
       });
       await em.save(ReviewApprovalEntity, approval);
 

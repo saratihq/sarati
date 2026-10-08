@@ -173,6 +173,13 @@ export class BranchService {
     return this.dataSource.transaction(async (em) => {
       const branch = await this.getBranch(em, workflowId, name);
       if (branch.isDefault) throw new DomainError('Cannot delete the default branch');
+      if (branch.isProtected) {
+        throw new DomainError(
+          `Branch '${name}' is protected — an owner or admin has to unprotect it before it can be deleted`,
+          409,
+          { code: 'branch_protected' },
+        );
+      }
 
       const tags = await em.find(WorkflowVersionTagEntity, { where: { branchId: branch.id } });
       if (tags.length > 0) {
@@ -194,6 +201,25 @@ export class BranchService {
       });
       return tags.length;
     });
+  }
+
+  /** Whether an approved review of this pair holds an approval of the source's CURRENT head — what a protected merge needs. */
+  async approvedAtHead(
+    em: EntityManager,
+    workflowId: string,
+    source: { id: string; headVersionId: string | null },
+    target: { id: string },
+  ): Promise<boolean> {
+    if (!source.headVersionId) return false;
+    const rows = await rawQuery<{ hit: number }>(
+      em,
+      `SELECT 1 AS hit FROM workflow_reviews r JOIN review_approvals a ON a.review_id = r.id
+        WHERE r.workflow_id = $1 AND r.source_branch_id = $2 AND r.target_branch_id = $3 AND r.status = 'approved'
+          AND a.decision = 'approved' AND a.source_version_id = $4
+        LIMIT 1`,
+      [workflowId, source.id, target.id, source.headVersionId],
+    );
+    return rows.length > 0;
   }
 
   /** The failing test that would refuse merging `source` into `target` now — what the review card shows. */
@@ -286,26 +312,29 @@ export class BranchService {
     const verA = await em.findOne(WorkflowVersionEntity, { where: { id: versionAId } });
     if (!verA) return null;
 
-    const rows = await rawQuery<{ id: string; parent_id: string | null }>(
+    const rows = await rawQuery<{ id: string; parent_id: string | null; merge_parent_id: string | null }>(
       em,
-      `SELECT id, parent_id FROM workflow_versions WHERE workflow_id = $1`,
+      `SELECT id, parent_id, merge_parent_id FROM workflow_versions WHERE workflow_id = $1`,
       [verA.workflowId],
     );
-    const parentMap = new Map(rows.map((r) => [r.id, r.parent_id]));
+    // Both parents, as `historyContains` walks them: a branch that took the target's changes shares the
+    // target's head, and missing that re-raises every conflict it already resolved.
+    const parentsOf = new Map(
+      rows.map((r) => [r.id, [r.parent_id, r.merge_parent_id].filter((p): p is string => p !== null)]),
+    );
+    const ancestorsOfA = reachableFrom(versionAId, parentsOf);
 
-    const ancestorsOfA = new Set<string>();
-    let current: string | null | undefined = versionAId;
-    while (current) {
-      ancestorsOfA.add(current);
-      current = parentMap.get(current);
-    }
-
-    current = versionBId;
-    while (current) {
-      if (ancestorsOfA.has(current)) {
-        return em.findOne(WorkflowVersionEntity, { where: { id: current } });
+    // Breadth-first from B, so the common ancestor found is the nearest one.
+    const queue = [versionBId];
+    const seen = new Set(queue);
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      if (ancestorsOfA.has(next)) return em.findOne(WorkflowVersionEntity, { where: { id: next } });
+      for (const parent of parentsOf.get(next) ?? []) {
+        if (!seen.has(parent)) {
+          seen.add(parent);
+          queue.push(parent);
+        }
       }
-      current = parentMap.get(current);
     }
     return null;
   }
@@ -359,6 +388,13 @@ export class BranchService {
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
         }
+        if (!(await this.approvedAtHead(em, workflowId, source, target))) {
+          throw new DomainError(
+            `Branch '${targetBranchName}' is protected — the review was approved before the latest changes to '${sourceBranchName}'. Approve it again to merge.`,
+            409,
+            { code: APPROVAL_STALE },
+          );
+        }
         const failing = await this.latestFailingTest(em, workflowId, {
           source: source.headVersionId,
           target: target.headVersionId,
@@ -369,6 +405,8 @@ export class BranchService {
             review_id: failing.review?.id ?? null,
           });
         }
+        if (resolutions && resolutions.length > 0)
+          throw protectedMergeConflicts(sourceBranchName, targetBranchName);
       }
 
       if (await this.historyContains(em, target.headVersionId, source.headVersionId)) {
@@ -386,6 +424,7 @@ export class BranchService {
 
       const result = threeWayMerge(ancestorIr, sourceIr, targetIr, resolutions);
       if (!result.success || !result.merged) {
+        if (target.isProtected) throw protectedMergeConflicts(sourceBranchName, targetBranchName);
         return { success: false, mergedVersionId: null, conflicts: result.conflicts };
       }
 
@@ -486,6 +525,20 @@ export const PROTECTED_TARGET_TEST_FAILING =
 /** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
 export const MERGE_TEST_FAILING = 'merge_test_failing';
 
+/** The refusal code when a protected merge's approval was given on an earlier version of the source. */
+export const APPROVAL_STALE = 'approval_stale';
+
+/** The refusal code when a merge into a protected branch would need conflicts resolved at merge time. */
+export const PROTECTED_MERGE_CONFLICTS = 'protected_merge_conflicts';
+
+function protectedMergeConflicts(source: string, target: string): DomainError {
+  return new DomainError(
+    `Branch '${target}' is protected, so conflicts can't be resolved while merging into it — that would land content nobody reviewed or tested. Update '${source}' from '${target}', resolve the conflicts there, and get that reviewed.`,
+    409,
+    { code: PROTECTED_MERGE_CONFLICTS, source_branch: source, target_branch: target },
+  );
+}
+
 /** The conclusive failing test that blocks a protected merge. */
 export interface FailingTest {
   /** The review it was run from; null once that review's branch has been deleted. */
@@ -512,4 +565,19 @@ export function isNewerTest(a: ReviewTestSummary, b: ReviewTestSummary): boolean
 /** Whether a test can decide a merge: one where the target failed too neither shows nor rules out a new failure. */
 export function isDecisiveTest(test: ReviewTestSummary): boolean {
   return test.verdict === 'red' || test.head?.status !== 'error';
+}
+
+/** Every version reachable from `start` through either parent, `start` included. */
+function reachableFrom(start: string, parentsOf: Map<string, string[]>): Set<string> {
+  const reached = new Set<string>([start]);
+  const stack = [start];
+  for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+    for (const parent of parentsOf.get(next) ?? []) {
+      if (!reached.has(parent)) {
+        reached.add(parent);
+        stack.push(parent);
+      }
+    }
+  }
+  return reached;
 }

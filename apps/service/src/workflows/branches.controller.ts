@@ -33,6 +33,20 @@ class CreateBranchDto {
   from_version_id?: string;
 }
 
+class UpdateBranchDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  from_branch = 'main';
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => MergeResolutionDto)
+  resolutions?: MergeResolutionDto[];
+}
+
 class MergeBranchDto {
   @IsOptional()
   @IsString()
@@ -152,6 +166,27 @@ export class BranchesController {
       workflowId,
       branchName,
       body.target_branch,
+      principal.user.id,
+      body.resolutions,
+    );
+  }
+
+  /** Bring another branch's changes (default: the default branch) into this one, resolving conflicts here. */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Scope('workflow:deploy')
+  @Post(':branchName/update')
+  async update(
+    @Req() req: Request,
+    @Param('workflowId') workflowId: string,
+    @Param('branchName') branchName: string,
+    @Body() body: UpdateBranchDto,
+  ): Promise<Record<string, unknown>> {
+    const principal = requirePrincipal(req);
+    await this.authorize(req, workflowId, 'merge');
+    return this.merges.updateFrom(
+      workflowId,
+      branchName,
+      body.from_branch,
       principal.user.id,
       body.resolutions,
     );

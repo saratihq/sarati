@@ -284,7 +284,8 @@ CREATE TABLE public.review_approvals (
     reviewer_id uuid NOT NULL,
     decision public.approvaldecision NOT NULL,
     comment text,
-    created_at timestamp with time zone DEFAULT now()
+    created_at timestamp with time zone DEFAULT now(),
+    source_version_id uuid
 );
 
 

@@ -414,6 +414,135 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
+  it('a protected target takes only what an approval covered, never conflicts resolved while merging, and cannot be deleted', async () => {
+    const wf = await seed('inv reviewed-only');
+    const setMain = async (texts: string[]): Promise<void> => {
+      await http()
+        .patch(`/api/workflows/${wf}/branches/main/protection`)
+        .send({ is_protected: false })
+        .expect(200);
+      await http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: ir(texts), branch: 'main' })
+        .expect(201);
+      await http()
+        .patch(`/api/workflows/${wf}/branches/main/protection`)
+        .send({ is_protected: true })
+        .expect(200);
+    };
+    const approve = (review: string) =>
+      http()
+        .post(`/api/workflows/${wf}/reviews/${review}/approve`)
+        .send({ decision: 'approved' })
+        .expect(201);
+    const fromReview = (review: string) =>
+      http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({});
+    const fromBranches = () =>
+      http().post(`/api/workflows/${wf}/branches/lane/merge`).send({ target_branch: 'main' });
+
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: ir(['reviewed']), branch: 'lane' })
+      .expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/main/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+    const review = (
+      await http()
+        .post(`/api/workflows/${wf}/reviews`)
+        .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+        .expect(201)
+    ).body.id as string;
+    await approve(review);
+
+    // An approval covers the version it saw: a later commit needs approving again, through both doors.
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: ir(['unreviewed']), branch: 'lane' })
+      .expect(201);
+    for (const res of [await fromReview(review), await fromBranches()]) {
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('approval_stale');
+    }
+    expect(
+      (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.approval_current,
+    ).toBe(false);
+    await approve(review);
+    expect(
+      (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.approval_current,
+    ).toBe(true);
+
+    // Conflicts are never resolved while merging into it — neither offered nor accepted.
+    await setMain(['main-moved']);
+    for (const res of [
+      await fromReview(review),
+      await fromBranches(),
+      await http()
+        .post(`/api/workflows/${wf}/branches/lane/merge`)
+        .send({
+          target_branch: 'main',
+          resolutions: [{ node_id: 'announce', field_path: 'parameters.texts', choice: 'source' }],
+        }),
+    ]) {
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('protected_merge_conflicts');
+    }
+
+    // They are resolved on the branch instead, which a review and a test then see.
+    const update = await http()
+      .post(`/api/workflows/${wf}/branches/lane/update`)
+      .send({ from_branch: 'main' })
+      .expect(201);
+    expect(update.body.status).toBe('conflicts');
+    const resolved = await http()
+      .post(`/api/workflows/${wf}/branches/lane/update`)
+      .send({
+        from_branch: 'main',
+        resolutions: [
+          { node_id: 'announce', field_path: 'parameters.texts', choice: 'custom', value: ['both'] },
+        ],
+      })
+      .expect(201);
+    expect(resolved.body.status).toBe('merged');
+    expect((await fromReview(review)).body.code).toBe('approval_stale');
+    await approve(review);
+    expect((await fromReview(review).expect(201)).body.status).toBe('merged');
+
+    // A rollback to what the head already holds mints nothing, so it cannot re-head a protected branch.
+    const head = (await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200)).body.head as {
+      version_id: string;
+      version_number: number;
+    };
+    const rollback = await http()
+      .post(`/api/workflows/${wf}/versions/${head.version_number}/rollback?branch=main`)
+      .expect(201);
+    expect(rollback.body).toMatchObject({ no_changes: true, new_version_number: head.version_number });
+    expect(
+      (
+        (await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200)).body.head as {
+          version_id: string;
+        }
+      ).version_id,
+    ).toBe(head.version_id);
+
+    // A protected branch cannot be deleted, so it cannot be recreated unprotected either; unprotected, it can.
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'release' }).expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/release/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+    const refused = await http().delete(`/api/workflows/${wf}/branches/release`).expect(409);
+    expect(refused.body.code).toBe('branch_protected');
+    await http()
+      .patch(`/api/workflows/${wf}/branches/release/protection`)
+      .send({ is_protected: false })
+      .expect(200);
+    await http().delete(`/api/workflows/${wf}/branches/release`).expect(200);
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
   it('a protected target refuses a merge while the latest test of its heads is failing, through BOTH entry points', async () => {
     // A trigger payload decides each side: `fail` breaks only the branch; `down` breaks main too.
     const codeIr = (code: string, name: string, triggerName = 'Trigger'): Record<string, unknown> => {
@@ -523,6 +652,11 @@ describe('domain invariants (the constitution)', () => {
     await http()
       .post(`/api/workflows/${source.wf}/commit`)
       .send({ workflow_ir: codeIr(mainCode, 'inv stale-source'), branch: 'lane' })
+      .expect(201);
+    // The new commit also needs approving again (approvals cover the version they saw) — that is not the test gate.
+    await http()
+      .post(`/api/workflows/${source.wf}/reviews/${source.review}/approve`)
+      .send({ decision: 'approved' })
       .expect(201);
     expect((await mergeFromReview(source.wf, source.review).expect(201)).body.status).toBe('merged');
     await http().delete(`/api/workflows/${source.wf}`).expect(200);

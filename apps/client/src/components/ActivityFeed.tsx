@@ -260,6 +260,8 @@ function ReviewFeedCard({
   const statusStyle = STATUS_STYLES[status] || STATUS_STYLES.open;
   const actionable = status !== "merged" && status !== "closed";
   const nothingToReview = actionable && detail?.up_to_date === true;
+  // A protected merge needs an approval of the source's current version; an older one is stale.
+  const approvalStale = status === "approved" && detail?.target_protected === true && detail.approval_current === false;
   // Comments/approvals are rejected server-side once a review is merged/closed.
   const canCollaborate = actionable;
   // The thread's own length is the truth once loaded; the summary count covers the gap before that.
@@ -469,6 +471,15 @@ function ReviewFeedCard({
                   style={{ background: "var(--orchestr-accent-tint)", color: "var(--orchestr-ink)" }}
                 />
               )}
+              {!nothingToReview && approvalStale && (
+                <div
+                  className="text-[11px] py-2 px-3 rounded-md"
+                  style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
+                >
+                  Approved before the latest changes to {review.source_branch} — approve it again to merge into{" "}
+                  {review.target_branch}.
+                </div>
+              )}
               {!nothingToReview && detail?.merge_blocked_by_test && (
                 <MergeBlockedNote
                   workflowId={workflowId}
@@ -491,7 +502,7 @@ function ReviewFeedCard({
                     >
                       Request changes
                     </Button>
-                    {status === "approved" && (
+                    {status === "approved" && !approvalStale && (
                       <Button variant="secondary" size="sm" onClick={() => onMergeRequest(review)} disabled={busy}>
                         Merge
                       </Button>
@@ -544,6 +555,8 @@ export default function ActivityFeed({
   // Per-environment live pointers: env badges and the promote picker both read from here.
   const [envPointers, setEnvPointers] = useState<EnvPointer[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Set when a merge into a protected branch was refused for conflicts: the branch takes the target's changes first.
+  const [updateOffer, setUpdateOffer] = useState<{ source: string; target: string } | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   // When this branch was forked (branch row created_at) — null on main/unknown.
   const [branchedAt, setBranchedAt] = useState<string | null>(null);
@@ -793,6 +806,7 @@ export default function ActivityFeed({
       // Toast as well as banner: the top banner can be scrolled off when merging from deep in the feed.
       const msg = e instanceof Error ? e.message : "Failed to merge review";
       setError(msg);
+      offerUpdateOn(e, review.source_branch, review.target_branch);
       toast.error("Couldn't merge", msg);
     } finally {
       setBusy(false);
@@ -815,6 +829,37 @@ export default function ActivityFeed({
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to merge branch");
+      offerUpdateOn(e, branch, "main");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const offerUpdateOn = (e: unknown, source: string, target: string) => {
+    setUpdateOffer(e instanceof api.ApiError && e.code === "protected_merge_conflicts" ? { source, target } : null);
+  };
+
+  // The branch takes the target's changes and resolves the conflicts here, where a review and a test see them.
+  const handleUpdateFrom = async ({ source, target }: { source: string; target: string }) => {
+    setBusy(true);
+    try {
+      const result = await api.updateBranch(workflowId, source, target);
+      setUpdateOffer(null);
+      setError(null);
+      if (result.status === "conflicts") {
+        openResolver(target, source, result.conflicts, async (resolutions) => {
+          const resolved = await api.updateBranch(workflowId, source, target, resolutions);
+          return { ...resolved, status: resolved.status === "conflicts" ? "conflicts" : "merged" };
+        });
+        return;
+      }
+      toast.success(
+        result.status === "up_to_date" ? "Already up to date" : "Branch updated",
+        `"${source}" has "${target}"'s changes — test it again and get it approved before merging`,
+      );
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update the branch");
     } finally {
       setBusy(false);
     }
@@ -1234,6 +1279,11 @@ export default function ActivityFeed({
           style={{ background: "var(--orchestr-danger-tint)", color: "var(--orchestr-danger)" }}
         >
           <span>{error}</span>
+          {updateOffer && (
+            <Button size="xs" variant="secondary" disabled={busy} onClick={() => void handleUpdateFrom(updateOffer)}>
+              Update {updateOffer.source} from {updateOffer.target}
+            </Button>
+          )}
         </div>
       )}
 

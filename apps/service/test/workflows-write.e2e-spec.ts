@@ -196,6 +196,41 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
     expect(conflict.target_value).toBe('main-change');
   });
 
+  it('a branch that took its target’s changes merges back without the conflict it already resolved', async () => {
+    const http = () => request(app.getHttpServer());
+    const created = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: wfJson('Merge base', 'base') })
+      .expect(201);
+    const wf = created.body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merge base', 'lane-change'), branch: 'lane' })
+      .expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merge base', 'main-change'), branch: 'main' })
+      .expect(201);
+
+    // Take main's changes into lane, resolving the one conflict there.
+    const update = await http()
+      .post(`/api/workflows/${wf}/branches/lane/update`)
+      .send({
+        from_branch: 'main',
+        resolutions: [{ node_id: 'send', field_path: 'parameters.subject', choice: 'custom', value: 'both' }],
+      })
+      .expect(201);
+    expect(update.body.status).toBe('merged');
+
+    // Merging back finds main's head as the common ancestor through lane's merge parent: nothing left to resolve.
+    const back = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(back.body.status).toBe('merged');
+  });
+
   it('non-conflicting merge succeeds, floats latest to the merge commit, deletes the source branch', async () => {
     await request(app.getHttpServer())
       .post(`/api/workflows/${wfId}/branches`)

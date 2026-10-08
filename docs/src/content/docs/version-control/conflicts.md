@@ -31,6 +31,14 @@ conflict has a decision.
 
 Cancelling changes nothing. Until you complete the merge, both branches are exactly as they were.
 
+## Into a protected branch
+
+A merge into a [protected branch](/version-control/branches/#protect-a-branch) never opens the
+resolver: whatever you picked or typed would land with no review and no test. It is refused instead,
+with **Update *your-branch* from main**. That brings main's changes into your branch, where the
+resolver opens as usual — then test it, get the review approved again, and merge with nothing left
+to resolve.
+
 ## A worked example
 
 `main` and `busy-hours` both forked from a version where `limit` was `10`. Then `main` moved to `5`
