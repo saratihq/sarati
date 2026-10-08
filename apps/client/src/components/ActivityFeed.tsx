@@ -365,7 +365,13 @@ function ReviewFeedCard({
                 (testResult.source_version_id === detail.source_head_version_id &&
                   testResult.target_version_id === detail.target_head_version_id)
               }
-              gate={detail?.target_protected ? { blocked: !!detail.merge_blocked_by_test } : null}
+              gate={
+                actionable &&
+                detail?.target_protected &&
+                (!testResult || detail.last_test?.tested_at === testResult.tested_at)
+                  ? { blocked: !!detail.merge_blocked_by_test }
+                  : null
+              }
               onResult={(result) => {
                 setTestResult(result);
                 onTested();

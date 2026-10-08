@@ -104,9 +104,14 @@ export class ReviewTestService {
     return summary;
   }
 
-  /** Keep a finished test by its versions — even once its review is gone — and show it there if newest; locks the review first. */
+  /** Keep a finished test by its versions — even once its review is gone — and show it there if newest. */
   async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
     await this.dataSource.transaction(async (em) => {
+      // Workflow before review — the order deleting the workflow cascades in — so the two cannot deadlock.
+      const workflow = await em.query<unknown[]>(`SELECT 1 FROM workflows WHERE id = $1 FOR KEY SHARE`, [
+        workflowId,
+      ]);
+      if (workflow.length === 0) return;
       const review = await em.findOne(WorkflowReviewEntity, {
         where: { id: reviewId },
         lock: { mode: 'pessimistic_write' },

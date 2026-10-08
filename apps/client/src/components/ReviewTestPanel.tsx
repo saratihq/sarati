@@ -136,11 +136,13 @@ function TestResult({
   workflowId,
   current,
   gate,
+  canRun,
 }: {
   result: ReviewTestSummary;
   workflowId: string;
   current: boolean;
   gate: { blocked: boolean } | null;
+  canRun: boolean;
 }) {
   const inconclusive = isInconclusive(result);
   const green = result.verdict === "green" && !inconclusive;
@@ -155,9 +157,11 @@ function TestResult({
       : "var(--orchestr-danger-tint)";
   // Where this result stands for merging: the gate reads the newest conclusive test of the current versions.
   const standing = !current
-    ? "This tested earlier versions of these branches — re-test to check them as they are now."
+    ? canRun
+      ? "This tested earlier versions of these branches — re-test to check them as they are now."
+      : "This tested earlier versions of these branches."
     : inconclusive && gate?.blocked
-      ? "An earlier failing result of these versions still blocks merging."
+      ? "A failing conclusive test of these versions still blocks merging."
       : !green && !inconclusive && gate && !gate.blocked
         ? "A newer passing test of these versions has lifted this, so it no longer blocks merging."
         : null;
@@ -189,7 +193,9 @@ function TestResult({
           style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
         >
           <div className="font-semibold">The target failed too, so this test can&apos;t tell.</div>
-          <div className="mt-0.5">It doesn&apos;t count for merging — re-test once the cause is resolved.</div>
+          <div className="mt-0.5">
+            {canRun ? "It doesn't count for merging — re-test once the cause is resolved." : "It didn't count for merging."}
+          </div>
         </div>
       )}
 
@@ -447,7 +453,7 @@ export default function ReviewTestPanel({
 
       {result && (
         <div className={canRun ? "mt-3" : ""}>
-          <TestResult result={result} workflowId={workflowId} current={current} gate={gate} />
+          <TestResult result={result} workflowId={workflowId} current={current} gate={gate} canRun={canRun} />
         </div>
       )}
 

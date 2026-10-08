@@ -82,6 +82,7 @@ export default function BranchSelector({
       await api.setBranchProtection(workflowId, b.name, next);
       await fetchBranches();
       toast.success(next ? `"${b.name}" is protected` : `"${b.name}" is no longer protected`);
+      onBranchesChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update protection");
     } finally {

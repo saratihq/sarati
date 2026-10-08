@@ -29,7 +29,8 @@ comment count and approvals.
 Pick the environment to run against, and whether the trigger payload comes from the **latest run**
 or JSON you paste.
 
-The result is a pass/fail plus every output field that moved:
+The result is **Passed**, **Failing** or **Inconclusive** — the target failed too, so it can't tell —
+plus every output field that moved:
 
 ```
 ✓ Passed                          Tested just now
@@ -71,7 +72,7 @@ Merging into a protected branch before approval is refused:
 Into a protected branch, a failing test also blocks the merge — from the review or with **Merge into
 main** on the workflow overview alike. A test fails when a step errors on your branch but not on the
 target. What counts is the latest conclusive test of exactly the two versions being merged, run from
-any review — every result is kept, even after its review or branch is deleted — and the refusal and
+any review — every result is kept, even after the branch it ran from is deleted — and the refusal and
 the review card name the review that ran it and what failed. A passing re-test, or a new commit on
 either side, lifts it. A test where the target fails too shows as **Inconclusive**: it decides nothing,
 so an earlier failure still stands.

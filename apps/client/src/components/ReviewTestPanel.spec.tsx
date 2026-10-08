@@ -59,7 +59,7 @@ describe("ReviewTestPanel — where a result stands for merging", () => {
         environments={null}
         result={r}
         onResult={vi.fn()}
-        canRun={false}
+        canRun
         current={current}
         gate={gate}
       />,
@@ -76,7 +76,7 @@ describe("ReviewTestPanel — where a result stands for merging", () => {
     );
     expect(screen.getByText("Inconclusive")).toBeInTheDocument();
     expect(screen.queryByText("Passed")).not.toBeInTheDocument();
-    expect(screen.getByTestId("test-standing")).toHaveTextContent("An earlier failing result of these versions still blocks merging.");
+    expect(screen.getByTestId("test-standing")).toHaveTextContent("A failing conclusive test of these versions still blocks merging.");
   });
 
   it("says a failing result has been lifted when a newer passing test unblocked the merge", () => {

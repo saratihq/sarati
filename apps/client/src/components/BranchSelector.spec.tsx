@@ -8,10 +8,12 @@ vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof api>()),
   listBranches: vi.fn(),
   createBranch: vi.fn(),
+  setBranchProtection: vi.fn(),
 }));
 
 const listBranches = vi.mocked(api.listBranches);
 const createBranch = vi.mocked(api.createBranch);
+const setBranchProtection = vi.mocked(api.setBranchProtection);
 
 const branch = (name: string, over: Partial<api.BranchSummary> = {}): api.BranchSummary => ({
   id: `b-${name}`,
@@ -40,6 +42,26 @@ describe("BranchSelector", () => {
     expect(createBranch).toHaveBeenCalledWith("wf-1", "fewer-stories");
     expect(screen.queryByPlaceholderText("branch-name")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New branch" })).not.toBeInTheDocument();
+  });
+
+  it("tells the page its branches changed once protecting one succeeds, so open reviews re-read the merge gate", async () => {
+    setBranchProtection.mockResolvedValue(branch("main", { is_default: true, is_protected: true }));
+    const onBranchesChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <BranchSelector
+        workflowId="wf-1"
+        currentBranch="main"
+        onBranchChange={vi.fn()}
+        onBranchesChanged={onBranchesChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /main/ }));
+    await user.click(screen.getByRole("button", { name: "Protect main" }));
+
+    await waitFor(() => expect(onBranchesChanged).toHaveBeenCalledTimes(1));
+    expect(setBranchProtection).toHaveBeenCalledWith("wf-1", "main", true);
   });
 
   it("stays open with the reason when the branch cannot be created", async () => {
