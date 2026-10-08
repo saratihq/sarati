@@ -13,6 +13,7 @@ import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { MCP_TOOLS, type McpTool } from './mcp-tool';
 import { toToolError, toToolResult } from './presentation/result';
+import { uniquelyNamed } from './unique-tool-names';
 import { WorkflowInvokeTool } from './workflow-invoke.tool';
 import { CallableWorkflowsService, type WorkflowTool } from '../workflows/callable-workflows.service';
 
@@ -46,6 +47,7 @@ function detailsOf(err: unknown): { code?: string; details?: Record<string, unkn
 @Injectable()
 export class McpHandlerService implements OnModuleDestroy {
   private readonly logger = new Logger(McpHandlerService.name);
+  private readonly reportedClashes = new Set<string>();
   private readonly handler: McpHttpHandler;
 
   constructor(
@@ -105,6 +107,7 @@ export class McpHandlerService implements OnModuleDestroy {
                 availableTools,
                 traceparent: typeof traceparent === 'string' ? traceparent : undefined,
               }),
+              { document: tool.returnsDocument === true },
             );
           } catch (err) {
             this.logger.warn(`${tool.name} failed: ${messageOf(err)}`);
@@ -123,6 +126,15 @@ export class McpHandlerService implements OnModuleDestroy {
   private async publishedToolsFor(principal: Principal): Promise<WorkflowTool[]> {
     const holds = principal.kind !== 'api_key' || scopeSatisfied(principal.scopes, 'workflow:invoke');
     if (!holds) return [];
-    return this.workflowTools.listFor(principal.activeOrgId);
+    const { offered, clashes } = uniquelyNamed(await this.workflowTools.listFor(principal.activeOrgId));
+    for (const name of clashes) {
+      const key = `${principal.activeOrgId}:${name}`;
+      if (this.reportedClashes.has(key)) continue;
+      this.reportedClashes.add(key);
+      this.logger.warn(
+        `Published tool name "${name}" is used by more than one live workflow — none of them is offered`,
+      );
+    }
+    return offered;
   }
 }

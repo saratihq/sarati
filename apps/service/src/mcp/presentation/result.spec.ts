@@ -1,4 +1,4 @@
-import { MAX_RESULT_BYTES, capPayload, toToolError, toToolResult } from './result';
+import { MAX_DOCUMENT_BYTES, MAX_RESULT_BYTES, capPayload, toToolError, toToolResult } from './result';
 
 const filler = (n: number): { id: string; text: string }[] =>
   Array.from({ length: n }, (_, i) => ({ id: `row-${i}`, text: 'x'.repeat(200) }));
@@ -40,7 +40,7 @@ describe('MCP result presentation', () => {
 
   it('says so plainly when a single oversized object cannot be trimmed', () => {
     const { notes } = capPayload({ schema: 'y'.repeat(MAX_RESULT_BYTES + 1) });
-    expect(notes).toEqual(['This result was truncated.']);
+    expect(notes).toEqual(['This result exceeds the size cap and nothing in it could be trimmed.']);
   });
 });
 
@@ -60,5 +60,22 @@ describe('MCP tool failures', () => {
 
   it('carries no code when the failure has none', () => {
     expect(toToolError('plain failure').structuredContent).toEqual({ error: 'plain failure' });
+  });
+
+  it('hands a document back whole however large, so a partial copy can never be committed back', () => {
+    const nodes = Array.from({ length: 40 }, (_, i) => ({ id: `n${i}`, code: 'x'.repeat(1_000) }));
+    const result = toToolResult({ nodes, edges: [] }, { document: true });
+    expect(result.isError).toBeUndefined();
+    expect((result.structuredContent as { nodes: unknown[] }).nodes).toHaveLength(40);
+    expect(result._meta).toBeUndefined();
+  });
+
+  it('refuses a document past the ceiling rather than trimming it', () => {
+    const result = toToolResult(
+      { nodes: [{ id: 'n', code: 'x'.repeat(MAX_DOCUMENT_BYTES) }] },
+      { document: true },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ code: 'document_too_large' });
   });
 });

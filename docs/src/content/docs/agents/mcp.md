@@ -87,6 +87,10 @@ A workflow whose production version starts with the **Called by another workflow
 description and inputs that trigger declares. Committing never changes the list — only publishing
 does.
 
+Names are lowercased, with anything that is not a letter or digit turned into `_`. If two live
+workflows come out with the same name, neither is offered — a name has to reach exactly one
+workflow. Rename one of them.
+
 Calling one **runs the live automation**. That is what it is for, so it counts against the same 20
 an hour. The call waits 15 seconds for an answer; a longer run returns a run id, and reading that
 run takes `workflow:read` — a key without it is told so instead of being pointed at a tool it
@@ -94,6 +98,15 @@ cannot see.
 
 A key holding only `workflow:invoke` can run those automations and see nothing of how they are
 built.
+
+## Result size
+
+A result is capped at 15 KB so one call cannot fill an agent's context. A list longer than that
+loses its last items, and the result says how many were left out.
+
+A workflow document — what `orchestr_get_workflow` and `orchestr_edit_workflow` return — is never
+trimmed, because a partial copy committed back would delete the steps that were cut. It comes back
+whole, or, past 200 KB, is refused with `document_too_large`.
 
 ## Payloads are data, not instructions
 

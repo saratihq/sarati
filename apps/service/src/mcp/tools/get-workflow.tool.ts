@@ -120,6 +120,7 @@ export class GetWorkflowTool implements McpTool {
     idempotentHint: true,
     openWorldHint: false,
   };
+  readonly returnsDocument = true as const;
 
   constructor(
     private readonly reads: WorkflowsReadService,
