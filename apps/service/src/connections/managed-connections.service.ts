@@ -160,6 +160,7 @@ export class ManagedConnectionsService {
     if (status === 'pending') return 'pending';
     if (status === 'active') {
       await this.connections.setStatus(id, 'active');
+      await this.connections.announceActivated(id, scope.kind === 'org' ? scope.orgId : null);
       return 'active';
     }
     await this.connections.setStatus(

@@ -1,5 +1,7 @@
 import { Column, Entity, PrimaryColumn } from 'typeorm';
 
+import type { AccountIdentity } from '../../connections/account-identity';
+
 /**
  * An account connected for a `provider`. `credential` is
  * Fernet-encrypted JSON; `authType` is `token`, `oauth2`, or `managed` (Composio, no secret here).
@@ -50,4 +52,12 @@ export class ConnectionEntity {
 
   @Column({ type: 'varchar', length: 100, nullable: true })
   environment!: string | null;
+
+  /** Which account the provider says this is; read back through `storedAccount`, null until it has answered. */
+  @Column({ type: 'jsonb', nullable: true })
+  account!: AccountIdentity | null;
+
+  /** When the provider was last asked which account this is. */
+  @Column({ name: 'account_checked_at', type: 'timestamptz', nullable: true })
+  accountCheckedAt!: Date | null;
 }

@@ -127,7 +127,9 @@ CREATE TABLE public.connections (
     environment character varying(100),
     status_reason text,
     last_checked_at timestamp with time zone,
-    oauth_client text
+    oauth_client text,
+    account jsonb,
+    account_checked_at timestamp with time zone
 );
 
 

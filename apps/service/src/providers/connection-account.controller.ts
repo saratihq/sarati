@@ -8,7 +8,7 @@ import { type AccountIdentity, describeAccount } from '../connections/account-id
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionIdentityService } from './connection-identity.service';
 
-/** What a connection is authorized against — asked of the provider, so it cannot be stale. */
+/** What a connection is authorized against — the provider's stored answer, asked again on `?refresh=1`. */
 export interface ConnectionAccountResult {
   /** null when the provider was not asked (no probe for this app) or would not answer. */
   account: AccountIdentity | null;
@@ -36,15 +36,17 @@ export class ConnectionAccountController {
     @Param('id') id: string,
     @Query('refresh') refresh?: string,
   ): Promise<ConnectionAccountResult> {
-    const userId = requirePrincipal(req).user.id;
+    const principal = requirePrincipal(req);
+    const userId = principal.user.id;
     const summary = (await this.connections.list(userId)).find((row) => row.id === id);
     if (!summary) throw new HttpException({ detail: 'Connection not found' }, 404);
     if (!this.identity.canProbe(summary.provider)) {
       return { account: null, detail: `Sarati cannot yet ask ${summary.provider} which account this is.` };
     }
-    // A re-authorization can point the same row at a different account, so a reconnect asks again.
-    if (refresh === '1') this.identity.forget(id);
-    const account = await this.identity.probe(userId, id, summary.provider);
+    const account = await this.identity.account(
+      { connectionId: id, ownerUserId: userId, provider: summary.provider, orgId: principal.activeOrgId },
+      refresh === '1',
+    );
     return {
       account,
       detail: account
