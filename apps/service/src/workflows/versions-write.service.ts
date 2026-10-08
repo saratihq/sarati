@@ -389,6 +389,17 @@ export class VersionsWriteService {
 
       const branch = targetBranch ?? (await this.ensureDefaultBranch(em, wf));
       await this.lockBranchById(em, branch.id);
+      // A branchless version may come back only to a branch that once held it — never a deleted branch's work.
+      const orphaned =
+        !targetBranch &&
+        !(branch.headVersionId && (await this.branches.wasHeadOf(em, branch.headVersionId, target.id)));
+      if (orphaned) {
+        throw new DomainError(
+          `Version ${versionNumber} belonged to a branch that has since been deleted, so it can't be rolled back onto '${branch.name}'`,
+          409,
+          { code: 'version_orphaned' },
+        );
+      }
 
       // Like a no-diff commit (invariant #3): a fresh id for the head's own content would make its test look stale.
       const locked = await em.findOne(WorkflowBranchEntity, { where: { id: branch.id } });

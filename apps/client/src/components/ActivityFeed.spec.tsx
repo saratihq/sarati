@@ -15,6 +15,7 @@ vi.mock("@/api/client", async (importOriginal) => ({
   getReview: vi.fn(),
   mergeBranch: vi.fn(),
   updateBranch: vi.fn(),
+  approveReview: vi.fn(),
 }));
 vi.mock("@/lib/toast", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
 vi.mock("@/api/environments", async (importOriginal) => ({
@@ -32,6 +33,29 @@ const review: api.ReviewSummary = {
   updated_at: "2026-10-08T09:00:00.000Z",
   comment_count: 0,
   approval_count: 1,
+};
+
+const laneVersions = {
+  workflow_id: "wf",
+  env_pointers: [],
+  versions: [
+    { id: "v-lane", version_number: 1, workflow_json: {}, tags: ["latest"], parent_id: "v-main", branch_name: "lane" },
+  ],
+};
+
+const approvedDetail: api.ReviewDetail = {
+  ...review,
+  status: "approved",
+  comments: [],
+  approvals: [],
+  last_test: null,
+  source_head_version_id: "v-lane-2",
+  target_head_version_id: "v-main",
+  up_to_date: false,
+  target_protected: true,
+  approval_current: false,
+  approval_stale_reason: "moved",
+  merge_blocked_by_test: null,
 };
 
 const failing: api.ReviewTestSummary = {
@@ -139,19 +163,7 @@ describe("ActivityFeed merge into main", () => {
 
 describe("ActivityFeed protected merges", () => {
   it("says an approval from before the latest changes must be given again, and offers no merge until then", async () => {
-    vi.mocked(api.getReview).mockResolvedValue({
-      ...review,
-      status: "approved",
-      comments: [],
-      approvals: [],
-      last_test: null,
-      source_head_version_id: "v-lane-2",
-      target_head_version_id: "v-main",
-      up_to_date: false,
-      target_protected: true,
-      approval_current: false,
-      merge_blocked_by_test: null,
-    });
+    vi.mocked(api.getReview).mockResolvedValue(approvedDetail);
     render(
       <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
     );
@@ -159,6 +171,71 @@ describe("ActivityFeed protected merges", () => {
     expect(await screen.findByText(/Approved before the latest changes to lane/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Merge" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("says an approval given before approvals covered one version must be given again", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({ ...approvedDetail, approval_stale_reason: "unversioned" });
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    expect(await screen.findByText(/Approved before approvals covered one exact version/)).toBeInTheDocument();
+    expect(screen.queryByText(/latest changes to lane/)).not.toBeInTheDocument();
+  });
+
+  it("approves the version it showed, and reloads the review when the branch has moved since", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({ ...approvedDetail, status: "open", approval_stale_reason: null });
+    vi.mocked(api.approveReview).mockRejectedValue(
+      new api.ApiError("'lane' has changed since you loaded this review", 409, "review_moved"),
+    );
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={onChanged} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(api.approveReview).toHaveBeenCalledWith("wf", "r1", "approved", undefined, "v-lane-2");
+    expect(screen.getByText(/has changed since you loaded this review/)).toBeInTheDocument();
+  });
+
+  it("keeps a protected branch after merging it into main, and says so", async () => {
+    vi.mocked(api.listVersions).mockResolvedValue(laneVersions);
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({
+      workflow_id: "wf",
+      branches: [{ id: "b-lane", name: "lane", is_default: false, is_protected: true }],
+    });
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent('"lane" is protected, so it is kept.');
+    expect(dialog).not.toHaveTextContent("is deleted");
+  });
+
+  it("offers no update when the source is protected too, since it takes changes only through a review", async () => {
+    vi.mocked(api.listVersions).mockResolvedValue(laneVersions);
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
+    vi.mocked(api.mergeBranch).mockRejectedValue(
+      new api.ApiError("'lane' is protected too, so create a branch from 'lane'", 409, "protected_merge_conflicts", {
+        code: "protected_merge_conflicts",
+        source_protected: true,
+      }),
+    );
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    expect(await screen.findByText(/create a branch from 'lane'/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update lane from main" })).not.toBeInTheDocument();
   });
 
   it("offers to update the branch from its target when a protected merge would need conflicts resolved", async () => {

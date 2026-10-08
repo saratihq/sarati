@@ -53,6 +53,11 @@ class ApprovalDto {
   @IsOptional()
   @IsString()
   comment?: string;
+
+  /** The source version the reviewer was shown; if the branch has moved since, the decision is refused. */
+  @IsOptional()
+  @IsString()
+  source_version_id?: string;
 }
 
 class MergeReviewDto {
@@ -182,6 +187,7 @@ export class ReviewsController {
       principal.user.id,
       body.decision,
       body.comment ?? null,
+      body.source_version_id ?? null,
     );
     return {
       id: approval.id,

@@ -35,9 +35,12 @@ Cancelling changes nothing. Until you complete the merge, both branches are exac
 
 A merge into a [protected branch](/version-control/branches/#protect-a-branch) never opens the
 resolver: whatever you picked or typed would land with no review and no test. It is refused instead,
-with **Update *your-branch* from main**. That brings main's changes into your branch, where the
-resolver opens as usual — then test it, get the review approved again, and merge with nothing left
-to resolve.
+with **Update *your-branch* from *target***. That brings the target branch's changes into your
+branch, where the resolver opens as usual — then test it, get the review approved again, and merge
+with nothing left to resolve.
+
+If your branch is protected too, it takes no update itself. Create a branch from it, update that one
+from the target, and review it instead.
 
 ## A worked example
 

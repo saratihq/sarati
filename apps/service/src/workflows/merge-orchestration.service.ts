@@ -95,6 +95,18 @@ export class MergeOrchestrationService {
     userId: string,
     resolutions?: MergeResolution[],
   ): Promise<Record<string, unknown>> {
+    const target = await this.dataSource.manager.findOne(WorkflowBranchEntity, {
+      where: { workflowId, name: branchName },
+    });
+    if (target?.isProtected) {
+      throw new DomainError(
+        `Branch '${branchName}' is protected — it takes changes only through a review`,
+        409,
+        {
+          code: 'branch_protected',
+        },
+      );
+    }
     const result = await this.branches.mergeBranch(workflowId, fromBranch, branchName, userId, resolutions);
     if (!result.success) return conflictsResponse(result);
     return result.mergedVersionId === null

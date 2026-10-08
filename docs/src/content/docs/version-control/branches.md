@@ -38,12 +38,14 @@ Both doors are locked:
 |---|---|
 | Merge a branch into it without an approved review — or while the latest conclusive [test](/version-control/reviews/#merge) of the two versions fails | Refused — *merge it through an approved review*, or *the pre-merge test is failing* |
 | Merge after new commits on the branch since it was approved | Refused until the review is approved again — an approval covers the version it was given on |
+| Update it from another branch | Refused — *it takes changes only through a review* |
 | Merge with conflicts | Refused — [update your branch from it](/version-control/conflicts/#into-a-protected-branch) and resolve them there |
 | Commit to it directly | Refused — *commit to a branch and open a review to bring it in* |
 | Delete it | Refused — an owner or admin unprotects it first |
 
 Promoting an older version still works, so protection can never leave you unable to roll back. A
-rollback to the version the branch already holds changes nothing.
+rollback to the content the branch already holds changes nothing, and a rollback restores only a
+version the branch itself once held.
 
 ## Delete
 

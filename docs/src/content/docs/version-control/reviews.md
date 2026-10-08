@@ -63,7 +63,12 @@ you can — otherwise a solo instance could never merge anything.
 
 An approval covers the version it was given on. Into a protected branch, a commit to your branch
 after approval needs approving again — the card says *Approved before the latest changes*, and
-Merge waits until then.
+Merge waits until then. If the branch changes while you have the review open, your decision is
+refused and the card reloads, so you never approve changes you were not shown.
+
+Approvals given before Sarati 0.2.20 recorded no version. After upgrading, an approved review into a
+protected branch needs approving once more — the card says *Approved before approvals covered one
+exact version*.
 
 ## Merge
 
@@ -75,10 +80,11 @@ Merging into a protected branch before approval is refused:
 
 Into a protected branch, a failing test also blocks the merge — from the review or with **Merge into
 main** on the workflow overview alike. A test fails when a step errors on your branch but not on the
-target. What counts is the latest conclusive test of exactly the two versions being merged, run from
-any review — every result is kept, even after the branch it ran from is deleted — and the refusal and
-the review card name the review that ran it and what failed. A passing re-test, or a new commit on
-either side, lifts it. A test where the target fails too shows as **Inconclusive**: it decides nothing,
+target. What counts is the latest conclusive test of exactly the content being merged — any two
+versions holding that content, run from any review. Every result is kept, even after the branch it
+ran from is deleted, so putting failing content back on a branch doesn't lift the failure. The
+refusal and the review card name the review that ran it and what failed. A passing re-test, or a
+commit that changes either side, lifts it. A test where the target fails too shows as **Inconclusive**: it decides nothing,
 so an earlier failure still stands.
 
 After a successful merge the target branch has a new version — the merge commit — and the review is
@@ -91,4 +97,4 @@ when you want it live — see [Save, version, publish](/version-control/save-ver
 
 If both branches changed the same field of the same step, the merge stops and opens the resolver —
 see [Merge conflicts](/version-control/conflicts/). Into a protected branch it is refused instead, and
-you resolve them on your branch with **Update *your-branch* from main**.
+you resolve them on your branch with **Update *your-branch* from *target***.

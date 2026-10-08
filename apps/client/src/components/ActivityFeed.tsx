@@ -166,7 +166,13 @@ interface ReviewFeedCardProps {
   busy: boolean;
   /** Named environments for the pre-merge test's env picker. */
   environments: EnvironmentSummary[] | null;
-  onApproval: (review: ReviewSummary, decision: "approved" | "rejected", comment?: string) => void;
+  /** `shownVersionId` is the source head the card showed, so a branch that moved since is refused rather than approved unseen. */
+  onApproval: (
+    review: ReviewSummary,
+    decision: "approved" | "rejected",
+    comment: string | undefined,
+    shownVersionId: string | null,
+  ) => void;
   onMergeRequest: (review: ReviewSummary) => void;
   onCloseReview: (review: ReviewSummary) => void;
   /** Bumped after any pre-merge test in the feed: a test on one review can change whether another may merge. */
@@ -283,7 +289,7 @@ function ReviewFeedCard({
   };
 
   const submitApproval = (decision: "approved" | "rejected") => {
-    onApproval(review, decision, note.trim() || undefined);
+    onApproval(review, decision, note.trim() || undefined, detail?.source_head_version_id ?? null);
     setNote("");
   };
 
@@ -476,8 +482,10 @@ function ReviewFeedCard({
                   className="text-[11px] py-2 px-3 rounded-md"
                   style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
                 >
-                  Approved before the latest changes to {review.source_branch} — approve it again to merge into{" "}
-                  {review.target_branch}.
+                  {detail?.approval_stale_reason === "unversioned"
+                    ? "Approved before approvals covered one exact version"
+                    : `Approved before the latest changes to ${review.source_branch}`}{" "}
+                  — approve it again to merge into {review.target_branch}.
                 </div>
               )}
               {!nothingToReview && detail?.merge_blocked_by_test && (
@@ -560,6 +568,8 @@ export default function ActivityFeed({
   const [warning, setWarning] = useState<string | null>(null);
   // When this branch was forked (branch row created_at) — null on main/unknown.
   const [branchedAt, setBranchedAt] = useState<string | null>(null);
+  // A protected branch is kept after a merge into main.
+  const [branchProtected, setBranchProtected] = useState(false);
 
   // Active conflict-resolution modal; `onResolve` re-POSTs the merge endpoint with the resolutions.
   const [resolver, setResolver] = useState<{
@@ -567,6 +577,8 @@ export default function ActivityFeed({
     source: string;
     target: string;
     onResolve: (resolutions: MergeResolution[]) => Promise<MergeResultResponse>;
+    /** An update of a branch rather than a merge: what to say once it lands. */
+    updated?: string;
   } | null>(null);
 
   // Resets on workflow/branch change but NOT on refreshKey, so refetches don't flash the whole feed.
@@ -580,7 +592,9 @@ export default function ActivityFeed({
     setError(null);
     setWarning(null);
     setResolver(null);
+    setUpdateOffer(null);
     setBranchedAt(null);
+    setBranchProtected(false);
   }
 
   useEffect(() => {
@@ -596,7 +610,9 @@ export default function ActivityFeed({
         setVersions(v.versions);
         setEnvPointers(v.env_pointers ?? []);
         setReviews(r.reviews);
-        setBranchedAt(b?.branches.find((entry) => entry.name === branch)?.created_at ?? null);
+        const row = b?.branches.find((entry) => entry.name === branch);
+        setBranchedAt(row?.created_at ?? null);
+        setBranchProtected(row?.is_protected ?? false);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -752,18 +768,24 @@ export default function ActivityFeed({
     target: string,
     conflicts: ConflictInfo[] | undefined,
     onResolve: (resolutions: MergeResolution[]) => Promise<MergeResultResponse>,
+    updated?: string,
   ) => {
     if (!conflicts || conflicts.length === 0) {
       // A conflicts status with no conflict list is a service contract violation — fail loudly.
       setError("Merge reported conflicts but returned none to resolve. Please retry.");
       return;
     }
-    setResolver({ source, target, conflicts, onResolve });
+    setResolver({ source, target, conflicts, onResolve, updated });
   };
 
   const handleResolverMerged = (result: MergeResultResponse) => {
     const ctx = resolver;
     setResolver(null);
+    if (ctx?.updated) {
+      toast.success("Branch updated", ctx.updated);
+      onChanged();
+      return;
+    }
     toast.success("Merge complete", ctx ? mergedDetail(ctx.source, ctx.target, result) : undefined);
     if (ctx) onMerged(ctx.target);
     else onChanged();
@@ -774,16 +796,19 @@ export default function ActivityFeed({
   const handleApproval = async (
     review: ReviewSummary,
     decision: "approved" | "rejected",
-    comment?: string,
+    comment: string | undefined,
+    shownVersionId: string | null,
   ) => {
     setBusy(true);
     setError(null);
     try {
-      await api.approveReview(workflowId, review.id, decision, comment);
+      await api.approveReview(workflowId, review.id, decision, comment, shownVersionId);
       toast.success(decision === "approved" ? "Review approved" : "Changes requested");
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to submit approval");
+      // The card reloads so the reviewer sees what landed since.
+      if (e instanceof api.ApiError && e.code === "review_moved") onChanged();
     } finally {
       setBusy(false);
     }
@@ -836,7 +861,9 @@ export default function ActivityFeed({
   };
 
   const offerUpdateOn = (e: unknown, source: string, target: string) => {
-    setUpdateOffer(e instanceof api.ApiError && e.code === "protected_merge_conflicts" ? { source, target } : null);
+    // A protected source takes no update itself; the refusal says to branch off it instead.
+    const refusal = api.asProtectedMergeConflicts(e);
+    setUpdateOffer(refusal && !refusal.source_protected ? { source, target } : null);
   };
 
   // The branch takes the target's changes and resolves the conflicts here, where a review and a test see them.
@@ -846,19 +873,24 @@ export default function ActivityFeed({
       const result = await api.updateBranch(workflowId, source, target);
       setUpdateOffer(null);
       setError(null);
+      const next = `"${source}" has "${target}"'s changes — test it again and get it approved before merging`;
       if (result.status === "conflicts") {
-        openResolver(target, source, result.conflicts, async (resolutions) => {
-          const resolved = await api.updateBranch(workflowId, source, target, resolutions);
-          return { ...resolved, status: resolved.status === "conflicts" ? "conflicts" : "merged" };
-        });
+        openResolver(
+          target,
+          source,
+          result.conflicts,
+          async (resolutions) => {
+            const resolved = await api.updateBranch(workflowId, source, target, resolutions);
+            return { ...resolved, status: resolved.status === "conflicts" ? "conflicts" : "merged" };
+          },
+          next,
+        );
         return;
       }
-      toast.success(
-        result.status === "up_to_date" ? "Already up to date" : "Branch updated",
-        `"${source}" has "${target}"'s changes — test it again and get it approved before merging`,
-      );
+      toast.success(result.status === "up_to_date" ? "Already up to date" : "Branch updated", next);
       onChanged();
     } catch (e) {
+      setUpdateOffer(null);
       setError(e instanceof Error ? e.message : "Failed to update the branch");
     } finally {
       setBusy(false);
@@ -869,7 +901,9 @@ export default function ActivityFeed({
     showConfirm(
       {
         title: "Merge into main?",
-        message: `"${branch}" merges into "main" as new versions. Then "${branch}" is deleted along with its reviews — unless a review of it into "main" is still under way; that review is marked merged and the branch is kept.`,
+        message: branchProtected
+          ? `"${branch}" merges into "main" as new versions. "${branch}" is protected, so it is kept.`
+          : `"${branch}" merges into "main" as new versions. Then "${branch}" is deleted along with its reviews — unless a review of it into "main" is still under way; that review is marked merged and the branch is kept.`,
         consequence: "Merges cannot be undone — recovery means manually reverting on main.",
         confirmLabel: "Merge",
       },
