@@ -19,7 +19,7 @@ RUN pnpm deploy --legacy --filter @sarati/agent --prod /out
 RUN rm -rf /out/src && cp -r apps/agent/dist /out/dist
 
 FROM node:24-alpine AS runtime
-ENV NODE_ENV=production PORT=8010
+ENV NODE_ENV=production ENVIRONMENT=production PORT=8010
 RUN apk add --no-cache tini
 WORKDIR /app
 
