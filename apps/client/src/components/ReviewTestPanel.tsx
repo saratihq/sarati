@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
 import * as api from "@/api/client";
 import type { ReviewTestRun, ReviewTestSummary } from "@/api/client";
 import type { EnvironmentSummary } from "@/api/environments";
@@ -128,12 +128,17 @@ function RunSideRow({
 }
 
 function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflowId: string }) {
-  const green = result.verdict === "green";
+  const inconclusive = isInconclusive(result);
+  const green = result.verdict === "green" && !inconclusive;
   const { changed, added, removed } = result.regression;
   const noChanges = changed.length === 0 && added.length === 0 && removed.length === 0;
-  const Icon = green ? CheckCircle2 : XCircle;
-  const tone = green ? "var(--orchestr-success)" : "var(--orchestr-danger)";
-  const tint = green ? "var(--orchestr-success-tint)" : "var(--orchestr-danger-tint)";
+  const Icon = green ? CheckCircle2 : inconclusive ? AlertTriangle : XCircle;
+  const tone = green ? "var(--orchestr-success)" : inconclusive ? "var(--orchestr-warning)" : "var(--orchestr-danger)";
+  const tint = green
+    ? "var(--orchestr-success-tint)"
+    : inconclusive
+      ? "var(--orchestr-warning-tint)"
+      : "var(--orchestr-danger-tint)";
 
   return (
     <div className="space-y-2.5">
@@ -143,14 +148,24 @@ function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflo
           style={{ background: tint, color: tone }}
         >
           <Icon size={13} />
-          {green ? "Passed" : "Failing"}
+          {green ? "Passed" : inconclusive ? "Inconclusive" : "Failing"}
         </span>
         <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
           Tested {timeAgo(result.tested_at)}
         </span>
       </div>
 
-      {!green && (
+      {inconclusive && (
+        <div
+          className="rounded-lg py-2 px-2.5 text-[12px]"
+          style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
+        >
+          <div className="font-semibold">The target failed too, so this test can&apos;t tell.</div>
+          <div className="mt-0.5">It doesn&apos;t count for merging — re-test once the cause is resolved.</div>
+        </div>
+      )}
+
+      {!green && !inconclusive && (
         <div
           className="rounded-lg py-2 px-2.5 text-[12px]"
           style={{ background: "var(--orchestr-danger-tint)", color: "var(--orchestr-danger)" }}
@@ -279,7 +294,9 @@ export default function ReviewTestPanel({
     try {
       const summary = await api.testReviewBranch(workflowId, reviewId, body);
       onResult(summary);
-      if (summary.verdict === "green") {
+      if (isInconclusive(summary)) {
+        toast.warning("Inconclusive", "The target failed too, so this test doesn't count for merging.");
+      } else if (summary.verdict === "green") {
         toast.success("Branch passed", "No new failure introduced.");
       } else {
         toast.error("Branch is failing", summary.head.error ?? "The change errors where the baseline passed.");
@@ -422,4 +439,9 @@ export default function ReviewTestPanel({
       />
     </div>
   );
+}
+
+/** A run where the target failed too can't show whether the branch adds a failure; the merge gate ignores it. */
+function isInconclusive(result: ReviewTestSummary): boolean {
+  return result.verdict === "green" && result.head.status === "error";
 }

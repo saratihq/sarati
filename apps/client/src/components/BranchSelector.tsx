@@ -232,7 +232,7 @@ export default function BranchSelector({
             className="py-1.5 px-3 text-[10px] leading-snug"
             style={{ borderTop: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink-subtle)" }}
           >
-            Protected branches require an approved review to merge.
+            Protected branches merge only through an approved review, and not while the latest test is failing.
           </div>
 
           <div className="py-2 px-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>

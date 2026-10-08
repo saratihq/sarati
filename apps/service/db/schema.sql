@@ -1619,6 +1619,28 @@ ALTER TABLE ONLY public.workflows
 
 
 --
+-- Name: review_test_results; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.review_test_results (
+    id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    review_id uuid,
+    source_version_id uuid NOT NULL,
+    target_version_id uuid NOT NULL,
+    verdict character varying(10) NOT NULL,
+    decisive boolean NOT NULL,
+    tested_at timestamp with time zone NOT NULL,
+    summary json NOT NULL,
+    CONSTRAINT review_test_results_pkey PRIMARY KEY (id),
+    CONSTRAINT review_test_results_workflow_id_fkey FOREIGN KEY (workflow_id) REFERENCES public.workflows(id) ON DELETE CASCADE,
+    CONSTRAINT review_test_results_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.workflow_reviews(id) ON DELETE SET NULL
+);
+
+CREATE INDEX ix_review_test_results_versions ON public.review_test_results USING btree (workflow_id, source_version_id, target_version_id, tested_at DESC);
+
+
+--
 -- PostgreSQL database dump complete
 --
 

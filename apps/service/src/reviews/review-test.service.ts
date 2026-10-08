@@ -8,6 +8,7 @@ import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
+import { ReviewTestResultEntity } from '../database/entities/review-test-result.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { now } from '../database/ids';
 import type { WorkflowIR } from '../ir/models';
@@ -99,27 +100,34 @@ export class ReviewTestService {
       regression,
     };
 
-    await this.storeTest(review.id, summary);
+    await this.storeTest(workflowId, review.id, summary);
     return summary;
   }
 
   /**
-   * Record the result and nothing else — a merge, approval or close made while it ran must survive — and
-   * never let a test of older heads replace one of the current heads, which the merge gate reads.
+   * Keep the result by the versions it tested — what the merge gate reads — and show it on the review. Only
+   * `last_test` is written there: a merge, approval or close made while the test ran must survive.
    */
-  private async storeTest(reviewId: string, summary: ReviewTestSummary): Promise<void> {
+  private async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
     await this.dataSource.transaction(async (em) => {
+      if (summary.source_version_id && summary.target_version_id) {
+        const result = new ReviewTestResultEntity();
+        result.id = randomUUID();
+        result.workflowId = workflowId;
+        result.reviewId = reviewId;
+        result.sourceVersionId = summary.source_version_id;
+        result.targetVersionId = summary.target_version_id;
+        result.verdict = summary.verdict;
+        result.decisive = isDecisiveTest(summary);
+        result.testedAt = new Date(summary.tested_at);
+        result.summary = summary;
+        await em.save(ReviewTestResultEntity, result);
+      }
       const review = await em.findOne(WorkflowReviewEntity, {
         where: { id: reviewId },
         lock: { mode: 'pessimistic_write' },
       });
       if (!review) return;
-      const [source, target] = await Promise.all([
-        em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } }),
-        em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } }),
-      ]);
-      const heads = { source: source?.headVersionId ?? null, target: target?.headVersionId ?? null };
-      if (!replacesStoredTest(review.lastTest, summary, heads)) return;
       review.lastTest = summary;
       review.updatedAt = now();
       await em.save(WorkflowReviewEntity, review);
@@ -182,25 +190,4 @@ export class ReviewTestService {
 
 function sideSummary(run: SideRun): ReviewTestSide {
   return { run_id: run.runId, status: run.status, error: run.error };
-}
-
-/**
- * Whether a finished test may replace the stored one. A stored test of the current heads is kept against one of
- * older heads, and a decisive one against one that decides nothing — the merge gate reads what is stored.
- */
-export function replacesStoredTest(
-  stored: ReviewTestSummary | null,
-  incoming: ReviewTestSummary,
-  heads: { source: string | null; target: string | null },
-): boolean {
-  if (!stored || !testsHeads(stored, heads)) return true;
-  if (!testsHeads(incoming, heads)) return false;
-  return isDecisiveTest(incoming) || !isDecisiveTest(stored);
-}
-
-function testsHeads(
-  test: ReviewTestSummary | null,
-  heads: { source: string | null; target: string | null },
-): boolean {
-  return !!test && test.source_version_id === heads.source && test.target_version_id === heads.target;
 }

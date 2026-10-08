@@ -196,28 +196,52 @@ export class BranchService {
     });
   }
 
-  /** The review whose failing test would refuse merging `source` into `target` now — what the review card shows. */
+  /** The failing test that would refuse merging `source` into `target` now — what the review card shows. */
   async testBlockingMerge(
     em: EntityManager,
     workflowId: string,
     sourceBranchId: string,
     targetBranchId: string,
-  ): Promise<{ id: string; title: string } | null> {
+  ): Promise<FailingTest | null> {
     const [source, target] = await Promise.all([
       em.findOne(WorkflowBranchEntity, { where: { id: sourceBranchId } }),
       em.findOne(WorkflowBranchEntity, { where: { id: targetBranchId } }),
     ]);
     if (!target?.isProtected || !source?.headVersionId || !target.headVersionId) return null;
-    const reviews = await this.reviewsInto(em, workflowId, target.id);
-    return latestFailingTest(reviews, { source: source.headVersionId, target: target.headVersionId });
+    return this.latestFailingTest(em, workflowId, {
+      source: source.headVersionId,
+      target: target.headVersionId,
+    });
   }
 
-  private reviewsInto(
+  /**
+   * The latest DECISIVE test of exactly these two versions, from any review — kept after that review or its
+   * branch is gone — when it failed; a tie fails closed (constitution #15).
+   */
+  private async latestFailingTest(
     em: EntityManager,
     workflowId: string,
-    targetBranchId: string,
-  ): Promise<WorkflowReviewEntity[]> {
-    return em.find(WorkflowReviewEntity, { where: { workflowId, targetBranchId } });
+    heads: { source: string; target: string },
+  ): Promise<FailingTest | null> {
+    const rows = await rawQuery<{
+      verdict: string;
+      review_id: string | null;
+      title: string | null;
+      source_branch: string | null;
+    }>(
+      em,
+      `SELECT t.verdict, t.review_id, r.title, b.name AS source_branch
+         FROM review_test_results t
+         LEFT JOIN workflow_reviews r ON r.id = t.review_id
+         LEFT JOIN workflow_branches b ON b.id = r.source_branch_id
+        WHERE t.workflow_id = $1 AND t.source_version_id = $2 AND t.target_version_id = $3 AND t.decisive
+        ORDER BY t.tested_at DESC, (t.verdict = 'red') DESC
+        LIMIT 1`,
+      [workflowId, heads.source, heads.target],
+    );
+    const latest = rows[0];
+    if (latest?.verdict !== 'red') return null;
+    return { reviewId: latest.review_id, title: latest.title, sourceBranch: latest.source_branch };
   }
 
   /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */
@@ -313,22 +337,26 @@ export class BranchService {
 
       // Enforced here, not per caller, so BOTH merge entry points inherit it (constitution rows 5, 15).
       if (target.isProtected) {
-        // Approval is per pair; a test counts from any review into this branch, closed ones included.
-        const reviews = await this.reviewsInto(em, workflowId, target.id);
-        if (!reviews.some((r) => r.sourceBranchId === source.id && r.status === 'approved')) {
+        const approved = await em.count(WorkflowReviewEntity, {
+          where: { workflowId, sourceBranchId: source.id, targetBranchId: target.id, status: 'approved' },
+        });
+        if (approved === 0) {
           throw new DomainError(
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
         }
-        const failing = latestFailingTest(reviews, {
+        const failing = await this.latestFailingTest(em, workflowId, {
           source: source.headVersionId,
           target: target.headVersionId,
         });
         if (failing) {
           throw new DomainError(
-            `${PROTECTED_TARGET_TEST_FAILING} The latest test of these versions is on review "${failing.title}".`,
+            `${PROTECTED_TARGET_TEST_FAILING} ${whereItRan(failing, targetBranchName)}`,
             400,
-            { code: MERGE_TEST_FAILING, review_id: failing.id },
+            {
+              code: MERGE_TEST_FAILING,
+              review_id: failing.reviewId,
+            },
           );
         }
       }
@@ -448,27 +476,17 @@ export const PROTECTED_TARGET_TEST_FAILING =
 /** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
 export const MERGE_TEST_FAILING = 'merge_test_failing';
 
-/**
- * The review whose test of exactly these two heads is the most recent, when that test failed — any review into
- * the target counts, and a newer passing test lifts an older failure (#15). A test where the target failed too
- * decides nothing, and a tie fails closed.
- */
-export function latestFailingTest(
-  reviews: Array<Pick<WorkflowReviewEntity, 'id' | 'title' | 'lastTest'>>,
-  heads: { source: string; target: string },
-): { id: string; title: string } | null {
-  let latest: { id: string; title: string; red: boolean; at: number } | null = null;
-  for (const review of reviews) {
-    const test = review.lastTest;
-    if (!test || test.source_version_id !== heads.source || test.target_version_id !== heads.target) continue;
-    if (!isDecisiveTest(test)) continue;
-    const red = test.verdict === 'red';
-    const at = Date.parse(test.tested_at);
-    if (!latest || at > latest.at || (at === latest.at && red)) {
-      latest = { id: review.id, title: review.title, red, at };
-    }
-  }
-  return latest?.red ? { id: latest.id, title: latest.title } : null;
+/** A failing test that blocks a protected merge, and the review it was run from while that review exists. */
+export interface FailingTest {
+  reviewId: string | null;
+  title: string | null;
+  sourceBranch: string | null;
+}
+
+function whereItRan(test: FailingTest, targetBranchName: string): string {
+  return test.title === null
+    ? 'The latest test of these versions was run on a review that has since been deleted.'
+    : `The latest test of these versions is on review "${test.title}" (${test.sourceBranch ?? 'a deleted branch'} → ${targetBranchName}).`;
 }
 
 /** Whether a test can decide a merge: one where the target failed too neither shows nor rules out a new failure. */

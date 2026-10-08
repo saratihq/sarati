@@ -480,7 +480,11 @@ describe('domain invariants (the constitution)', () => {
       expect(refused.body.detail).toContain('the pre-merge test is failing');
       expect(refused.body).toMatchObject({ code: 'merge_test_failing', review_id: review });
     }
-    expect(await blockedOnCard(wf, review)).toEqual({ review_id: review, title: 'lane → main' });
+    expect(await blockedOnCard(wf, review)).toEqual({
+      review_id: review,
+      title: 'lane → main',
+      source_branch: 'lane',
+    });
 
     // A test where main fails too decides nothing, so it cannot lift a real failure.
     expect(await test(wf, review, { down: true })).toBe('green');
@@ -495,7 +499,11 @@ describe('domain invariants (the constitution)', () => {
     expect(await test(wf, siblingId, {})).toBe('green');
     expect(await blockedOnCard(wf, review)).toBeNull();
     expect(await test(wf, siblingId, { fail: true })).toBe('red');
-    expect(await blockedOnCard(wf, review)).toEqual({ review_id: siblingId, title: 'second look' });
+    expect(await blockedOnCard(wf, review)).toEqual({
+      review_id: siblingId,
+      title: 'second look',
+      source_branch: 'lane',
+    });
 
     // Closing the review that ran it does not erase that failure…
     await http().post(`/api/workflows/${wf}/reviews/${siblingId}/close`).send({}).expect(201);

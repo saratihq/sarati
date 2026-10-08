@@ -341,9 +341,13 @@ export class ReviewsService {
     await this.dataSource.transaction(async (em) => {
       const review = await this.getReviewScoped(workflowId, reviewId);
       if (review.status === 'merged') throw new DomainError('Cannot close a merged review');
-      review.status = 'closed';
-      review.updatedAt = now();
-      await em.save(WorkflowReviewEntity, review);
+      // Status only — a whole-row save would write back a test or a merge that landed after the read above.
+      const closed = await em.update(
+        WorkflowReviewEntity,
+        { id: reviewId, status: Not('merged') },
+        { status: 'closed', updatedAt: now() },
+      );
+      if (!closed.affected) throw new DomainError('Cannot close a merged review');
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       await this.events.emit(em, {
         orgId: wf?.orgId ?? null,
@@ -355,11 +359,11 @@ export class ReviewsService {
     });
   }
 
-  /** The review whose failing test refuses this merge right now, as the merge gate itself would answer. */
+  /** The failing test that refuses this merge right now, as the merge gate itself would answer. */
   private async mergeBlockedByTest(
     em: EntityManager,
     review: WorkflowReviewEntity,
-  ): Promise<{ review_id: string; title: string } | null> {
+  ): Promise<{ review_id: string | null; title: string | null; source_branch: string | null } | null> {
     if (review.status === 'merged' || review.status === 'closed') return null;
     const blocking = await this.branches.testBlockingMerge(
       em,
@@ -367,7 +371,9 @@ export class ReviewsService {
       review.sourceBranchId,
       review.targetBranchId,
     );
-    return blocking ? { review_id: blocking.id, title: blocking.title } : null;
+    return blocking
+      ? { review_id: blocking.reviewId, title: blocking.title, source_branch: blocking.sourceBranch }
+      : null;
   }
 
   private async targetHasSource(

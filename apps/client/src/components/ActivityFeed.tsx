@@ -148,6 +148,40 @@ function ApprovalRow({ approval }: { approval: ReviewApproval }) {
   );
 }
 
+/** Why a protected merge is refused right now, naming — and linking — the review whose test it is. */
+function MergeBlockedNote({
+  workflowId,
+  review,
+  blocking,
+}: {
+  workflowId: string;
+  review: ReviewSummary;
+  blocking: { review_id: string | null; title: string | null; source_branch: string | null };
+}) {
+  const query = new URLSearchParams({ branch: review.target_branch, review: blocking.review_id ?? "" });
+  return (
+    <div
+      className="text-[11px] py-1.5 px-2.5 rounded"
+      style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
+    >
+      {blocking.review_id === review.id ? (
+        "The latest test of these versions is failing"
+      ) : blocking.review_id === null ? (
+        "The latest test of these versions failed on a review that has since been deleted"
+      ) : (
+        <>
+          {"The latest test of these versions — on review "}
+          <a href={`/workflows/${workflowId}/overview?${query.toString()}`} className="underline" style={{ color: "inherit" }}>
+            {blocking.title}
+          </a>
+          {` (${blocking.source_branch ?? "a deleted branch"} → ${review.target_branch}) — is failing`}
+        </>
+      )}
+      {`, so merging into ${review.target_branch} is blocked. Commit a fix, or re-test once the cause is resolved.`}
+    </div>
+  );
+}
+
 interface ReviewFeedCardProps {
   workflowId: string;
   review: ReviewSummary;
@@ -158,6 +192,9 @@ interface ReviewFeedCardProps {
   onApproval: (review: ReviewSummary, decision: "approved" | "rejected", comment?: string) => void;
   onMergeRequest: (review: ReviewSummary) => void;
   onCloseReview: (review: ReviewSummary) => void;
+  /** Bumped after any pre-merge test in the feed: a test on one review can change whether another may merge. */
+  testEpoch: number;
+  onTested: () => void;
 }
 
 function ReviewFeedCard({
@@ -169,6 +206,8 @@ function ReviewFeedCard({
   onApproval,
   onMergeRequest,
   onCloseReview,
+  testEpoch,
+  onTested,
 }: ReviewFeedCardProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
   // Each branch's newest version, resolved once on first expand.
@@ -184,8 +223,6 @@ function ReviewFeedCard({
   const [note, setNote] = useState("");
   // This review's latest pre-merge test, for the test panel; the merge-gate warning reads the service's answer.
   const [testResult, setTestResult] = useState<ReviewTestSummary | null>(null);
-  // Bumped after a test here, so the detail — and with it the gate's answer — is fetched again.
-  const [detailVersion, setDetailVersion] = useState(0);
 
   useEffect(() => {
     if (!expanded || resolved) return;
@@ -236,7 +273,7 @@ function ReviewFeedCard({
     return () => {
       cancelled = true;
     };
-  }, [expanded, workflowId, review.id, review.updated_at, detailVersion]);
+  }, [expanded, workflowId, review.id, review.updated_at, testEpoch]);
 
   const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
   const actionable = review.status !== "merged" && review.status !== "closed";
@@ -354,7 +391,7 @@ function ReviewFeedCard({
               result={testResult}
               onResult={(result) => {
                 setTestResult(result);
-                setDetailVersion((v) => v + 1);
+                onTested();
               }}
               canRun={actionable}
             />
@@ -438,15 +475,11 @@ function ReviewFeedCard({
                 />
               )}
               {!nothingToReview && detail?.merge_blocked_by_test && (
-                <div
-                  className="text-[11px] py-1.5 px-2.5 rounded"
-                  style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
-                >
-                  {detail.merge_blocked_by_test.review_id === review.id
-                    ? "The latest test of these versions is failing"
-                    : `The latest test of these versions, on review "${detail.merge_blocked_by_test.title}", is failing`}
-                  {`, so merging into ${review.target_branch} is blocked. Commit a fix, or re-test once the cause is resolved.`}
-                </div>
+                <MergeBlockedNote
+                  workflowId={workflowId}
+                  review={review}
+                  blocking={detail.merge_blocked_by_test}
+                />
               )}
               <div className="flex gap-2">
                 {!nothingToReview && (
@@ -509,6 +542,8 @@ export default function ActivityFeed({
   const isMain = branch === "main";
 
   const [versions, setVersions] = useState<WorkflowVersionSummary[] | null>(null);
+  const [testEpoch, setTestEpoch] = useState(0);
+  const bumpTestEpoch = useCallback(() => setTestEpoch((e) => e + 1), []);
   const [reviews, setReviews] = useState<ReviewSummary[] | null>(null);
   // Per-environment live pointers: env badges and the promote picker both read from here.
   const [envPointers, setEnvPointers] = useState<EnvPointer[]>([]);
@@ -1374,6 +1409,8 @@ export default function ActivityFeed({
                 onApproval={handleApproval}
                 onMergeRequest={handleMergeRequest}
                 onCloseReview={handleCloseRequest}
+                testEpoch={testEpoch}
+                onTested={bumpTestEpoch}
               />
             ),
           )}
