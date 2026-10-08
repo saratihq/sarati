@@ -15,6 +15,7 @@ import { EventsService } from '../events/events.service';
 import { computeDiff } from '../ir/diff';
 import { threeWayMerge, type ConflictEntry, type MergeResolution } from '../ir/merge';
 import type { WorkflowIR } from '../ir/models';
+import type { ReviewTestSummary } from '../reviews/review-test.types';
 import { rawQuery } from '../database/raw-query';
 export interface BranchMergeOutcome {
   success: boolean;
@@ -286,19 +287,23 @@ export class BranchService {
         throw new DomainError('Both branches must have at least one commit');
       }
 
-      // Enforced here, not per caller, so the branches page inherits it too (constitution row 5).
+      // Enforced here, not per caller, so BOTH merge entry points inherit it (constitution rows 5, 15).
       if (target.isProtected) {
-        const approvals = await em
+        const reviews = await em
           .createQueryBuilder(WorkflowReviewEntity, 'r')
           .where('r.workflow_id = :workflowId', { workflowId })
           .andWhere('r.source_branch_id = :sourceId', { sourceId: source.id })
           .andWhere('r.target_branch_id = :targetId', { targetId: target.id })
-          .andWhere('r.status = :status', { status: 'approved' })
-          .getCount();
-        if (approvals === 0) {
+          .andWhere('r.status IN (:...statuses)', { statuses: ['open', 'approved'] })
+          .getMany();
+        if (!reviews.some((r) => r.status === 'approved')) {
           throw new DomainError(
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
+        }
+        const heads = { source: source.headVersionId, target: target.headVersionId };
+        if (reviews.some((r) => failsOnTheseHeads(r.lastTest, heads))) {
+          throw new DomainError(PROTECTED_TARGET_TEST_FAILING);
         }
       }
 
@@ -408,4 +413,20 @@ export class BranchService {
     // Native: the IR is stored directly; workflow_json is the same document.
     return (version.workflowIr ?? version.workflowJson) as unknown as WorkflowIR;
   }
+}
+
+/** Refusal when a current test of the very heads being merged is failing (constitution row 15). */
+export const PROTECTED_TARGET_TEST_FAILING =
+  'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging.';
+
+/** A red test of exactly these two heads; once either head has moved, it says nothing about this merge. */
+function failsOnTheseHeads(
+  test: ReviewTestSummary | null,
+  heads: { source: string; target: string },
+): boolean {
+  return (
+    test?.verdict === 'red' &&
+    test.source_version_id === heads.source &&
+    test.target_version_id === heads.target
+  );
 }

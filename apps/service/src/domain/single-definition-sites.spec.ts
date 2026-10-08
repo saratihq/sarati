@@ -59,6 +59,15 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(fills).toEqual(['providers/action-router.provider.ts']);
   });
 
+  /** Constitution #15: a failing pre-merge test blocks a protected merge in `mergeBranchIn` alone, so no entry point can skip it. */
+  it('only mergeBranchIn decides a merge on a failing test', () => {
+    const deciders = sources()
+      .filter((f) => /verdict\s*===\s*['"]red['"]/.test(f.text))
+      .map((f) => f.rel);
+
+    expect(deciders).toEqual(['workflows/branch.service.ts']);
+  });
+
   /** Constitution #16: `WorkflowAccessService.require` is the only place allowed to decide it. */
   it('no route re-decides workflow access inline — it asks WorkflowAccessService', () => {
     // Loading a workflow AND deciding on it is the pattern; authorizing a CREATE has no workflow to

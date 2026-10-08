@@ -439,7 +439,7 @@ function ReviewFeedCard({
                   style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
                 >
                   {testIsCurrent(testResult, detail)
-                    ? `The latest test is failing. If ${review.target_branch} is protected, merging from this review is blocked until a re-test passes or either branch gets a new commit.`
+                    ? `The latest test is failing. If ${review.target_branch} is protected, merging is blocked until a re-test passes or either branch gets a new commit.`
                     : "The last test failed, but a branch has moved since — re-test to see where this stands."}
                 </div>
               )}

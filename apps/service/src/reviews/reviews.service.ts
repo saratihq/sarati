@@ -286,20 +286,6 @@ export class ReviewsService {
           throw new DomainError('Target branch is protected — review must be approved before merging');
         }
 
-        // A protected target blocks on a red pre-merge test only while it is FRESH
-        // (tested heads still match the branch heads) — a stale red or an absent test never blocks.
-        const test = review.lastTest;
-        if (
-          target.isProtected &&
-          test?.verdict === 'red' &&
-          test.source_version_id === source.headVersionId &&
-          test.target_version_id === target.headVersionId
-        ) {
-          throw new DomainError(
-            'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging.',
-          );
-        }
-
         const result = await this.branches.mergeBranchIn(
           em,
           workflowId,
