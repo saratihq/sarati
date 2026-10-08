@@ -352,4 +352,68 @@ describe('Platform MCP workflow reads (e2e, real client, isolated DB)', () => {
       .set('Authorization', `Bearer ${writeOnlyKey}`)
       .expect(403);
   });
+
+  it('orchestr_get_workflow hands a large workflow back whole, and refuses one past the ceiling instead of trimming it', async () => {
+    const seedWorkflow = async (name: string, steps: number): Promise<string> => {
+      const wfId = randomUUID();
+      const branchId = randomUUID();
+      const versionId = randomUUID();
+      const nodes = Array.from({ length: steps }, (_, i) => ({
+        id: `step-${i}`,
+        name: `Step ${i}`,
+        node_type: 'orchestr:code',
+        type_version: 1,
+        parameters: { language: 'js', code: `// ${'x'.repeat(1_000)}\nreturn { i: ${i} };` },
+        position: { x: i * 300, y: 0 },
+        metadata: {},
+      }));
+      const edges = nodes.slice(1).map((node, i) => ({
+        id: `e${i}`,
+        source_node_id: `step-${i}`,
+        source_port: 0,
+        target_node_id: node.id,
+        target_port: 0,
+        port_type: 'main',
+      }));
+      const doc = JSON.stringify({
+        version: '1',
+        name,
+        description: '',
+        nodes,
+        edges,
+        settings: {},
+        metadata: {},
+      });
+      await db.query(
+        `INSERT INTO workflows (id, name, source, user_id, org_id, created_at, updated_at)
+         VALUES ($1, $2, 'generated', $3, $4, now() - interval '5 hour', now() - interval '5 hour')`,
+        [wfId, name, userId, orgId],
+      );
+      await db.query(
+        `INSERT INTO workflow_branches (id, workflow_id, name, is_default, created_at) VALUES ($1, $2, 'main', true, now())`,
+        [branchId, wfId],
+      );
+      await db.query(
+        `INSERT INTO workflow_versions (id, workflow_id, version_number, workflow_json, workflow_ir, commit_message, branch_id, created_at)
+         VALUES ($1, $2, 1, $3, $3, 'Initial', $4, now())`,
+        [versionId, wfId, doc, branchId],
+      );
+      await db.query(`UPDATE workflows SET default_branch_id = $1 WHERE id = $2`, [branchId, wfId]);
+      await db.query(`UPDATE workflow_branches SET head_version_id = $1 WHERE id = $2`, [
+        versionId,
+        branchId,
+      ]);
+      return wfId;
+    };
+
+    const large = await call('orchestr_get_workflow', { workflow_id: await seedWorkflow('Gamma Flow', 30) });
+    expect(large.isError).toBeFalsy();
+    const out = large.structuredContent as { nodes: unknown[]; edges: unknown[] };
+    expect(out.nodes).toHaveLength(30);
+    expect(out.edges).toHaveLength(29);
+
+    const huge = await call('orchestr_get_workflow', { workflow_id: await seedWorkflow('Delta Flow', 250) });
+    expect(huge.isError).toBe(true);
+    expect(huge.structuredContent).toMatchObject({ code: 'document_too_large' });
+  });
 });

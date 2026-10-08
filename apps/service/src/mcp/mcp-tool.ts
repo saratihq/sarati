@@ -22,6 +22,8 @@ export interface McpTool {
   readonly inputSchema: ZodType;
   readonly outputSchema: ZodType;
   readonly annotations: ToolAnnotations;
+  /** Its result is a document the caller hands back (read → edit → commit): returned whole or refused, never trimmed. */
+  readonly returnsDocument?: true;
   run(input: unknown, ctx: McpCallContext): Promise<unknown>;
 }
 

@@ -242,4 +242,27 @@ describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
     expect(names).not.toContain('orchestr_commit');
     await client.close();
   });
+
+  it('two live workflows whose tool names come out the same are both left out, and nothing else breaks', async () => {
+    await publish(toolDoc('first ', 'Daily digest'));
+    await publish(toolDoc('second ', 'daily-digest'));
+
+    const client = await connect(invokeKey);
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('daily_digest');
+    expect(names).toContain('greet_person');
+    await client.close();
+  });
+
+  it('a published tool whose name the SDK refuses is left out on its own, and the surface stays up', async () => {
+    await publish(toolDoc('proto ', 'Constructor'));
+
+    const client = await connect(invokeKey);
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('constructor');
+    expect(names).toContain('greet_person');
+    await client.close();
+  });
 });

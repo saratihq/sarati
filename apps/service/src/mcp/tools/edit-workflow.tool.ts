@@ -76,6 +76,7 @@ export class EditWorkflowTool implements McpTool {
     idempotentHint: true,
     openWorldHint: false,
   };
+  readonly returnsDocument = true as const;
 
   constructor(
     private readonly catalog: ComposeCatalogService,
