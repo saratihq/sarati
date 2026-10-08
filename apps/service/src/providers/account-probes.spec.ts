@@ -40,7 +40,12 @@ describe('which account a connection is authorized against', () => {
   });
 
   it("reads the Gmail mailbox's address, wrapped or as our action shapes it", () => {
-    const profile = { emailAddress: 'huzefa@sarati.io', historyId: '3267', messagesTotal: 5, threadsTotal: 5 };
+    const profile = {
+      emailAddress: 'huzefa@sarati.io',
+      historyId: '3267',
+      messagesTotal: 5,
+      threadsTotal: 5,
+    };
     const expected = {
       subject: 'user',
       name: null,

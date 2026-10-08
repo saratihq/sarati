@@ -309,10 +309,14 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
 function accountValue(account: AccountIdentity | null, field: string, provider: string): string {
   const ref = accountRefText(field);
   if (!isAccountRefField(field)) {
-    throw new DomainError(`${ref} isn't something Sarati knows about an account — use email, handle, id or name`);
+    throw new DomainError(
+      `${ref} isn't something Sarati knows about an account — use email, handle, id or name`,
+    );
   }
   if (!account) {
-    throw new DomainError(`Sarati can't tell which ${provider} account this step runs as, so ${ref} has no value`);
+    throw new DomainError(
+      `Sarati can't tell which ${provider} account this step runs as, so ${ref} has no value`,
+    );
   }
   if (account.subject !== 'user') {
     throw new DomainError(
@@ -320,6 +324,7 @@ function accountValue(account: AccountIdentity | null, field: string, provider: 
     );
   }
   const value = account[field];
-  if (value === null) throw new DomainError(`${provider} doesn't share this account's ${field}, so ${ref} has no value`);
+  if (value === null)
+    throw new DomainError(`${provider} doesn't share this account's ${field}, so ${ref} has no value`);
   return value;
 }

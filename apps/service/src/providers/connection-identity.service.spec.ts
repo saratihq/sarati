@@ -1,5 +1,9 @@
 import type { AccountIdentity } from '../connections/account-identity';
-import type { ActivatedConnection, ConnectionsService, StoredAccount } from '../connections/connections.service';
+import type {
+  ActivatedConnection,
+  ConnectionsService,
+  StoredAccount,
+} from '../connections/connections.service';
 import type { AccountTarget } from './account-probes';
 import type { ActionRouterProvider } from './action-router.provider';
 import { ConnectionIdentityService } from './connection-identity.service';

@@ -24,7 +24,9 @@ function build(stored: Record<string, StoredAccount>, slot?: { id: string; owner
         input.actionId === 'gmail.get_profile' ? { emailAddress: 'probed@e2e.local' } : { sent: input.props },
     }),
   );
-  const accountOf = jest.fn((userId: string, id: string) => Promise.resolve(stored[`${userId}:${id}`] ?? null));
+  const accountOf = jest.fn((userId: string, id: string) =>
+    Promise.resolve(stored[`${userId}:${id}`] ?? null),
+  );
   const recordAccount = jest.fn(() => Promise.resolve());
   const router = new ActionRouterProvider(
     {
@@ -40,7 +42,9 @@ function build(stored: Record<string, StoredAccount>, slot?: { id: string; owner
       recordAccount,
     } as unknown as ConnectionsService,
     { get: () => ({ composioFallbackApps: '' }) } as unknown as ConfigService<{ env: EnvConfig }, true>,
-    { scopeFor: (userId: string) => Promise.resolve({ kind: 'user', userId }) } as unknown as PlatformKeysService,
+    {
+      scopeFor: (userId: string) => Promise.resolve({ kind: 'user', userId }),
+    } as unknown as PlatformKeysService,
   );
   return { router, runOurs, accountOf, recordAccount };
 }
@@ -54,13 +58,17 @@ const send = (props: Record<string, unknown>, over: Partial<RunActionInput> = {}
 });
 
 const sentProps = (runOurs: jest.Mock): unknown => {
-  const call = runOurs.mock.calls.find(([input]) => (input as RunActionInput).actionId === 'gmail.send_email');
+  const call = runOurs.mock.calls.find(
+    ([input]) => (input as RunActionInput).actionId === 'gmail.send_email',
+  );
   return (call?.[0] as RunActionInput | undefined)?.props;
 };
 
 describe('{{$account…}} in the action router', () => {
   it('fills the account the step runs as, from what the provider last said', async () => {
-    const { router, runOurs } = build({ 'u1:c1': { provider: 'gmail', account: MAILBOX, checkedAt: new Date() } });
+    const { router, runOurs } = build({
+      'u1:c1': { provider: 'gmail', account: MAILBOX, checkedAt: new Date() },
+    });
     await router.runAction(send({ to: '{{$account.email}}', subject: 'For {{$account.email}}' }));
     expect(sentProps(runOurs)).toEqual({ to: 'me@e2e.local', subject: 'For me@e2e.local' });
     expect(runOurs).toHaveBeenCalledTimes(1);
@@ -82,7 +90,11 @@ describe('{{$account…}} in the action router', () => {
     const { router, runOurs, accountOf } = build(
       {
         'u1:c1': { provider: 'gmail', account: MAILBOX, checkedAt: new Date() },
-        'owner:slot': { provider: 'gmail', account: { ...MAILBOX, email: 'ops@e2e.local' }, checkedAt: new Date() },
+        'owner:slot': {
+          provider: 'gmail',
+          account: { ...MAILBOX, email: 'ops@e2e.local' },
+          checkedAt: new Date(),
+        },
       },
       { id: 'slot', ownerUserId: 'owner' },
     );
@@ -92,17 +104,32 @@ describe('{{$account…}} in the action router', () => {
   });
 
   it.each([
-    ['an app Sarati cannot ask', { provider: 'claude', account: null, checkedAt: null }, '{{$account.email}}', "can't tell which claude account"],
+    [
+      'an app Sarati cannot ask',
+      { provider: 'claude', account: null, checkedAt: null },
+      '{{$account.email}}',
+      "can't tell which claude account",
+    ],
     [
       'a workspace, not a person',
       { provider: 'slack', account: { ...MAILBOX, subject: 'workspace' as const }, checkedAt: new Date() },
       '{{$account.email}}',
       'which workspace this connection is in',
     ],
-    ['a field no account has', { provider: 'gmail', account: MAILBOX, checkedAt: new Date() }, '{{$account.phone}}', "isn't something Sarati knows"],
-    ['a field this provider does not share', { provider: 'gmail', account: MAILBOX, checkedAt: new Date() }, '{{$account.handle}}', "doesn't share this account's handle"],
+    [
+      'a field no account has',
+      { provider: 'gmail', account: MAILBOX, checkedAt: new Date() },
+      '{{$account.phone}}',
+      "isn't something Sarati knows",
+    ],
+    [
+      'a field this provider does not share',
+      { provider: 'gmail', account: MAILBOX, checkedAt: new Date() },
+      '{{$account.handle}}',
+      "doesn't share this account's handle",
+    ],
   ])('fails the step before the action runs for %s', async (_case, stored, ref, message) => {
-    const { router, runOurs } = build({ 'u1:c1': stored as StoredAccount });
+    const { router, runOurs } = build({ 'u1:c1': stored });
     await expect(router.runAction(send({ to: ref }))).rejects.toThrow(message);
     expect(sentProps(runOurs)).toBeUndefined();
   });
