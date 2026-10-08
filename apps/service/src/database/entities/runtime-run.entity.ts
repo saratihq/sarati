@@ -98,6 +98,10 @@ export class RuntimeRunEntity {
   /** The exact version this run executed — null for inline-plan/raw-IR runs or a deleted version. */
   @Column({ name: 'workflow_version_id', type: 'uuid', nullable: true })
   workflowVersionId!: string | null;
+
+  /** The org the run executed in — its workflow's, else the caller's; kept when the workflow is deleted. */
+  @Column({ name: 'org_id', type: 'uuid', nullable: true })
+  orgId!: string | null;
 }
 
 /** One executed step (action/delay/waitForEvent); `step_key` is loop-iteration-unique. */

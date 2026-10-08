@@ -24,7 +24,7 @@ import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.se
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
-import { reachesRunWorkflow, runReachSql, type RunAccess } from './run-access';
+import { reachesRun, runReachSql, type RunAccess } from './run-access';
 import { failedNodeIdOf, type RunFailureDetails } from './run-failure';
 
 /** ~2KB cap for the per-step `output_preview` the runs panel renders. */
@@ -153,6 +153,7 @@ export class RunsService {
       environmentId: opts.environmentId ?? null,
       reviewId: opts.reviewId ?? null,
       dryRun: opts.dryRun ?? false,
+      orgId: opts.orgId ?? null,
     });
     try {
       const result = await this.execute(plan, scoped, opts);
@@ -273,6 +274,7 @@ export class RunsService {
       dryRun: opts.dryRun ?? false,
       parentRunId: opts.parentRunId,
       parentStepKey: opts.parentStepKey,
+      orgId: opts.orgId ?? null,
     });
     return this.interpreter.run(plan, {
       externalUserId: opts.externalUserId,
@@ -341,6 +343,7 @@ export class RunsService {
         environmentId: opts.environmentId ?? null,
         workflowVersionId: opts.workflowVersionId ?? null,
         reviewId: opts.reviewId ?? null,
+        orgId: opts.orgId ?? opts.activeOrgId ?? null,
       });
       await this.recorder?.runFinished(scoped, null, message);
       throw new DomainError(message, 400, {
@@ -510,6 +513,7 @@ export class RunsService {
       source: opts.source ?? 'api',
       environment: opts.environment ?? null,
       environmentId: opts.environmentId ?? null,
+      orgId: opts.orgId ?? opts.activeOrgId ?? null,
     });
     await this.dbos.startDurably(dag, {
       externalUserId: opts.externalUserId,
@@ -525,15 +529,18 @@ export class RunsService {
   /** A run's status + step log from the history tables; a still-`running` durable run is overlaid with live DBOS status. */
   async getRun(runId: string, access: RunAccess, opts: GetRunOptions = {}): Promise<RunDetail> {
     const em = this.dataSource?.manager;
-    const row = em ? await this.resolveActionableRun(em, runId, access) : null;
+    const { row, recorded } = em
+      ? await this.resolveActionableRun(em, runId, access)
+      : { row: null, recorded: false };
     // Key downstream lookups off the run's REAL (owner-scoped) id so an org-wide approver reads the same run.
     const scoped = row?.id ?? this.scopedRunId(access.userId, runId);
 
     if (!row) {
-      // No record: a durable run can still answer from DBOS; without DBOS there is nothing to consult.
-      const live = this.dbosEnabled
-        ? await this.dbos.getRunStatus(scoped)
-        : ({ status: 'not_found' } as const);
+      // No record: a durable run can still answer from DBOS. A record that was refused must not.
+      const live =
+        this.dbosEnabled && !recorded
+          ? await this.dbos.getRunStatus(scoped)
+          : ({ status: 'not_found' } as const);
       return {
         ...live,
         runId,
@@ -581,7 +588,7 @@ export class RunsService {
       decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
       decided_at: row.decidedAt?.toISOString() ?? null,
       steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false)),
-      ...(em ? await this.subWorkflowLinks(em, row, scoped) : { called_by: null, calls: [] }),
+      ...(em ? await this.subWorkflowLinks(em, row, scoped, access) : { called_by: null, calls: [] }),
       started_at: row.startedAt?.toISOString() ?? null,
       finished_at: row.finishedAt?.toISOString() ?? null,
       workflow_id: row.workflowId,
@@ -603,14 +610,23 @@ export class RunsService {
     em: EntityManager,
     run: { parentRunId: string | null; parentStepKey: string | null },
     scoped: string,
+    access: RunAccess,
   ): Promise<{ called_by: SubWorkflowRunLink | null; calls: SubWorkflowRunLink[] }> {
     const select = `SELECT r.run_id, r.parent_step_key, r.workflow_id, r.status, w.name AS workflow_name
                       FROM runtime_runs r LEFT JOIN workflows w ON w.id = r.workflow_id`;
+    const reach = [access.orgIds, access.pinned];
     const [parents, children] = await Promise.all([
       run.parentRunId
-        ? rawQuery<SubWorkflowRunRow>(em, `${select} WHERE r.id = $1`, [run.parentRunId])
+        ? rawQuery<SubWorkflowRunRow>(em, `${select} WHERE r.id = $1 AND ${runReachSql(2, 3)}`, [
+            run.parentRunId,
+            ...reach,
+          ])
         : Promise.resolve([]),
-      rawQuery<SubWorkflowRunRow>(em, `${select} WHERE r.parent_run_id = $1 ORDER BY r.started_at`, [scoped]),
+      rawQuery<SubWorkflowRunRow>(
+        em,
+        `${select} WHERE r.parent_run_id = $1 AND ${runReachSql(2, 3)} ORDER BY r.started_at`,
+        [scoped, ...reach],
+      ),
     ]);
     const parentRow = parents[0];
     return {
@@ -652,7 +668,7 @@ export class RunsService {
       `SELECT org_id FROM workflows WHERE id = $1`,
       [workflowId],
     );
-    if (!reachesRunWorkflow(access, rows[0] ? rows[0].org_id : null)) return null;
+    if (!reachesRun(access, { orgId: rows[0]?.org_id ?? null, hasWorkflow: true })) return null;
     return this.latestRunOutputs(access.userId, workflowId);
   }
 
@@ -781,7 +797,7 @@ export class RunsService {
       this.requireDbos();
       return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, payload);
     }
-    const row = await this.resolveActionableRun(em, runId, access);
+    const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     const scoped = row.id;
     if (row.status !== 'waiting' || !row.waitingTopic) {
@@ -821,7 +837,7 @@ export class RunsService {
       await this.dbos.cancelWorkflow(this.scopedRunId(access.userId, runId));
       return { runId, status: 'cancelled' };
     }
-    const row = await this.resolveActionableRun(em, runId, access);
+    const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     if (row.status === 'completed' || row.status === 'error' || row.status === 'cancelled') {
       return { runId, status: row.status };
@@ -875,7 +891,7 @@ export class RunsService {
     em: EntityManager,
     runRef: string,
     access: RunAccess,
-  ): Promise<RuntimeRunEntity | null> {
+  ): Promise<{ row: RuntimeRunEntity | null; recorded: boolean }> {
     // Resolve the inbox's UNIQUE row id (`<owner>:<run>`) EXACTLY — the PK allows the same
     // run_id across users, so matching on run_id could pick the wrong run.
     const exact =
@@ -883,31 +899,30 @@ export class RunsService {
       // Back-compat: a bare run_id, scoped to the caller so it can never resolve another user's run.
       (await em.findOne(RuntimeRunEntity, { where: { id: this.scopedRunId(access.userId, runRef) } }));
     if (exact) {
-      if (!reachesRunWorkflow(access, await this.workflowOrgOf(em, exact.workflowId))) return null;
-      if (exact.userId === access.userId) return exact;
+      const orgId = exact.orgId ?? (exact.workflowId ? await this.workflowOrgOf(em, exact.workflowId) : null);
+      if (!reachesRun(access, { orgId, hasWorkflow: exact.workflowId !== null })) {
+        return { row: null, recorded: true };
+      }
+      if (exact.userId === access.userId) return { row: exact, recorded: true };
       if (access.orgWide && access.activeOrgId && exact.workflowId) {
         const inOrg: unknown[] = await em.query(
           `SELECT 1 FROM workflows WHERE id = $1 AND org_id = $2 LIMIT 1`,
           [exact.workflowId, access.activeOrgId],
         );
-        if (inOrg.length > 0) return exact;
+        if (inOrg.length > 0) return { row: exact, recorded: true };
       }
-      return null; // exists but not the caller's to touch → indistinguishable 404
+      return { row: null, recorded: true }; // exists but not the caller's to touch → indistinguishable 404
     }
-    return null;
+    return { row: null, recorded: false };
   }
 
-  /** The org of a run's workflow: `undefined` when the run has no workflow, null when it is org-less or gone. */
-  private async workflowOrgOf(
-    em: EntityManager,
-    workflowId: string | null,
-  ): Promise<string | null | undefined> {
-    if (!workflowId) return undefined;
+  /** The org of a run's workflow, for a run recorded before runs kept their own; null when org-less or gone. */
+  private async workflowOrgOf(em: EntityManager, workflowId: string): Promise<string | null> {
     const rows: Array<{ org_id: string | null }> = await em.query(
       `SELECT org_id FROM workflows WHERE id = $1`,
       [workflowId],
     );
-    return rows[0] ? rows[0].org_id : null;
+    return rows[0]?.org_id ?? null;
   }
 
   private requireDbos(): void {

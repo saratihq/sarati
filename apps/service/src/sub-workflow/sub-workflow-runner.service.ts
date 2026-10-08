@@ -144,10 +144,8 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
     const wf = await em.findOne(WorkflowEntity, { where: { id } });
     if (!wf) throw notFound;
     const sameOrg = ctx.orgId !== null && wf.orgId === ctx.orgId;
-    // Deliberately BROADER than `assertWorkflowRunnable` (org-only): a caller may call their OWN
-    // workflow from an org-less run. Safe because the sub-run executes AS the caller, granting no
-    // access they don't already have.
-    const owned = wf.userId !== null && wf.userId === ctx.externalUserId;
+    // The creator may call their own workflow only while it has no org; inside an org, the org decides.
+    const owned = wf.orgId === null && wf.userId !== null && wf.userId === ctx.externalUserId;
     if (!sameOrg && !owned) throw notFound;
     return wf;
   }

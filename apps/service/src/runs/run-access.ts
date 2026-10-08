@@ -29,14 +29,14 @@ export async function runAccessOf(principal: Principal, policy: PolicyService): 
   };
 }
 
-/** Whether a run of a workflow in this org is within reach; `undefined` = the run has no workflow at all. */
-export function reachesRunWorkflow(access: RunAccess, workflowOrgId: string | null | undefined): boolean {
-  if (workflowOrgId === undefined) return true;
-  if (workflowOrgId === null) return !access.pinned;
-  return access.orgIds.includes(workflowOrgId);
+/** Whether a run is within reach: an org's run only through that org; an org-less run follows its workflow, or is its owner's. */
+export function reachesRun(access: RunAccess, run: { orgId: string | null; hasWorkflow: boolean }): boolean {
+  if (run.orgId !== null) return access.orgIds.includes(run.orgId);
+  return run.hasWorkflow ? !access.pinned : true;
 }
 
-/** {@link reachesRunWorkflow} as SQL over `runtime_runs r LEFT JOIN workflows w`, for the given `$n` positions. */
+/** {@link reachesRun} as SQL over `runtime_runs r LEFT JOIN workflows w`, for the given `$n` positions. */
 export function runReachSql(orgIdsParam: number, pinnedParam: number): string {
-  return `(r.workflow_id IS NULL OR w.org_id = ANY($${orgIdsParam}::uuid[]) OR (w.org_id IS NULL AND NOT $${pinnedParam}::boolean))`;
+  const org = 'COALESCE(r.org_id, w.org_id)';
+  return `(CASE WHEN ${org} IS NOT NULL THEN ${org} = ANY($${orgIdsParam}::uuid[]) WHEN r.workflow_id IS NOT NULL THEN NOT $${pinnedParam}::boolean ELSE true END)`;
 }

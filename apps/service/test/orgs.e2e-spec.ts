@@ -573,18 +573,29 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       [orgId],
     );
     const acmeFlow = acme.rows[0]!.id;
-    const seedRun = async (owner: string, workflowId: string, status: string): Promise<string> => {
+    const seedRun = async (owner: string, workflowId: string | null, status: string): Promise<string> => {
       const runId = `reach-${randomUUID()}`;
       await db.query(
-        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, outputs, workflow_id, waiting_topic, finished_at)
-         VALUES ($1, $2, $3, 'p', $4, '{"trigger":{"secret":"acme"}}'::json, $5, $6, now())`,
-        [`${owner}:${runId}`, runId, owner, status, workflowId, status === 'waiting' ? 'approve' : null],
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, outputs, workflow_id, waiting_topic, finished_at, org_id)
+         VALUES ($1, $2, $3, 'p', $4, '{"trigger":{"secret":"acme"}}'::json, $5, $6, now(), $7)`,
+        [
+          `${owner}:${runId}`,
+          runId,
+          owner,
+          status,
+          workflowId,
+          status === 'waiting' ? 'approve' : null,
+          orgId,
+        ],
       );
       return `${owner}:${runId}`;
     };
     const done = await seedRun(userB, theirs, 'completed');
     const parked = await seedRun(userB, theirs, 'waiting');
     const aliceRun = await seedRun(userA, acmeFlow, 'completed');
+    // A run whose workflow was deleted since: the workflow link is gone, the org it ran in is not.
+    const orphaned = await seedRun(userB, null, 'completed');
+    const aliceOrphaned = await seedRun(userA, null, 'completed');
 
     expect((await asB(http().get(`/api/runs/${done}`)).expect(200)).body.status).toBe('completed');
     const listed = await asB(http().get(`/api/runs?workflow_id=${theirs}`)).expect(200);
@@ -597,6 +608,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       )
     ).rows[0]!;
     try {
+      expect((await asB(http().get(`/api/runs/${orphaned}`)).expect(200)).body.status).toBe('not_found');
       const gone = await asB(http().get(`/api/runs/${done}`)).expect(200);
       expect(gone.body).toMatchObject({ status: 'not_found', workflow_id: null });
       expect(gone.body.outputs ?? null).toBeNull();
@@ -619,9 +631,74 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     const asPinned = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${pinned}`);
     expect((await asA(http().get(`/api/runs/${aliceRun}`)).expect(200)).body.status).toBe('completed');
     expect((await asPinned(http().get(`/api/runs/${aliceRun}`)).expect(200)).body.status).toBe('not_found');
+    expect((await asA(http().get(`/api/runs/${aliceOrphaned}`)).expect(200)).body.status).toBe('completed');
+    expect((await asPinned(http().get(`/api/runs/${aliceOrphaned}`)).expect(200)).body.status).toBe(
+      'not_found',
+    );
     expect((await asPinned(http().get(`/api/runs?workflow_id=${acmeFlow}`)).expect(200)).body.runs).toEqual(
       [],
     );
+  });
+
+  it('an owner invite an admin minted before this rule cannot be redeemed, by preview, accept or sign-up', async () => {
+    const userD = randomUUID();
+    const keyD = 'ork_e2e_joiner_dddddddddddddddddddddd';
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'joiner-d@e2e.local', 'Joiner D', now(), now())`,
+      [userD],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'd', $2, $3, now())`,
+      [userD, hash(keyD), keyD.slice(0, 12)],
+    );
+    const asD = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyD}`);
+    const seedOwnerInvite = async (createdBy: string, email = 'joiner-d@e2e.local'): Promise<string> => {
+      const token = `tok_${randomUUID().replace(/-/g, '')}`;
+      await db.query(
+        `INSERT INTO org_invites (id, org_id, email, role, token, created_by, created_at, expires_at)
+         VALUES (gen_random_uuid(), $1, $4, 'owner', $2, $3, now(), now() + interval '1 day')`,
+        [orgId, token, createdBy, email],
+      );
+      return token;
+    };
+    const setB = (role: string) =>
+      db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [orgId, userB, role]);
+    const { role } = (
+      await db.query<{ role: string }>(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+      ])
+    ).rows[0]!;
+    await setB('admin');
+    try {
+      const byAdmin = await seedOwnerInvite(userB);
+      await asD(http().get(`/api/orgs/invites/${byAdmin}`)).expect(404);
+      await asD(http().post(`/api/orgs/invites/${byAdmin}/accept`)).expect(404);
+      const member = await db.query(`SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userD,
+      ]);
+      expect(member.rowCount).toBe(0);
+      const forNewcomer = await seedOwnerInvite(userB, 'newcomer@e2e.local');
+      const signup = await http()
+        .post('/api/auth/local/register')
+        .send({
+          email: 'newcomer@e2e.local',
+          password: 'a-long-enough-passphrase',
+          invite_token: forNewcomer,
+        })
+        .expect(403);
+      expect(signup.body.code).toBe('signup_closed');
+
+      const byOwner = await seedOwnerInvite(userA);
+      await asD(http().get(`/api/orgs/invites/${byOwner}`)).expect(200);
+    } finally {
+      await setB(role);
+      await db.query(
+        `DELETE FROM org_invites WHERE org_id = $1 AND email IN ('joiner-d@e2e.local', 'newcomer@e2e.local')`,
+        [orgId],
+      );
+    }
   });
 
   it("an owner invite's link is an owner's to hand out, and only an owner removes an owner", async () => {

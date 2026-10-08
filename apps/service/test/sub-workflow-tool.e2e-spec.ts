@@ -283,6 +283,7 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
   let undeclaredWfId = ''; // never declared callable → refused on both call paths
   const crossOrgWfId = randomUUID();
   const otherOrgId = randomUUID();
+  const leftBehindWfId = randomUUID(); // the CALLER created it, in an org the caller is not in
 
   const deploy = async (doc: Record<string, unknown>): Promise<string> => {
     const res = await asA(
@@ -395,6 +396,11 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
       otherOrgId,
       otherUserId,
     ]);
+    await db.query(`INSERT INTO workflows (id, name, org_id, user_id) VALUES ($1, 'left behind', $2, $3)`, [
+      leftBehindWfId,
+      otherOrgId,
+      callerId,
+    ]);
   }, 45_000);
 
   afterAll(async () => {
@@ -434,7 +440,8 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
 
   it('(a2) a Default (no-env) run resolves the sub-workflow PRODUCTION version', async () => {
     const result = await app.get(DagInterpreter).run(compileWorkflowIrDag(parentDoc(echoWfId)), {
-      externalUserId: callerId, // owns the sub-workflow → allowed on a Default run
+      externalUserId: callerId,
+      orgId, // a Default run still carries the caller's active org, as RunsService passes it
       initialScope: { trigger: { chatInput: 'hi' } },
     });
     expect(toolStep(result)?.output).toBe('SUB_RESULT:hello');
@@ -485,6 +492,12 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
     // (e2) a workflow in another org, owned by another user — indistinguishable from missing.
     const cross = await runParent(crossOrgWfId);
     expect(toolStep(cross)?.output).toMatchObject({
+      error: { message: expect.stringMatching(/not found or not accessible/i) },
+    });
+
+    // (e4) a workflow the caller created, in an org they are no longer in — creating it grants nothing there.
+    const leftBehind = await runParent(leftBehindWfId);
+    expect(toolStep(leftBehind)?.output).toMatchObject({
       error: { message: expect.stringMatching(/not found or not accessible/i) },
     });
 

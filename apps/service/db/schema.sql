@@ -384,7 +384,8 @@ CREATE TABLE public.runtime_runs (
     review_id uuid,
     dry_run boolean DEFAULT false NOT NULL,
     parent_run_id character varying(200),
-    parent_step_key character varying(500)
+    parent_step_key character varying(500),
+    org_id uuid
 );
 
 
@@ -1066,6 +1067,13 @@ CREATE INDEX ix_runtime_blobs_run ON public.runtime_blobs USING btree (run_id);
 --
 
 CREATE INDEX ix_runtime_runs_parent ON public.runtime_runs USING btree (parent_run_id) WHERE (parent_run_id IS NOT NULL);
+
+
+--
+-- Name: ix_runtime_runs_org; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_runs_org ON public.runtime_runs USING btree (org_id) WHERE (org_id IS NOT NULL);
 
 
 --

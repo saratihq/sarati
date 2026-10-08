@@ -261,8 +261,7 @@ export class OrgManagementService {
     });
   }
 
-  /** Pending = not yet accepted and not expired. */
-  /** Pending invites; an owner invite's link is shown only to an owner, or an admin could accept it themselves. */
+  /** Pending (unaccepted, unexpired) invites; an owner invite's link is shown only to an owner. */
   async listInvites(orgId: string, viewerRole: OrgRole): Promise<Array<Record<string, unknown>>> {
     const invites = await this.dataSource
       .createQueryBuilder(OrgInviteEntity, 'i')
@@ -273,7 +272,7 @@ export class OrgManagementService {
       .getMany();
     return invites.map((i) => ({
       id: i.id,
-      // The token IS the delivery mechanism in OSS (no mailer) — the link must stay re-copyable.
+      // The token IS the delivery mechanism in OSS (no mailer), so it stays re-copyable — except an owner's to an admin.
       token: i.role === 'owner' && viewerRole !== 'owner' ? null : i.token,
       email: i.email,
       role: i.role,
@@ -343,13 +342,22 @@ export class OrgManagementService {
     });
   }
 
+  /** Whether an invite can still be redeemed: unused, unexpired, and an owner invite only while its creator is an owner. */
+  async isRedeemable(em: EntityManager, invite: OrgInviteEntity): Promise<boolean> {
+    if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) return false;
+    if (invite.role !== 'owner') return true;
+    const creator = invite.createdBy
+      ? await em.findOne(OrgMemberEntity, { where: { orgId: invite.orgId, userId: invite.createdBy } })
+      : null;
+    return creator?.role === 'owner';
+  }
+
   /** Peek an invite's org + role WITHOUT consuming it; same indistinguishable 404s as accept. */
   async previewInvite(token: string): Promise<{ org_id: string; org_name: string; role: OrgRole }> {
-    const invite = await this.dataSource.manager.findOne(OrgInviteEntity, { where: { token } });
-    const org = invite
-      ? await this.dataSource.manager.findOne(OrganizationEntity, { where: { id: invite.orgId } })
-      : null;
-    if (!invite || !org || invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) {
+    const em = this.dataSource.manager;
+    const invite = await em.findOne(OrgInviteEntity, { where: { token } });
+    const org = invite ? await em.findOne(OrganizationEntity, { where: { id: invite.orgId } }) : null;
+    if (!invite || !org || !(await this.isRedeemable(em, invite))) {
       throw new DomainError('Invite not found or expired', 404);
     }
     // No invitee email: the token is link-bound, so the holder must not learn who it was addressed to.
@@ -367,9 +375,7 @@ export class OrgManagementService {
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
         if (existing) return { org_id: org.id, name: org.name };
 
-        if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) {
-          throw new DomainError('Invite not found or expired', 404);
-        }
+        if (!(await this.isRedeemable(em, invite))) throw new DomainError('Invite not found or expired', 404);
 
         await em.insert(OrgMemberEntity, {
           id: newId(),
