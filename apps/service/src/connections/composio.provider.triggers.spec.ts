@@ -145,21 +145,28 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
   });
 
   // The orphan reaper lists live instances via GET /trigger_instances/active.
-  it('listActiveTriggerInstanceIds GETs /trigger_instances/active, paginates, and returns ti_ ids', async () => {
+  it("listActiveTriggerInstances GETs /trigger_instances/active, paginates, and names each one's account", async () => {
     mockRequest
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'ti_aaa' }], next_cursor: 'C2' }))
-      .mockResolvedValueOnce(jsonResponse({ items: [{ id: 'ti_bbb' }], next_cursor: null }));
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ id: 'ti_aaa', connected_account_id: 'ca_1' }], next_cursor: 'C2' }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ id: 'ti_bbb', connectedAccountId: 'ca_2' }], next_cursor: null }),
+      );
 
-    const ids = await makeProvider().listActiveTriggerInstanceIds(SCOPE);
+    const instances = await makeProvider().listActiveTriggerInstances(SCOPE);
 
-    expect(ids).toEqual(['ti_aaa', 'ti_bbb']);
+    expect(instances).toEqual([
+      { id: 'ti_aaa', connectedAccountId: 'ca_1' },
+      { id: 'ti_bbb', connectedAccountId: 'ca_2' },
+    ]);
     const [url1] = mockRequest.mock.calls[0] as [string, { method: string }];
     expect(url1).toBe('https://backend.composio.dev/api/v3/trigger_instances/active?limit=100');
     const [url2] = mockRequest.mock.calls[1] as [string];
     expect(url2).toBe('https://backend.composio.dev/api/v3/trigger_instances/active?limit=100&cursor=C2');
   });
 
-  it('listActiveTriggerInstanceIds reads the id under alternate keys but REQUIRES the ti_ prefix', async () => {
+  it('listActiveTriggerInstances reads the id under alternate keys but REQUIRES the ti_ prefix', async () => {
     mockRequest.mockResolvedValueOnce(
       jsonResponse({
         items: [
@@ -170,12 +177,16 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
         next_cursor: null,
       }),
     );
-    const ids = await makeProvider().listActiveTriggerInstanceIds(SCOPE);
-    expect(ids).toEqual(['ti_from_trigger_id', 'ti_from_nano']); // the non-ti_ item contributes nothing
+    const instances = await makeProvider().listActiveTriggerInstances(SCOPE);
+    // The non-ti_ item contributes nothing, and an item naming no account says so rather than guessing one.
+    expect(instances).toEqual([
+      { id: 'ti_from_trigger_id', connectedAccountId: null },
+      { id: 'ti_from_nano', connectedAccountId: null },
+    ]);
   });
 
-  it('listActiveTriggerInstanceIds throws on an unexpected shape (no items array)', async () => {
+  it('listActiveTriggerInstances throws on an unexpected shape (no items array)', async () => {
     mockRequest.mockResolvedValueOnce(jsonResponse({ oops: true }));
-    await expect(makeProvider().listActiveTriggerInstanceIds(SCOPE)).rejects.toThrow(/unexpected shape/);
+    await expect(makeProvider().listActiveTriggerInstances(SCOPE)).rejects.toThrow(/unexpected shape/);
   });
 });

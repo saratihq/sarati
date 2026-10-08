@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -42,6 +44,21 @@ function activeTriggerInstanceId(raw: unknown): string | null {
   return null;
 }
 
+/** The connected account a `GET /trigger_instances/active` item sits on, or null when it names none. */
+function activeTriggerAccountId(raw: unknown): string | null {
+  if (!isRecord(raw)) return null;
+  for (const key of ['connected_account_id', 'connectedAccountId']) {
+    const value = raw[key];
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return null;
+}
+
+/** The Composio project a key opens, as far as Sarati can tell — a hash of the key, never the key. */
+function projectKeyOf(apiKey: string): string {
+  return createHash('sha256').update(apiKey, 'utf8').digest('hex');
+}
+
 /** `state.val` fields that ARE the (masked) secret — dropped from `auth.data` so they can't masquerade as a usable credential. */
 const SECRET_METADATA_KEYS = new Set([
   'access_token',
@@ -72,6 +89,12 @@ function extractAccountMetadata(body: unknown): Record<string, unknown> {
 }
 
 /** A Composio toolkit that supports their shared (managed) OAuth app. */
+/** A live trigger instance, and the connected account it sits on — null when the listing names none. */
+export interface ActiveTriggerInstance {
+  id: string;
+  connectedAccountId: string | null;
+}
+
 export interface ComposioToolkit {
   slug: string;
   name: string;
@@ -182,6 +205,14 @@ export class ComposioProvider {
     return (await this.platformKeys?.composioApiKey(scope)) ?? '';
   }
 
+  private async requireApiKey(scope: PlatformKeyScope): Promise<string> {
+    const apiKey = await this.apiKey(scope);
+    if (!apiKey) {
+      throw new DomainError('Managed connections are not configured — add a Composio API key in Settings');
+    }
+    return apiKey;
+  }
+
   /** Toolkits with a Composio-managed (shared) OAuth app, cached in-process. */
   async listManagedToolkits(scope: PlatformKeyScope): Promise<ComposioToolkit[]> {
     const cacheKey = scopeKey(scope);
@@ -215,8 +246,10 @@ export class ComposioProvider {
    * config, else created. The winner is persisted so restarts reuse it; a concurrent create leaves a harmless orphan.
    */
   async ensureAuthConfig(scope: PlatformKeyScope, toolkitSlug: string): Promise<string> {
+    // An auth config lives in ONE Composio project, so a key that opens another must never be handed it.
+    const projectKey = projectKeyOf(await this.requireApiKey(scope));
     const existing = await this.dataSource.manager.findOne(ComposioAuthConfigEntity, {
-      where: { toolkitSlug },
+      where: { projectKey, toolkitSlug },
     });
     if (existing) return existing.authConfigId;
 
@@ -228,11 +261,11 @@ export class ComposioProvider {
       .createQueryBuilder()
       .insert()
       .into(ComposioAuthConfigEntity)
-      .values({ toolkitSlug, authConfigId, createdAt: now() })
+      .values({ projectKey, toolkitSlug, authConfigId, createdAt: now() })
       .orIgnore() // concurrent link calls: first insert wins
       .execute();
     const winner = await this.dataSource.manager.findOne(ComposioAuthConfigEntity, {
-      where: { toolkitSlug },
+      where: { projectKey, toolkitSlug },
     });
     return winner?.authConfigId ?? authConfigId;
   }
@@ -425,9 +458,9 @@ export class ComposioProvider {
     return body.trigger_id;
   }
 
-  /** Every LIVE Composio trigger instance id on this project — the orphan reaper diffs these against activation rows. */
-  async listActiveTriggerInstanceIds(scope: PlatformKeyScope): Promise<string[]> {
-    const ids: string[] = [];
+  /** Every LIVE Composio trigger instance on this project — the orphan reaper diffs its own against activation rows. */
+  async listActiveTriggerInstances(scope: PlatformKeyScope): Promise<ActiveTriggerInstance[]> {
+    const instances: ActiveTriggerInstance[] = [];
     let cursor: string | null = null;
     do {
       const page = await this.request(
@@ -444,11 +477,11 @@ export class ComposioProvider {
       }
       for (const raw of page.items) {
         const id = activeTriggerInstanceId(raw);
-        if (id) ids.push(id);
+        if (id) instances.push({ id, connectedAccountId: activeTriggerAccountId(raw) });
       }
       cursor = typeof page.next_cursor === 'string' && page.next_cursor ? page.next_cursor : null;
     } while (cursor);
-    return ids;
+    return instances;
   }
 
   /** Delete a trigger instance; an already-gone (404/410) one counts as success so a re-run can't wedge teardown. */
@@ -505,10 +538,7 @@ export class ComposioProvider {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
-    const apiKey = await this.apiKey(scope);
-    if (!apiKey) {
-      throw new DomainError('Managed connections are not configured — add a Composio API key in Settings');
-    }
+    const apiKey = await this.requireApiKey(scope);
     let statusCode: number;
     let text: string;
     try {

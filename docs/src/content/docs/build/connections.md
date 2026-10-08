@@ -36,6 +36,10 @@ organization that is the organization's key, set by an owner or admin and used b
 working outside one it is your own. Managed connections turn on the moment it is saved. Get a key
 from the [Composio dashboard](https://app.composio.dev/developers).
 
+A key belongs to one Composio project, and so does every account connected through it. Switch to a
+key from another project and the next connect uses that project; accounts connected under the old
+one stay there and stop working, so connect those apps again.
+
 Without a key, managed connections are simply absent: built-in actions and bring-your-own auth work
 exactly as before.
 
@@ -109,7 +113,11 @@ app triggers do not fire on a laptop instance without a tunnel.
 To receive them, expose the instance (`cloudflared` needs no signup) and point `PUBLIC_BASE_URL` at
 the public URL — that one is the instance's address, so it stays in `.env`. Then add your **Composio
 webhook secret** in **Settings → Platform keys**, beside the API key and scoped the same way, and
-register the public URL in the Composio dashboard under **Settings → Webhooks**.
+register `<public URL>/api/hooks/composio` as the project's webhook in the Composio dashboard under
+**Settings → Webhooks**, sending trigger messages in the V3 payload (Composio's default).
+
+Composio sends every trigger event in a project to that one URL, so each Sarati instance that
+receives app triggers needs a Composio project of its own.
 
 A delivery is verified against the secret of whichever user or organization owns the workflow it is
 for. Without that secret stored, deliveries are rejected rather than run.

@@ -511,6 +511,17 @@ export class ConnectionsService {
   }
 
   /** The Composio connected-account id stored in a managed row's credential blob. */
+  /** Every Composio connected account this install holds a connection for — the only ones its triggers sit on. */
+  async heldComposioAccounts(): Promise<Set<string>> {
+    const rows = await this.dataSource.manager.find(ConnectionEntity, { where: { authType: 'managed' } });
+    const held = new Set<string>();
+    for (const row of rows) {
+      const id = this.connectedAccountIdOf(row);
+      if (id) held.add(id);
+    }
+    return held;
+  }
+
   private connectedAccountIdOf(row: ConnectionEntity): string | null {
     try {
       const parsed: unknown = JSON.parse(this.encryption.decryptToken(row.credential));
