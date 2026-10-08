@@ -3,20 +3,52 @@ import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
+import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
+import { ConnectionsService } from '../src/connections/connections.service';
 import { computeDiff } from '../src/ir/diff';
 import { type AgentResult } from '../src/runtime/agent';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import type { DagAgentNode } from '../src/runtime/dag-plan';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
+import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
+/** A Gmail behind our own Gmail actions: one mailbox per access token, and every search it is asked. */
+const MAILBOXES: Record<string, string> = {
+  'tok-authored': 'author@e2e.local',
+  'tok-staging': 'staging@e2e.local',
+};
+const gmailSearches: string[] = [];
+const gmailFetch: FetchLike = (input, init) => {
+  const url = new URL(String(input));
+  const token = (init?.headers?.authorization ?? '').replace(/^Bearer /, '');
+  const reply = (status: number, body: unknown): Promise<FetchLikeResponse> =>
+    Promise.resolve({
+      status,
+      headers: { forEach: (cb) => cb('application/json', 'content-type') },
+      text: () => Promise.resolve(JSON.stringify(body)),
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+    });
+  if (url.pathname.endsWith('/profile')) {
+    const email = MAILBOXES[token];
+    return email
+      ? reply(200, { emailAddress: email, messagesTotal: 1, threadsTotal: 1, historyId: '1' })
+      : reply(401, { error: { code: 401, message: 'Invalid Credentials' } });
+  }
+  if (url.pathname.endsWith('/messages')) {
+    gmailSearches.push(url.searchParams.get('q') ?? '');
+    return reply(200, { messages: [], resultSizeEstimate: 0 });
+  }
+  return reply(404, { error: { code: 404, message: `unexpected ${url.pathname}` } });
+};
 
 /**
  * THE CONSTITUTION (src/domain/README.md): one named test per load-bearing rule.
@@ -182,6 +214,8 @@ describe('domain invariants (the constitution)', () => {
     // the storage: a per-route @Throttle overrides the env-driven limit, and APP_GUARD ignores
     // overrideGuard, so this is the only seam that actually stops the counting.
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(SDK_ACTIONS_FETCH)
+      .useValue(gmailFetch)
       .overrideProvider(ThrottlerStorage)
       .useValue({
         increment: () =>
@@ -632,6 +666,79 @@ describe('domain invariants (the constitution)', () => {
         expect(ops).toContain('add_edge');
       });
   });
+
+  it("invariant 17: {{$account}} is the account the step RUNS AS — the environment slot's, not the author's — and an unknown one fails closed", async () => {
+    const me = await http().get('/api/auth/me').expect(200);
+    const userId = me.body.user.id as string;
+    const connections = app.get(ConnectionsService);
+    const gmail = (token: string) =>
+      connections.createOAuth2(userId, 'gmail', { access_token: token, token_type: 'Bearer', raw: {} });
+    const authored = await gmail('tok-authored');
+    const slotted = await gmail('tok-staging');
+    const unnamed = await gmail('tok-revoked');
+    // Asked the moment the connection became usable.
+    expect(authored.account).toMatchObject({ subject: 'user', email: 'author@e2e.local' });
+
+    const doc = (connectionId: string, name: string): Record<string, unknown> => {
+      const base = triggerIr({ node_type: 'orchestr:webhook' }, '', name);
+      return {
+        ...base,
+        nodes: [
+          base.nodes[0],
+          {
+            id: 'mail',
+            name: 'Find mail to me',
+            node_type: 'gmail.list_messages',
+            type_version: 1,
+            parameters: { connectionId, query: 'to:{{$account.email}}' },
+            position: { x: 300, y: 0 },
+            metadata: {},
+          },
+        ],
+        edges: [{ ...base.edges[0], target_node_id: 'mail' }],
+      };
+    };
+
+    // A Default run is the author's own account.
+    gmailSearches.length = 0;
+    await http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: doc(authored.id, 'inv17 default') })
+      .expect(201);
+    expect(gmailSearches).toEqual(['to:author@e2e.local']);
+
+    // An environment run is its slot's account, even though the step names the author's connection.
+    const wf = await seedDoc(doc(authored.id, 'inv17 staging'));
+    const envs = await http().get('/api/environments').expect(200);
+    const staging = (envs.body.environments as Array<{ id: string; name: string }>).find(
+      (e) => e.name === 'staging',
+    )!;
+    await http()
+      .put(`/api/environments/${staging.id}/slots/gmail`)
+      .send({ connection_id: slotted.id })
+      .expect(200);
+    await http()
+      .post(`/api/workflows/${wf}/promote`)
+      .send({ environment: 'staging', version_id: await versionId(wf, 1) })
+      .expect(201);
+    gmailSearches.length = 0;
+    const fired = await http().post(`/api/hooks/${wf}/staging`).send({}).expect(202);
+    const run = await awaitRun(fired.body.run_id as string);
+    expect(run.status).toBe('completed');
+    expect(gmailSearches).toEqual(['to:staging@e2e.local']);
+
+    // An account the provider won't name fails the step before the action is ever called.
+    gmailSearches.length = 0;
+    const refused = await http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: doc(unnamed.id, 'inv17 unnamed') });
+    expect(refused.status).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(refused.body)).toContain("couldn't ask gmail which account this step runs as");
+    expect(gmailSearches).toEqual([]);
+
+    await http().delete(`/api/environments/${staging.id}/slots/gmail`).expect(200);
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  }, 30_000);
 
   it('invariant 14: a tool edge binds a tool, distinct from a main edge, never collapses', () => {
     const node = (id: string, node_type: string, parameters: Record<string, unknown> = {}) => ({

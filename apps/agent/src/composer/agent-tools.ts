@@ -8,7 +8,7 @@ import { fillParams, type ParamCompleteFn } from './param-filler';
 import type { PendingAnswers } from './pending-answers';
 import type { BriefData, ComposerEvent, ComposeOp } from './protocol';
 import type { ComposerSession } from './sessions';
-import type { CatalogEntry, RunRecord, WorkflowServiceClient } from './workflow-client';
+import type { CatalogEntry, ComposerAccount, RunRecord, WorkflowServiceClient } from './workflow-client';
 
 /**
  * The composer's tool surface — thin wrappers over workflow-service plus the
@@ -238,8 +238,9 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
 
   const connectionsStatus = tool(
     'connections_status',
-    "The person's app connections (provider + status). Check BEFORE a live-effect test so you can " +
-      'name exactly which connection a step still needs instead of discovering it red.',
+    "The person's app connections (provider + status + which account each signs in as). Check BEFORE a " +
+      'live-effect test so you can name exactly which connection a step still needs instead of discovering it red.',
+
     {},
     () => runConnectionsStatus(ctx),
     { annotations: { readOnlyHint: true } },
@@ -851,7 +852,7 @@ export async function runConnectionsStatus(ctx: ToolContext): Promise<ToolResult
     }
     const lines = connections.map(
       (c) =>
-        `- ${c.provider}${c.display_name ? ` (${c.display_name})` : ''}: ${c.status} [connection_id: ${c.id}]`,
+        `- ${c.provider}${c.display_name ? ` (${c.display_name})` : ''}: ${c.status} [connection_id: ${c.id}]${accountNote(c.account)}`,
     );
     return {
       content: [
@@ -861,13 +862,28 @@ export async function runConnectionsStatus(ctx: ToolContext): Promise<ToolResult
             `Connections:\n${lines.join('\n')}\n\n` +
             'A step uses a connection via its `connectionId` parameter — if a run fails with ' +
             '"requires a <app> connection", set that step\'s connectionId to the matching id above ' +
-            'with update_node (never ask the person to reconnect an account that is already active).',
+            'with update_node (never ask the person to reconnect an account that is already active).\n\n' +
+            'A step can use the account it runs as: {{$account.email}}, {{$account.handle}}, {{$account.id}} or ' +
+            "{{$account.name}}, filled with whichever account runs the step. It works only for a field that step's " +
+            'account lists above.',
         },
       ],
     };
   } catch (err) {
     return toolError(err);
   }
+}
+
+/** What a connection's provider said about the account behind it, for the composer's list. */
+function accountNote(account: ComposerAccount | null): string {
+  if (!account) return '';
+  if (account.subject === 'workspace') {
+    return ` — in the workspace ${account.name ?? account.id ?? 'with no name'} (no person to address)`;
+  }
+  const fields = (['email', 'handle', 'id', 'name'] as const)
+    .filter((field) => account[field] !== null)
+    .map((field) => `${field} ${account[field]}`);
+  return fields.length > 0 ? ` — signs in as ${fields.join(', ')}` : '';
 }
 
 /** The read_run handler: the per-step record, formatted for the fix loop. */

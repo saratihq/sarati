@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { DomainError } from '../common/domain-error';
+import { errorMessage } from '../common/error-message';
+import { type AccountIdentity } from '../connections/account-identity';
 import { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import { ConnectionsService, type ManagedConnectionRef } from '../connections/connections.service';
 import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
@@ -11,6 +13,8 @@ import {
   parseFallbackOverride,
 } from '../connections/managed-app-rails';
 import type { EnvConfig } from '../config/env.config';
+import { accountRefFields, accountRefText, fillAccountRefs, isAccountRefField } from '../runtime/account-ref';
+import { accountProbeFor, type AccountTarget, identityFrom } from './account-probes';
 import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
 import { connectionIdOf } from './sdk-auth';
 import { withheldManagedStep } from './dry-run-marker';
@@ -28,7 +32,7 @@ import type {
 
 /**
  * The run-time resolution-priority seam across the two execution rails (our clean-room SDK and Composio), picking one
- * per action in the order marked (a0)/(a)/(b)/(c)/(d) in {@link ActionRouterProvider.runAction}. The decision is a
+ * per action in the order marked (a0)/(a)/(b)/(c)/(d) in its `route`. The decision is a
  * static registry/allowlist, never a run-time guess, and only MANAGED connections may take a Composio rail.
  */
 @Injectable()
@@ -55,6 +59,62 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   async runAction(input: RunActionInput): Promise<RunActionResult> {
     // Env-scoping runs BEFORE routing, so every rail resolves the right account transparently.
     input = await this.applyEnvConnection(input);
+    // Only now is the connection the step runs as decided, so only now can `{{$account…}}` be filled (#17).
+    input = await this.fillAccount(input);
+    return this.route(input);
+  }
+
+  /** Ask the app which account a connection is, on the rail its actions run on; null when it has no way to say. */
+  async probeAccount(target: AccountTarget): Promise<AccountIdentity | null> {
+    const probe = accountProbeFor(target.provider);
+    if (!probe) return null;
+    const { output } = await this.route({
+      externalUserId: target.ownerUserId,
+      actionId: probe.actionId,
+      props: { ...probe.props },
+      auth: { connectionId: target.connectionId },
+      orgId: target.orgId,
+    });
+    return identityFrom(output, probe);
+  }
+
+  /** Ask, and store the answer on the connection; a provider that errors stores nothing, so a good answer survives. */
+  async refreshAccount(target: AccountTarget): Promise<AccountIdentity | null> {
+    if (!accountProbeFor(target.provider)) return null;
+    const account = await this.probeAccount(target);
+    await this.connections.recordAccount(target.connectionId, account);
+    return account;
+  }
+
+  /** Replace each `{{$account…}}` with the account this step runs as — failing the step, never the field, when unknown. */
+  private async fillAccount(input: RunActionInput): Promise<RunActionInput> {
+    if (accountRefFields(input.props).length === 0) return input;
+    const connectionId = connectionIdOf(input.auth);
+    if (!connectionId) {
+      throw new DomainError(
+        '{{$account…}} is the account a step runs as, and this step runs as none — give it a connection',
+      );
+    }
+    const stored = await this.connections.accountOf(input.externalUserId, connectionId);
+    if (!stored) throw new DomainError(`Connection ${connectionId} not found`, 404);
+    const account =
+      stored.account ??
+      (await this.refreshAccount({
+        connectionId,
+        ownerUserId: input.externalUserId,
+        provider: stored.provider,
+        orgId: input.orgId ?? null,
+      }).catch((err: unknown) => {
+        throw new DomainError(
+          `Sarati couldn't ask ${stored.provider} which account this step runs as: ${errorMessage(err)}`,
+        );
+      }));
+    const props = fillAccountRefs(input.props, (field) => accountValue(account, field, stored.provider));
+    return { ...input, props: props as Record<string, unknown> };
+  }
+
+  /** Pick the rail for one action, in the order marked (a0)/(a)/(b)/(c)/(d). */
+  private async route(input: RunActionInput): Promise<RunActionResult> {
     const appSlug = validatedAppSlug(input.actionId);
     // (a0) COMPOSIO-DIRECT apps: a managed connection executes via Composio typed execution
     //      ahead of every other rail (Google rejects the SDK's proxy leg); BYO/none falls through.
@@ -243,4 +303,28 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
       400,
     );
   }
+}
+
+/** One field of the account a step runs as, or the reason it has none. */
+function accountValue(account: AccountIdentity | null, field: string, provider: string): string {
+  const ref = accountRefText(field);
+  if (!isAccountRefField(field)) {
+    throw new DomainError(
+      `${ref} isn't something Sarati knows about an account — use email, handle, id or name`,
+    );
+  }
+  if (!account) {
+    throw new DomainError(
+      `Sarati can't tell which ${provider} account this step runs as, so ${ref} has no value`,
+    );
+  }
+  if (account.subject !== 'user') {
+    throw new DomainError(
+      `${provider} tells Sarati which workspace this connection is in, not who it signs in as, so ${ref} has no value`,
+    );
+  }
+  const value = account[field];
+  if (value === null)
+    throw new DomainError(`${provider} doesn't share this account's ${field}, so ${ref} has no value`);
+  return value;
 }

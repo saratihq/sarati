@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
+import { accountLabel, storedAccount } from '../connections/account-identity';
 import { isIdShape } from '../database/ids';
 import { rawMutate, rawQuery } from '../database/raw-query';
 import { ConnectionEntity } from '../database/entities/connection.entity';
@@ -22,7 +23,7 @@ import {
 export interface SlotView {
   app: string;
   connection_id: string;
-  /** The connection's display identity (display_name, falling back to provider). */
+  /** The connection's display identity: its display name, else the account the provider named, else the app. */
   account_label: string;
   owner_user_id: string;
   /** Whose account fills this slot — the owning user's email (human-readable). */
@@ -86,12 +87,13 @@ export class EnvironmentsService {
       connection_id: string;
       display_name: string | null;
       provider: string;
+      account: unknown;
       owner_user_id: string;
       owner_email: string | null;
       status: string;
     }>(
       em,
-      `SELECT ec.environment_id, ec.app, ec.connection_id, c.display_name, c.provider,
+      `SELECT ec.environment_id, ec.app, ec.connection_id, c.display_name, c.provider, c.account,
               c.user_id AS owner_user_id, u.email AS owner_email, c.status
          FROM environment_connections ec
          JOIN environments e ON e.id = ec.environment_id
@@ -110,7 +112,7 @@ export class EnvironmentsService {
         .map((s) => ({
           app: s.app,
           connection_id: s.connection_id,
-          account_label: s.display_name ?? s.provider,
+          account_label: s.display_name ?? slotAccountLabel(s.account) ?? s.provider,
           owner_user_id: s.owner_user_id,
           owner_label: s.owner_email ?? s.owner_user_id,
           status: s.status,
@@ -374,4 +376,9 @@ export class EnvironmentsService {
     }
     return name;
   }
+}
+
+function slotAccountLabel(raw: unknown): string | null {
+  const account = storedAccount(raw);
+  return account ? accountLabel(account) : null;
 }

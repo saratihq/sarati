@@ -53,6 +53,8 @@ These strings are written into saved data, issued tokens, live cookies or the da
 - The `orchestr_local_session` cookie and the `orchestr-oauth` `postMessage` type — renaming either
   signs users out or breaks the connect popup mid-flight.
 - The `--orchestr-*` CSS custom properties — the client's token names.
+- The `{{$account.*}}` reference and its field names (`email`, `handle`, `id`, `name`) — in every
+  saved workflow that uses them.
 
 The user-visible product name is Sarati and is free to change; none of the above is user-visible.
 

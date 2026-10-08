@@ -55,6 +55,11 @@ failing mid-run:
 With the connection attached, the step runs against the real account and returns real data — a
 Slack `list_channels` comes back with the workspace's actual channels.
 
+Where the app can say which account a connection signs in as, the connection is labelled with it —
+`gmail · you@example.com` — so two accounts for the same app are told apart. Sarati asks when the
+account is connected and again when you **Test** it under **Integrations**. A step can also write to
+that account: see [Your own account](/build/data/#your-own-account).
+
 ## The AI Agent step needs one too
 
 An **AI Agent** step calls a model, and that model call is a connection like any other: connect

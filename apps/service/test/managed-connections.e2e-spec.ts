@@ -125,6 +125,15 @@ describe('managed connections (e2e, isolated DB, stubbed Composio, mock auth)', 
           json(deleteReplyStatus, deleteReplyStatus === 200 ? { success: true } : { error: 'not found' });
           return;
         }
+        // The provider's own who-am-I, asked the moment the connection goes active.
+        if (req.method === 'POST' && url === '/api/v3/tools/execute/SLACK_FETCH_TEAM_INFO') {
+          json(200, {
+            successful: true,
+            data: { team: { id: 'T0BFMNPDEQ2', name: 'orchestr' } },
+            error: null,
+          });
+          return;
+        }
         json(404, { error: `unexpected ${req.method} ${url}` });
       });
     });
@@ -222,6 +231,16 @@ describe('managed connections (e2e, isolated DB, stubbed Composio, mock auth)', 
     await request(app.getHttpServer()).get(`/api/connections/${connectionId}/status`).expect(200);
     const pollsAfter = calls.filter((c) => c.url === `/api/v3/connected_accounts/${ACCOUNT_ID}`).length;
     expect(pollsAfter).toBe(pollsBefore);
+  });
+
+  it('asks the app which account it is the moment the connection goes active', async () => {
+    const asked = calls.filter((c) => c.url === '/api/v3/tools/execute/SLACK_FETCH_TEAM_INFO');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.body).toMatchObject({ connected_account_id: ACCOUNT_ID });
+    const list = await request(app.getHttpServer()).get('/api/connections').expect(200);
+    expect(list.body.find((c: { id: string }) => c.id === connectionId)).toMatchObject({
+      account: { subject: 'workspace', name: 'orchestr', id: 'T0BFMNPDEQ2', email: null, handle: null },
+    });
   });
 
   it('lists the managed row alongside the others, secret-free and now active', async () => {

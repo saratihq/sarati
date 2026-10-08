@@ -1,12 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { Connection } from "@/api/client";
+import type { AccountIdentity, Connection } from "@/api/client";
 import {
+  accountLabel,
   activeConnections,
   appDisplayName,
   candidateConnections,
   connectionLabel,
+  describeAccount,
   matchingConnections,
 } from "@/lib/connections";
+
+const person = (over: Partial<AccountIdentity> = {}): AccountIdentity => ({
+  subject: "user",
+  name: null,
+  id: null,
+  email: null,
+  handle: null,
+  ...over,
+});
 
 const conn = (over: Partial<Connection> & Pick<Connection, "id" | "provider">): Connection => ({
   display_name: null,
@@ -81,6 +92,25 @@ describe("connectionLabel", () => {
   it("falls back to the provider alone", () => {
     expect(connectionLabel(conn({ id: "1", provider: "slack" }))).toBe("slack");
     expect(connectionLabel(conn({ id: "1", provider: "slack", display_name: "" }))).toBe("slack");
+  });
+
+  it("names the account the provider reported when nobody has named the connection", () => {
+    const gmail = conn({ id: "1", provider: "gmail", account: person({ email: "me@e2e.local", id: "me@e2e.local" }) });
+    expect(connectionLabel(gmail)).toBe("gmail · me@e2e.local");
+    expect(connectionLabel({ ...gmail, display_name: "Work" })).toBe("gmail · Work");
+  });
+});
+
+describe("accountLabel / describeAccount", () => {
+  it("leads with what a person recognises — the email, else the handle, name or id", () => {
+    expect(accountLabel(person({ email: "me@e2e.local", handle: "me", name: "Me" }))).toBe("me@e2e.local");
+    expect(accountLabel(person({ handle: "eghuzefa", id: "190477365" }))).toBe("eghuzefa");
+    expect(accountLabel(person())).toBe("an unnamed account");
+  });
+
+  it("adds the id when it says something the label does not", () => {
+    expect(describeAccount(person({ handle: "eghuzefa", id: "190477365" }))).toBe("eghuzefa (190477365)");
+    expect(describeAccount(person({ email: "me@e2e.local", id: "me@e2e.local" }))).toBe("me@e2e.local");
   });
 });
 

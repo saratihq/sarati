@@ -1507,6 +1507,16 @@ export interface IntegrationProvider {
   scopes: string[];
 }
 
+/** Which account a connection is authorized against, as its provider said; a `workspace` names only where it is. */
+export interface AccountIdentity {
+  subject: "user" | "workspace";
+  name: string | null;
+  id: string | null;
+  email: string | null;
+  /** The login or username the provider addresses the account by. */
+  handle: string | null;
+}
+
 /** Secret-free view of a stored connection — GET /connections. */
 export interface Connection {
   id: string;
@@ -1520,6 +1530,8 @@ export interface Connection {
   /** ISO time health was last verified (Test button, connect poll, or a run-time renewal). */
   last_checked_at?: string | null;
   created_at?: string | null;
+  /** Which account the provider says this is; null until it has answered. */
+  account?: AccountIdentity | null;
 }
 
 export async function listIntegrationProviders(): Promise<{
@@ -1534,7 +1546,7 @@ export async function listIntegrationProviders(): Promise<{
 
 /** Which account a connection is authorized against — GET /connections/:id/account. */
 export interface ConnectionAccount {
-  account: { name: string | null; id: string | null } | null;
+  account: AccountIdentity | null;
   detail: string;
 }
 

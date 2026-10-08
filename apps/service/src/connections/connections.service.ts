@@ -8,6 +8,7 @@ import { EncryptionService } from '../common/crypto/encryption.service';
 import { errorMessage } from '../common/error-message';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { newId, now } from '../database/ids';
+import { type AccountIdentity, storedAccount } from './account-identity';
 import { ComposioProvider, ComposioUpstreamError } from './composio.provider';
 import { OAuthExchangeError, refreshAccessToken, type OAuthTokenSet } from './oauth-token';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
@@ -49,6 +50,25 @@ export interface ConnectionSummary {
   status_reason: string | null;
   /** ISO time health was last verified (test probe, poll flip, or run-time renewal). */
   last_checked_at: string | null;
+  /** Which account the provider says this is; null until it has answered. */
+  account: AccountIdentity | null;
+}
+
+/** A connection that has just become usable — what the account behind it can be asked of. */
+export interface ActivatedConnection {
+  id: string;
+  ownerUserId: string;
+  provider: string;
+  /** The org whose Composio project brokered it, when one did. */
+  orgId: string | null;
+}
+
+/** The account a connection was last said to be, for its owner. */
+export interface StoredAccount {
+  provider: string;
+  account: AccountIdentity | null;
+  /** Null until the provider has been asked. */
+  checkedAt: Date | null;
 }
 
 /** A health transition the service can persist (pending is owned by the connect poll). */
@@ -117,6 +137,8 @@ export function scopeOfConnection(row: ConnectionEntity): PlatformKeyScope | nul
 export class ConnectionsService {
   private readonly logger = new Logger(ConnectionsService.name);
 
+  private activationListener: ((connection: ActivatedConnection) => Promise<void>) | null = null;
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
@@ -142,7 +164,7 @@ export class ConnectionsService {
     entity.createdAt = now();
     entity.status = 'active';
     await this.dataSource.manager.save(ConnectionEntity, entity);
-    return toSummary(entity);
+    return this.activated(entity);
   }
 
   /** A managed (Composio-brokered) connection, created PENDING; stores only the connected-account reference, no secret. */
@@ -284,7 +306,44 @@ export class ConnectionsService {
     entity.createdAt = now();
     entity.status = 'active';
     await this.dataSource.manager.save(ConnectionEntity, entity);
-    return toSummary(entity);
+    return this.activated(entity);
+  }
+
+  /** Called once a connection is usable — registered from the providers side, which imports this module. */
+  onActivated(listener: (connection: ActivatedConnection) => Promise<void>): void {
+    this.activationListener = listener;
+  }
+
+  /** Tell the listener a connection just became usable, under the org whose Composio project brokered it; never throws. */
+  async announceActivated(id: string, orgId: string | null): Promise<void> {
+    if (!this.activationListener) return;
+    const row = await this.dataSource.manager.findOne(ConnectionEntity, {
+      where: { id },
+      select: { id: true, userId: true, provider: true },
+    });
+    if (row) await this.activationListener({ id, ownerUserId: row.userId, provider: row.provider, orgId });
+  }
+
+  /** The account a connection was last said to be — for its owner only, null when it is not theirs. */
+  async accountOf(userId: string, id: string): Promise<StoredAccount | null> {
+    const row = await this.dataSource.manager.findOne(ConnectionEntity, {
+      where: { id, userId },
+      select: { id: true, provider: true, account: true, accountCheckedAt: true },
+    });
+    if (!row) return null;
+    return { provider: row.provider, account: storedAccount(row.account), checkedAt: row.accountCheckedAt };
+  }
+
+  /** Store what the provider said; null records that it was asked and named no account. */
+  async recordAccount(id: string, account: AccountIdentity | null): Promise<void> {
+    await this.dataSource.manager.update(ConnectionEntity, { id }, { account, accountCheckedAt: now() });
+  }
+
+  /** Announce a just-saved, usable row, then return it as it now stands — the account included. */
+  private async activated(entity: ConnectionEntity): Promise<ConnectionSummary> {
+    await this.announceActivated(entity.id, null);
+    const saved = await this.dataSource.manager.findOne(ConnectionEntity, { where: { id: entity.id } });
+    return toSummary(saved ?? entity);
   }
 
   /**
@@ -403,12 +462,13 @@ export class ConnectionsService {
       status: string;
       status_reason: string | null;
       last_checked_at: Date | null;
+      account: unknown;
       environment: string | null;
       owner_id: string;
       owner_name: string | null;
     }> = await this.dataSource.query(
       `SELECT c.id, c.provider, c.display_name, c.auth_type, c.created_at, c.status,
-              c.status_reason, c.last_checked_at, c.environment,
+              c.status_reason, c.last_checked_at, c.account, c.environment,
               c.user_id AS owner_id, u.name AS owner_name
          FROM connections c LEFT JOIN users u ON u.id = c.user_id
         WHERE c.org_id = $1
@@ -424,6 +484,7 @@ export class ConnectionsService {
       status: r.status,
       status_reason: r.status_reason,
       last_checked_at: r.last_checked_at ? new Date(r.last_checked_at).toISOString() : null,
+      account: storedAccount(r.account),
       environment: r.environment,
       owner: { id: r.owner_id, name: r.owner_name },
     }));
@@ -752,5 +813,6 @@ function toSummary(e: ConnectionEntity): ConnectionSummary {
     status: e.status || 'active',
     status_reason: e.statusReason ?? null,
     last_checked_at: e.lastCheckedAt ? e.lastCheckedAt.toISOString() : null,
+    account: storedAccount(e.account),
   };
 }

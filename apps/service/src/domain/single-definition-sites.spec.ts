@@ -13,6 +13,8 @@ const SINGLE_DEFINITION = [
   { symbol: 'isTriggerNode', definedIn: 'compiler/compile-ir.ts' },
   // Constitution #4 — "did the content change?" is answered ONLY by computeDiff.
   { symbol: 'computeDiff', definedIn: 'ir/diff.ts' },
+  // Constitution #17 — what `{{$account…}}` reads, and how it is filled.
+  { symbol: 'fillAccountRefs', definedIn: 'runtime/account-ref.ts' },
 ] as const;
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -46,6 +48,15 @@ describe('vault: one definition site per load-bearing question', () => {
       .map((f) => f.rel);
 
     expect(offenders).toEqual([]);
+  });
+
+  /** Constitution #17: only the action router fills `{{$account…}}`, after the environment has chosen the account. */
+  it('only the action router fills {{$account…}}', () => {
+    const fills = sources()
+      .filter((f) => f.rel !== 'runtime/account-ref.ts' && /\bfillAccountRefs\s*\(/.test(f.text))
+      .map((f) => f.rel);
+
+    expect(fills).toEqual(['providers/action-router.provider.ts']);
   });
 
   /** Constitution #16: `WorkflowAccessService.require` is the only place allowed to decide it. */

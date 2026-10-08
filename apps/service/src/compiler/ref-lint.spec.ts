@@ -159,4 +159,46 @@ describe('lintDataRefs', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('no step "ghost" exists');
   });
+
+  describe('{{$account…}} — the account a step runs as', () => {
+    it('accepts an account field on an app step that runs as a connection', () => {
+      const ir = doc([
+        node('mail', 'Email me', 'gmail.send_email', {
+          connectionId: 'conn-1',
+          to: '{{$account.email}}',
+          subject: 'Digest for {{ $account.name }}',
+        }),
+      ]);
+      expect(lintDataRefs(ir)).toEqual([]);
+    });
+
+    it('flags a field an account does not have', () => {
+      const ir = doc([
+        node('mail', 'Email me', 'gmail.send_email', { connectionId: 'conn-1', to: '{{$account.address}}' }),
+      ]);
+      expect(lintDataRefs(ir)).toEqual([
+        '"Email me" uses {{$account.address}}, but an account has only an email, handle, id and name',
+      ]);
+    });
+
+    it('flags an app step that runs as no connection', () => {
+      const ir = doc([node('mail', 'Email me', 'gmail.send_email', { to: '{{$account.email}}' })]);
+      expect(lintDataRefs(ir)).toEqual([
+        '"Email me" uses {{$account.email}}, but runs as no connected account, so nothing can fill it',
+      ]);
+    });
+
+    it('flags it anywhere but an app step — a trigger, a condition, an agent', () => {
+      const ir = doc([
+        node('trig', 'Webhook', 'orchestr:webhook', { secret: '{{$account.id}}' }),
+        node('iff', 'Is it me', 'orchestr:if', { left: '{{$account.email}}', op: 'truthy' }),
+        node('agent', 'Agent', 'orchestr:agent', { input: 'Write to {{$account.email}}' }),
+      ]);
+      expect(lintDataRefs(ir)).toEqual([
+        '"Webhook" uses {{$account.id}}, but only an app step that runs as a connected account can',
+        '"Is it me" uses {{$account.email}}, but only an app step that runs as a connected account can',
+        '"Agent" uses {{$account.email}}, but only an app step that runs as a connected account can',
+      ]);
+    });
+  });
 });

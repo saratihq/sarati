@@ -1,108 +1,77 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
-import { isRecord } from '../common/json-util';
-import { ActionRouterProvider } from './action-router.provider';
 import { type AccountIdentity } from '../connections/account-identity';
+import { type ActivatedConnection, ConnectionsService } from '../connections/connections.service';
+import { accountProbeFor, type AccountTarget } from './account-probes';
+import { ActionRouterProvider } from './action-router.provider';
 
-/**
- * WHICH account a connection is authorized against, asked of the provider itself.
- *
- * The connected-account metadata cannot answer it: Composio returns the account's identity fields
- * REDACTED (`team: {id: "REDACTED", name: "REDACTED"}`), so a healthy credential on the wrong
- * workspace looks exactly like one on the right workspace. Only the provider's own "who am I" call
- * settles it, so this runs on demand — never on every listing.
- */
-interface IdentityProbe {
-  actionId: string;
-  props: Record<string, unknown>;
-  /** Where the answer names the account, and where it identifies it; `a.b` reads one level down. */
-  name: readonly string[];
-  id: readonly string[];
-}
+/** How long a just-completed connect waits for the answer; a slower one still lands, just after the connect returns. */
+const ACTIVATION_WAIT_MS = 5_000;
 
-/** A managed Google connection carries Drive scope — the spreadsheet picker lists Drive files. */
-const GOOGLE_ACCOUNT: IdentityProbe = {
-  actionId: 'drive.get_about',
-  props: { fields: 'user' },
-  name: ['user.emailAddress', 'user.displayName'],
-  id: ['user.permissionId'],
-};
-
-/** Only apps whose probe has been run against a live connection belong here. */
-const PROBES: ReadonlyMap<string, IdentityProbe> = new Map<string, IdentityProbe>([
-  ['slack', { actionId: 'slack.fetch_team_info', props: {}, name: ['team.name'], id: ['team.id'] }],
-  ['github', { actionId: 'github.get_the_authenticated_user', props: {}, name: ['login'], id: ['id'] }],
-  ['sheets', GOOGLE_ACCOUNT],
-  ['drive', GOOGLE_ACCOUNT],
-]);
-
-/** Long enough that opening a dialog is one call per connection, short enough that a re-auth surfaces. */
-const IDENTITY_TTL_MS = 10 * 60 * 1000;
-
+/** Asks a connection's provider which account it is when the connection becomes usable, and answers from what it said. */
 @Injectable()
-export class ConnectionIdentityService {
+export class ConnectionIdentityService implements OnModuleInit {
   private readonly logger = new Logger(ConnectionIdentityService.name);
-  private readonly cache = new Map<string, { at: number; identity: AccountIdentity | null }>();
+  private readonly inflight = new Map<string, Promise<AccountIdentity | null>>();
 
-  constructor(private readonly router: ActionRouterProvider) {}
+  constructor(
+    private readonly router: ActionRouterProvider,
+    private readonly connections: ConnectionsService,
+  ) {}
 
-  /** `null` when the app has no probe or the provider would not answer — never a guess. */
-  async probe(userId: string, connectionId: string, provider: string): Promise<AccountIdentity | null> {
-    const probe = PROBES.get(provider);
-    if (!probe) return null;
-    const cached = this.cache.get(connectionId);
-    if (cached && Date.now() - cached.at < IDENTITY_TTL_MS) return cached.identity;
-    try {
-      const result = await this.router.runAction({
-        externalUserId: userId,
-        actionId: probe.actionId,
-        props: { ...probe.props, connectionId },
-        auth: { connectionId },
-      });
-      const identity = identityFrom(result.output, probe);
-      this.cache.set(connectionId, { at: Date.now(), identity });
-      return identity;
-    } catch (err) {
-      this.logger.warn(
-        `Connection ${connectionId} (${provider}): identity probe failed: ${errorMessage(err)}`,
-      );
-      return null;
-    }
+  onModuleInit(): void {
+    this.connections.onActivated((connection) => this.askOnActivation(connection));
   }
 
-  /** Drop a cached answer — a reconnect can point the same row at a different account. */
-  forget(connectionId: string): void {
-    this.cache.delete(connectionId);
+  /** The stored answer, asking the provider when it never has been or `refresh` is set; null when it can't or won't say. */
+  async account(target: AccountTarget, refresh: boolean): Promise<AccountIdentity | null> {
+    if (!refresh) {
+      const stored = await this.connections.accountOf(target.ownerUserId, target.connectionId);
+      if (stored?.checkedAt) return stored.account;
+    }
+    return this.ask(target);
   }
 
   /** Whether this app can be asked at all — the caller says "unknown" rather than "no account". */
   canProbe(provider: string): boolean {
-    return PROBES.has(provider);
+    return accountProbeFor(provider) !== undefined;
   }
-}
 
-function read(body: Record<string, unknown>, path: string): string | null {
-  const [head, tail] = path.split('.');
-  if (head === undefined) return null;
-  const top = body[head];
-  const value = tail === undefined ? top : isRecord(top) ? top[tail] : undefined;
-  if (typeof value === 'string' && value.trim() !== '') return value.trim();
-  return typeof value === 'number' ? String(value) : null;
-}
-
-function firstOf(body: Record<string, unknown>, paths: readonly string[]): string | null {
-  for (const path of paths) {
-    const value = read(body, path);
-    if (value !== null) return value;
+  private ask(target: AccountTarget): Promise<AccountIdentity | null> {
+    const pending = this.inflight.get(target.connectionId);
+    if (pending) return pending;
+    const asking = this.router
+      .refreshAccount(target)
+      .catch((err: unknown) => {
+        this.logger.warn(
+          `Connection ${target.connectionId} (${target.provider}): identity probe failed: ${errorMessage(err)}`,
+        );
+        return null;
+      })
+      .finally(() => this.inflight.delete(target.connectionId));
+    this.inflight.set(target.connectionId, asking);
+    return asking;
   }
-  return null;
-}
 
-function identityFrom(output: unknown, probe: IdentityProbe): AccountIdentity | null {
-  const body = isRecord(output) && isRecord(output.response_data) ? output.response_data : output;
-  if (!isRecord(body)) return null;
-  const name = firstOf(body, probe.name);
-  const id = firstOf(body, probe.id);
-  return name === null && id === null ? null : { name, id };
+  private async askOnActivation(connection: ActivatedConnection): Promise<void> {
+    if (!this.canProbe(connection.provider)) return;
+    let timer: NodeJS.Timeout | undefined;
+    const waited = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ACTIVATION_WAIT_MS);
+    });
+    try {
+      await Promise.race([
+        this.ask({
+          connectionId: connection.id,
+          ownerUserId: connection.ownerUserId,
+          provider: connection.provider,
+          orgId: connection.orgId,
+        }),
+        waited,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
