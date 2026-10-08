@@ -9,11 +9,11 @@ Every workflow has `main`. Add a branch to change something without touching it.
 
 Click the branch selector on the workflow overview, type a name, **Create**.
 
-The branch starts from the current version of the branch you were on. Nothing is copied — the
-starting point is inherited.
+The branch starts from the latest version on `main`, whichever branch you were on. Nothing is
+copied — the starting point is inherited.
 
-<img class="shot shot-dark" src="/shots/branch-selector-dark.webp" alt="The branch selector listing branches, with the protected default marked and a new-branch action." />
-<img class="shot shot-light" src="/shots/branch-selector-light.webp" alt="The branch selector listing branches, with the protected default marked and a new-branch action." />
+<img class="shot shot-dark" src="/shots/branch-selector-dark.webp" alt="The branch selector listing branches, with the default marked and a new-branch action." />
+<img class="shot shot-light" src="/shots/branch-selector-light.webp" alt="The branch selector listing branches, with the default marked and a new-branch action." />
 
 ## Version numbers are per branch
 

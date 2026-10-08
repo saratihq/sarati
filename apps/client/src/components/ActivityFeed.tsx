@@ -23,6 +23,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOSSARY, Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 import { branchHasNothingNew } from "@/lib/branchChanges";
+import { testIsCurrent } from "@/lib/reviewTest";
 import { timeAgo } from "@/lib/format";
 import { getTagColor } from "@/lib/envPresentation";
 import { toast } from "@/lib/toast";
@@ -437,8 +438,9 @@ function ReviewFeedCard({
                   className="text-[11px] py-1.5 px-2.5 rounded"
                   style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
                 >
-                  The latest test is failing. If {review.target_branch} is protected, this merge will be
-                  blocked until a test passes.
+                  {testIsCurrent(testResult, detail)
+                    ? `The latest test is failing. If ${review.target_branch} is protected, merging from this review is blocked until a re-test passes or either branch gets a new commit.`
+                    : "The last test failed, but a branch has moved since — re-test to see where this stands."}
                 </div>
               )}
               <div className="flex gap-2">

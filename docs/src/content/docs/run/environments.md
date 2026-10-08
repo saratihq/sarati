@@ -3,8 +3,9 @@ title: Environments
 description: Point each environment at its own version, with its own accounts and its own URLs.
 ---
 
-An environment is a **pointer at one version**. A fresh install has `production`, `staging` and
-`uat`.
+An environment is a **pointer at one version**. Each workspace has its own environments, starting
+with `production`, `staging` and `uat`; promoting to a name the workspace doesn't have yet creates
+it.
 
 `production` and `uat` cannot be renamed or deleted.
 

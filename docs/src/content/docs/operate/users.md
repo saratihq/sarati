@@ -47,14 +47,17 @@ Three: `owner`, `admin`, `member`.
 | Read workflows and runs | ✅ | ✅ |
 | Create branches, commit, open reviews | ✅ | ✅ |
 | Approve a review | ✅ | ✅ |
-| **Publish or promote to production** | ❌ | ✅ |
-| Invite people, change roles, org settings | ❌ | ✅ |
+| **Publish, promote or un-promote — to any environment** | ❌ | ✅ |
+| Invite and remove people, org settings | ❌ | ✅ |
+| Change roles, transfer ownership, delete the organization | ❌ | owner only |
 
 A member is a full contributor who cannot ship. The refusals name the reason:
 
-> Only owners and admins can move the 'production' pointer in an organization
+> Only owners and admins can move the 'staging' pointer in an organization
 
-> Only owners and admins can manage this organization
+> Only owners can change member roles
+
+In your personal workspace you are the owner, so none of this applies.
 
 ## Reviews need someone else
 
