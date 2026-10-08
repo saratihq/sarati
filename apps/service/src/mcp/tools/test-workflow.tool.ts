@@ -143,7 +143,10 @@ export class TestWorkflowTool implements McpTool {
   }
 
   /** The document to run: the one given, or the head of the named workflow/branch. */
-  private async documentFor(args: z.infer<typeof Input>, ctx: McpCallContext): Promise<Record<string, unknown>> {
+  private async documentFor(
+    args: z.infer<typeof Input>,
+    ctx: McpCallContext,
+  ): Promise<Record<string, unknown>> {
     if (args.workflow_ir && args.workflow_id) {
       throw new DomainError(
         'Give either workflow_ir or workflow_id, not both — otherwise which document runs is ambiguous.',

@@ -196,7 +196,8 @@ export class OrgsController {
     const principal = requirePrincipal(req);
     const { org, role } = await this.requireManager(orgId, principal);
     const inviteRole = body.role ?? 'member';
-    if (inviteRole === 'owner' && role !== 'owner') throw new DomainError('Only owners can invite an owner', 403);
+    if (inviteRole === 'owner' && role !== 'owner')
+      throw new DomainError('Only owners can invite an owner', 403);
     const invite = await this.mgmt.createInvite(org, principal.user.id, body.email, inviteRole);
 
     // The token is in the response either way, so a failing mail provider must not fail the invite.
