@@ -17,7 +17,7 @@ interface ConflictResolverProps {
   /** Re-POST the merge endpoint with the resolutions; resolves with the outcome. */
   onResolve: (resolutions: MergeResolution[]) => Promise<MergeResultResponse>;
   /** Called on a successful merge (parent toasts, closes, and refetches). */
-  onMerged: (mergedVersionId: string | null | undefined) => void;
+  onMerged: (result: MergeResultResponse) => void;
   /** Cancel / escape — no merge happened. */
   onCancel: () => void;
 }
@@ -359,7 +359,7 @@ export default function ConflictResolver({
     try {
       const result = await onResolve(resolutions);
       if (result.status === "merged") {
-        onMerged(result.merged_version_id);
+        onMerged(result);
       } else {
         setFormError("The merge still reports conflicts. Reopen the merge and try again.");
       }

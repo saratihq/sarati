@@ -116,7 +116,7 @@ export default function BranchSelector({
     setError(null);
     try {
       await api.deleteBranch(workflowId, b.name);
-      toast.success(`Deleted "${b.name}"`, "The branch and any deployments on it were removed");
+      toast.success(`Deleted "${b.name}"`, "Its reviews went with it; its versions keep running wherever they are live");
       setPendingDelete(null);
       if (b.name === currentBranch) {
         onBranchChange(branches.find((x) => x.is_default)?.name ?? "main");
@@ -215,7 +215,7 @@ export default function BranchSelector({
                       onClick={() => setPendingDelete(b)}
                       disabled={deleting}
                       aria-label={`Delete ${b.name}`}
-                      title={`Delete "${b.name}" — also tears down any deployments on it`}
+                      title={`Delete "${b.name}" and its reviews — its versions keep running wherever they are live`}
                       className="shrink-0 mr-2 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-danger-tint)]"
                       style={{ width: 24, height: 24, color: "var(--orchestr-ink-subtle)" }}
                     >
@@ -269,7 +269,7 @@ export default function BranchSelector({
       <ConfirmDialog
         open={pendingDelete !== null}
         title={`Delete branch "${pendingDelete?.name ?? ""}"?`}
-        message={`This permanently removes the "${pendingDelete?.name ?? ""}" branch, including its version history on this branch, and tears down any deployments it has.`}
+        message={`This deletes the "${pendingDelete?.name ?? ""}" branch and every review into or out of it, with their comments and approvals. Its versions stay, so an environment running one keeps running it.`}
         consequence="This cannot be undone."
         confirmLabel={deleting ? "Deleting…" : "Delete branch"}
         destructive

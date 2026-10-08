@@ -62,7 +62,7 @@ describe("ConflictResolver", () => {
     expect(onResolve).toHaveBeenCalledWith([
       { node_id: "code", field_path: "parameters.code", choice: "source" },
     ]);
-    expect(onMerged).toHaveBeenCalledWith("v9");
+    expect(onMerged).toHaveBeenCalledWith(expect.objectContaining({ status: "merged", merged_version_id: "v9" }));
   });
 
   it("keeps a custom value's type by round-tripping it through JSON", async () => {

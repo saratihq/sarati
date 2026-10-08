@@ -24,7 +24,7 @@ import { GLOSSARY, Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 import { branchHasNothingNew } from "@/lib/branchChanges";
 import { timeAgo } from "@/lib/format";
-import { getTagColor } from "@/lib/envPresentation";
+import { getTagColor, isProtectedEnv } from "@/lib/envPresentation";
 import { toast } from "@/lib/toast";
 import ConflictResolver from "./ConflictResolver";
 import DiffView from "./DiffView";
@@ -50,8 +50,18 @@ const APPROVAL_STYLES: Record<string, { label: string; text: string }> = {
 };
 
 
-// Promote-menu fallback when the environments list can't load; promoting works by name.
-const FALLBACK_ENV_NAMES = ["production", "staging", "uat"] as const;
+function mergedDetail(source: string, target: string, result: MergeResultResponse): string {
+  return result.cleaned_up
+    ? `"${source}" merged into "${target}" and was deleted`
+    : `"${source}" merged into "${target}"`;
+}
+
+// Promote-menu fallback when the environments list can't load; promoting works by name, the flag still decides.
+const FALLBACK_ENVS = [
+  { name: "production", is_prod: true },
+  { name: "staging", is_prod: false },
+  { name: "uat", is_prod: false },
+] as const;
 
 const CARD_STYLE = {
   background: "var(--orchestr-surface-card)",
@@ -614,7 +624,7 @@ export default function ActivityFeed({
     document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [loading, initialReviewId, initialVersion]);
 
-  // Confirm dialog, shared by deploy/rollback/merge.
+  // One confirm dialog for merges, closing a review and removing an environment's pointer.
   const [confirm, setConfirm] = useState<ConfirmOptions | null>(null);
   const confirmCallbackRef = useRef<(() => void) | null>(null);
   const showConfirm = useCallback((opts: ConfirmOptions, onConfirm: () => void) => {
@@ -631,8 +641,6 @@ export default function ActivityFeed({
       return next;
     });
 
-  // Every workflow runs on the built-in engine.
-  const builtIn = true;
   const headVersionNumber = (versions ?? []).reduce((m, v) => Math.max(m, v.version_number), 0);
   const nothingNew = !isMain && branchHasNothingNew(versions ?? []);
 
@@ -653,7 +661,6 @@ export default function ActivityFeed({
   const [envsRetry, setEnvsRetry] = useState(0);
 
   useEffect(() => {
-    if (!builtIn) return;
     let cancelled = false;
     listEnvironments()
       .then((res) => {
@@ -667,7 +674,7 @@ export default function ActivityFeed({
     return () => {
       cancelled = true;
     };
-  }, [builtIn, refreshKey, envsRetry]);
+  }, [refreshKey, envsRetry]);
 
   // Menu order: prod first, then the rest as the service lists them.
   const sortedEnvs = useMemo(
@@ -725,23 +732,6 @@ export default function ActivityFeed({
     );
   };
 
-  // Rollback appends v{n}'s content as a NEW head version; it never moves a live pointer.
-  const handleRollback = (versionNumber: number) => {
-    showConfirm(
-      { message: `This will create a new version with v${versionNumber}'s content and set it as latest.` },
-      async () => {
-        setError(null);
-        try {
-          await api.rollbackVersion(workflowId, versionNumber, branch);
-          toast.success(`Rolled back to v${versionNumber}`, "Created as a new version at the branch head");
-          onChanged();
-        } catch (e) {
-          setError(e instanceof Error ? e.message : "Failed to rollback");
-        }
-      },
-    );
-  };
-
 
   // Both merge paths (review + branch) open this same resolver on conflicts.
   const openResolver = (
@@ -758,10 +748,10 @@ export default function ActivityFeed({
     setResolver({ source, target, conflicts, onResolve });
   };
 
-  const handleResolverMerged = () => {
+  const handleResolverMerged = (result: MergeResultResponse) => {
     const ctx = resolver;
     setResolver(null);
-    toast.success("Merge complete", ctx ? `"${ctx.source}" merged into "${ctx.target}"` : undefined);
+    toast.success("Merge complete", ctx ? mergedDetail(ctx.source, ctx.target, result) : undefined);
     if (ctx) onMerged(ctx.target);
     else onChanged();
   };
@@ -816,7 +806,7 @@ export default function ActivityFeed({
     try {
       const result = await api.mergeBranch(workflowId, branch, "main");
       if (result.status === "merged") {
-        toast.success("Branch merged", `"${branch}" merged into "main"`);
+        toast.success("Branch merged", mergedDetail(branch, "main", result));
         onMerged("main");
       } else {
         openResolver(branch, "main", result.conflicts, (resolutions) =>
@@ -834,7 +824,7 @@ export default function ActivityFeed({
     showConfirm(
       {
         title: "Merge into main?",
-        message: `"${branch}" merges into "main" as new versions.`,
+        message: `"${branch}" merges into "main" as new versions. Then "${branch}" is deleted along with its reviews — unless a review of it into "main" is still under way; that review is marked merged and the branch is kept.`,
         consequence: "Merges cannot be undone — recovery means manually reverting on main.",
         confirmLabel: "Merge",
       },
@@ -920,11 +910,15 @@ export default function ActivityFeed({
   };
 
   // One Promote-menu entry; with the env row loaded it flips to "Remove from <env>" for the active one.
-  const renderPromoteEntry = (v: WorkflowVersionSummary, name: string, env?: EnvironmentSummary) => {
+  const renderPromoteEntry = (
+    v: WorkflowVersionSummary,
+    target: Pick<EnvironmentSummary, "name" | "is_prod">,
+    env?: EnvironmentSummary,
+  ) => {
+    const { name } = target;
     const pointer = envPointers.find((p) => p.environment === name);
     const alreadyHere = pointer?.version_id === v.id;
-    const isProd = env ? env.is_prod : name === "prod";
-    const mainOnlyBlocked = (isProd || name === "uat") && !isMain;
+    const mainOnlyBlocked = isProtectedEnv(target) && !isMain;
     const color = getTagColor(name);
 
     if (alreadyHere && env) {
@@ -974,7 +968,7 @@ export default function ActivityFeed({
   // branch's own vN exists too and the two must not read as the same thing.
   const renderForkRow = (v: WorkflowVersionSummary, isOnlyHistory: boolean) => {
     const source = v.fork_source_branch || "main";
-    const forkClickable = isOnlyHistory && builtIn;
+    const forkClickable = isOnlyHistory;
     return (
       <div
         key={v.id}
@@ -1016,15 +1010,13 @@ export default function ActivityFeed({
   const renderVersionCard = (v: WorkflowVersionSummary) => {
     const displayTags = (v.tags || []).filter((t) => t !== "latest");
     // Every env pointing at this version renders as its own chip, prod included.
-    const pointedEnvs = builtIn ? envPointers.filter((p) => p.version_id === v.id) : [];
-    const builtinHead = builtIn && isMain && v.version_number === headVersionNumber;
+    const pointedEnvs = envPointers.filter((p) => p.version_id === v.id);
+    const mainHead = isMain && v.version_number === headVersionNumber;
     const diffOpen = openDiffIds.has(v.id);
     // A branch's first version DOES have a parent — its fork point on the parent branch. The header
     // labels each side from the resolved branch, so that comparison is no longer mislabelled.
     const hasParent = Boolean(v.parent_id);
     const isHead = (v.tags || []).includes("latest");
-    const multiple = (versions?.length ?? 0) > 1;
-    const canRollback = !builtIn && !isHead && multiple;
 
     // The card itself is the edit affordance: head opens the editor, older versions continue-from
     // (?v=, so Save appends a new head and vN stays immutable).
@@ -1035,10 +1027,10 @@ export default function ActivityFeed({
       <div
         key={v.id}
         id={`feed-version-${v.version_number}`}
-        className={`rounded-xl p-4 group/vcard${builtIn ? " cursor-pointer transition-colors hover:border-[var(--orchestr-line-strong)]" : ""}`}
+        className="rounded-xl p-4 group/vcard cursor-pointer transition-colors hover:border-[var(--orchestr-line-strong)]"
         style={CARD_STYLE}
         {...cardLinkProps(
-          builtIn,
+          true,
           editHref,
           isHead ? `Open v${v.version_number} in the editor` : `Edit from v${v.version_number}`,
           (to) => router.push(to),
@@ -1065,7 +1057,7 @@ export default function ActivityFeed({
               </Tooltip>
             );
           })}
-          {builtinHead && (
+          {mainHead && (
             <Tooltip content="The newest saved version — promote it when it should go live">
               <span
                 className="text-[9px] py-[1px] px-1.5 rounded font-medium uppercase"
@@ -1076,14 +1068,12 @@ export default function ActivityFeed({
             </Tooltip>
           )}
           <span className="ml-auto inline-flex items-center gap-2.5 shrink-0">
-            {builtIn && (
-              <span
-                className="text-[10px] opacity-0 group-hover/vcard:opacity-100 transition-opacity"
-                style={{ color: "var(--orchestr-ink-subtle)" }}
-              >
-                {isHead ? "click to open in the editor" : `click to edit from v${v.version_number}`}
-              </span>
-            )}
+            <span
+              className="text-[10px] opacity-0 group-hover/vcard:opacity-100 transition-opacity"
+              style={{ color: "var(--orchestr-ink-subtle)" }}
+            >
+              {isHead ? "click to open in the editor" : `click to edit from v${v.version_number}`}
+            </span>
             {hasParent && (
               <button
                 onClick={() => toggleDiff(v.id)}
@@ -1113,7 +1103,7 @@ export default function ActivityFeed({
         {/* Actions row */}
         <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
           {/* Promote: points an environment at this version, via the field-diff confirm. */}
-          {builtIn && !canMovePointers && (
+          {!canMovePointers && (
             <Tooltip content={ENV_POINTER_GATE.promote}>
               <Button
                 variant="ghost"
@@ -1128,7 +1118,7 @@ export default function ActivityFeed({
               </Button>
             </Tooltip>
           )}
-          {builtIn && canMovePointers && (
+          {canMovePointers && (
           <div className="relative" ref={promoteMenuId === v.id ? promoteMenuRef : undefined}>
             <Button
               variant="ghost"
@@ -1151,10 +1141,10 @@ export default function ActivityFeed({
                 }}
               >
                 {sortedEnvs !== null ? (
-                  sortedEnvs.map((env) => renderPromoteEntry(v, env.name, env))
+                  sortedEnvs.map((env) => renderPromoteEntry(v, env, env))
                 ) : envsFailed ? (
                   <>
-                    {FALLBACK_ENV_NAMES.map((name) => renderPromoteEntry(v, name))}
+                    {FALLBACK_ENVS.map((target) => renderPromoteEntry(v, target))}
                     <div
                       className="px-3 pt-2 mt-1 flex items-center gap-2"
                       style={{ borderTop: "1px solid var(--orchestr-line)" }}
@@ -1191,17 +1181,6 @@ export default function ActivityFeed({
               </div>
             )}
           </div>
-          )}
-
-          {canRollback && (
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={() => handleRollback(v.version_number)}
-              className="text-[color:var(--orchestr-warning)] hover:text-[color:var(--orchestr-warning)]"
-            >
-              Rollback here
-            </Button>
           )}
 
         </div>

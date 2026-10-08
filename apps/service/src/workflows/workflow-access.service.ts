@@ -31,4 +31,14 @@ export class WorkflowAccessService {
     }
     return wf;
   }
+
+  /** Whether the caller may create a workflow in its active org — `write` for a draft, `deploy` for one that goes live. */
+  async requireCreate(principal: Principal, action: 'write' | 'deploy'): Promise<void> {
+    const orgId = principal.activeOrgId;
+    if (
+      !(await this.policy.can(principal, action, { orgId, ownerUserId: orgId ? null : principal.user.id }))
+    ) {
+      throw new DomainError('Not authorised to create workflows in this organisation', 403);
+    }
+  }
 }

@@ -43,5 +43,9 @@ Promoting an older version still works, so protection can never leave you unable
 
 ## Delete
 
-Delete a branch from the selector once its change has landed. Its versions go with it, so delete
-after merging, not before.
+**Merge into main** deletes the branch once its change lands, unless a review of it into main is
+still under way — that review is marked merged and the branch is kept. You can also delete one from
+the selector.
+
+Either way its reviews are deleted with it and its versions drop out of the feed. An environment
+already running one of them keeps running it.

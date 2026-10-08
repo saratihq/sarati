@@ -778,6 +778,8 @@ export interface MergeResultResponse {
   status: "merged" | "conflicts";
   merged_version_id?: string | null;
   conflicts?: ConflictInfo[];
+  /** Set when Merge into main deleted the source branch afterwards — it keeps it while a review of it is open. */
+  cleaned_up?: { branch_deleted: string } | null;
 }
 
 /** Layout is presentation, not history: PATCH the branch head's node positions in place. */
@@ -1346,24 +1348,6 @@ export async function sendRunEvent(
     method: "POST",
     body: JSON.stringify(body),
   });
-}
-
-export async function rollbackVersion(
-  workflowId: string,
-  versionNumber: number,
-  branch?: string,
-): Promise<{
-  status: string;
-  new_version_number: number;
-  rolled_back_to: number;
-}> {
-  const params = branch ? `?branch=${encodeURIComponent(branch)}` : "";
-  return request(
-    `/workflows/${workflowId}/versions/${versionNumber}/rollback${params}`,
-    {
-      method: "POST",
-    },
-  );
 }
 
 // ─── Publish / Restore (Save ≠ Live) ───

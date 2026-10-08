@@ -64,6 +64,25 @@ describe("BranchSelector", () => {
     expect(setBranchProtection).toHaveBeenCalledWith("wf-1", "main", true);
   });
 
+  it("says what deleting a branch removes and what keeps running before it asks", async () => {
+    listBranches.mockResolvedValue({
+      workflow_id: "wf-1",
+      branches: [branch("main", { is_default: true }), branch("lane")],
+    });
+    const user = userEvent.setup();
+    render(<BranchSelector workflowId="wf-1" currentBranch="main" onBranchChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /main/ }));
+    const trash = await screen.findByRole("button", { name: "Delete lane" });
+    expect(trash).toHaveAttribute("title", expect.stringContaining("its versions keep running"));
+    await user.click(trash);
+
+    const confirm = await screen.findByRole("dialog");
+    expect(confirm).toHaveTextContent("every review into or out of it");
+    expect(confirm).toHaveTextContent("an environment running one keeps running it");
+    expect(confirm).not.toHaveTextContent("tears down");
+  });
+
   it("stays open with the reason when the branch cannot be created", async () => {
     createBranch.mockRejectedValue(new Error('A branch named "main" already exists'));
     const onBranchChange = vi.fn();
