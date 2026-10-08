@@ -118,7 +118,16 @@ export class McpHandlerService implements OnModuleDestroy {
       );
     }
 
-    for (const tool of published) this.invoker.register(server, tool, principal);
+    // One published tool the SDK refuses must not take the platform tools and every other workflow down with it.
+    for (const tool of published) {
+      try {
+        this.invoker.register(server, tool, principal);
+      } catch (err) {
+        this.logger.warn(
+          `Published tool "${tool.name}" (workflow ${tool.workflowId}) not offered: ${messageOf(err)}`,
+        );
+      }
+    }
     return server;
   }
 

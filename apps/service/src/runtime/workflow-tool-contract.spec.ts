@@ -15,6 +15,12 @@ describe('what a workflow declares about being called as a tool', () => {
     expect(contractOf({ tool_name: 'orchestr_diff', description: 'x' }, 'w')).toBeNull();
   });
 
+  it('refuses a name the MCP SDK reads as already registered, however it is spelled', () => {
+    expect(toolNameOf('Constructor', 'fallback')).toBeNull();
+    expect(toolNameOf(undefined, 'constructor')).toBeNull();
+    expect(toolNameOf('construct', 'fallback')).toBe('construct');
+  });
+
   it('drops a malformed argument rather than publishing a broken schema', () => {
     const inputs = inputsOf([{ name: 'n', type: 'number' }, { type: 'string' }, { name: '  ' }]);
     expect(inputs).toEqual([{ name: 'n', type: 'number', description: '', required: false }]);

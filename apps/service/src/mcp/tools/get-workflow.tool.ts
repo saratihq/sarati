@@ -24,7 +24,6 @@ const Output = z.object({
   branch: Branch,
   version_id: z.string().nullable(),
   version_number: z.number().nullable().describe('Version numbers are per-branch, never global.'),
-  // Listed before the other arrays so the result-size cap trims the graph, not the orientation.
   nodes: z.array(
     z.object({
       id: z.string(),

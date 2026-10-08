@@ -36,7 +36,8 @@ export function toolNameOf(raw: unknown, fallback: string): string | null {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 60);
-  if (!name || /^\d/.test(name)) return null;
+  // `constructor` and the like read as already registered off Object.prototype in the MCP SDK's tool map.
+  if (!name || /^\d/.test(name) || name in Object.prototype) return null;
   // Refused rather than silently renamed: an author who picks a reserved name should find out,
   // not discover their tool answering to something else.
   return name.startsWith(RESERVED_PREFIX.replace(/_$/, '')) ? null : name;

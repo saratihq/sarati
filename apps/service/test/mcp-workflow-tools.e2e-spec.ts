@@ -254,4 +254,15 @@ describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
     expect(names).toContain('greet_person');
     await client.close();
   });
+
+  it('a published tool whose name the SDK refuses is left out on its own, and the surface stays up', async () => {
+    await publish(toolDoc('proto ', 'Constructor'));
+
+    const client = await connect(invokeKey);
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain('constructor');
+    expect(names).toContain('greet_person');
+    await client.close();
+  });
 });

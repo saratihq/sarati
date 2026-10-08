@@ -87,9 +87,13 @@ A workflow whose production version starts with the **Called by another workflow
 description and inputs that trigger declares. Committing never changes the list — only publishing
 does.
 
-Names are lowercased, with anything that is not a letter or digit turned into `_`. If two live
-workflows come out with the same name, neither is offered — a name has to reach exactly one
-workflow. Rename one of them.
+The tool name is the trigger's tool name, or the workflow's name when that is blank. It is
+lowercased, every run of characters other than `a`–`z` and `0`–`9` becomes one `_`, leading and
+trailing `_` are dropped, and it is cut to 60 characters. A name that comes out empty, starts with
+a digit or with `orchestr`, or is `constructor` is not offered.
+
+If two live workflows come out with the same name, neither is offered — a name has to reach
+exactly one workflow. Rename one of them.
 
 Calling one **runs the live automation**. That is what it is for, so it counts against the same 20
 an hour. The call waits 15 seconds for an answer; a longer run returns a run id, and reading that
