@@ -245,8 +245,10 @@ function ReviewFeedCard({
     };
   }, [expanded, workflowId, review.id, review.updated_at, testEpoch, refreshKey]);
 
-  const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
-  const actionable = review.status !== "merged" && review.status !== "closed";
+  // The detail refetches whenever the list's summary moves, so it is never older than the list — and it answered the gate.
+  const status = detail?.status ?? review.status;
+  const statusStyle = STATUS_STYLES[status] || STATUS_STYLES.open;
+  const actionable = status !== "merged" && status !== "closed";
   const nothingToReview = actionable && detail?.up_to_date === true;
   // Comments/approvals are rejected server-side once a review is merged/closed.
   const canCollaborate = actionable;
@@ -280,7 +282,7 @@ function ReviewFeedCard({
           className="text-[9px] py-[1px] px-1.5 rounded font-semibold uppercase shrink-0"
           style={{ background: statusStyle.bg, color: statusStyle.text }}
         >
-          {review.status}
+          {status}
         </span>
         <span className="text-[13px] font-semibold flex-1 truncate" style={{ color: "var(--orchestr-ink)" }}>
           {review.title}
@@ -479,7 +481,7 @@ function ReviewFeedCard({
                     >
                       Request changes
                     </Button>
-                    {review.status === "approved" && (
+                    {status === "approved" && (
                       <Button variant="secondary" size="sm" onClick={() => onMergeRequest(review)} disabled={busy}>
                         Merge
                       </Button>
