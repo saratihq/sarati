@@ -23,7 +23,6 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOSSARY, Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 import { branchHasNothingNew } from "@/lib/branchChanges";
-import { testIsCurrent } from "@/lib/reviewTest";
 import { timeAgo } from "@/lib/format";
 import { getTagColor } from "@/lib/envPresentation";
 import { toast } from "@/lib/toast";
@@ -183,8 +182,10 @@ function ReviewFeedCard({
   const [commentBody, setCommentBody] = useState("");
   const [postingComment, setPostingComment] = useState(false);
   const [note, setNote] = useState("");
-  // Latest pre-merge test; drives the merge-gate warning below.
+  // This review's latest pre-merge test, for the test panel; the merge-gate warning reads the service's answer.
   const [testResult, setTestResult] = useState<ReviewTestSummary | null>(null);
+  // Bumped after a test here, so the detail — and with it the gate's answer — is fetched again.
+  const [detailVersion, setDetailVersion] = useState(0);
 
   useEffect(() => {
     if (!expanded || resolved) return;
@@ -235,7 +236,7 @@ function ReviewFeedCard({
     return () => {
       cancelled = true;
     };
-  }, [expanded, workflowId, review.id, review.updated_at]);
+  }, [expanded, workflowId, review.id, review.updated_at, detailVersion]);
 
   const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
   const actionable = review.status !== "merged" && review.status !== "closed";
@@ -351,7 +352,10 @@ function ReviewFeedCard({
               reviewId={review.id}
               environments={environments}
               result={testResult}
-              onResult={setTestResult}
+              onResult={(result) => {
+                setTestResult(result);
+                setDetailVersion((v) => v + 1);
+              }}
               canRun={actionable}
             />
           )}
@@ -433,14 +437,15 @@ function ReviewFeedCard({
                   style={{ background: "var(--orchestr-accent-tint)", color: "var(--orchestr-ink)" }}
                 />
               )}
-              {!nothingToReview && review.status === "approved" && testResult?.verdict === "red" && (
+              {!nothingToReview && detail?.merge_blocked_by_test && (
                 <div
                   className="text-[11px] py-1.5 px-2.5 rounded"
                   style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
                 >
-                  {testIsCurrent(testResult, detail)
-                    ? `The latest test is failing. If ${review.target_branch} is protected, merging is blocked until a re-test passes or either branch gets a new commit.`
-                    : "The last test failed, but a branch has moved since — re-test to see where this stands."}
+                  {detail.merge_blocked_by_test.review_id === review.id
+                    ? "The latest test of these versions is failing"
+                    : `The latest test of these versions, on review "${detail.merge_blocked_by_test.title}", is failing`}
+                  {`, so merging into ${review.target_branch} is blocked. Commit a fix, or re-test once the cause is resolved.`}
                 </div>
               )}
               <div className="flex gap-2">

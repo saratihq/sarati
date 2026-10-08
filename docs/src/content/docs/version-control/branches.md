@@ -36,9 +36,8 @@ Both doors are locked:
 
 | Attempt | Result |
 |---|---|
-| Merge a branch into it without an approved review | Refused — *merge it through an approved review* |
+| Merge a branch into it without an approved review — or while the latest [test](/version-control/reviews/#merge) of the two versions is failing | Refused — *merge it through an approved review*, or *the pre-merge test is failing* |
 | Commit to it directly | Refused — *commit to a branch and open a review to bring it in* |
-| Merge while the latest [test](/version-control/reviews/#merge) of the two versions failed | Refused — *the pre-merge test is failing* |
 
 Promoting an older version still works, so protection can never leave you unable to roll back.
 

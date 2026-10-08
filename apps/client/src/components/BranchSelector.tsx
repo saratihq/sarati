@@ -196,7 +196,7 @@ export default function BranchSelector({
                     aria-label={b.is_protected ? `Unprotect ${b.name}` : `Protect ${b.name}`}
                     title={
                       b.is_protected
-                        ? "Protected — merges require an approved review. Click to unprotect."
+                        ? "Protected — merges need an approved review and no failing latest test. Click to unprotect."
                         : "Not protected — anyone can merge into it. Click to protect."
                     }
                     className="shrink-0 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-accent-tint)]"

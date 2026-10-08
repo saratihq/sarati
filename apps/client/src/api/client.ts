@@ -1036,6 +1036,8 @@ export interface ReviewDetail extends ReviewSummary {
   target_head_version_id?: string | null;
   /** True when the target already has every change on the source: nothing is left to review. */
   up_to_date?: boolean;
+  /** The review whose failing test refuses this merge right now, as the service's merge gate answers it. */
+  merge_blocked_by_test?: { review_id: string; title: string } | null;
 }
 
 export interface ReviewListResponse {

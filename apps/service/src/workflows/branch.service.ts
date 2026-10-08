@@ -196,6 +196,30 @@ export class BranchService {
     });
   }
 
+  /** The review whose failing test would refuse merging `source` into `target` now — what the review card shows. */
+  async testBlockingMerge(
+    em: EntityManager,
+    workflowId: string,
+    sourceBranchId: string,
+    targetBranchId: string,
+  ): Promise<{ id: string; title: string } | null> {
+    const [source, target] = await Promise.all([
+      em.findOne(WorkflowBranchEntity, { where: { id: sourceBranchId } }),
+      em.findOne(WorkflowBranchEntity, { where: { id: targetBranchId } }),
+    ]);
+    if (!target?.isProtected || !source?.headVersionId || !target.headVersionId) return null;
+    const reviews = await this.reviewsInto(em, workflowId, target.id);
+    return latestFailingTest(reviews, { source: source.headVersionId, target: target.headVersionId });
+  }
+
+  private reviewsInto(
+    em: EntityManager,
+    workflowId: string,
+    targetBranchId: string,
+  ): Promise<WorkflowReviewEntity[]> {
+    return em.find(WorkflowReviewEntity, { where: { workflowId, targetBranchId } });
+  }
+
   /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */
   async historyContains(em: EntityManager, headId: string, versionId: string): Promise<boolean> {
     const rows = await rawQuery<{ found: number }>(
@@ -289,14 +313,9 @@ export class BranchService {
 
       // Enforced here, not per caller, so BOTH merge entry points inherit it (constitution rows 5, 15).
       if (target.isProtected) {
-        // Every review of the pair, closed ones included: closing a review must not erase a test it ran.
-        const reviews = await em
-          .createQueryBuilder(WorkflowReviewEntity, 'r')
-          .where('r.workflow_id = :workflowId', { workflowId })
-          .andWhere('r.source_branch_id = :sourceId', { sourceId: source.id })
-          .andWhere('r.target_branch_id = :targetId', { targetId: target.id })
-          .getMany();
-        if (!reviews.some((r) => r.status === 'approved')) {
+        // Approval is per pair; a test counts from any review into this branch, closed ones included.
+        const reviews = await this.reviewsInto(em, workflowId, target.id);
+        if (!reviews.some((r) => r.sourceBranchId === source.id && r.status === 'approved')) {
           throw new DomainError(
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
@@ -424,24 +443,35 @@ export class BranchService {
 
 /** Refusal when the latest test of the very heads being merged failed (constitution row 15). */
 export const PROTECTED_TARGET_TEST_FAILING =
-  'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging.';
+  'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Commit a fix, or re-test once the cause is resolved.';
 
 /** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
 export const MERGE_TEST_FAILING = 'merge_test_failing';
 
 /**
- * The review whose test of exactly these two heads is the most recent, when that test failed. Any review of
- * the pair counts — a newer passing test lifts an older failure; a test of other heads says nothing (#15).
+ * The review whose test of exactly these two heads is the most recent, when that test failed — any review into
+ * the target counts, and a newer passing test lifts an older failure (#15). A test where the target failed too
+ * decides nothing, and a tie fails closed.
  */
 export function latestFailingTest(
   reviews: Array<Pick<WorkflowReviewEntity, 'id' | 'title' | 'lastTest'>>,
   heads: { source: string; target: string },
-): Pick<WorkflowReviewEntity, 'id' | 'title'> | null {
-  let latest: { review: Pick<WorkflowReviewEntity, 'id' | 'title'>; test: ReviewTestSummary } | null = null;
+): { id: string; title: string } | null {
+  let latest: { id: string; title: string; red: boolean; at: number } | null = null;
   for (const review of reviews) {
     const test = review.lastTest;
     if (!test || test.source_version_id !== heads.source || test.target_version_id !== heads.target) continue;
-    if (!latest || Date.parse(test.tested_at) > Date.parse(latest.test.tested_at)) latest = { review, test };
+    if (!isDecisiveTest(test)) continue;
+    const red = test.verdict === 'red';
+    const at = Date.parse(test.tested_at);
+    if (!latest || at > latest.at || (at === latest.at && red)) {
+      latest = { id: review.id, title: review.title, red, at };
+    }
   }
-  return latest && latest.test.verdict === 'red' ? latest.review : null;
+  return latest?.red ? { id: latest.id, title: latest.title } : null;
+}
+
+/** Whether a test can decide a merge: one where the target failed too neither shows nor rules out a new failure. */
+export function isDecisiveTest(test: ReviewTestSummary): boolean {
+  return test.verdict === 'red' || test.head?.status !== 'error';
 }

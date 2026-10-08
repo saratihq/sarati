@@ -154,6 +154,7 @@ export class ReviewsService {
       source_head_version_id: source?.headVersionId ?? null,
       target_head_version_id: target?.headVersionId ?? null,
       up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
+      merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
       comments: comments.map((c) => ({
@@ -352,6 +353,21 @@ export class ReviewsService {
         subjectId: review.id,
       });
     });
+  }
+
+  /** The review whose failing test refuses this merge right now, as the merge gate itself would answer. */
+  private async mergeBlockedByTest(
+    em: EntityManager,
+    review: WorkflowReviewEntity,
+  ): Promise<{ review_id: string; title: string } | null> {
+    if (review.status === 'merged' || review.status === 'closed') return null;
+    const blocking = await this.branches.testBlockingMerge(
+      em,
+      review.workflowId,
+      review.sourceBranchId,
+      review.targetBranchId,
+    );
+    return blocking ? { review_id: blocking.id, title: blocking.title } : null;
   }
 
   private async targetHasSource(
