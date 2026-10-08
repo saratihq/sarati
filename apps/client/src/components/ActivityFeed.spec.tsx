@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import * as environments from "@/api/environments";
 import ActivityFeed from "@/components/ActivityFeed";
+import { toast } from "@/lib/toast";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/api/client", async (importOriginal) => ({
@@ -12,7 +13,9 @@ vi.mock("@/api/client", async (importOriginal) => ({
   listReviews: vi.fn(),
   listBranches: vi.fn(),
   getReview: vi.fn(),
+  mergeBranch: vi.fn(),
 }));
+vi.mock("@/lib/toast", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
 vi.mock("@/api/environments", async (importOriginal) => ({
   ...(await importOriginal<typeof environments>()),
   listEnvironments: vi.fn(),
@@ -101,5 +104,34 @@ describe("ActivityFeed promote menu", () => {
     expect(screen.getByRole("button", { name: /Promote to production/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Promote to uat/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Promote to staging/ })).toBeEnabled();
+  });
+});
+
+describe("ActivityFeed merge into main", () => {
+  it("says the branch is deleted after the merge, and confirms it when it was", async () => {
+    vi.mocked(api.listVersions).mockResolvedValue({
+      workflow_id: "wf",
+      env_pointers: [],
+      versions: [
+        { id: "v-lane", version_number: 1, workflow_json: {}, tags: ["latest"], parent_id: "v-main", branch_name: "lane" },
+      ],
+    });
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
+    vi.mocked(api.mergeBranch).mockResolvedValue({
+      status: "merged",
+      merged_version_id: "v-merged",
+      cleaned_up: { branch_deleted: "lane" },
+    });
+    const onMerged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={onMerged} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent('Then "lane" is deleted along with its reviews');
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+
+    await vi.waitFor(() => expect(onMerged).toHaveBeenCalledWith("main"));
+    expect(toast.success).toHaveBeenCalledWith("Branch merged", '"lane" merged into "main" and was deleted');
   });
 });

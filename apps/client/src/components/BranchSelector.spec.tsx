@@ -73,7 +73,9 @@ describe("BranchSelector", () => {
     render(<BranchSelector workflowId="wf-1" currentBranch="main" onBranchChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: /main/ }));
-    await user.click(await screen.findByRole("button", { name: "Delete lane" }));
+    const trash = await screen.findByRole("button", { name: "Delete lane" });
+    expect(trash).toHaveAttribute("title", expect.stringContaining("its versions keep running"));
+    await user.click(trash);
 
     const confirm = await screen.findByRole("dialog");
     expect(confirm).toHaveTextContent("every review into or out of it");

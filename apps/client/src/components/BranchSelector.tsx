@@ -215,7 +215,7 @@ export default function BranchSelector({
                       onClick={() => setPendingDelete(b)}
                       disabled={deleting}
                       aria-label={`Delete ${b.name}`}
-                      title={`Delete "${b.name}" — also tears down any deployments on it`}
+                      title={`Delete "${b.name}" and its reviews — its versions keep running wherever they are live`}
                       className="shrink-0 mr-2 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-danger-tint)]"
                       style={{ width: 24, height: 24, color: "var(--orchestr-ink-subtle)" }}
                     >

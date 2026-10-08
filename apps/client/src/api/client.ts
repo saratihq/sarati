@@ -778,6 +778,8 @@ export interface MergeResultResponse {
   status: "merged" | "conflicts";
   merged_version_id?: string | null;
   conflicts?: ConflictInfo[];
+  /** Set when Merge into main deleted the source branch afterwards — it keeps it while a review of it is open. */
+  cleaned_up?: { branch_deleted: string } | null;
 }
 
 /** Layout is presentation, not history: PATCH the branch head's node positions in place. */

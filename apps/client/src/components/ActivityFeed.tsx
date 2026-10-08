@@ -50,6 +50,12 @@ const APPROVAL_STYLES: Record<string, { label: string; text: string }> = {
 };
 
 
+function mergedDetail(source: string, target: string, result: MergeResultResponse): string {
+  return result.cleaned_up
+    ? `"${source}" merged into "${target}" and was deleted`
+    : `"${source}" merged into "${target}"`;
+}
+
 // Promote-menu fallback when the environments list can't load; promoting works by name, the flag still decides.
 const FALLBACK_ENVS = [
   { name: "production", is_prod: true },
@@ -742,10 +748,10 @@ export default function ActivityFeed({
     setResolver({ source, target, conflicts, onResolve });
   };
 
-  const handleResolverMerged = () => {
+  const handleResolverMerged = (result: MergeResultResponse) => {
     const ctx = resolver;
     setResolver(null);
-    toast.success("Merge complete", ctx ? `"${ctx.source}" merged into "${ctx.target}"` : undefined);
+    toast.success("Merge complete", ctx ? mergedDetail(ctx.source, ctx.target, result) : undefined);
     if (ctx) onMerged(ctx.target);
     else onChanged();
   };
@@ -800,7 +806,7 @@ export default function ActivityFeed({
     try {
       const result = await api.mergeBranch(workflowId, branch, "main");
       if (result.status === "merged") {
-        toast.success("Branch merged", `"${branch}" merged into "main"`);
+        toast.success("Branch merged", mergedDetail(branch, "main", result));
         onMerged("main");
       } else {
         openResolver(branch, "main", result.conflicts, (resolutions) =>
@@ -818,7 +824,7 @@ export default function ActivityFeed({
     showConfirm(
       {
         title: "Merge into main?",
-        message: `"${branch}" merges into "main" as new versions.`,
+        message: `"${branch}" merges into "main" as new versions. Then "${branch}" is deleted along with its reviews — unless a review of it into "main" is still under way; that review is marked merged and the branch is kept.`,
         consequence: "Merges cannot be undone — recovery means manually reverting on main.",
         confirmLabel: "Merge",
       },
