@@ -413,7 +413,7 @@ export class VersionsWriteService {
 
   /**
    * Publish — the explicit release act: moves the live pointer to a default-branch version (head by
-   * default), minting nothing. Idempotent. Env-less triggers head-track main and are unaffected.
+   * default), minting nothing. Idempotent. Triggers fire their environment's pointer, so this re-reconciles them.
    */
   async publish(
     workflowId: string,

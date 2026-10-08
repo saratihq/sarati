@@ -112,7 +112,9 @@ keys** — inside the running app, not in `.env`. Everything else works without 
 
 ## What it talks to
 
-A self-hosted Sarati sends no telemetry: no analytics, no crash reporting, no update checks. The
+A self-hosted Sarati sends no telemetry: no analytics, no crash reporting, no update checks. (Before
+v0.2.12, the composer's Claude Agent SDK could send Anthropic usage and error reports once a key was
+set.) The
 installer fetches its stack definition from GitHub and pulls the image from the registry, and after
 that the instance only contacts what you connect — the accounts you link, Composio if you add a key,
 Clerk if you configure cloud sign-in, and the model provider behind the composer. The pages your

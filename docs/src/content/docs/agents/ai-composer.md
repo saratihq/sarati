@@ -73,12 +73,13 @@ it never renames over you, however often it re-plans.
 
 ## Saving
 
-Nothing reaches the server until you save.
+Nothing becomes a workflow until you save. The conversation and its draft are kept as you go, so
+reopening the editor picks up where you left off; **clear conversation** deletes them.
 
 | | |
 |---|---|
 | **Save and turn on** | Creates the workflow and makes it live. |
-| **Keep tweaking** | Carries on the conversation. Nothing is stored until you save. |
+| **Keep tweaking** | Carries on the conversation. Nothing becomes a workflow until you save. |
 
 The composer commits versions. It never moves a live pointer on an existing workflow — see
 [Save, version, publish](/version-control/save-version-publish/).
