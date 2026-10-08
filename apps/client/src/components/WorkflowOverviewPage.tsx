@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
+import { hasUnpublishedVersion, type ReleaseState } from "@/lib/release";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import { useWorkflowContext } from "./WorkflowDetail";
 import ActivityFeed from "./ActivityFeed";
@@ -58,14 +59,8 @@ export default function WorkflowOverviewPage() {
     setRefreshKey((k) => k + 1);
   }, []);
 
-  // Save ≠ Live: `live < latest` means saved-but-unpublished changes, which is
-  // what the Publish affordance keys off.
-  const [release, setRelease] = useState<{
-    live: number | null;
-    liveId: string | null;
-    latest: number;
-    latestId: string | null;
-  } | null>(null);
+  // Save ≠ Live: what production runs against main's head, which the Publish affordance keys off.
+  const [release, setRelease] = useState<ReleaseState | null>(null);
   // The displayed version's step nodes, for the connection-health banner.
   const [docNodes, setDocNodes] = useState<Record<string, unknown>[] | null>(
     null,
@@ -131,14 +126,7 @@ export default function WorkflowOverviewPage() {
     };
   }, [workflowId, refreshKey]);
 
-  // Identity, not the number: live can point at a feature-branch version whose per-branch number
-  // outranks main's head, which a `latest > live` test reads as "nothing to publish" (invariant #1).
-  const hasUnpublished =
-    release != null &&
-    release.live != null &&
-    (release.liveId != null && release.latestId != null
-      ? release.liveId !== release.latestId
-      : release.latest > release.live);
+  const hasUnpublished = hasUnpublishedVersion(release);
 
   // Prod-publish gate: a plain member of a non-personal org can't
   // move the live pointer — the service 403s Publish, so disable it with a why.

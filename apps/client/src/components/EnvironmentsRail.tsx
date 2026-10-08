@@ -44,10 +44,13 @@ export default function EnvironmentsRail({
     pointers: EnvPointer[];
   } | null>(null);
 
+  const [failed, setFailed] = useState(false);
+
   const [lastId, setLastId] = useState(workflowId);
   if (workflowId !== lastId) {
     setLastId(workflowId);
     setRuntime(null);
+    setFailed(false);
   }
 
   useEffect(() => {
@@ -75,9 +78,12 @@ export default function EnvironmentsRail({
           draft: asTarget(head),
           pointers: res.env_pointers ?? [],
         });
+        setFailed(false);
       })
       .catch(() => {
-        if (!cancelled) setRuntime(null);
+        if (cancelled) return;
+        setRuntime(null);
+        setFailed(true);
       });
     return () => {
       cancelled = true;
@@ -101,35 +107,41 @@ export default function EnvironmentsRail({
           Runtime
         </div>
         <div className="rounded-xl p-3.5" style={CARD_STYLE}>
-          <Link
-            href={`/workflows/${workflowId}/runs`}
-            className="flex items-center gap-2 group"
-          >
-            <span
-              className="w-1.5 h-1.5 rounded-full"
-              style={{ background: "var(--orchestr-success)" }}
-            />
-            <span
-              className="text-[12px] font-semibold group-hover:underline underline-offset-2"
-              style={{ color: "var(--orchestr-ink)" }}
+          {runtime === null ? (
+            <div className="text-[12px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              {failed ? "Couldn't load what runs — reload to try again." : "Loading…"}
+            </div>
+          ) : (
+            <Link
+              href={`/workflows/${workflowId}/runs`}
+              className="flex items-center gap-2 group"
             >
-              Live on Sarati
-            </span>
-            {!multiEnv && live && (
               <span
-                className="text-[12px] font-mono font-semibold"
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: live ? "var(--orchestr-success)" : "var(--orchestr-ink-subtle)" }}
+              />
+              <span
+                className="text-[12px] font-semibold group-hover:underline underline-offset-2"
                 style={{ color: "var(--orchestr-ink)" }}
               >
-                v{live.number}
+                {live ? "Live on Sarati" : "Not live yet"}
               </span>
-            )}
-            <span
-              className="text-[11px] ml-auto opacity-0 group-hover:opacity-100 transition-opacity"
-              style={{ color: "var(--orchestr-ink-subtle)" }}
-            >
-              Runs →
-            </span>
-          </Link>
+              {!multiEnv && live && (
+                <span
+                  className="text-[12px] font-mono font-semibold"
+                  style={{ color: "var(--orchestr-ink)" }}
+                >
+                  v{live.number}
+                </span>
+              )}
+              <span
+                className="text-[11px] ml-auto opacity-0 group-hover:opacity-100 transition-opacity"
+                style={{ color: "var(--orchestr-ink-subtle)" }}
+              >
+                Runs →
+              </span>
+            </Link>
+          )}
           {multiEnv && (
             <div className="mt-2 space-y-1.5">
               {pointers.map((p) => {
