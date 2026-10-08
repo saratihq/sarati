@@ -294,6 +294,7 @@ describe('ComposerService.stream', () => {
     const subprocessEnv = seenOptions[0]!.env as Record<string, string | undefined>;
     expect(Object.keys(subprocessEnv).sort()).toEqual([
       'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
       'HOME',
       'MCP_TIMEOUT',
       'MCP_TOOL_TIMEOUT',
@@ -301,6 +302,21 @@ describe('ComposerService.stream', () => {
       'TMPDIR',
     ]);
     expect(subprocessEnv.ANTHROPIC_API_KEY).toBe('sk-test');
+  });
+
+  it('runs the SDK with its usage and error reporting off, so the composer sends Anthropic nothing but the turn', async () => {
+    const seenOptions: Array<Record<string, unknown>> = [];
+    const base = scriptedQuery([{ type: 'result', subtype: 'success' }]);
+    const spying: QueryFn = ((args: { options?: Record<string, unknown> }) => {
+      seenOptions.push(args.options ?? {});
+      return (base as unknown as (a: unknown) => unknown)(args);
+    }) as unknown as QueryFn;
+
+    const { service } = await makeService(spying);
+    await collect(service.stream({ message: 'one' }, never, null, null));
+
+    const subprocessEnv = seenOptions[0]!.env as Record<string, string | undefined>;
+    expect(subprocessEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
   });
 
   it('stores the freshest caller token on the session (tool calls run AS the user)', async () => {

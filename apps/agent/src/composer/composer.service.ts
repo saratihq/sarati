@@ -443,6 +443,8 @@ export class ComposerService {
           ANTHROPIC_API_KEY: anthropicApiKey,
           MCP_TIMEOUT: '30000',
           MCP_TOOL_TIMEOUT: '360000',
+          // The SDK's own usage and error reporting, which the docs promise a self-host never sends.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         },
       },
     });
