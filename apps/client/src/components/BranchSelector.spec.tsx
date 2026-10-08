@@ -83,6 +83,20 @@ describe("BranchSelector", () => {
     expect(confirm).not.toHaveTextContent("tears down");
   });
 
+  it("will not delete a protected branch, and says to unprotect it first", async () => {
+    listBranches.mockResolvedValue({
+      workflow_id: "wf-1",
+      branches: [branch("main", { is_default: true }), branch("release", { is_protected: true })],
+    });
+    const user = userEvent.setup();
+    render(<BranchSelector workflowId="wf-1" currentBranch="main" onBranchChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /main/ }));
+    const trash = await screen.findByRole("button", { name: "Delete release" });
+    expect(trash).toBeDisabled();
+    expect(trash).toHaveAttribute("title", expect.stringContaining("unprotect it first"));
+  });
+
   it("stays open with the reason when the branch cannot be created", async () => {
     createBranch.mockRejectedValue(new Error('A branch named "main" already exists'));
     const onBranchChange = vi.fn();

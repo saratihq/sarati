@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { repairDocumentLayout } from '../compose/apply-ops';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource, EntityManager } from 'typeorm';
+import { In, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { newId, now } from '../database/ids';
@@ -33,7 +33,7 @@ export interface ForkPoint {
 
 /**
  * Branch create/merge. Locks BOTH branch rows FOR UPDATE, name-sorted (deadlock safety); `latest`
- * floats to the merge commit INSIDE mergeBranch so every caller inherits it. Ancestor walk follows parent_id only.
+ * floats to the merge commit INSIDE mergeBranch so every caller inherits it. The merge base is a lowest common ancestor over both parents.
  */
 @Injectable()
 export class BranchService {
@@ -173,6 +173,13 @@ export class BranchService {
     return this.dataSource.transaction(async (em) => {
       const branch = await this.getBranch(em, workflowId, name);
       if (branch.isDefault) throw new DomainError('Cannot delete the default branch');
+      if (branch.isProtected) {
+        throw new DomainError(
+          `Branch '${name}' is protected — an owner or admin has to unprotect it before it can be deleted`,
+          409,
+          { code: 'branch_protected' },
+        );
+      }
 
       const tags = await em.find(WorkflowVersionTagEntity, { where: { branchId: branch.id } });
       if (tags.length > 0) {
@@ -194,6 +201,25 @@ export class BranchService {
       });
       return tags.length;
     });
+  }
+
+  /** Where this pair's approvals stand for a protected merge: one covers the source's head, they cover an earlier version, or they predate versioned approvals. */
+  async approvalStanding(
+    em: EntityManager,
+    workflowId: string,
+    source: { id: string; headVersionId: string | null },
+    target: { id: string },
+  ): Promise<ApprovalStanding> {
+    const [row] = await rawQuery<{ current: boolean | null; versioned: boolean | null }>(
+      em,
+      `SELECT bool_or(a.source_version_id = $4) AS current, bool_or(a.source_version_id IS NOT NULL) AS versioned
+         FROM workflow_reviews r JOIN review_approvals a ON a.review_id = r.id
+        WHERE r.workflow_id = $1 AND r.source_branch_id = $2 AND r.target_branch_id = $3 AND r.status = 'approved'
+          AND a.decision = 'approved'`,
+      [workflowId, source.id, target.id, source.headVersionId],
+    );
+    if (row?.current) return 'current';
+    return row?.versioned ? 'moved' : 'unversioned';
   }
 
   /** The failing test that would refuse merging `source` into `target` now — what the review card shows. */
@@ -236,13 +262,15 @@ export class BranchService {
       `SELECT t.verdict, t.tested_at, t.summary->'head'->>'error' AS error, t.review_id, r.title,
               s.name AS source_branch, d.name AS target_branch
          FROM review_test_results t
+         JOIN unnest($2::uuid[], $3::uuid[]) AS tested(source_version_id, target_version_id)
+           ON tested.source_version_id = t.source_version_id AND tested.target_version_id = t.target_version_id
          LEFT JOIN workflow_reviews r ON r.id = t.review_id
          LEFT JOIN workflow_branches s ON s.id = r.source_branch_id
          LEFT JOIN workflow_branches d ON d.id = r.target_branch_id
-        WHERE t.workflow_id = $1 AND t.source_version_id = $2 AND t.target_version_id = $3 AND t.decisive
+        WHERE t.workflow_id = $1 AND t.decisive
         ORDER BY t.tested_at DESC, (t.verdict = 'red') DESC
         LIMIT 1`,
-      [workflowId, heads.source, heads.target],
+      [workflowId, ...(await this.pairsWithContentOf(em, workflowId, heads))],
     );
     const latest = rows[0];
     if (latest?.verdict !== 'red') return null;
@@ -256,6 +284,36 @@ export class BranchService {
           }
         : null;
     return { review, error: latest.error, testedAt: new Date(latest.tested_at).toISOString() };
+  }
+
+  /** Every tested version pair holding these heads' content, as parallel source/target id lists — a test follows content, not ids. */
+  private async pairsWithContentOf(
+    em: EntityManager,
+    workflowId: string,
+    heads: { source: string; target: string },
+  ): Promise<[string[], string[]]> {
+    const pairs = await rawQuery<{ source_version_id: string; target_version_id: string }>(
+      em,
+      `SELECT DISTINCT source_version_id, target_version_id FROM review_test_results WHERE workflow_id = $1 AND decisive`,
+      [workflowId],
+    );
+    const ids = new Set([
+      heads.source,
+      heads.target,
+      ...pairs.flatMap((p) => [p.source_version_id, p.target_version_id]),
+    ]);
+    const versions = await em.find(WorkflowVersionEntity, { where: { id: In([...ids]) } });
+    const irOf = new Map(versions.map((v) => [v.id, this.loadIrFor(v)]));
+    const sameContent = (headId: string, id: string): boolean => {
+      if (id === headId) return true;
+      const head = irOf.get(headId);
+      const other = irOf.get(id);
+      return !!head && !!other && computeDiff(head, other).entries.length === 0;
+    };
+    const matching = pairs.filter(
+      (p) => sameContent(heads.source, p.source_version_id) && sameContent(heads.target, p.target_version_id),
+    );
+    return [matching.map((p) => p.source_version_id), matching.map((p) => p.target_version_id)];
   }
 
   /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */
@@ -277,7 +335,22 @@ export class BranchService {
     return rows.length > 0;
   }
 
-  /** Walk A's ancestry, then return the first hit on B's chain. Follows parent_id ONLY (merge parents are not walked). */
+  /** Whether `versionId` was once this branch's own head: on its first-parent line, not merely merged into it. */
+  async wasHeadOf(em: EntityManager, headId: string, versionId: string): Promise<boolean> {
+    const rows = await rawQuery<{ found: number }>(
+      em,
+      `WITH RECURSIVE line(id) AS (
+         SELECT $1::uuid
+         UNION
+         SELECT v.parent_id FROM line l JOIN workflow_versions v ON v.id = l.id WHERE v.parent_id IS NOT NULL
+       )
+       SELECT 1 AS found FROM line WHERE id = $2::uuid LIMIT 1`,
+      [headId, versionId],
+    );
+    return rows.length > 0;
+  }
+
+  /** The merge base: a lowest common ancestor of A and B, walking both parents (`parent_id` and `merge_parent_id`). */
   async findCommonAncestor(
     em: EntityManager,
     versionAId: string,
@@ -286,28 +359,17 @@ export class BranchService {
     const verA = await em.findOne(WorkflowVersionEntity, { where: { id: versionAId } });
     if (!verA) return null;
 
-    const rows = await rawQuery<{ id: string; parent_id: string | null }>(
+    const rows = await rawQuery<{ id: string; parent_id: string | null; merge_parent_id: string | null }>(
       em,
-      `SELECT id, parent_id FROM workflow_versions WHERE workflow_id = $1`,
+      `SELECT id, parent_id, merge_parent_id FROM workflow_versions WHERE workflow_id = $1`,
       [verA.workflowId],
     );
-    const parentMap = new Map(rows.map((r) => [r.id, r.parent_id]));
-
-    const ancestorsOfA = new Set<string>();
-    let current: string | null | undefined = versionAId;
-    while (current) {
-      ancestorsOfA.add(current);
-      current = parentMap.get(current);
-    }
-
-    current = versionBId;
-    while (current) {
-      if (ancestorsOfA.has(current)) {
-        return em.findOne(WorkflowVersionEntity, { where: { id: current } });
-      }
-      current = parentMap.get(current);
-    }
-    return null;
+    // Both parents, as `historyContains` walks them — missing the merge parent re-raises conflicts already resolved.
+    const parentsOf = new Map(
+      rows.map((r) => [r.id, [r.parent_id, r.merge_parent_id].filter((p): p is string => p !== null)]),
+    );
+    const base = lowestCommonAncestor(versionAId, versionBId, parentsOf);
+    return base ? em.findOne(WorkflowVersionEntity, { where: { id: base } }) : null;
   }
 
   async mergeBranch(
@@ -359,6 +421,21 @@ export class BranchService {
             `Branch '${targetBranchName}' is protected — merge it through an approved review`,
           );
         }
+        const standing = await this.approvalStanding(em, workflowId, source, target);
+        if (standing !== 'current') {
+          const why =
+            standing === 'moved'
+              ? `the review was approved before the latest changes to '${sourceBranchName}'`
+              : 'the review was approved before an approval covered one exact version';
+          throw new DomainError(
+            `Branch '${targetBranchName}' is protected — ${why}. Approve it again to merge.`,
+            409,
+            {
+              code: APPROVAL_STALE,
+              reason: standing,
+            },
+          );
+        }
         const failing = await this.latestFailingTest(em, workflowId, {
           source: source.headVersionId,
           target: target.headVersionId,
@@ -369,6 +446,7 @@ export class BranchService {
             review_id: failing.review?.id ?? null,
           });
         }
+        if (resolutions && resolutions.length > 0) throw protectedMergeConflicts(source, targetBranchName);
       }
 
       if (await this.historyContains(em, target.headVersionId, source.headVersionId)) {
@@ -386,6 +464,7 @@ export class BranchService {
 
       const result = threeWayMerge(ancestorIr, sourceIr, targetIr, resolutions);
       if (!result.success || !result.merged) {
+        if (target.isProtected) throw protectedMergeConflicts(source, targetBranchName);
         return { success: false, mergedVersionId: null, conflicts: result.conflicts };
       }
 
@@ -486,6 +565,34 @@ export const PROTECTED_TARGET_TEST_FAILING =
 /** The `code` a failing-test refusal carries, beside the `review_id` holding that test. */
 export const MERGE_TEST_FAILING = 'merge_test_failing';
 
+/** The refusal code when a protected merge's approval was given on an earlier version of the source. */
+export const APPROVAL_STALE = 'approval_stale';
+
+/** `moved`: approved on an earlier source version; `unversioned`: approved before approvals recorded a version. */
+export type ApprovalStanding = 'current' | 'moved' | 'unversioned';
+
+/** The refusal code when a merge into a protected branch would need conflicts resolved at merge time. */
+export const PROTECTED_MERGE_CONFLICTS = 'protected_merge_conflicts';
+
+function protectedMergeConflicts(
+  source: { name: string; isProtected: boolean },
+  target: string,
+): DomainError {
+  const fix = source.isProtected
+    ? `'${source.name}' is protected too, so create a branch from '${source.name}', update it from '${target}', resolve the conflicts there, and get that reviewed.`
+    : `Update '${source.name}' from '${target}', resolve the conflicts there, and get that reviewed.`;
+  return new DomainError(
+    `Branch '${target}' is protected, so conflicts can't be resolved while merging into it — that would land content nobody reviewed or tested. ${fix}`,
+    409,
+    {
+      code: PROTECTED_MERGE_CONFLICTS,
+      source_branch: source.name,
+      target_branch: target,
+      source_protected: source.isProtected,
+    },
+  );
+}
+
 /** The conclusive failing test that blocks a protected merge. */
 export interface FailingTest {
   /** The review it was run from; null once that review's branch has been deleted. */
@@ -512,4 +619,30 @@ export function isNewerTest(a: ReviewTestSummary, b: ReviewTestSummary): boolean
 /** Whether a test can decide a merge: one where the target failed too neither shows nor rules out a new failure. */
 export function isDecisiveTest(test: ReviewTestSummary): boolean {
   return test.verdict === 'red' || test.head?.status !== 'error';
+}
+
+/** A lowest common ancestor of `a` and `b`: common to both, and no other common one descends from it; ties take the nearest to `b`. */
+export function lowestCommonAncestor(a: string, b: string, parentsOf: Map<string, string[]>): string | null {
+  const ancestorsOfA = reachableFrom([a], parentsOf);
+  const common = [...reachableFrom([b], parentsOf)].filter((id) => ancestorsOfA.has(id));
+  const dominated = reachableFrom(
+    common.flatMap((id) => parentsOf.get(id) ?? []),
+    parentsOf,
+  );
+  return common.find((id) => !dominated.has(id)) ?? null;
+}
+
+/** Every version reachable from `starts` through either parent, `starts` included, in breadth-first order. */
+function reachableFrom(starts: string[], parentsOf: Map<string, string[]>): Set<string> {
+  const reached = new Set<string>(starts);
+  const queue = [...starts];
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    for (const parent of parentsOf.get(next) ?? []) {
+      if (!reached.has(parent)) {
+        reached.add(parent);
+        queue.push(parent);
+      }
+    }
+  }
+  return reached;
 }

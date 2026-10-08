@@ -80,6 +80,16 @@ POST /api/workflows/<id>/versions/1/rollback?branch=main
 {"status":"rolled_back","new_version_number":7,"rolled_back_to":1}
 ```
 
+Rolling back to a version whose content the head already holds writes nothing — the head stays put:
+
+```
+POST /api/workflows/<id>/versions/5/rollback?branch=main
+{"status":"no_changes","new_version_number":7,"rolled_back_to":5,"no_changes":true}
+```
+
+A version left behind by a deleted branch is never rolled back onto another branch — that would land
+work nobody merged. It is refused with `409 version_orphaned`.
+
 The `branch` matters: version numbers are per branch, so a bare number that exists on several
 branches is refused rather than guessed.
 

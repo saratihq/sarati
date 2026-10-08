@@ -135,6 +135,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='org_id'",
   },
+  {
+    migration: '029_review_approval_version.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='review_approvals' AND column_name='source_version_id'",
+  },
 ];
 
 /**

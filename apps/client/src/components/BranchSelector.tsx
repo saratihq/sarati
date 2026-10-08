@@ -197,7 +197,7 @@ export default function BranchSelector({
                     aria-label={b.is_protected ? `Unprotect ${b.name}` : `Protect ${b.name}`}
                     title={
                       b.is_protected
-                        ? "Protected — merges need an approved review, and not a failing latest conclusive test. Click to unprotect."
+                        ? "Protected — merges need a review approved at the latest version and no failing latest conclusive test. Click to unprotect."
                         : "Not protected — anyone can merge into it. Click to protect."
                     }
                     className="shrink-0 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-accent-tint)]"
@@ -213,9 +213,13 @@ export default function BranchSelector({
                   {!b.is_default ? (
                     <button
                       onClick={() => setPendingDelete(b)}
-                      disabled={deleting}
+                      disabled={deleting || b.is_protected}
                       aria-label={`Delete ${b.name}`}
-                      title={`Delete "${b.name}" and its reviews — its versions keep running wherever they are live`}
+                      title={
+                        b.is_protected
+                          ? `"${b.name}" is protected — unprotect it first to delete it`
+                          : `Delete "${b.name}" and its reviews — its versions keep running wherever they are live`
+                      }
                       className="shrink-0 mr-2 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-danger-tint)]"
                       style={{ width: 24, height: 24, color: "var(--orchestr-ink-subtle)" }}
                     >
@@ -233,7 +237,8 @@ export default function BranchSelector({
             className="py-1.5 px-3 text-[10px] leading-snug"
             style={{ borderTop: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink-subtle)" }}
           >
-            Protected branches merge only through an approved review, and not while the latest conclusive test fails.
+            Protected branches merge only through a review approved at their latest version, never while the latest
+            conclusive test fails, and never with conflicts resolved during the merge. They cannot be deleted.
           </div>
 
           <div className="py-2 px-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>

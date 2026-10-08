@@ -203,6 +203,16 @@ describe('review pre-merge test — "Test this branch" (e2e, isolated DB, mock a
     const retest = await test(reviewId).expect(201);
     expect(retest.body.verdict).toBe('green');
 
+    // The fix is a new version, so the approval no longer covers it: approve it again, then merge.
+    const stale = await request(server())
+      .post(`/api/workflows/${wfId}/reviews/${reviewId}/merge`)
+      .expect(409);
+    expect(stale.body.code).toBe('approval_stale');
+    await request(server())
+      .post(`/api/workflows/${wfId}/reviews/${reviewId}/approve`)
+      .send({ decision: 'approved' })
+      .expect(201);
+
     const merged = await request(server())
       .post(`/api/workflows/${wfId}/reviews/${reviewId}/merge`)
       .expect(201);

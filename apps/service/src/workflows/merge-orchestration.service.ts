@@ -8,7 +8,7 @@ import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entit
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { EventsService } from '../events/events.service';
 import { now } from '../database/ids';
-import type { MergeResolution } from '../ir/merge';
+import type { ConflictEntry, MergeResolution } from '../ir/merge';
 import { BranchService } from './branch.service';
 
 /** Machine code for a merge whose target already has every change on the source. */
@@ -38,21 +38,7 @@ export class MergeOrchestrationService {
       resolutions,
     );
 
-    if (!result.success) {
-      return {
-        status: 'conflicts',
-        conflicts: result.conflicts.map((c) => ({
-          node_id: c.node_id,
-          node_name: c.node_name,
-          kind: c.kind,
-          field_path: c.field_path,
-          deleted_on: c.deleted_on ?? null,
-          source_value: c.source_value,
-          target_value: c.target_value,
-          ancestor_value: c.ancestor_value,
-        })),
-      };
-    }
+    if (!result.success) return conflictsResponse(result);
 
     // Refused before the cleanup below, which would otherwise delete a branch that merged nothing.
     if (result.mergedVersionId === null) {
@@ -82,6 +68,13 @@ export class MergeOrchestrationService {
       };
     }
 
+    // A protected branch outlives its merge: deleting one takes an owner or admin unprotecting it first.
+    const source = await this.dataSource.manager.findOne(WorkflowBranchEntity, {
+      where: { workflowId, name: sourceBranchName },
+    });
+    if (source?.isProtected) {
+      return { status: 'merged', merged_version_id: result.mergedVersionId, cleaned_up: null };
+    }
     await this.branches.deleteBranch(workflowId, sourceBranchName, userId);
 
     return {
@@ -89,6 +82,36 @@ export class MergeOrchestrationService {
       merged_version_id: result.mergedVersionId,
       cleaned_up: { branch_deleted: sourceBranchName },
     };
+  }
+
+  /**
+   * Bring `fromBranch`'s changes into `branchName` — how a branch takes its target's newer work before merging
+   * back, so conflicts are resolved on the branch, where a review and a test see the result. Never deletes a branch.
+   */
+  async updateFrom(
+    workflowId: string,
+    branchName: string,
+    fromBranch: string,
+    userId: string,
+    resolutions?: MergeResolution[],
+  ): Promise<Record<string, unknown>> {
+    const target = await this.dataSource.manager.findOne(WorkflowBranchEntity, {
+      where: { workflowId, name: branchName },
+    });
+    if (target?.isProtected) {
+      throw new DomainError(
+        `Branch '${branchName}' is protected — it takes changes only through a review`,
+        409,
+        {
+          code: 'branch_protected',
+        },
+      );
+    }
+    const result = await this.branches.mergeBranch(workflowId, fromBranch, branchName, userId, resolutions);
+    if (!result.success) return conflictsResponse(result);
+    return result.mergedVersionId === null
+      ? { status: 'up_to_date', merged_version_id: null }
+      : { status: 'merged', merged_version_id: result.mergedVersionId };
   }
 
   /** Mark every non-terminal review for this (source → target) pair merged, under a row lock so it can't race a concurrent approve/merge. */
@@ -135,4 +158,20 @@ export class MergeOrchestrationService {
       return reviews.map((r) => r.id);
     });
   }
+}
+
+function conflictsResponse(result: { conflicts: ConflictEntry[] }): Record<string, unknown> {
+  return {
+    status: 'conflicts',
+    conflicts: result.conflicts.map((c) => ({
+      node_id: c.node_id,
+      node_name: c.node_name,
+      kind: c.kind,
+      field_path: c.field_path,
+      deleted_on: c.deleted_on ?? null,
+      source_value: c.source_value,
+      target_value: c.target_value,
+      ancestor_value: c.ancestor_value,
+    })),
+  };
 }

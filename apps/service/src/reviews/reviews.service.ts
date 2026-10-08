@@ -16,7 +16,7 @@ import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entit
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { EventsService } from '../events/events.service';
 import type { MergeResolution } from '../ir/merge';
-import { BranchService } from './../workflows/branch.service';
+import { BranchService, type ApprovalStanding } from './../workflows/branch.service';
 
 const PG_LOCK_NOT_AVAILABLE = '55P03';
 
@@ -155,6 +155,7 @@ export class ReviewsService {
       target_head_version_id: target?.headVersionId ?? null,
       up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
       target_protected: target?.isProtected ?? false,
+      ...(await this.approvalOf(em, review, source, target)),
       merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
@@ -206,6 +207,7 @@ export class ReviewsService {
     reviewerId: string,
     decision: ApprovalDecision,
     comment: string | null,
+    shownSourceVersionId: string | null = null,
   ): Promise<ReviewApprovalEntity> {
     return this.dataSource.transaction(async (em) => {
       // Lock the review row so concurrent decisions can't race the derived status.
@@ -231,6 +233,15 @@ export class ReviewsService {
         }
       }
 
+      // Unlocked: the approval records the head it was checked against, so a later commit leaves it stale, never wrong.
+      const sourceBranch = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
+      if (shownSourceVersionId && sourceBranch?.headVersionId !== shownSourceVersionId) {
+        throw new DomainError(
+          `'${sourceBranch?.name ?? 'The branch'}' has changed since you loaded this review — look over the new changes, then decide again`,
+          409,
+          { code: 'review_moved' },
+        );
+      }
       const approval = em.create(ReviewApprovalEntity, {
         id: newId(),
         reviewId: review.id,
@@ -238,6 +249,7 @@ export class ReviewsService {
         decision,
         comment,
         createdAt: now(),
+        sourceVersionId: sourceBranch?.headVersionId ?? null,
       });
       await em.save(ReviewApprovalEntity, approval);
 
@@ -358,6 +370,24 @@ export class ReviewsService {
         subjectId: review.id,
       });
     });
+  }
+
+  /** Whether the approval covers the source's current head and, when it doesn't, why — the protected merge gate's answer. */
+  private async approvalOf(
+    em: EntityManager,
+    review: WorkflowReviewEntity,
+    source: WorkflowBranchEntity | null,
+    target: WorkflowBranchEntity | null,
+  ): Promise<{
+    approval_current: boolean;
+    approval_stale_reason: Exclude<ApprovalStanding, 'current'> | null;
+  }> {
+    if (review.status !== 'approved' || !source || !target)
+      return { approval_current: false, approval_stale_reason: null };
+    const standing = await this.branches.approvalStanding(em, review.workflowId, source, target);
+    return standing === 'current'
+      ? { approval_current: true, approval_stale_reason: null }
+      : { approval_current: false, approval_stale_reason: standing };
   }
 
   /** The conclusive failing test that refuses this merge right now, as the merge gate itself would answer. */

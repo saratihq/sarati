@@ -96,4 +96,8 @@ export class ReviewApprovalEntity {
 
   @Column({ name: 'created_at', type: 'timestamptz', nullable: true })
   createdAt!: Date | null;
+
+  /** The source branch head this decision was made on — an approval covers that version and no later one. */
+  @Column({ name: 'source_version_id', type: 'uuid', nullable: true })
+  sourceVersionId!: string | null;
 }

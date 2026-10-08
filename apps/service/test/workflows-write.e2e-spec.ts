@@ -1,5 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
 
@@ -64,7 +65,14 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
 
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    // /api/deploy's own 10-a-minute limit is not what this suite tests.
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ThrottlerStorage)
+      .useValue({
+        increment: () =>
+          Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
+      })
+      .compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
@@ -194,6 +202,131 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
     expect(conflict.field_path).toBe('parameters.subject');
     expect(conflict.source_value).toBe('feature-change');
     expect(conflict.target_value).toBe('main-change');
+  });
+
+  it('a branch that took its target’s changes merges back without the conflict it already resolved', async () => {
+    const http = () => request(app.getHttpServer());
+    const created = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: wfJson('Merge base', 'base') })
+      .expect(201);
+    const wf = created.body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merge base', 'lane-change'), branch: 'lane' })
+      .expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merge base', 'main-change'), branch: 'main' })
+      .expect(201);
+
+    // Take main's changes into lane, resolving the one conflict there.
+    const update = await http()
+      .post(`/api/workflows/${wf}/branches/lane/update`)
+      .send({
+        from_branch: 'main',
+        resolutions: [{ node_id: 'send', field_path: 'parameters.subject', choice: 'custom', value: 'both' }],
+      })
+      .expect(201);
+    expect(update.body.status).toBe('merged');
+
+    // Merging back finds main's head as the common ancestor through lane's merge parent: nothing left to resolve.
+    const back = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(back.body.status).toBe('merged');
+  });
+
+  it('a branch kept after one merge merges again from where it last merged, not from where it forked', async () => {
+    const http = () => request(app.getHttpServer());
+    const wf = (
+      await http()
+        .post('/api/deploy')
+        .send({ workflow_json: wfJson('Merged twice', 'base') })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merged twice', 'lane-1'), branch: 'lane' })
+      .expect(201);
+    // An open review keeps the branch through its first merge.
+    await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+      .expect(201);
+    const first = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(first.body).toMatchObject({ status: 'merged', cleaned_up: null });
+
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Merged twice', 'lane-2'), branch: 'lane' })
+      .expect(201);
+    const second = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(second.body.status).toBe('merged');
+    const head = await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200);
+    const send = (head.body.head.nodes as Array<{ id: string; parameters: { subject: string } }>).find(
+      (n) => n.id === 'send',
+    );
+    expect(send?.parameters.subject).toBe('lane-2');
+  });
+
+  it('a deleted branch’s version is never rolled back onto main', async () => {
+    const http = () => request(app.getHttpServer());
+    const wf = (
+      await http()
+        .post('/api/deploy')
+        .send({ workflow_json: wfJson('Orphan', 'main') })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'gone' }).expect(201);
+    // Its v2 has no namesake on main, so the bare number names only the deleted branch's version.
+    for (const subject of ['draft', 'never-reviewed']) {
+      await http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_json: wfJson('Orphan', subject), branch: 'gone' })
+        .expect(201);
+    }
+    await http().delete(`/api/workflows/${wf}/branches/gone`).expect(200);
+    const before = await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200);
+
+    const refused = await http().post(`/api/workflows/${wf}/versions/2/rollback`).expect(409);
+    expect(refused.body.code).toBe('version_orphaned');
+    const after = await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200);
+    expect(after.body.head.version_id).toBe(before.body.head.version_id);
+  });
+
+  it('a protected branch takes no update from another branch — only a review', async () => {
+    const http = () => request(app.getHttpServer());
+    const wf = (
+      await http()
+        .post('/api/deploy')
+        .send({ workflow_json: wfJson('Protected update', 'base') })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Protected update', 'lane-change'), branch: 'lane' })
+      .expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/main/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+
+    const refused = await http()
+      .post(`/api/workflows/${wf}/branches/main/update`)
+      .send({ from_branch: 'lane' })
+      .expect(409);
+    expect(refused.body.code).toBe('branch_protected');
   });
 
   it('non-conflicting merge succeeds, floats latest to the merge commit, deletes the source branch', async () => {

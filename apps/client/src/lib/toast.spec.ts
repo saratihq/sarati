@@ -48,6 +48,13 @@ describe("toast: auto-dismiss", () => {
     expect(toasts().map((t) => t.title)).toEqual(["Two"]);
   });
 
+  it("lets whoever raised a sticky toast dismiss it once it no longer holds", () => {
+    const stale = toast.error("Couldn't merge");
+    toast.error("Something else");
+    toast.dismiss(stale);
+    expect(toasts().map((t) => t.title)).toEqual(["Something else"]);
+  });
+
   it("ignores a dismiss for a toast that is already gone", () => {
     toast.error("One");
     const { id } = toasts()[0];

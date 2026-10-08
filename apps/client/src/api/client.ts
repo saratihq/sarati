@@ -903,6 +903,13 @@ export function asBranchMoved(err: unknown): BranchMoved | null {
   return null;
 }
 
+/** Narrow an ApiError to the protected_merge_conflicts 409 (null if it isn't one); a protected source can't take the update itself. */
+export function asProtectedMergeConflicts(err: unknown): { source_protected: boolean } | null {
+  if (!(err instanceof ApiError) || err.code !== "protected_merge_conflicts") return null;
+  const b = err.body;
+  return { source_protected: !!b && typeof b === "object" && (b as { source_protected?: unknown }).source_protected === true };
+}
+
 // ─── Diff Types & API ───
 
 export interface DiffEntry {
@@ -1042,6 +1049,10 @@ export interface ReviewDetail extends ReviewSummary {
   up_to_date?: boolean;
   /** Whether the target branch is protected — only then can a test block the merge. */
   target_protected?: boolean;
+  /** Whether the approval covers the source's current head; a later commit needs approving again. */
+  approval_current?: boolean;
+  /** Why an approval no longer covers the head: `moved` — the source changed since; `unversioned` — given before approvals named a version. */
+  approval_stale_reason?: "moved" | "unversioned" | null;
   /** The conclusive failing test that refuses this merge right now, as the service's merge gate answers it. */
   merge_blocked_by_test?: {
     /** The review it ran from, and its branches — null once that review's branch has been deleted. */
@@ -1101,15 +1112,37 @@ export async function addReviewComment(
   });
 }
 
+/** `sourceVersionId` is the source head the reviewer was shown; if the branch has moved since, it is refused with `review_moved`. */
 export async function approveReview(
   workflowId: string,
   reviewId: string,
   decision: string,
   comment?: string,
+  sourceVersionId?: string | null,
 ): Promise<ReviewApproval> {
   return request(`/workflows/${workflowId}/reviews/${reviewId}/approve`, {
     method: "POST",
-    body: JSON.stringify({ decision, comment }),
+    body: JSON.stringify({ decision, comment, source_version_id: sourceVersionId ?? undefined }),
+  });
+}
+
+/** The outcome of bringing another branch's changes into a branch: merged, nothing to bring, or conflicts to resolve. */
+export interface UpdateBranchResult {
+  status: "merged" | "conflicts" | "up_to_date";
+  merged_version_id?: string | null;
+  conflicts?: ConflictInfo[];
+}
+
+/** Bring `fromBranch`'s changes into `branch` — where a merge into a protected branch has its conflicts resolved. */
+export async function updateBranch(
+  workflowId: string,
+  branch: string,
+  fromBranch: string,
+  resolutions?: MergeResolution[],
+): Promise<UpdateBranchResult> {
+  return request(`/workflows/${workflowId}/branches/${encodeURIComponent(branch)}/update`, {
+    method: "POST",
+    body: JSON.stringify({ from_branch: fromBranch, resolutions }),
   });
 }
 

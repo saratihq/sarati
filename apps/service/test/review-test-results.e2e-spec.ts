@@ -16,8 +16,9 @@ const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
 /**
  * What a protected merge reads (constitution #15): every pre-merge test is kept by the two versions it tested,
- * and the latest DECISIVE one of the current heads decides. Results are written straight to the table so each
- * rule — order, ties, decisiveness, scope, survival — is pinned on its own; the review detail answers as the gate.
+ * and the latest DECISIVE one of the current heads' content decides; an approval covers the version it was given on.
+ * Results are written straight to the table so each rule — order, ties, decisiveness, scope, survival, content — is
+ * pinned on its own; the review detail answers as the gate.
  */
 describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
   let app: INestApplication;
@@ -111,8 +112,24 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
     );
   };
 
+  const detail = async (wf: string, review: string): Promise<Record<string, unknown>> =>
+    (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body as Record<string, unknown>;
+
   const blocked = async (wf: string, review: string): Promise<unknown> =>
-    (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.merge_blocked_by_test;
+    (await detail(wf, review)).merge_blocked_by_test;
+
+  const commitLane = async (wf: string, marker: string): Promise<string> =>
+    (
+      await http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: doc(marker), branch: 'lane' })
+        .expect(201)
+    ).body.id as string;
+
+  const approve = (wf: string, review: string, shown?: string) =>
+    http()
+      .post(`/api/workflows/${wf}/reviews/${review}/approve`)
+      .send({ decision: 'approved', source_version_id: shown });
 
   beforeAll(async () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
@@ -205,6 +222,62 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
 
     // Only a newer passing test of the same versions lifts it.
     await record(wf, review, { source: lane, target: main }, 'green', '2026-10-08T11:00:00Z');
+    expect(
+      (await http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({}).expect(201)).body.status,
+    ).toBe('merged');
+  });
+
+  it('follows content, not version ids: a branch put back to content a failing test covered is refused again', async () => {
+    const { wf, review, lane, main } = await setUp();
+    await record(wf, review, { source: lane, target: main }, 'red', '2026-10-08T10:00:00Z');
+
+    await commitLane(wf, 'lane-2');
+    expect(await blocked(wf, review)).toBeNull();
+    const restored = await commitLane(wf, 'lane');
+    expect(restored).not.toBe(lane);
+    expect(await blocked(wf, review)).toMatchObject({ review_id: review });
+
+    await approve(wf, review).expect(201);
+    const refused = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(400);
+    expect(refused.body.code).toBe('merge_test_failing');
+
+    // A newer passing test of the same content lifts it, whichever versions it ran on.
+    await record(wf, review, { source: restored, target: main }, 'green', '2026-10-08T11:00:00Z');
+    expect(await blocked(wf, review)).toBeNull();
+  });
+
+  it('refuses an approval of a version the reviewer was not shown, and says when one is from before the latest changes', async () => {
+    const { wf, review, lane } = await setUp();
+    const moved = await commitLane(wf, 'lane-2');
+    expect(await detail(wf, review)).toMatchObject({
+      approval_current: false,
+      approval_stale_reason: 'moved',
+    });
+
+    const refused = await approve(wf, review, lane).expect(409);
+    expect(refused.body.code).toBe('review_moved');
+    expect(refused.body.detail).toContain("'lane' has changed since you loaded this review");
+
+    await approve(wf, review, moved).expect(201);
+    expect(await detail(wf, review)).toMatchObject({ approval_current: true, approval_stale_reason: null });
+  });
+
+  it('asks again for an approval given before approvals named a version, and says that is why', async () => {
+    const { wf, review } = await setUp();
+    await db.query(`UPDATE review_approvals SET source_version_id = NULL WHERE review_id = $1`, [review]);
+    expect(await detail(wf, review)).toMatchObject({
+      approval_current: false,
+      approval_stale_reason: 'unversioned',
+    });
+
+    const refused = await http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({}).expect(409);
+    expect(refused.body).toMatchObject({ code: 'approval_stale', reason: 'unversioned' });
+    expect(refused.body.detail).toContain('approved before an approval covered one exact version');
+
+    await approve(wf, review).expect(201);
     expect(
       (await http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({}).expect(201)).body.status,
     ).toBe('merged');
