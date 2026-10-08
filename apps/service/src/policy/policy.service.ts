@@ -4,7 +4,7 @@ import type { DataSource } from 'typeorm';
 
 import type { OrgRole } from '../database/entities/organization.entity';
 import { OrgMemberEntity } from '../database/entities/organization.entity';
-import type { Principal } from '../auth/principal';
+import { reachesOrg, type Principal } from '../auth/principal';
 
 export type PolicyAction = 'read' | 'write' | 'deploy' | 'merge' | 'manage';
 
@@ -30,15 +30,16 @@ export class PolicyService {
 
   async can(principal: Principal, action: PolicyAction, subject: PolicySubject): Promise<boolean> {
     const userId = principal.user.id;
+    if (!reachesOrg(principal, subject.orgId ?? null)) return false;
 
     if (subject.orgId) {
       const member = await this.dataSource.manager.findOne(OrgMemberEntity, {
         where: { orgId: subject.orgId, userId },
       });
-      if (member && ROLE_ALLOWS[member.role]?.has(action)) return true;
+      return member !== null && ROLE_ALLOWS[member.role]?.has(action) === true;
     }
 
-    // Direct-ownership fallback; NULL owner + NULL org must DENY (never public).
+    // Org-less rows only: once a subject has an org, membership decides, so leaving the org ends access.
     if (subject.ownerUserId) return subject.ownerUserId === userId;
     return false;
   }

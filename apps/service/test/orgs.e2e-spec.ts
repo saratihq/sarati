@@ -449,6 +449,120 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await deployAsB().expect(201);
   });
 
+  it('a key issued for one org reaches nothing in another — not by workflow id, not by org route', async () => {
+    const pinned = 'ork_e2e_pinned_pppppppppppppppppppppp';
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'pinned', $3, $4, $5, now())`,
+      [
+        userA,
+        personalA,
+        hash(pinned),
+        pinned.slice(0, 12),
+        JSON.stringify(['workflow:read', 'workflow:write', 'workflow:deploy', 'org:manage']),
+      ],
+    );
+    const asPinned = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${pinned}`);
+    const acme = await db.query<{ id: string }>(
+      `SELECT id FROM workflows WHERE org_id = $1 AND name = 'Acme Flow'`,
+      [orgId],
+    );
+    const acmeFlow = acme.rows[0]!.id;
+
+    await asPinned(http().get(`/api/workflows/${acmeFlow}`)).expect(404);
+    await asPinned(
+      http().post(`/api/workflows/${acmeFlow}/commit`).send({ workflow_ir: concatIr(), branch: 'main' }),
+    ).expect(404);
+    const rename = await asPinned(http().patch(`/api/orgs/${orgId}`).send({ name: 'Renamed' })).expect(403);
+    expect(rename.body.detail).toBe('This API key is scoped to a different organization');
+
+    // Its own org is untouched.
+    const own = await asPinned(http().post('/api/deploy').send({ workflow_json: concatIr() })).expect(201);
+    await asPinned(http().get(`/api/workflows/${own.body.workflow_id as string}`)).expect(200);
+  });
+
+  it('only an owner can invite an owner', async () => {
+    const setB = (role: string) =>
+      db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [orgId, userB, role]);
+    const { role } = (
+      await db.query<{ role: string }>(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+      ])
+    ).rows[0]!;
+    await setB('admin');
+    try {
+      const refused = await asB(
+        http().post(`/api/orgs/${orgId}/invites`).send({ email: 'crowned@e2e.local', role: 'owner' }),
+      ).expect(403);
+      expect(refused.body.detail).toBe('Only owners can invite an owner');
+      const member = await asB(
+        http().post(`/api/orgs/${orgId}/invites`).send({ email: 'joined@e2e.local', role: 'member' }),
+      ).expect(201);
+      await asA(http().delete(`/api/orgs/${orgId}/invites/${member.body.id as string}`)).expect(200);
+    } finally {
+      await setB(role);
+    }
+    const byOwner = await asA(
+      http().post(`/api/orgs/${orgId}/invites`).send({ email: 'crowned@e2e.local', role: 'owner' }),
+    ).expect(201);
+    await asA(http().delete(`/api/orgs/${orgId}/invites/${byOwner.body.id as string}`)).expect(200);
+  });
+
+  it('leaving an org ends access to the workflows you created in it', async () => {
+    const made = await asB(
+      http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: concatIr() }),
+    ).expect(201);
+    const theirs = made.body.workflow_id as string;
+    await asB(http().get(`/api/workflows/${theirs}`)).expect(200);
+    const { role } = (
+      await db.query<{ role: string }>(
+        `DELETE FROM org_members WHERE org_id = $1 AND user_id = $2 RETURNING role`,
+        [orgId, userB],
+      )
+    ).rows[0]!;
+    try {
+      await asB(http().get(`/api/workflows/${theirs}`)).expect(404);
+    } finally {
+      await db.query(
+        `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, $3, now())`,
+        [orgId, userB, role],
+      );
+    }
+  });
+
+  it('setting or clearing a webhook signing secret asks the policy, like every other change', async () => {
+    const acme = await db.query<{ id: string }>(
+      `SELECT id FROM workflows WHERE org_id = $1 AND name = 'Acme Flow'`,
+      [orgId],
+    );
+    const acmeFlow = acme.rows[0]!.id;
+    const setB = (role: string) =>
+      db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [orgId, userB, role]);
+    const { role } = (
+      await db.query<{ role: string }>(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
+        orgId,
+        userB,
+      ])
+    ).rows[0]!;
+    await setB('viewer');
+    try {
+      await asB(
+        http()
+          .put(`/api/workflows/${acmeFlow}/webhook-secret`)
+          .send({ node_id: 'n1', secret: 'whsec_viewer' }),
+      ).expect(403);
+      await asB(http().delete(`/api/workflows/${acmeFlow}/webhook-secret?node_id=n1`)).expect(403);
+      await asB(http().get(`/api/workflows/${acmeFlow}/webhook-secret?node_id=n1`)).expect(200);
+    } finally {
+      await setB(role);
+    }
+    await asB(
+      http().put(`/api/workflows/${acmeFlow}/webhook-secret`).send({ node_id: 'n1', secret: 'whsec_member' }),
+    ).expect(200);
+    await asB(http().delete(`/api/workflows/${acmeFlow}/webhook-secret?node_id=n1`)).expect(200);
+  });
+
   /** Org-wide approvals are a SESSION capability (proven in mcp-runs.e2e-spec); a key reaches only its own runs. */
   it('a KEY gets no org-wide reach: another member cannot see or resume a parked run through one', async () => {
     // The run is NOT awaited — it parks on the wait node. Its owner is A.

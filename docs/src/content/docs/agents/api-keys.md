@@ -56,6 +56,14 @@ A missing scope is refused by name, so the fix is obvious:
 {"detail":"This API key is missing the \"workflow:write\" scope."}
 ```
 
+A key is personal: it acts only in your personal workspace, the organization it is minted for. A
+team organization's workflows answer `404` as if they did not exist, even ones you can open
+yourself, and its organization routes refuse:
+
+```json
+{"detail":"This API key is scoped to a different organization"}
+```
+
 ## Revoke
 
 ```bash

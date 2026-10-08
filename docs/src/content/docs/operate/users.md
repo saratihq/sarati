@@ -32,8 +32,11 @@ curl -X POST http://localhost:8080/api/orgs/<org-id>/invites \
 That returns an invite token. The link built from it is what the new person opens — they set a
 password and land in the organization.
 
-An invite is **token-bound, not email-bound**: whoever holds the link joins. Treat it like a
-password, and delete one you did not mean to send.
+A new account can only be created with the email address the invite was sent to. Someone who
+already has an account joins by opening the link while signed in — for them the link alone is
+enough, so treat it like a password and delete one you did not mean to send.
+
+Only an owner can invite someone as an owner; an admin's attempt is refused.
 
 <img class="shot shot-dark" src="/shots/org-members-dark.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />
 <img class="shot shot-light" src="/shots/org-members-light.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />

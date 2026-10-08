@@ -17,7 +17,7 @@ import { IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { requirePrincipal, type Principal } from '../auth/principal';
+import { KEY_SCOPED_TO_OTHER_ORG, reachesOrg, requirePrincipal, type Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import type { EnvConfig } from '../config/env.config';
 import {
@@ -194,8 +194,10 @@ export class OrgsController {
     @Body() body: CreateInviteDto,
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
-    const { org } = await this.requireManager(orgId, principal);
-    const invite = await this.mgmt.createInvite(org, principal.user.id, body.email, body.role ?? 'member');
+    const { org, role } = await this.requireManager(orgId, principal);
+    const inviteRole = body.role ?? 'member';
+    if (inviteRole === 'owner' && role !== 'owner') throw new DomainError('Only owners can invite an owner', 403);
+    const invite = await this.mgmt.createInvite(org, principal.user.id, body.email, inviteRole);
 
     // The token is in the response either way, so a failing mail provider must not fail the invite.
     const env = this.config.get('env', { infer: true });
@@ -234,6 +236,7 @@ export class OrgsController {
     const org = await this.mgmt.orgById(orgId);
     const membership = await this.mgmt.membershipOf(org.id, principal.user.id);
     if (!membership) throw new DomainError('Not a member of this organization', 403);
+    if (!reachesOrg(principal, org.id)) throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
     return { org, role: membership.role };
   }
 

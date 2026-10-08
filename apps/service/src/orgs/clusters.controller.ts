@@ -3,7 +3,7 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { requirePrincipal, type Principal } from '../auth/principal';
+import { KEY_SCOPED_TO_OTHER_ORG, reachesOrg, requirePrincipal, type Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import type { OrganizationEntity } from '../database/entities/organization.entity';
 import { ConnectionsService } from '../connections/connections.service';
@@ -83,6 +83,7 @@ export class ClustersController {
     if (org.isPersonal) throw new DomainError('Personal workspaces have no connection clusters', 400);
     const membership = await this.mgmt.membershipOf(org.id, principal.user.id);
     if (!membership) throw new DomainError('Not a member of this organization', 403);
+    if (!reachesOrg(principal, org.id)) throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
     if (membership.role !== 'owner' && membership.role !== 'admin') {
       throw new DomainError('Only owners and admins can manage connection clusters', 403);
     }

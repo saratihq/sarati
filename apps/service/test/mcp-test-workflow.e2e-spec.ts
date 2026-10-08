@@ -281,6 +281,28 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     expect(res.data.code).toBe('ambiguous_document');
   });
 
+  it("never reads another org's workflow: it answers exactly as for one that does not exist", async () => {
+    const otherOrg = randomUUID();
+    const foreign = randomUUID();
+    await db.query(
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1,'Elsewhere',false,now(),now())`,
+      [otherOrg],
+    );
+    await db.query(`INSERT INTO workflows (id, name, org_id) VALUES ($1, 'theirs', $2)`, [foreign, otherOrg]);
+    await db.query(
+      `INSERT INTO workflow_branches (workflow_id, name, is_default) VALUES ($1, 'main', true)`,
+      [foreign],
+    );
+    const missing = randomUUID();
+
+    for (const branch of ['x', undefined]) {
+      const theirs = await call(dryKey, { workflow_id: foreign, ...(branch ? { branch } : {}) });
+      const nobody = await call(dryKey, { workflow_id: missing, ...(branch ? { branch } : {}) });
+      expect(theirs.ok).toBe(false);
+      expect(theirs.text.replace(foreign, '<id>')).toBe(nobody.text.replace(missing, '<id>'));
+    }
+  });
+
   it('is not offered at all to a key with neither run scope', async () => {
     const readOnly = 'ork_tw_read_key_cccccccccccccccccc';
     await db.query(
