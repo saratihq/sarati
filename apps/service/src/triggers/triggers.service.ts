@@ -512,7 +512,8 @@ export class TriggersService {
   }
 
   /**
-   * Delete every live Composio trigger instance no live activation references.
+   * Delete every live Composio trigger instance on an account this install connected that no live activation
+   * references — one Composio project can also serve another install, or the person's own code.
    * TWO-STRIKE grace is required: only reap an instance seen orphaned on the previous pass
    * too, so an in-flight subscribe (instance created, row not yet committed) is never killed.
    */
@@ -543,14 +544,19 @@ export class TriggersService {
   }
 
   private async reapScope(scope: PlatformKeyScope): Promise<void> {
-    const live = await this.composioTriggers.listActiveInstanceIds(scope);
+    const live = await this.composioTriggers.listActiveInstances(scope);
     if (live.length === 0) return;
+    const held = await this.connections.heldComposioAccounts();
+    const ours = live
+      .filter((instance) => instance.connectedAccountId !== null && held.has(instance.connectedAccountId))
+      .map((instance) => instance.id);
+    if (ours.length === 0) return;
     const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity, {
-      where: { composioTriggerInstanceId: In(live), paused: false },
+      where: { composioTriggerInstanceId: In(ours), paused: false },
     });
     const referenced = new Set<string>();
     for (const row of rows) if (row.composioTriggerInstanceId) referenced.add(row.composioTriggerInstanceId);
-    const orphans = live.filter((id) => !referenced.has(id));
+    const orphans = ours.filter((id) => !referenced.has(id));
     const priorCandidates = this.composioOrphanCandidates;
     for (const id of orphans) this.nextComposioOrphanCandidates.add(id);
     const toReap = orphans.filter((id) => priorCandidates.has(id));

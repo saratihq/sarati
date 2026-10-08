@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
-import { ComposioProvider, type ComposioTriggerType } from '../connections/composio.provider';
+import {
+  type ActiveTriggerInstance,
+  ComposioProvider,
+  type ComposioTriggerType,
+} from '../connections/composio.provider';
 import { toOurSlug } from '../connections/managed-connections.service';
 import { verifyComposioWebhook, type ComposioWebhookVerifyResult } from './composio-webhook-verify';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
@@ -129,13 +133,13 @@ export class ComposioTriggerProvider {
   }
 
   /**
-   * Every LIVE Composio trigger-instance id — the truth the reaper diffs against the activation rows.
+   * Every LIVE Composio trigger instance and the account it sits on — the truth the reaper diffs against the activation rows.
    * A hiccup yields `[]` rather than throwing, so a transient failure can never read as "everything is orphaned".
    */
-  async listActiveInstanceIds(scope: PlatformKeyScope): Promise<string[]> {
+  async listActiveInstances(scope: PlatformKeyScope): Promise<ActiveTriggerInstance[]> {
     if (!(await this.isConfigured(scope))) return [];
     try {
-      return await this.composio.listActiveTriggerInstanceIds(scope);
+      return await this.composio.listActiveTriggerInstances(scope);
     } catch (err) {
       this.logger.warn(`Composio active trigger-instance listing failed: ${errorMessage(err)}`);
       return [];

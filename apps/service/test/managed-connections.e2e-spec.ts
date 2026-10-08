@@ -4,12 +4,13 @@ import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService, MANAGED_TOKEN_PREFIX } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
-import { seedPlatformKeyEverywhere } from './support/platform-keys';
+import { seedPlatformKeyEverywhere, setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -33,6 +34,8 @@ describe('managed connections (e2e, isolated DB, stubbed Composio, mock auth)', 
   let deleteReplyStatus = 200;
   /** What the stub answers to account GETs (the health tests simulate a Composio outage). */
   let accountReplyStatus = 200;
+  /** Which project — which key — each auth config the stub minted lives in, as in Composio. */
+  const authConfigProject = new Map<string, { apiKey: string; toolkit: string }>();
 
   beforeAll(async () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
@@ -67,16 +70,33 @@ describe('managed connections (e2e, isolated DB, stubbed Composio, mock auth)', 
           });
           return;
         }
+        const apiKey = String(req.headers['x-api-key'] ?? '');
         if (req.method === 'GET' && url.startsWith('/api/v3/auth_configs')) {
-          json(200, { items: [] }); // nothing to adopt → create path
+          const toolkit = new URL(url, 'http://stub').searchParams.get('toolkit_slug');
+          const items = [...authConfigProject]
+            .filter(([, owner]) => owner.apiKey === apiKey && owner.toolkit === toolkit)
+            .map(([id]) => ({ id, is_composio_managed: true }));
+          json(200, { items });
           return;
         }
         if (req.method === 'POST' && url === '/api/v3/auth_configs') {
           authConfigCreates += 1;
-          json(201, { toolkit: { slug: 'slack' }, auth_config: { id: AUTH_CONFIG_ID } });
+          const toolkit = String((body as { toolkit?: { slug?: string } }).toolkit?.slug);
+          const id =
+            apiKey === 'test-composio-key' && toolkit === 'slack'
+              ? AUTH_CONFIG_ID
+              : `ac_stub_${toolkit}_${authConfigProject.size}`;
+          authConfigProject.set(id, { apiKey, toolkit });
+          json(201, { toolkit: { slug: toolkit }, auth_config: { id } });
           return;
         }
         if (req.method === 'POST' && url === '/api/v3/connected_accounts/link') {
+          // Composio refuses an auth config from another project.
+          const authConfigId = (body as { auth_config_id?: string }).auth_config_id ?? '';
+          if (authConfigProject.get(authConfigId)?.apiKey !== apiKey) {
+            json(400, { error: { message: `Auth config ${authConfigId} not found` } });
+            return;
+          }
           json(201, { redirect_url: REDIRECT_URL, connected_account_id: ACCOUNT_ID });
           return;
         }
@@ -291,5 +311,39 @@ describe('managed connections (e2e, isolated DB, stubbed Composio, mock auth)', 
     deleteReplyStatus = 200;
     const list = await request(app.getHttpServer()).get('/api/connections').expect(200);
     expect(list.body.some((c: { id: string }) => c.id === link.body.connection_id)).toBe(false);
+  });
+
+  it("connects with the auth config of the Composio project the key opens — never another project's", async () => {
+    const me = await request(app.getHttpServer()).get('/api/auth/me').expect(200);
+    const scope = { kind: 'user' as const, userId: me.body.user.id as string };
+    const linkWith = async (): Promise<string> => {
+      await request(app.getHttpServer())
+        .post('/api/connections/managed/link')
+        .send({ app: 'slack' })
+        .expect(201);
+      const links = calls.filter((c) => c.url === '/api/v3/connected_accounts/link');
+      return (links[links.length - 1]?.body as { auth_config_id: string }).auth_config_id;
+    };
+
+    expect(await linkWith()).toBe(AUTH_CONFIG_ID);
+
+    // The key moves to another Composio project, whose own Slack config is the one to use.
+    await setPlatformKey(app, scope, 'composio_api_key', 'second-project-key');
+    const second = await linkWith();
+    expect(second).not.toBe(AUTH_CONFIG_ID);
+    expect(authConfigProject.get(second)?.apiKey).toBe('second-project-key');
+
+    // Back on the first project: its config is found again, and nothing is minted twice.
+    const created = authConfigCreates;
+    await setPlatformKey(app, scope, 'composio_api_key', 'test-composio-key');
+    expect(await linkWith()).toBe(AUTH_CONFIG_ID);
+    await setPlatformKey(app, scope, 'composio_api_key', 'second-project-key');
+    expect(await linkWith()).toBe(second);
+    expect(authConfigCreates).toBe(created);
+
+    const stored = await app
+      .get(DataSource)
+      .query(`SELECT project_key FROM composio_auth_configs WHERE project_key ILIKE '%second-project-key%'`);
+    expect(stored).toEqual([]); // the key itself is never stored, only its hash
   });
 });

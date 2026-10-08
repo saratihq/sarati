@@ -104,7 +104,8 @@ CREATE TABLE public.composer_threads (
 CREATE TABLE public.composio_auth_configs (
     toolkit_slug character varying(120) NOT NULL,
     auth_config_id character varying(120) NOT NULL,
-    created_at timestamp with time zone DEFAULT now()
+    created_at timestamp with time zone DEFAULT now(),
+    project_key character varying(64) NOT NULL
 );
 
 
@@ -621,11 +622,11 @@ ALTER TABLE ONLY public.composer_threads
 
 
 --
--- Name: composio_auth_configs composio_auth_configs_pkey; Type: CONSTRAINT; Schema: public; Owner: orchestr
+-- Name: composio_auth_configs composio_auth_configs_project_pkey; Type: CONSTRAINT; Schema: public; Owner: orchestr
 --
 
 ALTER TABLE ONLY public.composio_auth_configs
-    ADD CONSTRAINT composio_auth_configs_pkey PRIMARY KEY (toolkit_slug);
+    ADD CONSTRAINT composio_auth_configs_project_pkey PRIMARY KEY (project_key, toolkit_slug);
 
 
 --

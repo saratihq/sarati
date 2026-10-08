@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 
 import type {
+  ActiveTriggerInstance,
   ComposioProvider,
   ComposioToolkit,
   ComposioTriggerType,
@@ -70,7 +71,7 @@ interface FakeComposio {
   listManagedToolkits: jest.Mock<Promise<ComposioToolkit[]>, []>;
   createTriggerInstance: jest.Mock;
   deleteTriggerInstance: jest.Mock;
-  listActiveTriggerInstanceIds: jest.Mock<Promise<string[]>, []>;
+  listActiveTriggerInstances: jest.Mock<Promise<ActiveTriggerInstance[]>, []>;
 }
 
 function makeProvider(opts?: {
@@ -91,7 +92,9 @@ function makeProvider(opts?: {
     ),
     createTriggerInstance: jest.fn(() => Promise.resolve('ti_created')),
     deleteTriggerInstance: jest.fn(() => Promise.resolve()),
-    listActiveTriggerInstanceIds: jest.fn(() => Promise.resolve<string[]>(['ti_live'])),
+    listActiveTriggerInstances: jest.fn(() =>
+      Promise.resolve<ActiveTriggerInstance[]>([{ id: 'ti_live', connectedAccountId: 'ca_live' }]),
+    ),
   };
   // The webhook secret is stored per scope now, not read from env.
   const keys = {
@@ -267,23 +270,25 @@ describe('ComposioTriggerProvider', () => {
   });
 
   // The orphan reaper's live-instance source — managed-gated + best-effort.
-  describe('listActiveInstanceIds', () => {
+  describe('listActiveInstances', () => {
     it('delegates to the v3 client when configured', async () => {
       const { provider, fake } = makeProvider();
-      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual(['ti_live']);
-      expect(fake.listActiveTriggerInstanceIds).toHaveBeenCalledTimes(1);
+      expect(await provider.listActiveInstances(SCOPE)).toEqual([
+        { id: 'ti_live', connectedAccountId: 'ca_live' },
+      ]);
+      expect(fake.listActiveTriggerInstances).toHaveBeenCalledTimes(1);
     });
 
     it('is inert ([]) when the key is unset — never lists', async () => {
       const { provider, fake } = makeProvider({ configured: false });
-      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual([]);
-      expect(fake.listActiveTriggerInstanceIds).not.toHaveBeenCalled();
+      expect(await provider.listActiveInstances(SCOPE)).toEqual([]);
+      expect(fake.listActiveTriggerInstances).not.toHaveBeenCalled();
     });
 
     it('degrades to [] (never throws) on a listing failure — no false "all orphaned"', async () => {
       const { provider, fake } = makeProvider();
-      fake.listActiveTriggerInstanceIds.mockRejectedValueOnce(new Error('composio 502'));
-      expect(await provider.listActiveInstanceIds(SCOPE)).toEqual([]);
+      fake.listActiveTriggerInstances.mockRejectedValueOnce(new Error('composio 502'));
+      expect(await provider.listActiveInstances(SCOPE)).toEqual([]);
     });
   });
 

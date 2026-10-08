@@ -117,6 +117,10 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='parent_run_id'",
   },
+  {
+    migration: '025_composio_auth_config_project.sql',
+    probe: "SELECT 1 FROM pg_constraint WHERE conname='composio_auth_configs_project_pkey'",
+  },
 ];
 
 /**

@@ -327,8 +327,9 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
     });
   });
 
-  // FIX C: the two-strike reaper deletes any live Composio instance no live activation references.
-  describe('orphan reaper deletes an unreferenced instance, keeps a referenced one (FIX C)', () => {
+  // FIX C: the two-strike reaper deletes a live Composio instance on THIS install's accounts that no live
+  // activation references — one Composio project can also serve another install, or the person's own code.
+  describe('orphan reaper deletes its own unreferenced instance, keeps a referenced one (FIX C)', () => {
     let wf = '';
     let listSpy: jest.SpyInstance;
     let deleteSpy: jest.SpyInstance;
@@ -337,20 +338,24 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
     beforeAll(async () => {
       wf = await deploy(manualDoc('reaper wf'));
       await seedComposioActivation(wf, 'ti_referenced', 'sub'); // a LIVE (paused=false) row holds it
+      await app.get(ConnectionsService).createManaged(userId, 'acmecrm', 'ca_ours');
     });
 
     beforeEach(() => {
       deleteSpy = jest.spyOn(app.get(ComposioTriggerProvider), 'deleteTriggerInstance').mockResolvedValue();
-      listSpy = jest
-        .spyOn(app.get(ComposioTriggerProvider), 'listActiveInstanceIds')
-        .mockResolvedValue(['ti_referenced', 'ti_orphan']);
+      listSpy = jest.spyOn(app.get(ComposioTriggerProvider), 'listActiveInstances').mockResolvedValue([
+        { id: 'ti_referenced', connectedAccountId: 'ca_ours' },
+        { id: 'ti_orphan', connectedAccountId: 'ca_ours' },
+        { id: 'ti_elsewhere', connectedAccountId: 'ca_another_install' },
+        { id: 'ti_unattributed', connectedAccountId: null },
+      ]);
     });
     afterEach(() => {
       deleteSpy.mockRestore();
       listSpy.mockRestore();
     });
 
-    it('reaps ti_orphan after two strikes, never ti_referenced', async () => {
+    it('reaps ti_orphan after two strikes; never ti_referenced, nor one on an account it did not connect', async () => {
       // Two-strike grace: the first pass only records the candidate, guarding a subscribe mid-flight.
       await triggers().reapOrphanedComposioSubscriptions();
       expect(deleteSpy).not.toHaveBeenCalled();
@@ -360,6 +365,8 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
       expect(deleteSpy).toHaveBeenCalledTimes(1);
       expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), 'ti_orphan');
       expect(deleteSpy).not.toHaveBeenCalledWith(expect.any(Object), 'ti_referenced');
+      expect(deleteSpy).not.toHaveBeenCalledWith(expect.any(Object), 'ti_elsewhere');
+      expect(deleteSpy).not.toHaveBeenCalledWith(expect.any(Object), 'ti_unattributed');
     });
   });
 });
