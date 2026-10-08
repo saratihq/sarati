@@ -34,7 +34,7 @@ export interface ReviewTestSide {
   error: string | null;
 }
 
-/** The review's latest pre-merge test; the gate ignores it as STALE once the version ids no longer match the branch heads. */
+/** One pre-merge test; the merge gate reads the newest conclusive result of exactly the current heads, from any review (`review_test_results`). */
 export interface ReviewTestSummary {
   verdict: TestVerdict;
   tested_at: string;

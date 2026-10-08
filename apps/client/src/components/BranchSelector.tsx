@@ -82,6 +82,7 @@ export default function BranchSelector({
       await api.setBranchProtection(workflowId, b.name, next);
       await fetchBranches();
       toast.success(next ? `"${b.name}" is protected` : `"${b.name}" is no longer protected`);
+      onBranchesChanged?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update protection");
     } finally {
@@ -196,7 +197,7 @@ export default function BranchSelector({
                     aria-label={b.is_protected ? `Unprotect ${b.name}` : `Protect ${b.name}`}
                     title={
                       b.is_protected
-                        ? "Protected — merges require an approved review. Click to unprotect."
+                        ? "Protected — merges need an approved review, and not a failing latest conclusive test. Click to unprotect."
                         : "Not protected — anyone can merge into it. Click to protect."
                     }
                     className="shrink-0 flex items-center justify-center rounded-md cursor-pointer bg-transparent border-none disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-[var(--orchestr-accent-tint-strong)] hover:bg-[var(--orchestr-accent-tint)]"
@@ -232,7 +233,7 @@ export default function BranchSelector({
             className="py-1.5 px-3 text-[10px] leading-snug"
             style={{ borderTop: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink-subtle)" }}
           >
-            Protected branches require an approved review to merge.
+            Protected branches merge only through an approved review, and not while the latest conclusive test fails.
           </div>
 
           <div className="py-2 px-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>

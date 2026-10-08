@@ -70,7 +70,7 @@ export class OpenReviewTool implements McpTool {
   readonly scope: ApiScope = 'workflow:write';
   readonly title = 'Open a review';
   readonly description =
-    "Propose a branch's changes to a human, with the field-level diff they will review. This is an agent's terminal move — merging is a human act. Opening a second review for the same branch pair fails with `review_already_open` and the id of the review that already exists: read that one instead of retrying.";
+    "Propose a branch's changes to a human, with the field-level diff they will review. This is an agent's terminal move — merging is a human act. While a review of the same branch pair is still open, opening another fails with `review_already_open` and that review's id: hand that id to the person instead of retrying.";
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

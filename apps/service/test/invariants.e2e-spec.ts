@@ -414,6 +414,131 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
+  it('a protected target refuses a merge while the latest test of its heads is failing, through BOTH entry points', async () => {
+    // A trigger payload decides each side: `fail` breaks only the branch; `down` breaks main too.
+    const codeIr = (code: string, name: string, triggerName = 'Trigger'): Record<string, unknown> => {
+      const base = ir(['unused'], name);
+      return {
+        ...base,
+        nodes: [
+          { ...base.nodes[0], name: triggerName },
+          {
+            id: 'check',
+            name: 'Check',
+            node_type: 'orchestr:code',
+            type_version: 1,
+            parameters: { language: 'js', code },
+            position: { x: 300, y: 0 },
+            metadata: {},
+          },
+        ],
+        edges: [{ ...base.edges[0], target_node_id: 'check' }],
+      };
+    };
+    const mainCode = "if (trigger.down) throw new Error('down'); return { ok: true };";
+    const branchCode = "if (trigger.fail || trigger.down) throw new Error('boom'); return { ok: true };";
+    const setUp = async (name: string): Promise<{ wf: string; review: string }> => {
+      const wf = await seedDoc(codeIr(mainCode, name));
+      await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+      await http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: codeIr(branchCode, name), branch: 'lane' })
+        .expect(201);
+      await protect(wf, true);
+      const review = await http()
+        .post(`/api/workflows/${wf}/reviews`)
+        .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+        .expect(201);
+      await http()
+        .post(`/api/workflows/${wf}/reviews/${review.body.id}/approve`)
+        .send({ decision: 'approved' })
+        .expect(201);
+      return { wf, review: review.body.id as string };
+    };
+    const protect = (wf: string, on: boolean) =>
+      http().patch(`/api/workflows/${wf}/branches/main/protection`).send({ is_protected: on }).expect(200);
+    const test = async (wf: string, review: string, payload: Record<string, unknown>): Promise<string> =>
+      (
+        await http()
+          .post(`/api/workflows/${wf}/reviews/${review}/test`)
+          .send({ trigger_payload: payload })
+          .expect(201)
+      ).body.verdict as string;
+    const blockedOnCard = async (wf: string, review: string): Promise<unknown> =>
+      (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.merge_blocked_by_test;
+    const mergeFromReview = (wf: string, review: string) =>
+      http().post(`/api/workflows/${wf}/reviews/${review}/merge`).send({});
+    const mergeFromBranches = (wf: string) =>
+      http().post(`/api/workflows/${wf}/branches/lane/merge`).send({ target_branch: 'main' });
+
+    const { wf, review } = await setUp('inv failing-test-merge');
+    expect(await test(wf, review, { fail: true })).toBe('red');
+
+    // Both doors refuse — the branches page included, which once checked only the approval — and say whose test it is.
+    for (const refused of [await mergeFromReview(wf, review), await mergeFromBranches(wf)]) {
+      expect(refused.status).toBe(400);
+      expect(refused.body.detail).toContain('the pre-merge test is failing');
+      expect(refused.body).toMatchObject({ code: 'merge_test_failing', review_id: review });
+    }
+    expect(await blockedOnCard(wf, review)).toMatchObject({
+      review_id: review,
+      title: 'lane → main',
+      source_branch: 'lane',
+    });
+
+    // A test where main fails too decides nothing, so it cannot lift a real failure.
+    expect(await test(wf, review, { down: true })).toBe('green');
+    expect((await mergeFromBranches(wf)).body).toMatchObject({ review_id: review });
+
+    // Any review into main counts, and the LATEST test of these heads decides.
+    const sibling = await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'lane', target_branch: 'main', title: 'second look' })
+      .expect(201);
+    const siblingId = sibling.body.id as string;
+    expect(await test(wf, siblingId, {})).toBe('green');
+    expect(await blockedOnCard(wf, review)).toBeNull();
+    expect(await test(wf, siblingId, { fail: true })).toBe('red');
+    expect(await blockedOnCard(wf, review)).toMatchObject({
+      review_id: siblingId,
+      title: 'second look',
+      source_branch: 'lane',
+    });
+
+    // Closing the review that ran it does not erase that failure…
+    await http().post(`/api/workflows/${wf}/reviews/${siblingId}/close`).send({}).expect(201);
+    expect((await mergeFromBranches(wf)).body).toMatchObject({
+      code: 'merge_test_failing',
+      review_id: siblingId,
+    });
+
+    // …a passing re-test of these same heads lifts it.
+    expect(await test(wf, review, {})).toBe('green');
+    expect((await mergeFromBranches(wf)).status).toBe(201);
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+
+    // A failing test of OTHER heads says nothing — whichever side moved.
+    const source = await setUp('inv stale-source');
+    expect(await test(source.wf, source.review, { fail: true })).toBe('red');
+    await http()
+      .post(`/api/workflows/${source.wf}/commit`)
+      .send({ workflow_ir: codeIr(mainCode, 'inv stale-source'), branch: 'lane' })
+      .expect(201);
+    expect((await mergeFromReview(source.wf, source.review).expect(201)).body.status).toBe('merged');
+    await http().delete(`/api/workflows/${source.wf}`).expect(200);
+
+    const target = await setUp('inv stale-target');
+    expect(await test(target.wf, target.review, { fail: true })).toBe('red');
+    await protect(target.wf, false);
+    await http()
+      .post(`/api/workflows/${target.wf}/commit`)
+      .send({ workflow_ir: codeIr(mainCode, 'inv stale-target', 'Start'), branch: 'main' })
+      .expect(201);
+    await protect(target.wf, true);
+    expect((await mergeFromBranches(target.wf)).status).toBe(201);
+    await http().delete(`/api/workflows/${target.wf}`).expect(200);
+  }, 90_000);
+
   it('latest floats to the merge commit, inside the merge itself', async () => {
     const wf = await seed('inv latest-floats');
     await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);

@@ -8,10 +8,12 @@ import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
+import { ReviewTestResultEntity } from '../database/entities/review-test-result.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { now } from '../database/ids';
 import type { WorkflowIR } from '../ir/models';
 import { RunsService } from '../runs/runs.service';
+import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
 import type { ReviewTestSide, ReviewTestSummary, TestVerdict } from './review-test.types';
@@ -98,10 +100,40 @@ export class ReviewTestService {
       regression,
     };
 
-    review.lastTest = summary;
-    review.updatedAt = now();
-    await em.save(WorkflowReviewEntity, review);
+    await this.storeTest(workflowId, review.id, summary);
     return summary;
+  }
+
+  /** Keep a finished test by its versions — even once its review is gone — and show it there if newest. */
+  async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      // Workflow before review — the order deleting the workflow cascades in — so the two cannot deadlock.
+      const workflow = await em.query<unknown[]>(`SELECT 1 FROM workflows WHERE id = $1 FOR KEY SHARE`, [
+        workflowId,
+      ]);
+      if (workflow.length === 0) return;
+      const review = await em.findOne(WorkflowReviewEntity, {
+        where: { id: reviewId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (summary.source_version_id && summary.target_version_id) {
+        const result = new ReviewTestResultEntity();
+        result.id = randomUUID();
+        result.workflowId = workflowId;
+        result.reviewId = review ? review.id : null;
+        result.sourceVersionId = summary.source_version_id;
+        result.targetVersionId = summary.target_version_id;
+        result.verdict = summary.verdict;
+        result.decisive = isDecisiveTest(summary);
+        result.testedAt = new Date(summary.tested_at);
+        result.summary = summary;
+        await em.save(ReviewTestResultEntity, result);
+      }
+      if (!review || (review.lastTest && !isNewerTest(summary, review.lastTest))) return;
+      review.lastTest = summary;
+      review.updatedAt = now();
+      await em.save(WorkflowReviewEntity, review);
+    });
   }
 
   /** The stored head IR (native workflow doc) of a branch. */

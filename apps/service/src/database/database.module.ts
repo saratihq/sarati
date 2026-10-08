@@ -14,6 +14,7 @@ import { EnvironmentConnectionEntity, EnvironmentEntity } from './entities/envir
 import { OrgInviteEntity } from './entities/org-invite.entity';
 import { OrgMemberEntity, OrganizationEntity } from './entities/organization.entity';
 import { ReviewApprovalEntity, ReviewCommentEntity, WorkflowReviewEntity } from './entities/review.entity';
+import { ReviewTestResultEntity } from './entities/review-test-result.entity';
 import { NodeIconEntity } from './entities/node-icon.entity';
 import { OAuthStateEntity } from './entities/oauth-state.entity';
 import { IdempotencyKeyEntity } from './entities/idempotency-key.entity';
@@ -55,6 +56,7 @@ export const ENTITIES = [
   WorkflowVersionTagEntity,
   WebhookTriggerSecretEntity,
   WorkflowEnvPointerEntity,
+  ReviewTestResultEntity,
   WorkflowReviewEntity,
   ReviewCommentEntity,
   ReviewApprovalEntity,

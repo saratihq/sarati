@@ -365,8 +365,9 @@ export default function ConflictResolver({
       }
     } catch (e) {
       const msg = e instanceof ApiError || e instanceof Error ? e.message : "Couldn't complete the merge.";
-      // Best-effort attribution of an illegal-choice 400 to the card it names.
-      const offending = conflicts.findIndex((c) => c.node_name && msg.includes(c.node_name));
+      // A failing-test refusal is about the whole merge; otherwise attribute an illegal choice to the card it names.
+      const wholeMerge = e instanceof ApiError && e.code === "merge_test_failing";
+      const offending = wholeMerge ? -1 : conflicts.findIndex((c) => c.node_name && msg.includes(c.node_name));
       if (offending >= 0) {
         setDecision(offending, { ...decisions[offending], error: msg });
       } else {

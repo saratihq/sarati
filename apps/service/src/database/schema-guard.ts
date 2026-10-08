@@ -126,6 +126,10 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='connections' AND column_name='account_checked_at'",
   },
+  {
+    migration: '027_review_test_results.sql',
+    probe: "SELECT 1 FROM information_schema.tables WHERE table_name='review_test_results'",
+  },
 ];
 
 /**

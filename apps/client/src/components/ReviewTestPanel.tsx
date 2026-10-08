@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
 import * as api from "@/api/client";
 import type { ReviewTestRun, ReviewTestSummary } from "@/api/client";
 import type { EnvironmentSummary } from "@/api/environments";
@@ -24,8 +24,12 @@ interface ReviewTestPanelProps {
   environments: EnvironmentSummary[] | null;
   /** The persisted / latest test result to render, or null if never tested. */
   result: ReviewTestSummary | null;
-  /** Lift a fresh result up so the card's merge-gate warning stays in sync. */
+  /** Lift a fresh result up, so every card asks the service for the gate's answer again. */
   onResult: (r: ReviewTestSummary) => void;
+  /** Whether `result` tested the branches as they are now; false once either has moved on. */
+  current?: boolean;
+  /** For a protected target: whether a conclusive failing test blocks this merge right now. */
+  gate?: { blocked: boolean } | null;
   /** False once the review is merged/closed — the result stays, running is off. */
   canRun: boolean;
 }
@@ -127,13 +131,40 @@ function RunSideRow({
   );
 }
 
-function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflowId: string }) {
-  const green = result.verdict === "green";
+function TestResult({
+  result,
+  workflowId,
+  current,
+  gate,
+  canRun,
+}: {
+  result: ReviewTestSummary;
+  workflowId: string;
+  current: boolean;
+  gate: { blocked: boolean } | null;
+  canRun: boolean;
+}) {
+  const inconclusive = isInconclusive(result);
+  const green = result.verdict === "green" && !inconclusive;
   const { changed, added, removed } = result.regression;
   const noChanges = changed.length === 0 && added.length === 0 && removed.length === 0;
-  const Icon = green ? CheckCircle2 : XCircle;
-  const tone = green ? "var(--orchestr-success)" : "var(--orchestr-danger)";
-  const tint = green ? "var(--orchestr-success-tint)" : "var(--orchestr-danger-tint)";
+  const Icon = green ? CheckCircle2 : inconclusive ? AlertTriangle : XCircle;
+  const tone = green ? "var(--orchestr-success)" : inconclusive ? "var(--orchestr-warning)" : "var(--orchestr-danger)";
+  const tint = green
+    ? "var(--orchestr-success-tint)"
+    : inconclusive
+      ? "var(--orchestr-warning-tint)"
+      : "var(--orchestr-danger-tint)";
+  // Where this result stands for merging: the gate reads the newest conclusive test of the current versions.
+  const standing = !current
+    ? canRun
+      ? "This tested earlier versions of these branches — re-test to check them as they are now."
+      : "This tested earlier versions of these branches."
+    : inconclusive && gate?.blocked
+      ? "A failing conclusive test of these versions still blocks merging."
+      : !green && !inconclusive && gate && !gate.blocked
+        ? "A newer passing test of these versions has lifted this, so it no longer blocks merging."
+        : null;
 
   return (
     <div className="space-y-2.5">
@@ -143,14 +174,32 @@ function TestResult({ result, workflowId }: { result: ReviewTestSummary; workflo
           style={{ background: tint, color: tone }}
         >
           <Icon size={13} />
-          {green ? "Passed" : "Failing"}
+          {green ? "Passed" : inconclusive ? "Inconclusive" : "Failing"}
         </span>
         <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
           Tested {timeAgo(result.tested_at)}
         </span>
       </div>
 
-      {!green && (
+      {standing && (
+        <p className="text-[11px] m-0" style={{ color: "var(--orchestr-ink-subtle)" }} data-testid="test-standing">
+          {standing}
+        </p>
+      )}
+
+      {inconclusive && (
+        <div
+          className="rounded-lg py-2 px-2.5 text-[12px]"
+          style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
+        >
+          <div className="font-semibold">The target failed too, so this test can&apos;t tell.</div>
+          <div className="mt-0.5">
+            {canRun ? "It doesn't count for merging — re-test once the cause is resolved." : "It didn't count for merging."}
+          </div>
+        </div>
+      )}
+
+      {!green && !inconclusive && (
         <div
           className="rounded-lg py-2 px-2.5 text-[12px]"
           style={{ background: "var(--orchestr-danger-tint)", color: "var(--orchestr-danger)" }}
@@ -229,6 +278,8 @@ export default function ReviewTestPanel({
   result,
   onResult,
   canRun,
+  current = true,
+  gate = null,
 }: ReviewTestPanelProps) {
   const [envId, setEnvId] = useState<string>(DEFAULT_ENV);
   const [payloadSource, setPayloadSource] = useState<"latest" | "paste">("latest");
@@ -279,7 +330,9 @@ export default function ReviewTestPanel({
     try {
       const summary = await api.testReviewBranch(workflowId, reviewId, body);
       onResult(summary);
-      if (summary.verdict === "green") {
+      if (isInconclusive(summary)) {
+        toast.warning("Inconclusive", "The target failed too, so this test doesn't count for merging.");
+      } else if (summary.verdict === "green") {
         toast.success("Branch passed", "No new failure introduced.");
       } else {
         toast.error("Branch is failing", summary.head.error ?? "The change errors where the baseline passed.");
@@ -400,7 +453,7 @@ export default function ReviewTestPanel({
 
       {result && (
         <div className={canRun ? "mt-3" : ""}>
-          <TestResult result={result} workflowId={workflowId} />
+          <TestResult result={result} workflowId={workflowId} current={current} gate={gate} canRun={canRun} />
         </div>
       )}
 
@@ -422,4 +475,9 @@ export default function ReviewTestPanel({
       />
     </div>
   );
+}
+
+/** A run where the target failed too can't show whether the branch adds a failure; the merge gate ignores it. */
+function isInconclusive(result: ReviewTestSummary): boolean {
+  return result.verdict === "green" && result.head.status === "error";
 }

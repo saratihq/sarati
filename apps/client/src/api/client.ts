@@ -1012,7 +1012,7 @@ export interface ReviewTestRegression {
   removed: string[];
 }
 
-/** The result of a pre-merge test — also persisted as a review's `last_test`. */
+/** The result of a pre-merge test; a review's `last_test` is the latest one run from it, and every result is kept for the merge gate. */
 export interface ReviewTestSummary {
   verdict: "green" | "red";
   tested_at: string;
@@ -1036,6 +1036,18 @@ export interface ReviewDetail extends ReviewSummary {
   target_head_version_id?: string | null;
   /** True when the target already has every change on the source: nothing is left to review. */
   up_to_date?: boolean;
+  /** Whether the target branch is protected — only then can a test block the merge. */
+  target_protected?: boolean;
+  /** The conclusive failing test that refuses this merge right now, as the service's merge gate answers it. */
+  merge_blocked_by_test?: {
+    /** The review it ran from, and its branches — null once that review's branch has been deleted. */
+    review_id: string | null;
+    title: string | null;
+    source_branch: string | null;
+    target_branch: string | null;
+    error: string | null;
+    tested_at: string;
+  } | null;
 }
 
 export interface ReviewListResponse {

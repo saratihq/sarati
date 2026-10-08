@@ -23,13 +23,13 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOSSARY, Tooltip } from "@/components/ui/term";
 import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 import { branchHasNothingNew } from "@/lib/branchChanges";
-import { testIsCurrent } from "@/lib/reviewTest";
 import { timeAgo } from "@/lib/format";
 import { getTagColor } from "@/lib/envPresentation";
 import { toast } from "@/lib/toast";
 import ConflictResolver from "./ConflictResolver";
 import DiffView from "./DiffView";
 import { SaratiLoader } from "./SaratiLogo";
+import MergeBlockedNote from "./MergeBlockedNote";
 import PromoteDialog from "./PromoteDialog";
 import ReviewTestPanel from "./ReviewTestPanel";
 
@@ -159,6 +159,11 @@ interface ReviewFeedCardProps {
   onApproval: (review: ReviewSummary, decision: "approved" | "rejected", comment?: string) => void;
   onMergeRequest: (review: ReviewSummary) => void;
   onCloseReview: (review: ReviewSummary) => void;
+  /** Bumped after any pre-merge test in the feed: a test on one review can change whether another may merge. */
+  testEpoch: number;
+  onTested: () => void;
+  /** Bumped by the page after any change — a protection toggle or a merge can change the gate's answer too. */
+  refreshKey: number;
 }
 
 function ReviewFeedCard({
@@ -170,6 +175,9 @@ function ReviewFeedCard({
   onApproval,
   onMergeRequest,
   onCloseReview,
+  testEpoch,
+  onTested,
+  refreshKey,
 }: ReviewFeedCardProps) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
   // Each branch's newest version, resolved once on first expand.
@@ -183,7 +191,7 @@ function ReviewFeedCard({
   const [commentBody, setCommentBody] = useState("");
   const [postingComment, setPostingComment] = useState(false);
   const [note, setNote] = useState("");
-  // Latest pre-merge test; drives the merge-gate warning below.
+  // This review's latest pre-merge test, for the test panel; the merge-gate warning reads the service's answer.
   const [testResult, setTestResult] = useState<ReviewTestSummary | null>(null);
 
   useEffect(() => {
@@ -235,10 +243,12 @@ function ReviewFeedCard({
     return () => {
       cancelled = true;
     };
-  }, [expanded, workflowId, review.id, review.updated_at]);
+  }, [expanded, workflowId, review.id, review.updated_at, testEpoch, refreshKey]);
 
-  const statusStyle = STATUS_STYLES[review.status] || STATUS_STYLES.open;
-  const actionable = review.status !== "merged" && review.status !== "closed";
+  // The detail refetches whenever the list's summary moves, so it is never older than the list — and it answered the gate.
+  const status = detail?.status ?? review.status;
+  const statusStyle = STATUS_STYLES[status] || STATUS_STYLES.open;
+  const actionable = status !== "merged" && status !== "closed";
   const nothingToReview = actionable && detail?.up_to_date === true;
   // Comments/approvals are rejected server-side once a review is merged/closed.
   const canCollaborate = actionable;
@@ -272,7 +282,7 @@ function ReviewFeedCard({
           className="text-[9px] py-[1px] px-1.5 rounded font-semibold uppercase shrink-0"
           style={{ background: statusStyle.bg, color: statusStyle.text }}
         >
-          {review.status}
+          {status}
         </span>
         <span className="text-[13px] font-semibold flex-1 truncate" style={{ color: "var(--orchestr-ink)" }}>
           {review.title}
@@ -351,7 +361,23 @@ function ReviewFeedCard({
               reviewId={review.id}
               environments={environments}
               result={testResult}
-              onResult={setTestResult}
+              current={
+                !detail ||
+                !testResult ||
+                (testResult.source_version_id === detail.source_head_version_id &&
+                  testResult.target_version_id === detail.target_head_version_id)
+              }
+              gate={
+                actionable &&
+                detail?.target_protected &&
+                (!testResult || detail.last_test?.tested_at === testResult.tested_at)
+                  ? { blocked: !!detail.merge_blocked_by_test }
+                  : null
+              }
+              onResult={(result) => {
+                setTestResult(result);
+                onTested();
+              }}
               canRun={actionable}
             />
           )}
@@ -433,15 +459,13 @@ function ReviewFeedCard({
                   style={{ background: "var(--orchestr-accent-tint)", color: "var(--orchestr-ink)" }}
                 />
               )}
-              {!nothingToReview && review.status === "approved" && testResult?.verdict === "red" && (
-                <div
-                  className="text-[11px] py-1.5 px-2.5 rounded"
-                  style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
-                >
-                  {testIsCurrent(testResult, detail)
-                    ? `The latest test is failing. If ${review.target_branch} is protected, merging from this review is blocked until a re-test passes or either branch gets a new commit.`
-                    : "The last test failed, but a branch has moved since — re-test to see where this stands."}
-                </div>
+              {!nothingToReview && detail?.merge_blocked_by_test && (
+                <MergeBlockedNote
+                  workflowId={workflowId}
+                  reviewId={review.id}
+                  targetBranch={review.target_branch}
+                  blocking={detail.merge_blocked_by_test}
+                />
               )}
               <div className="flex gap-2">
                 {!nothingToReview && (
@@ -457,7 +481,7 @@ function ReviewFeedCard({
                     >
                       Request changes
                     </Button>
-                    {review.status === "approved" && (
+                    {status === "approved" && (
                       <Button variant="secondary" size="sm" onClick={() => onMergeRequest(review)} disabled={busy}>
                         Merge
                       </Button>
@@ -504,6 +528,8 @@ export default function ActivityFeed({
   const isMain = branch === "main";
 
   const [versions, setVersions] = useState<WorkflowVersionSummary[] | null>(null);
+  const [testEpoch, setTestEpoch] = useState(0);
+  const bumpTestEpoch = useCallback(() => setTestEpoch((e) => e + 1), []);
   const [reviews, setReviews] = useState<ReviewSummary[] | null>(null);
   // Per-environment live pointers: env badges and the promote picker both read from here.
   const [envPointers, setEnvPointers] = useState<EnvPointer[]>([]);
@@ -1369,6 +1395,9 @@ export default function ActivityFeed({
                 onApproval={handleApproval}
                 onMergeRequest={handleMergeRequest}
                 onCloseReview={handleCloseRequest}
+                testEpoch={testEpoch}
+                onTested={bumpTestEpoch}
+                refreshKey={refreshKey}
               />
             ),
           )}

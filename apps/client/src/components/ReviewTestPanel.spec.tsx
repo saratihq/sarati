@@ -48,3 +48,55 @@ describe("ReviewTestPanel output regression", () => {
     expect(screen.getByText("new")).toBeInTheDocument();
   });
 });
+
+describe("ReviewTestPanel — where a result stands for merging", () => {
+  const result = (over: Partial<ReviewTestSummary>): ReviewTestSummary => ({ ...summary([]), ...over });
+  const renderWith = (r: ReviewTestSummary, current: boolean, gate: { blocked: boolean } | null) =>
+    render(
+      <ReviewTestPanel
+        workflowId="wf"
+        reviewId="rev"
+        environments={null}
+        result={r}
+        onResult={vi.fn()}
+        canRun
+        current={current}
+        gate={gate}
+      />,
+    );
+
+  it("calls a run where the target failed too Inconclusive, and says an earlier failure still blocks", () => {
+    renderWith(
+      result({
+        base: { run_id: "b", status: "error", error: "down" },
+        head: { run_id: "h", status: "error", error: "down" },
+      }),
+      true,
+      { blocked: true },
+    );
+    expect(screen.getByText("Inconclusive")).toBeInTheDocument();
+    expect(screen.queryByText("Passed")).not.toBeInTheDocument();
+    expect(screen.getByTestId("test-standing")).toHaveTextContent("A failing conclusive test of these versions still blocks merging.");
+  });
+
+  it("says a failing result has been lifted when a newer passing test unblocked the merge", () => {
+    renderWith(
+      result({ verdict: "red", head: { run_id: "h", status: "error", error: "boom" } }),
+      true,
+      { blocked: false },
+    );
+    expect(screen.getByText("Failing")).toBeInTheDocument();
+    expect(screen.getByTestId("test-standing")).toHaveTextContent("has lifted this");
+  });
+
+  it("says a result tested earlier versions once either branch has moved on", () => {
+    renderWith(result({ verdict: "red", head: { run_id: "h", status: "error", error: "boom" } }), false, { blocked: false });
+    expect(screen.getByTestId("test-standing")).toHaveTextContent("This tested earlier versions");
+  });
+
+  it("adds nothing when the result is current and decides the merge as shown", () => {
+    renderWith(result({ verdict: "red", head: { run_id: "h", status: "error", error: "boom" } }), true, { blocked: true });
+    expect(screen.queryByTestId("test-standing")).not.toBeInTheDocument();
+  });
+});
+

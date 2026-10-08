@@ -154,6 +154,8 @@ export class ReviewsService {
       source_head_version_id: source?.headVersionId ?? null,
       target_head_version_id: target?.headVersionId ?? null,
       up_to_date: source && target ? await this.targetHasSource(em, source, target) : false,
+      target_protected: target?.isProtected ?? false,
+      merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
       comments: comments.map((c) => ({
@@ -286,20 +288,6 @@ export class ReviewsService {
           throw new DomainError('Target branch is protected — review must be approved before merging');
         }
 
-        // A protected target blocks on a red pre-merge test only while it is FRESH
-        // (tested heads still match the branch heads) — a stale red or an absent test never blocks.
-        const test = review.lastTest;
-        if (
-          target.isProtected &&
-          test?.verdict === 'red' &&
-          test.source_version_id === source.headVersionId &&
-          test.target_version_id === target.headVersionId
-        ) {
-          throw new DomainError(
-            'Target branch is protected — the pre-merge test is failing (a step errors on this branch that passes on the target). Fix it and re-test before merging.',
-          );
-        }
-
         const result = await this.branches.mergeBranchIn(
           em,
           workflowId,
@@ -354,9 +342,13 @@ export class ReviewsService {
     await this.dataSource.transaction(async (em) => {
       const review = await this.getReviewScoped(workflowId, reviewId);
       if (review.status === 'merged') throw new DomainError('Cannot close a merged review');
-      review.status = 'closed';
-      review.updatedAt = now();
-      await em.save(WorkflowReviewEntity, review);
+      // Status only — a whole-row save would write back a test or a merge that landed after the read above.
+      const closed = await em.update(
+        WorkflowReviewEntity,
+        { id: reviewId, status: Not('merged') },
+        { status: 'closed', updatedAt: now() },
+      );
+      if (!closed.affected) throw new DomainError('Cannot close a merged review');
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       await this.events.emit(em, {
         orgId: wf?.orgId ?? null,
@@ -366,6 +358,29 @@ export class ReviewsService {
         subjectId: review.id,
       });
     });
+  }
+
+  /** The conclusive failing test that refuses this merge right now, as the merge gate itself would answer. */
+  private async mergeBlockedByTest(
+    em: EntityManager,
+    review: WorkflowReviewEntity,
+  ): Promise<MergeBlockedByTest | null> {
+    if (review.status === 'merged' || review.status === 'closed') return null;
+    const blocking = await this.branches.testBlockingMerge(
+      em,
+      review.workflowId,
+      review.sourceBranchId,
+      review.targetBranchId,
+    );
+    if (!blocking) return null;
+    return {
+      review_id: blocking.review?.id ?? null,
+      title: blocking.review?.title ?? null,
+      source_branch: blocking.review?.sourceBranch ?? null,
+      target_branch: blocking.review?.targetBranch ?? null,
+      error: blocking.error,
+      tested_at: blocking.testedAt,
+    };
   }
 
   private async targetHasSource(
@@ -401,4 +416,14 @@ export class ReviewsService {
       approval_count: approvalCount,
     };
   }
+}
+
+/** Why a protected merge is refused right now; the review fields are null once that review's branch is gone. */
+interface MergeBlockedByTest {
+  review_id: string | null;
+  title: string | null;
+  source_branch: string | null;
+  target_branch: string | null;
+  error: string | null;
+  tested_at: string;
 }
