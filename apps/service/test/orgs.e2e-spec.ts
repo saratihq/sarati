@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
 
@@ -173,7 +174,14 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    // Per-route throttles (/api/deploy: 10 a minute) are not what this suite tests.
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ThrottlerStorage)
+      .useValue({
+        increment: () =>
+          Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
+      })
+      .compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
@@ -447,6 +455,35 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       ]);
     }
     await deployAsB().expect(201);
+  });
+
+  it("a member's new workflow is saved but not live until an owner or admin publishes it", async () => {
+    const live = async (workflowId: string): Promise<{ pointer: boolean; alias: boolean }> => {
+      const pointers = await db.query(`SELECT 1 FROM workflow_env_pointers WHERE workflow_id = $1`, [
+        workflowId,
+      ]);
+      const wf = await db.query<{ active_version_id: string | null }>(
+        `SELECT active_version_id FROM workflows WHERE id = $1`,
+        [workflowId],
+      );
+      return { pointer: (pointers.rowCount ?? 0) > 0, alias: wf.rows[0]!.active_version_id !== null };
+    };
+    const create = (as: (r: request.Test) => request.Test, org?: string) => {
+      const req = http().post('/api/deploy');
+      return as(org ? req.set('X-Org-Id', org) : req).send({ workflow_json: concatIr() });
+    };
+
+    const byMember = await create(asB, orgId).expect(201);
+    expect(byMember.body).toMatchObject({ is_live: false, version_number: 1 });
+    expect(await live(byMember.body.workflow_id as string)).toEqual({ pointer: false, alias: false });
+
+    const byOwner = await create(asA, orgId).expect(201);
+    expect(byOwner.body.is_live).toBe(true);
+    expect(await live(byOwner.body.workflow_id as string)).toEqual({ pointer: true, alias: true });
+
+    // In their own workspace the member is the owner, so it goes live as before.
+    const personal = await create(asB).expect(201);
+    expect(personal.body.is_live).toBe(true);
   });
 
   it('a key issued for one org reaches nothing in another — not by workflow id, not by org route', async () => {

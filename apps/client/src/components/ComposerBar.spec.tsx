@@ -1,9 +1,10 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "@/api/agent";
 import ComposerBar from "@/components/ComposerBar";
 import { refreshComposerAvailability } from "@/lib/useComposerAvailable";
 import { useComposer } from "@/store/useComposer";
+import { useOrgs } from "@/store/useOrgs";
 
 vi.mock("@/api/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof agent>()),
@@ -38,5 +39,23 @@ describe("ComposerBar reattach", () => {
 
     await waitFor(() => expect(composerAttach).toHaveBeenCalledTimes(1));
     expect(composerAttach.mock.calls[0]![0]).toMatchObject({ workflowId: "wf-1", scratch: false });
+  });
+});
+
+describe("ComposerBar save offer", () => {
+  const offerFor = async (role: "member" | "owner"): Promise<string> => {
+    composerStatus.mockResolvedValue({ available: true });
+    useOrgs.setState({ orgs: [{ id: "o1", name: "Team", is_personal: false, role }], activeOrgId: "o1" });
+    useComposer.setState({ offerPending: true });
+    render(<ComposerBar />);
+    return (await screen.findByTestId("offer-save-live")).textContent?.trim() ?? "";
+  };
+
+  it("offers to save and turn on a new workflow to someone who may publish", async () => {
+    expect(await offerFor("owner")).toBe("Save and turn on");
+  });
+
+  it("offers only to save it to a member, whose new workflow an owner or admin turns on", async () => {
+    expect(await offerFor("member")).toBe("Save");
   });
 });

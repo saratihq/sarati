@@ -300,16 +300,21 @@ export class EnvPointersService {
     environment: string,
     actorUserId: string,
   ): Promise<void> {
-    if (!wf.orgId) return;
-    const org = await em.findOne(OrganizationEntity, { where: { id: wf.orgId } });
-    if (!org || org.isPersonal) return;
-    const role = await this.orgs.roleOf(em, actorUserId, wf.orgId);
-    if (role !== 'owner' && role !== 'admin') {
+    if (!(await this.mayMovePointers(em, wf.orgId, actorUserId))) {
       throw new DomainError(
         `Only owners and admins can move the '${environment}' pointer in an organization`,
         403,
       );
     }
+  }
+
+  /** Whether this user may change what runs in this org: anyone outside a shared org, an owner or admin inside one. */
+  async mayMovePointers(em: EntityManager, orgId: string | null, actorUserId: string): Promise<boolean> {
+    if (!orgId) return true;
+    const org = await em.findOne(OrganizationEntity, { where: { id: orgId } });
+    if (!org || org.isPersonal) return true;
+    const role = await this.orgs.roleOf(em, actorUserId, orgId);
+    return role === 'owner' || role === 'admin';
   }
 }
 

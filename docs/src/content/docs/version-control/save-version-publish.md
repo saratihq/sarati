@@ -20,6 +20,9 @@ untouched workflow — or one you edited and put back — is a no-op.
 The **first** version of a brand-new workflow goes live in production immediately. A workflow that
 could not run until you found a second button would be a worse product.
 
+Except for a [member](/operate/users/#roles) of a shared organization: their new workflow is
+saved, not live, and an owner or admin publishes it — the same as any other change to what runs.
+
 Every version after that one waits for you.
 
 ## Reading the state

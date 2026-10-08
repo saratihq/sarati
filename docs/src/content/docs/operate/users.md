@@ -55,7 +55,8 @@ Three: `owner`, `admin`, `member`.
 | Invite and remove people, org settings | ❌ | ✅ |
 | Change roles, transfer ownership, invite or remove an owner, delete the organization | ❌ | owner only |
 
-A member is a full contributor who cannot ship. Creating a workflow gives no extra rights over it:
+A member is a full contributor who cannot ship: a workflow a member creates is saved, not live,
+until an owner or admin publishes it. Creating a workflow gives no extra rights over it:
 the role decides, and leaving the organization, or being removed, ends access to its workflows and
 their runs, including the ones you created. The refusals name the reason:
 

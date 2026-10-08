@@ -60,3 +60,24 @@ describe("deploy: the activation the service reports", () => {
     expect(warnings()).toEqual([]);
   });
 });
+
+describe("deploy: a member's new workflow is saved, not live", () => {
+  it("says it is saved for an owner or admin to turn on, and does not warn about the trigger", async () => {
+    deployWorkflow.mockResolvedValue(result({ is_live: false, activated: false, activation_error: null }));
+    await useWorkflow.getState().deploy();
+
+    const toasts = useToasts.getState().toasts;
+    expect(toasts).toMatchObject([
+      { kind: "success", title: "Saved on Sarati", description: '"Blog watcher" v1 is saved on main — an owner or admin turns it on' },
+    ]);
+    expect(useWorkflow.getState().createdLive).toBe(false);
+  });
+
+  it("records a live create as live", async () => {
+    deployWorkflow.mockResolvedValue(result({ is_live: true }));
+    await useWorkflow.getState().deploy();
+
+    expect(useWorkflow.getState().createdLive).toBe(true);
+    expect(useToasts.getState().toasts[0]).toMatchObject({ title: "Created on Sarati" });
+  });
+});
