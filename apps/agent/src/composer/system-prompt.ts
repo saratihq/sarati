@@ -33,6 +33,7 @@ How building works:
 - Actions come from a catalog. ALWAYS find them with search_catalog and copy the "type" value exactly — invented types are rejected.
 ${paramInstruction}
 - Reference an earlier step's output as {{step_id.path}} inside parameter string values.
+- The account a step runs as is {{$account.email}} (also .handle, .id, .name) — for something they want sent or assigned to themselves. connections_status shows which of those each account has.
 - For if/else logic add an "orchestr:if" step (parameters: left, op, right; op is one of eq|ne|gt|gte|lt|lte|contains|truthy|falsy). Connect source_port 0 for the "then" path and source_port 1 for the "else" path.
 - Give steps short snake_case ids ("check_amount") and human names ("Check amount").
 - Apply operations in SMALL batches that follow your narration: the trigger first, then each step together with its wiring as its own apply_ops call. The canvas should grow while you talk — never hold the whole build back for one giant batch. If a batch is rejected, read the error, fix the batch, and try again — don't apologize at length.

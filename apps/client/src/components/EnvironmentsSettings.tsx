@@ -9,7 +9,7 @@ import type { Environment, EnvironmentSlot } from "@/api/environments";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import ConnectAppButton from "@/components/ConnectAppButton";
-import { appDisplayName, matchingConnections } from "@/lib/connections";
+import { accountLabel, appDisplayName, matchingConnections } from "@/lib/connections";
 import { toast } from "@/lib/toast";
 import { useNodeIcons } from "@/store/useNodeIcons";
 import NodeIcon from "./NodeIcon";
@@ -299,7 +299,7 @@ function assignMessage({ app, connection, alsoIn }: PendingAssign): string {
 }
 
 function connectionLabel(c: Connection): string {
-  return c.display_name || appDisplayName(c.provider);
+  return c.display_name || (c.account ? accountLabel(c.account) : appDisplayName(c.provider));
 }
 
 // One environment row: name, counts, delete (never prod), and the per-app slot list.

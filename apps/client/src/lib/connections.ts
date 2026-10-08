@@ -1,4 +1,4 @@
-import type { Connection } from "@/api/client";
+import type { AccountIdentity, Connection } from "@/api/client";
 
 /**
  * Only rows a step can actually run as. A pending/expired/failed row hard-errors at run time, so every
@@ -22,9 +22,21 @@ export function candidateConnections(connections: Connection[], appSlug: string 
   return appSlug ? matchingConnections(connections, appSlug) : connections;
 }
 
-/** Human label for a connection option/row. */
+/** What a person recognises an account by: its email, else its handle, name or id. */
+export function accountLabel(account: AccountIdentity): string {
+  return account.email ?? account.handle ?? account.name ?? account.id ?? "an unnamed account";
+}
+
+/** `orchestr (T0BFMNPDEQ2)` — the label plus the id someone can compare with what the provider shows. */
+export function describeAccount(account: AccountIdentity): string {
+  const label = accountLabel(account);
+  return account.id !== null && account.id !== label ? `${label} (${account.id})` : label;
+}
+
+/** Human label for a connection option/row: its name, else the account it signs in as, else just the app. */
 export function connectionLabel(c: Connection): string {
-  return c.display_name ? `${c.provider} · ${c.display_name}` : c.provider;
+  const named = c.display_name || (c.account ? accountLabel(c.account) : "");
+  return named ? `${c.provider} · ${named}` : c.provider;
 }
 
 /** Human name for an app slug when the catalog name isn't at hand: "google-sheets" → "Google Sheets". */

@@ -594,7 +594,9 @@ describe('tool handlers (workflow-service wrappers)', () => {
       }),
       listConnections: jest
         .fn()
-        .mockResolvedValue([{ id: 'conn-1', provider: 'slack', status: 'active', display_name: null }]),
+        .mockResolvedValue([
+          { id: 'conn-1', provider: 'slack', status: 'active', display_name: null, account: null },
+        ]),
       loadOptions: jest.fn().mockResolvedValue([{ label: '#social', value: 'C0BFN9NKRUH' }]),
     });
 
@@ -806,13 +808,38 @@ describe('A3 accept + evolve tools and bounds', () => {
     const { context } = makeCtx({
       listConnections: () =>
         Promise.resolve([
-          { id: 'conn-slack-1', provider: 'slack', status: 'active', display_name: null },
-          { id: 'conn-sheets-1', provider: 'sheets', status: 'expired', display_name: 'Team sheet' },
+          {
+            id: 'conn-slack-1',
+            provider: 'slack',
+            status: 'active',
+            display_name: null,
+            account: { subject: 'workspace', name: 'orchestr', id: 'T0BFMNPDEQ2', email: null, handle: null },
+          },
+          {
+            id: 'conn-sheets-1',
+            provider: 'sheets',
+            status: 'expired',
+            display_name: 'Team sheet',
+            account: null,
+          },
+          {
+            id: 'conn-gmail-1',
+            provider: 'gmail',
+            status: 'active',
+            display_name: null,
+            account: { subject: 'user', name: null, id: 'me@e2e.local', email: 'me@e2e.local', handle: null },
+          },
         ]),
     });
-    const result = await runConnectionsStatus(context);
-    expect(result.content[0]!.text).toContain('slack: active');
-    expect(result.content[0]!.text).toContain('sheets (Team sheet): expired');
+    const text = (await runConnectionsStatus(context)).content[0]!.text;
+    expect(text).toContain(
+      'slack: active [connection_id: conn-slack-1] — in the workspace orchestr (no person to address)',
+    );
+    expect(text).toContain('sheets (Team sheet): expired [connection_id: conn-sheets-1]\n');
+    expect(text).toContain(
+      'gmail: active [connection_id: conn-gmail-1] — signs in as email me@e2e.local, id me@e2e.local',
+    );
+    expect(text).toContain('{{$account.email}}');
   });
 });
 

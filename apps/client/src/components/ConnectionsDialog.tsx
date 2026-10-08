@@ -5,11 +5,11 @@ import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 import { Pencil, Activity, RefreshCw, Search, X } from "lucide-react";
 import * as api from "@/api/client";
-import type { Connection, ManagedApp } from "@/api/client";
+import type { AccountIdentity, Connection, ManagedApp } from "@/api/client";
 import * as envApi from "@/api/environments";
 import type { ConnectionReference } from "@/api/environments";
 import { loadByoApps, type ByoApp } from "@/lib/byoConnect";
-import { appDisplayName } from "@/lib/connections";
+import { accountLabel, appDisplayName, describeAccount } from "@/lib/connections";
 import { timeAgo } from "@/lib/format";
 import { connectAppWithFeedback } from "@/lib/managedConnect";
 import { toast } from "@/lib/toast";
@@ -104,14 +104,19 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
   // The band shows EVERY connection with its status: pending/failed rows would otherwise be
   // invisible and unrecoverable. The grid's de-dup reads the same list.
   /** Which account each connection answers as, once known — kept for the life of the dialog. */
-  const [accounts, setAccounts] = useState<Record<string, { name: string | null; id: string | null }>>({});
+  const [accounts, setAccounts] = useState<Record<string, AccountIdentity>>({});
 
   /**
-   * Which account each connection answers as. Filled in after the list lands rather than blocking
-   * it: each answer is a real provider call, cached service-side, and a chip without one is honest.
+   * Which account each connection answers as. The list carries every answer the provider has given;
+   * a connection never asked yet is asked after the list lands, so a chip without one is honest.
    */
   const fillAccounts = useCallback((rows: Connection[]) => {
     for (const row of rows) {
+      const known = row.account;
+      if (known) {
+        setAccounts((prev) => ({ ...prev, [row.id]: known }));
+        continue;
+      }
       void api
         .connectionAccount(row.id)
         .then(({ account }) => {
@@ -222,8 +227,8 @@ function ConnectionsDialogBody({ onClose }: { onClose: () => void }) {
     try {
       const res = await api.testConnection(c.id);
       if (res.ok) {
-        // Health is not identity: a valid token on the WRONG workspace passes every check.
-        const named = await api.connectionAccount(c.id).catch(() => null);
+        // Health is not identity: a valid token on the WRONG workspace passes every check, so ask again.
+        const named = await api.connectionAccount(c.id, true).catch(() => null);
         toast.success(`${label} is working`, named?.detail ?? res.detail);
         const identity = named?.account;
         if (identity) setAccounts((prev) => ({ ...prev, [c.id]: identity }));
@@ -552,8 +557,8 @@ function ConnectionChip({
 }: {
   connection: Connection;
   label: string;
-  /** Which account it answered as, once tested — health alone cannot tell these apart. */
-  account?: { name: string | null; id: string | null };
+  /** Which account it answered as — health alone cannot tell these apart. */
+  account?: AccountIdentity;
   reconnecting: boolean;
   testing: boolean;
   onTest: () => void;
@@ -567,10 +572,8 @@ function ConnectionChip({
   // The service's stored reason wins; the static hint is the fallback copy.
   const reason = connection.status_reason || meta?.hint;
   const checked = connection.last_checked_at ? ` — checked ${timeAgo(connection.last_checked_at)}` : "";
-  const accountName = account ? (account.name ?? account.id) : null;
-  const accountTitle = account
-    ? ` — authorized against ${account.name ?? "an unnamed account"}${account.id ? ` (${account.id})` : ""}`
-    : "";
+  const accountName = account ? accountLabel(account) : null;
+  const accountTitle = account ? ` — authorized against ${describeAccount(account)}` : "";
   return (
     <span
       className="group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-lg"

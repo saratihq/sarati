@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { AlertTriangle, Braces, Check, Clock, Copy, MessageCircle, Pin, Play, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Webhook, Workflow, Wrench, X, Zap } from "lucide-react";
 import * as api from "@/api/client";
-import type { AgentStep, CallableWorkflow, Connection, DropdownOption, NodeParamSchema, NodeTypeEntry, TriggerCatalogEntry } from "@/api/client";
+import type { AccountIdentity, AgentStep, CallableWorkflow, Connection, DropdownOption, NodeParamSchema, NodeTypeEntry, TriggerCatalogEntry } from "@/api/client";
 import { apiBaseUrl } from "@/lib/config";
 import { useWorkflow } from "@/store/useWorkflow";
 import { useStepSamples } from "@/store/useStepSamples";
@@ -15,7 +15,8 @@ import NodeIcon from "./NodeIcon";
 import SupportBadge from "./SupportBadge";
 import { defaultParamsFromSchema, getNodeTypeLabel, isNativeOrTriggerType, opDropsRight, opLabel } from "@/lib/constants";
 import { listEnvironments, type EnvironmentSlot } from "@/api/environments";
-import { activeConnections, appDisplayName, candidateConnections, connectionLabel, matchingConnections } from "@/lib/connections";
+import { accountFields, accountRefToken, accountRefValue, isAccountRef, isEmailRecipientField } from "@/lib/accountRef";
+import { activeConnections, appDisplayName, candidateConnections, connectionLabel, describeAccount, matchingConnections } from "@/lib/connections";
 import { humanizeKey } from "@/lib/format";
 import { REAL_RUN_CONSEQUENCE, REAL_RUN_STEP_NOTE } from "@/lib/realRun";
 import { toast } from "@/lib/toast";
@@ -548,15 +549,25 @@ const PREVIEW_MAX = 80;
 
 /**
  * Client-side twin of the runtime's string interpolation, for the field preview. Returns null when
- * there is nothing to preview: no refs, or a reserved `{{$…}}` ref the runtime owns.
+ * there is nothing to preview: no refs, or a reserved `{{$…}}` ref the runtime owns — an account
+ * reference previews as the step's own account when this editor knows it.
  */
-function resolveRefsPreview(value: string, samples: Record<string, unknown>): RefPreview | null {
+function resolveRefsPreview(
+  value: string,
+  samples: Record<string, unknown>,
+  account?: AccountIdentity | null,
+): RefPreview | null {
   const REF = /\{\{\s*([^}]+?)\s*\}\}/g;
   if (!REF.test(value)) return null;
   REF.lastIndex = 0;
   let reserved = false;
   const missing = new Set<string>();
   const out = value.replace(REF, (_m, ref: string) => {
+    if (isAccountRef(ref)) {
+      const known = accountRefValue(ref, account);
+      if (known === null) reserved = true;
+      return known ?? "";
+    }
     const segments = ref.split(".").map((x: string) => x.trim());
     const root = segments[0] ?? "";
     if (!root || root.startsWith("$")) {
@@ -766,7 +777,7 @@ function TriggerCatch({
   );
 }
 
-/** A text field whose picker drops a `{{stepId}}` reference to an upstream step at the cursor. */
+/** A text field whose picker drops a `{{stepId}}` reference to an upstream step — or to the step's own account — at the cursor. */
 function ReferenceTextInput({
   value,
   onChange,
@@ -775,6 +786,8 @@ function ReferenceTextInput({
   samples,
   onTriggerSample,
   multiline = false,
+  account = null,
+  suggestMe = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -784,6 +797,10 @@ function ReferenceTextInput({
   onTriggerSample: (payload: unknown) => void;
   /** Long-text props: a textarea, because an `<input>` strips the newlines out of the value. */
   multiline?: boolean;
+  /** The account the step runs as, when known — offered as "Me". */
+  account?: AccountIdentity | null;
+  /** A recipient field: an empty one offers "Send to me". */
+  suggestMe?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -835,7 +852,9 @@ function ReferenceTextInput({
     setMenu({ top: r.bottom + 4, left, width });
   };
 
-  const preview = resolveRefsPreview(value, samples);
+  const me = accountFields(account);
+  const myEmail = me.find((f) => f.field === "email");
+  const preview = resolveRefsPreview(value, samples, account);
   return (
     <div className="flex flex-col gap-0.5">
     <div className={`flex gap-1 ${multiline ? "items-start" : "items-center"}`}>
@@ -863,13 +882,13 @@ function ReferenceTextInput({
           style={FIELD_STYLE}
         />
       )}
-      {upstream.length > 0 && (
+      {(upstream.length > 0 || me.length > 0) && (
         <button
           ref={btnRef}
           type="button"
           onClick={() => (menu ? setMenu(null) : openMenu())}
-          aria-label="Insert data from an earlier step"
-          title="Insert data from an earlier step"
+          aria-label={upstream.length > 0 ? "Insert data from an earlier step" : "Insert your account's details"}
+          title={upstream.length > 0 ? "Insert data from an earlier step" : "Insert your account's details"}
           className="shrink-0 h-8 w-8 flex items-center justify-center rounded-lg cursor-pointer"
           style={{
             background: "var(--orchestr-field)",
@@ -886,7 +905,7 @@ function ReferenceTextInput({
             <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
             <div
               role="menu"
-              aria-label="Insert a reference to an earlier step"
+              aria-label={upstream.length > 0 ? "Insert a reference to an earlier step" : "Insert your account's details"}
               className="fixed z-50 rounded-xl py-1.5 overflow-y-auto"
               style={{
                 top: menu.top,
@@ -898,13 +917,45 @@ function ReferenceTextInput({
                 boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
               }}
             >
-              <div
-                className="px-3 pt-1 pb-1.5 text-[10px] leading-snug"
-                style={{ color: "var(--orchestr-ink-subtle)" }}
-              >
-                Insert data from an earlier step. Test a step to pick its individual{" "}
-                <span className="font-mono">.field</span>s.
-              </div>
+              {me.length > 0 && (
+                <div style={upstream.length > 0 ? { borderBottom: "1px solid var(--orchestr-line)" } : undefined}>
+                  <div className="px-3 pt-1 pb-0.5">
+                    <span className="text-[11px] font-medium" style={{ color: "var(--orchestr-ink)" }}>
+                      Me
+                    </span>
+                    <p className="text-[10px] leading-snug m-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                      The account this step runs as — in an environment, the account assigned there.
+                    </p>
+                  </div>
+                  {me.map((f) => (
+                    <button
+                      key={f.field}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => insertToken(accountRefToken(f.field), false)}
+                      className="w-full text-left pl-5 pr-3 py-1 flex items-baseline justify-between gap-2 cursor-pointer hover:bg-[color:var(--orchestr-accent-tint)]"
+                      style={{ color: "var(--orchestr-ink)" }}
+                    >
+                      <span className="text-[11px]">{f.label}</span>
+                      <span
+                        className="text-[10px] font-mono shrink-0 truncate max-w-[170px]"
+                        style={{ color: "var(--orchestr-ink-subtle)" }}
+                      >
+                        {f.value}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {upstream.length > 0 && (
+                <div
+                  className="px-3 pt-1 pb-1.5 text-[10px] leading-snug"
+                  style={{ color: "var(--orchestr-ink-subtle)" }}
+                >
+                  Insert data from an earlier step. Test a step to pick its individual{" "}
+                  <span className="font-mono">.field</span>s.
+                </div>
+              )}
               {upstream.map((s, i) => {
                 const fields = s.fields ?? [];
                 const label = s.isTrigger ? "Trigger payload" : s.name;
@@ -969,6 +1020,17 @@ function ReferenceTextInput({
           document.body,
         )}
     </div>
+    {suggestMe && myEmail && value.trim() === "" && (
+      <button
+        type="button"
+        onClick={() => onChange(accountRefToken("email"))}
+        className="self-start text-[10px] px-0.5 py-0 bg-transparent border-none underline cursor-pointer"
+        style={{ color: "var(--orchestr-ink-subtle)" }}
+        data-testid="send-to-me"
+      >
+        Send to me · {myEmail.value}
+      </button>
+    )}
     {preview &&
       (preview.kind === "resolved" ? (
         <p
@@ -3369,10 +3431,7 @@ function LoopEditor({
  */
 function ConnectionAccountLine({ connectionId }: { connectionId: string }) {
   // Keyed by the connection it describes, so a slower answer for a previous pick can never show.
-  const [answered, setAnswered] = useState<{
-    for: string;
-    account: { name: string | null; id: string | null } | null;
-  } | null>(null);
+  const [answered, setAnswered] = useState<{ for: string; account: AccountIdentity | null } | null>(null);
   useEffect(() => {
     if (!connectionId) return;
     let cancelled = false;
@@ -3390,15 +3449,13 @@ function ConnectionAccountLine({ connectionId }: { connectionId: string }) {
   }, [connectionId]);
   const account = answered?.for === connectionId ? answered.account : null;
   if (!account) return null;
-  const named = account.name ?? account.id;
   return (
     <p
       className="text-[10px] m-0 mt-1 leading-snug"
       style={{ color: "var(--orchestr-ink-subtle)" }}
       data-testid="connection-account-line"
     >
-      Authorized against {named}
-      {account.name && account.id ? ` (${account.id})` : ""}.
+      Authorized against {describeAccount(account)}.
     </p>
   );
 }
@@ -4319,6 +4376,10 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
       ? "trigger payload"
       : (upstream.find((u) => u.refKey === refKey)?.name ?? refKey);
 
+  // The account this step runs as on a Default run — what "Me" means while editing.
+  const stepAccount =
+    connections?.find((c) => c.id === params.connectionId)?.account ?? null;
+
   // The default control, the dropdown's degrade path, and the fx-mode widget; objects render as JSON.
   const textInputFor = (key: string, multiline = false) => {
     const value = params[key];
@@ -4339,6 +4400,8 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
         samples={samples}
         onTriggerSample={(payload) => setSample(scopeKey, "trigger", payload)}
         multiline={multiline}
+        account={stepAccount}
+        suggestMe={isEmailRecipientField(key)}
       />
     );
   };

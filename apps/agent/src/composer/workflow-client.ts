@@ -252,10 +252,8 @@ export class WorkflowServiceClient {
       .map((o) => ({ label: typeof o.label === 'string' ? o.label : String(o.value), value: o.value }));
   }
 
-  /** The caller's connections (provider + status) — read-only credential awareness. */
-  async listConnections(
-    token: string | null,
-  ): Promise<Array<{ id: string; provider: string; status: string; display_name: string | null }>> {
+  /** The caller's connections (provider + status + which account each is) — read-only credential awareness. */
+  async listConnections(token: string | null): Promise<ComposerConnection[]> {
     const { status, body } = await this.request('GET', '/api/connections', token);
     if (status !== 200) throw this.asError('list connections', status, body);
     const list = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [];
@@ -264,6 +262,7 @@ export class WorkflowServiceClient {
       provider: typeof c.provider === 'string' ? c.provider : 'unknown',
       status: typeof c.status === 'string' ? c.status : 'unknown',
       display_name: typeof c.display_name === 'string' ? c.display_name : null,
+      account: accountOf(c.account),
     }));
   }
 
@@ -371,4 +370,37 @@ function detailOf(body: unknown): string | null {
     if (typeof d === 'string') return d;
   }
   return null;
+}
+
+/** Which account a connection is, as its provider said; a `workspace` names only where it is. */
+export interface ComposerAccount {
+  subject: 'user' | 'workspace';
+  name: string | null;
+  id: string | null;
+  email: string | null;
+  handle: string | null;
+}
+
+/** One of the caller's connections, as the composer sees it. */
+export interface ComposerConnection {
+  id: string;
+  provider: string;
+  status: string;
+  display_name: string | null;
+  /** Null until the provider has said which account this is. */
+  account: ComposerAccount | null;
+}
+
+function accountOf(raw: unknown): ComposerAccount | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const a = raw as Record<string, unknown>;
+  if (a.subject !== 'user' && a.subject !== 'workspace') return null;
+  const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+  return {
+    subject: a.subject,
+    name: text(a.name),
+    id: text(a.id),
+    email: text(a.email),
+    handle: text(a.handle),
+  };
 }
