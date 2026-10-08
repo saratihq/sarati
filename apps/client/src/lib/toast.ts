@@ -21,7 +21,8 @@ export interface ToastItem {
 
 interface ToastState {
   toasts: ToastItem[];
-  push: (kind: ToastKind, title: string, description?: string) => void;
+  /** Returns the toast's id, so whatever made it obsolete can dismiss it. */
+  push: (kind: ToastKind, title: string, description?: string) => number;
   dismiss: (id: number) => void;
 }
 
@@ -35,6 +36,7 @@ export const useToasts = create<ToastState>((set, get) => ({
     if (kind !== "error" && kind !== "warning") {
       setTimeout(() => get().dismiss(id), AUTO_DISMISS_MS);
     }
+    return id;
   },
   dismiss: (id) => {
     const item = get().toasts.find((t) => t.id === id);
@@ -49,6 +51,7 @@ export const toast = {
   error: (title: string, description?: string) => useToasts.getState().push("error", title, description),
   info: (title: string, description?: string) => useToasts.getState().push("info", title, description),
   warning: (title: string, description?: string) => useToasts.getState().push("warning", title, description),
+  dismiss: (id: number) => useToasts.getState().dismiss(id),
   /** Undo window: commits only when the toast leaves un-undone. Exactly one of onCommit/onUndo runs. */
   undoable: (title: string, description: string | undefined, handlers: { onCommit: () => void; onUndo: () => void }) => {
     const id = nextId++;

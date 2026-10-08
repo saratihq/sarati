@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
@@ -16,8 +16,11 @@ vi.mock("@/api/client", async (importOriginal) => ({
   mergeBranch: vi.fn(),
   updateBranch: vi.fn(),
   approveReview: vi.fn(),
+  mergeReview: vi.fn(),
 }));
-vi.mock("@/lib/toast", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
+vi.mock("@/lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), dismiss: vi.fn() },
+}));
 vi.mock("@/api/environments", async (importOriginal) => ({
   ...(await importOriginal<typeof environments>()),
   listEnvironments: vi.fn(),
@@ -236,6 +239,39 @@ describe("ActivityFeed protected merges", () => {
 
     expect(await screen.findByText(/create a branch from 'lane'/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Update lane from main" })).not.toBeInTheDocument();
+  });
+
+  it("retires a review's merge refusal once its update runs, so it can't sit over the resolver", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({ ...approvedDetail, approval_current: true, approval_stale_reason: null });
+    vi.mocked(api.mergeReview).mockRejectedValue(
+      new api.ApiError("Branch 'main' is protected, so conflicts can't be resolved while merging into it.", 409, "protected_merge_conflicts"),
+    );
+    vi.mocked(toast.error).mockReturnValue(7);
+    vi.mocked(api.updateBranch).mockResolvedValue({
+      status: "conflicts",
+      conflicts: [
+        {
+          node_id: "announce",
+          node_name: "Announce",
+          kind: "field",
+          field_path: "parameters.texts",
+          source_value: ["main-moved"],
+          target_value: ["lane-3"],
+          ancestor_value: ["base"],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Merge" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Merge" }));
+    await user.click(await screen.findByRole("button", { name: "Update lane from main" }));
+
+    await vi.waitFor(() => expect(toast.dismiss).toHaveBeenCalledWith(7));
+    expect(await screen.findByText("Resolve merge conflicts")).toBeInTheDocument();
   });
 
   it("offers to update the branch from its target when a protected merge would need conflicts resolved", async () => {

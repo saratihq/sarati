@@ -565,6 +565,7 @@ export default function ActivityFeed({
   const [error, setError] = useState<string | null>(null);
   // Set when a merge into a protected branch was refused for conflicts: the branch takes the target's changes first.
   const [updateOffer, setUpdateOffer] = useState<{ source: string; target: string } | null>(null);
+  const mergeRefusal = useRef<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   // When this branch was forked (branch row created_at) — null on main/unknown.
   const [branchedAt, setBranchedAt] = useState<string | null>(null);
@@ -832,7 +833,7 @@ export default function ActivityFeed({
       const msg = e instanceof Error ? e.message : "Failed to merge review";
       setError(msg);
       offerUpdateOn(e, review.source_branch, review.target_branch);
-      toast.error("Couldn't merge", msg);
+      mergeRefusal.current = toast.error("Couldn't merge", msg);
     } finally {
       setBusy(false);
     }
@@ -868,6 +869,9 @@ export default function ActivityFeed({
 
   // The branch takes the target's changes and resolves the conflicts here, where a review and a test see them.
   const handleUpdateFrom = async ({ source, target }: { source: string; target: string }) => {
+    // The refusal this update answers is obsolete, and it would sit over the resolver's footer.
+    if (mergeRefusal.current !== null) toast.dismiss(mergeRefusal.current);
+    mergeRefusal.current = null;
     setBusy(true);
     try {
       const result = await api.updateBranch(workflowId, source, target);
