@@ -11,6 +11,9 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { ReviewTestService } from '../src/reviews/review-test.service';
+import { RunReaperService } from '../src/runs/run-reaper.service';
+import { RunsService } from '../src/runs/runs.service';
+import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import type { ReviewTestSummary } from '../src/reviews/review-test.types';
 import { BranchService } from '../src/workflows/branch.service';
 import { VersionsWriteService } from '../src/workflows/versions-write.service';
@@ -1099,5 +1102,256 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       .expect(200);
     expect((await clear().expect(200)).body).toEqual({ status: 'cleared' });
     expect((await clear().expect(200)).body).toEqual({ status: 'absent' });
+  });
+
+  describe("a run's own lock, taken first, under a workflow or environment delete", () => {
+    const OPEN = `now() + interval '1 hour'`;
+    const LAPSED = `now() - interval '2 hours'`;
+    interface HeldWait {
+      key: string;
+      topic: string;
+      due: string;
+    }
+
+    const parkRun = async (
+      runId: string,
+      own: { workflowId?: string; environmentId?: string; status?: string; waits: HeldWait[] },
+    ): Promise<string> => {
+      const id = `${user}:${runId}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, workflow_id, environment_id)
+         VALUES ($1, $2, $3, 'plan-held', $4, now() - interval '3 hours', $5, $6)`,
+        [id, runId, user, own.status ?? 'waiting', own.workflowId ?? null, own.environmentId ?? null],
+      );
+      for (const w of own.waits) {
+        await db.query(
+          `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at,
+                                          waiting_topic, waiting_since, waiting_timeout_at)
+           VALUES (gen_random_uuid(), $1, $2, $2, 'waitForEvent', 'running', now() - interval '3 hours',
+                   $3, now() - interval '3 hours', ${w.due})`,
+          [id, w.key, w.topic],
+        );
+      }
+      return id;
+    };
+    const runOf = async (
+      id: string,
+    ): Promise<{ status: string; workflow_id: string | null; environment_id: string | null }> =>
+      (
+        await db.query<{ status: string; workflow_id: string | null; environment_id: string | null }>(
+          `SELECT status, workflow_id, environment_id FROM runtime_runs WHERE id = $1`,
+          [id],
+        )
+      ).rows[0]!;
+    const decide = (org: string, runId: string, stepKey: string, topic: string): Promise<number> =>
+      statusOf(
+        as(http().post(`/api/runs/${runId}/events`), org).send({
+          topic,
+          step_key: stepKey,
+          payload: { d: 1 },
+        }),
+      );
+    const removeEnv = (org: string, env: string): request.Test =>
+      as(http().delete(`/api/environments/${env}`), org);
+    const suffix = (): string => randomUUID().slice(0, 8);
+
+    let deliver: jest.SpyInstance;
+    beforeEach(() => {
+      // The decision is claimed for real; only its send to a run that is not executing is stood in for.
+      deliver = jest.spyOn(app.get(RunsService), 'deliver' as never).mockResolvedValue(undefined as never);
+    });
+    afterEach(() => deliver.mockRestore());
+
+    it.each([
+      ['a workflow', 'workflow'],
+      ['an environment', 'environment'],
+    ])(
+      'a decision held under its run lock finishes before %s delete, which then clears the run’s link',
+      async (_, kind) => {
+        const org = await workspace(`Claim then ${kind} delete`);
+        const wfId = await deploy(org, 'claim under delete');
+        const env = kind === 'environment' ? await createEnv(org, `claim-${suffix()}`) : undefined;
+        const runId = `held-claim-${suffix()}`;
+        const id = await parkRun(runId, {
+          workflowId: wfId,
+          environmentId: env,
+          waits: [{ key: 'approve', topic: 'approval', due: OPEN }],
+        });
+        const held = holdQuery(/SET claimed_at = t\.at/);
+        const before = await deadlocks();
+        try {
+          const deciding = decide(org, runId, 'approve', 'approval');
+          await held.arrived;
+          const deleting = statusOf(env ? removeEnv(org, env) : remove(org, wfId));
+          await lockWaiters(1);
+          held.release();
+          expect(await deciding).toBe(200);
+          expect(await deleting).toBe(200);
+        } finally {
+          held.restore();
+        }
+        expect(await runOf(id)).toMatchObject(env ? { environment_id: null } : { workflow_id: null });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+
+    it('a cancel held under its run lock finishes before a workflow delete', async () => {
+      const org = await workspace('Cancel then delete');
+      const wfId = await deploy(org, 'cancel under delete');
+      const runId = `held-cancel-${suffix()}`;
+      const id = await parkRun(runId, {
+        workflowId: wfId,
+        waits: [{ key: 'approve', topic: 'approval', due: OPEN }],
+      });
+      const held = holdQuery(/SET status = 'cancelled'/);
+      const before = await deadlocks();
+      try {
+        const cancelling = statusOf(as(http().post(`/api/runs/${runId}/cancel`), org));
+        await held.arrived;
+        const deleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        held.release();
+        expect(await cancelling).toBe(200);
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+      expect(await runOf(id)).toEqual({ status: 'cancelled', workflow_id: null, environment_id: null });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a park held at its status re-derive finishes before a workflow delete', async () => {
+      const org = await workspace('Park then delete');
+      const wfId = await deploy(org, 'park under delete');
+      const id = await parkRun(`held-park-${suffix()}`, { workflowId: wfId, status: 'running', waits: [] });
+      await db.query(
+        `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
+         VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'running', now())`,
+        [id],
+      );
+      const held = holdQuery(/SET status = CASE WHEN EXISTS/);
+      const before = await deadlocks();
+      try {
+        const parking = app.get(RunRecorderService).stepWaiting(id, 'approve', 'approval', 3_600_000);
+        await held.arrived;
+        const deleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        held.release();
+        expect(await parking).toBeInstanceOf(Date);
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+      expect(await runOf(id)).toMatchObject({ status: 'waiting', workflow_id: null });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a reaper pass waits on a park held under its run lock, then reaps the lapsed wait', async () => {
+      const id = await parkRun(`held-repark-${suffix()}`, {
+        waits: [{ key: 'gone', topic: 'other', due: LAPSED }],
+      });
+      await db.query(
+        `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
+         VALUES (gen_random_uuid(), $1, 'again', 'again', 'waitForEvent', 'running', now())`,
+        [id],
+      );
+      const held = holdQuery(/SET status = CASE WHEN EXISTS/);
+      const before = await deadlocks();
+      try {
+        const parking = app.get(RunRecorderService).stepWaiting(id, 'again', 'approval', 3_600_000);
+        await held.arrived;
+        const reaping = app.get(RunReaperService).reapStale();
+        await lockWaiters(1);
+        held.release();
+        await parking;
+        expect((await reaping).timedOutWaits).toBeGreaterThanOrEqual(1);
+      } finally {
+        held.restore();
+      }
+      expect((await runOf(id)).status).toBe('error');
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a decision claimed while the reaper waits on its run is kept, and the run is not reaped', async () => {
+      const org = await workspace('Claim under reap');
+      const runId = `held-reap-claim-${suffix()}`;
+      const id = await parkRun(runId, {
+        waits: [
+          { key: 'gone', topic: 'other', due: LAPSED },
+          { key: 'live', topic: 'approval', due: OPEN },
+        ],
+      });
+      const held = holdQuery(/SET claimed_at = t\.at/);
+      try {
+        const deciding = decide(org, runId, 'live', 'approval');
+        await held.arrived;
+        const reaping = app.get(RunReaperService).reapStale();
+        await lockWaiters(1);
+        held.release();
+        expect(await deciding).toBe(200);
+        await reaping;
+      } finally {
+        held.restore();
+      }
+      expect((await runOf(id)).status).toBe('waiting');
+      const steps = await db.query<{
+        step_key: string;
+        waiting_topic: string | null;
+        claimed_by: string | null;
+      }>(
+        `SELECT step_key, waiting_topic, claimed_by FROM runtime_run_steps WHERE run_id = $1 ORDER BY step_key`,
+        [id],
+      );
+      expect(steps.rows).toEqual([
+        { step_key: 'gone', waiting_topic: 'other', claimed_by: null },
+        { step_key: 'live', waiting_topic: 'approval', claimed_by: user },
+      ]);
+    });
+
+    it.each([
+      ['a workflow', 'workflow'],
+      ['an environment', 'environment'],
+    ])(
+      'the reaper and %s delete over two of its runs, locked in opposite orders by plan, never deadlock',
+      async (_, kind) => {
+        await db.query(
+          `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at)
+           SELECT 'filler-${kind}-' || g, 'filler-${kind}-' || g, $1, 'p', 'completed', now()
+             FROM generate_series(1, 5000) g`,
+          [user],
+        );
+        await db.query('ANALYZE runtime_runs');
+        await db.query('ANALYZE runtime_run_steps');
+        const org = await workspace(`Reap under ${kind} delete`);
+        const wfId = await deploy(org, 'reap under delete');
+        const env = kind === 'environment' ? await createEnv(org, `reap-${suffix()}`) : undefined;
+        const tag = suffix();
+        const own = {
+          workflowId: wfId,
+          environmentId: env,
+          waits: [{ key: 'approve', topic: 'approval', due: LAPSED }],
+        };
+        const last = await parkRun(`zz-zzzz-${tag}`, own);
+        const first = await parkRun(`zz-aaaa-${tag}`, own);
+        const holder = new Client({ connectionString: dbUrl });
+        await holder.connect();
+        const before = await deadlocks();
+        try {
+          await holder.query('BEGIN');
+          await holder.query(`SELECT 1 FROM runtime_runs WHERE id = $1 FOR NO KEY UPDATE`, [first]);
+          const reaping = app.get(RunReaperService).reapStale();
+          await lockWaiters(1);
+          const deleting = statusOf(env ? removeEnv(org, env) : remove(org, wfId));
+          await lockWaiters(2);
+          await holder.query('COMMIT');
+          await expect(reaping).resolves.toMatchObject({ timedOutWaits: 2 });
+          expect(await deleting).toBe(200);
+        } finally {
+          await holder.end();
+        }
+        for (const id of [first, last]) expect((await runOf(id)).status).toBe('error');
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
   });
 });

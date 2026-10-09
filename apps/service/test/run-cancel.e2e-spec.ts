@@ -20,10 +20,18 @@ describe('run cancel (B7, e2e, isolated DB, mock auth)', () => {
   const insertRun = async (userId: string, status: string): Promise<string> => {
     const id = randomUUID();
     await db.query(
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_node_id)
-       VALUES ($1, $2, $3, 'plan-x', $4, now(), ${status === 'waiting' ? `'n1'` : 'NULL'})`,
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at)
+       VALUES ($1, $2, $3, 'plan-x', $4, now())`,
       [id, `rid-${id.slice(0, 8)}`, userId, status],
     );
+    if (status === 'waiting') {
+      await db.query(
+        `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at,
+                                        waiting_topic, waiting_since, waiting_timeout_at)
+         VALUES (gen_random_uuid(), $1, 'n1', 'n1', 'waitForEvent', 'running', now(), 'approve', now(), now() + interval '1 hour')`,
+        [id],
+      );
+    }
     return id;
   };
   const statusOf = async (id: string): Promise<{ status: string; finished: boolean }> => {
@@ -71,10 +79,12 @@ describe('run cancel (B7, e2e, isolated DB, mock auth)', () => {
     expect(s.finished).toBe(true);
   });
 
-  it('cancels a waiting (HITL) run', async () => {
+  it('cancels a waiting (HITL) run, and its step is no longer parked', async () => {
     const id = await insertRun(callerId, 'waiting');
     await request(app.getHttpServer()).post(`/api/runs/${id}/cancel`).expect(200);
     expect((await statusOf(id)).status).toBe('cancelled');
+    const step = await db.query(`SELECT waiting_topic FROM runtime_run_steps WHERE run_id = $1`, [id]);
+    expect(step.rows).toEqual([{ waiting_topic: null }]);
   });
 
   it('is idempotent on an already-terminal run — returns its status, no rewrite', async () => {
@@ -88,6 +98,30 @@ describe('run cancel (B7, e2e, isolated DB, mock auth)', () => {
     const id = await insertRun(otherUserId, 'running');
     await request(app.getHttpServer()).post(`/api/runs/${id}/cancel`).expect(404);
     expect((await statusOf(id)).status).toBe('running'); // untouched
+  });
+
+  it('leaves alone, when it refuses an event, a run an older version parked in the run slot', async () => {
+    const id = randomUUID();
+    await db.query(
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at,
+                                 waiting_node_id, waiting_topic, waiting_since, waiting_timeout_at)
+       VALUES ($1, $2, $3, 'plan-x', 'waiting', now(), 'approve', 'approval', now(), now() + interval '1 hour')`,
+      [id, `rid-${id.slice(0, 8)}`, callerId],
+    );
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
+       VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'running', now())`,
+      [id],
+    );
+    const refused = await request(app.getHttpServer())
+      .post(`/api/runs/${id}/events`)
+      .send({ topic: 'approval', payload: {} });
+    expect(refused.status).toBe(409);
+    const row = await db.query(
+      `SELECT status, waiting_node_id, waiting_topic FROM runtime_runs WHERE id = $1`,
+      [id],
+    );
+    expect(row.rows).toEqual([{ status: 'waiting', waiting_node_id: 'approve', waiting_topic: 'approval' }]);
   });
 
   it('404s a nonexistent run id', async () => {

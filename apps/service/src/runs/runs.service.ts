@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource, EntityManager } from 'typeorm';
+import { LessThan, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
@@ -21,16 +21,43 @@ import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
 import { rawQuery } from '../database/raw-query';
 import {
+  lockRunRow,
+  PARKED_STEP,
+  parkedStep,
+  recordCancel,
   REFUSED_RUN_ERROR_PREFIX,
   RunRecorderService,
   truncatedValueOf,
+  withRunLock,
 } from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
 import { isTimerWait, TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
+import { eventMessage } from '../runtime/event-wait';
 import { reachesRun, runReachSql, type RunAccess } from './run-access';
 import { failedNodeIdOf, type RunFailureDetails } from './run-failure';
+import {
+  claimKey,
+  claimLeads,
+  claimWaits,
+  type Decider,
+  decidersOf,
+  aimedAt,
+  DECISION_MARGIN_SECONDS,
+  lateRefusal,
+  noWaitOn,
+  parkedSteps,
+  receiveKey,
+  receiveMates,
+  runWaitingOf,
+  type RunWaiting,
+  stepWaitingOf,
+  stillInTime,
+  timerTopicRefusal,
+  unclaimWaits,
+  waitFor,
+} from './run-waits';
 
 /** ~2KB cap for the per-step `output_preview` the runs panel renders. */
 const OUTPUT_PREVIEW_CHARS = 2_048;
@@ -89,33 +116,66 @@ interface SubWorkflowRunRow {
   status: string;
 }
 
-function timerWaitRefusal(message: string): DomainError {
-  return new DomainError(message, 409, { code: 'timer_wait' });
+interface InboxRow {
+  id: string;
+  run_id: string;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  step_key: string;
+  node_id: string;
+  waiting_topic: string;
+  delivery_topic: string | null;
+  claimed_at: Date | null;
+  waiting_since: Date | null;
+  waiting_timeout_at: Date | null;
+  triggered_by: string;
+  triggered_by_email: string | null;
+  triggered_by_name: string | null;
 }
 
-function parkedTimerRefusal(runId: string, wakesAt: Date | null): DomainError {
-  if (wakesAt && wakesAt.getTime() <= Date.now()) {
-    return timerWaitRefusal(
-      `Run ${runId} was due at ${wakesAt.toISOString()}, not waiting for an event — it resumes on its own`,
-    );
+// Waits sharing one receive take one decision, so they are one entry with no step to name.
+function inboxEntries(rows: InboxRow[]): Array<Record<string, unknown>> {
+  const entries = new Map<string, InboxRow[]>();
+  for (const r of rows) {
+    const key = receiveKey(r.id, r.step_key, r.waiting_topic, r.delivery_topic);
+    entries.set(key, [...(entries.get(key) ?? []), r]);
   }
-  const until = wakesAt ? ` until ${wakesAt.toISOString()}` : '';
-  return timerWaitRefusal(`Run ${runId} is waiting${until}, not for an event — it resumes on its own`);
+  const takesDecisions = Date.now() + DECISION_MARGIN_SECONDS * 1000;
+  const open = (r: InboxRow): boolean =>
+    r.claimed_at === null && (!r.waiting_timeout_at || r.waiting_timeout_at.getTime() > takesDecisions);
+  return [...entries.values()]
+    .filter((members) => members.every(open))
+    .map((members) => {
+      const [first] = members as [InboxRow];
+      const alone = members.length === 1;
+      const timeouts = members.flatMap((m) => (m.waiting_timeout_at ? [m.waiting_timeout_at.getTime()] : []));
+      return {
+        // The UNIQUE run handle the client echoes back to resume/view — unlike the caller-suppliable run_id.
+        id: first.id,
+        run_id: first.run_id,
+        workflow_id: first.workflow_id,
+        workflow_name: first.workflow_name,
+        step_key: alone ? first.step_key : null,
+        node_id: alone ? first.node_id : null,
+        waits: members.length,
+        topic: first.waiting_topic,
+        waiting_since: first.waiting_since?.toISOString() ?? null,
+        timeout_at: timeouts.length > 0 ? new Date(Math.min(...timeouts)).toISOString() : null,
+        triggered_by: {
+          id: first.triggered_by,
+          email: first.triggered_by_email,
+          name: first.triggered_by_name,
+        },
+      };
+    });
 }
 
-/** What a parked run is waiting for: its own clock (`timer`) or someone sending an event. */
-export interface RunWaiting {
-  kind: 'timer' | 'event';
-  /** When a timer wakes, or when an event wait times out. */
-  until: string | null;
-}
+type WaitTaken =
+  | { refused: DomainError; decided: RuntimeRunStepEntity | undefined }
+  | { waits: RuntimeRunStepEntity[]; claimedAt: Date };
 
-function waitingOf(row: RuntimeRunEntity): RunWaiting | null {
-  if (row.status !== 'waiting' || !row.waitingTopic) return null;
-  return {
-    kind: isTimerWait(row.waitingTopic) ? 'timer' : 'event',
-    until: row.waitingTimeoutAt?.toISOString() ?? null,
-  };
+function isTerminal(status: string): status is 'completed' | 'error' | 'cancelled' {
+  return status === 'completed' || status === 'error' || status === 'cancelled';
 }
 
 function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
@@ -620,12 +680,13 @@ export class RunsService {
     const steps = em
       ? await em.find(RuntimeRunStepEntity, { where: { runId: scoped }, order: { startedAt: 'ASC' } })
       : [];
+    const deciders = em ? await decidersOf(em, steps) : new Map<string, Decider>();
     return {
       ...status,
       decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
       decided_at: row.decidedAt?.toISOString() ?? null,
-      waiting: waitingOf(row),
-      steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false)),
+      waiting: runWaitingOf(row.status, steps, deciders),
+      steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false, deciders)),
       ...(em ? await this.subWorkflowLinks(em, row, scoped, access) : { called_by: null, calls: [] }),
       started_at: row.startedAt?.toISOString() ?? null,
       finished_at: row.finishedAt?.toISOString() ?? null,
@@ -770,7 +831,7 @@ export class RunsService {
     }));
   }
 
-  /** Runs currently parked on a `waitForEvent` node (approvals inbox); past-timeout rows are excluded so they never linger. */
+  /** One entry per parked wait-for-event (approvals inbox), or per topic for waits sharing one receive; a decided or lapsed wait is left out. */
   async listWaitingRuns(access: RunAccess, workflowId?: string): Promise<Array<Record<string, unknown>>> {
     if (!this.dataSource) return [];
     // Org-wide approvals: own runs plus every run parked in the ACTIVE org. A non-interactive
@@ -783,90 +844,148 @@ export class RunsService {
       TIMER_TOPIC_SQL_PREFIX,
     ];
     let where = `r.status = 'waiting'
-        AND r.waiting_topic NOT LIKE $5 || '%'
-        AND (r.waiting_timeout_at IS NULL OR r.waiting_timeout_at > now())
+        AND ${parkedStep('s')}
+        AND s.waiting_topic NOT LIKE $5 || '%'
         AND (r.user_id = $1 OR w.org_id = $2)
         AND ${runReachSql(3, 4)}`;
     if (workflowId) {
       params.push(workflowId);
       where += ` AND r.workflow_id = $${params.length}`;
     }
-    const rows: Array<{
-      id: string;
-      run_id: string;
-      workflow_id: string | null;
-      workflow_name: string | null;
-      waiting_node_id: string | null;
-      waiting_topic: string | null;
-      waiting_since: Date | null;
-      waiting_timeout_at: Date | null;
-      triggered_by: string;
-      triggered_by_email: string | null;
-      triggered_by_name: string | null;
-    }> = await this.dataSource.query(
-      `SELECT r.id, r.run_id, r.workflow_id, w.name AS workflow_name, r.waiting_node_id, r.waiting_topic,
-              r.waiting_since, r.waiting_timeout_at,
+    const rows: InboxRow[] = await this.dataSource.query(
+      `SELECT r.id, r.run_id, r.workflow_id, w.name AS workflow_name, s.step_key, s.node_id, s.waiting_topic,
+              s.delivery_topic, s.claimed_at, s.waiting_since, s.waiting_timeout_at,
               r.user_id AS triggered_by, u.email AS triggered_by_email, u.name AS triggered_by_name
-         FROM runtime_runs r
+         FROM runtime_run_steps s
+         JOIN runtime_runs r ON r.id = s.run_id
          LEFT JOIN workflows w ON w.id = r.workflow_id
          LEFT JOIN users u ON u.id = r.user_id
         WHERE ${where}
-        ORDER BY r.waiting_since ASC`,
+        ORDER BY s.waiting_since ASC, s.step_key ASC`,
       params,
     );
-    return rows.map((r) => ({
-      // The UNIQUE run handle the client echoes back to resume/view — unlike the caller-suppliable run_id.
-      id: r.id,
-      run_id: r.run_id,
-      workflow_id: r.workflow_id,
-      workflow_name: r.workflow_name,
-      node_id: r.waiting_node_id,
-      topic: r.waiting_topic,
-      waiting_since: r.waiting_since?.toISOString() ?? null,
-      timeout_at: r.waiting_timeout_at?.toISOString() ?? null,
-      triggered_by: { id: r.triggered_by, email: r.triggered_by_email, name: r.triggered_by_name },
-    }));
+    return inboxEntries(rows);
   }
 
-  /** Resume a run parked on a `waitForEvent` node (approve/reject), validated against the persisted waiting state. */
-  async sendEvent(runId: string, topic: string, payload: unknown, access: RunAccess): Promise<void> {
+  /** Answer one parked wait: the step named, else the undecided one on `topic` that has waited longest. */
+  async sendEvent(
+    runId: string,
+    topic: string,
+    payload: unknown,
+    access: RunAccess,
+    stepKey?: string,
+  ): Promise<void> {
     const em = this.dataSource?.manager;
     if (!em) {
       // Bare embedding (no history tables): DBOS buffers sends itself, and without the
       // runtime_runs row the caller may only resume their own run.
-      if (isTimerWait(topic)) {
-        throw timerWaitRefusal(`Topic "${topic}" belongs to a timed wait and can't be sent to`);
-      }
+      if (isTimerWait(topic)) throw timerTopicRefusal(topic);
       this.requireDbos();
-      return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, payload);
+      return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, eventMessage(payload));
     }
     const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     const scoped = row.id;
-    if (row.status !== 'waiting' || !row.waitingTopic) {
-      throw new DomainError(`Run ${runId} is not waiting for an event`, 409);
+    // Chosen under the run's lock, so two events never pick the same wait; a claim parks nothing, so nothing is re-derived.
+    const taken = await withRunLock(em, scoped, (tx) =>
+      this.takeWaits(tx, scoped, runId, topic, stepKey, access, payload),
+    );
+    if ('refused' in taken) {
+      if (taken.decided) await this.resend(scoped, taken.decided);
+      throw taken.refused;
     }
-    if (isTimerWait(row.waitingTopic)) throw parkedTimerRefusal(runId, row.waitingTimeoutAt);
-    if (row.waitingTopic !== topic) {
-      throw new DomainError(`Run ${runId} is waiting on topic "${row.waitingTopic}", not "${topic}"`, 409);
+    const lead = taken.waits[0]!;
+    try {
+      await this.deliver(em, runId, scoped, lead, lead.deliveryTopic ?? topic, payload);
+    } catch (err) {
+      await withRunLock(em, scoped, (tx) => unclaimWaits(tx, scoped, taken.waits, taken.claimedAt));
+      throw err;
     }
-    if (row.waitingTimeoutAt && row.waitingTimeoutAt.getTime() <= Date.now()) {
-      throw new DomainError(`Run ${runId} is no longer waiting — the wait timed out`, 409);
+  }
+
+  private async takeWaits(
+    tx: EntityManager,
+    scoped: string,
+    runId: string,
+    topic: string,
+    stepKey: string | undefined,
+    access: RunAccess,
+    payload: unknown,
+  ): Promise<WaitTaken> {
+    const run = await tx.findOneByOrFail(RuntimeRunEntity, { id: scoped });
+    const parked = run.status === 'waiting' ? await parkedSteps(tx, scoped) : [];
+    const waits = waitFor(parked, topic, stepKey);
+    if (!waits) {
+      const claimed = parked.find(
+        (s) =>
+          s.claimedAt !== null &&
+          s.waitingTopic === topic &&
+          (stepKey === undefined || s.stepKey === stepKey),
+      );
+      const named =
+        stepKey !== undefined && !parked.some((s) => s.stepKey === stepKey)
+          ? await tx.findOneBy(RuntimeRunStepEntity, { runId: scoped, stepKey })
+          : null;
+      return {
+        refused: noWaitOn({ runId, topic, stepKey, parked, named }),
+        decided: claimed ? receiveMates(parked, claimed)[0] : undefined,
+      };
     }
+    const claimedAt = await claimWaits(tx, scoped, waits, access.userId, payload);
+    return claimedAt
+      ? { waits, claimedAt }
+      : { refused: lateRefusal(runId, waits, aimedAt(topic, stepKey)), decided: undefined };
+  }
+
+  /** Send again every decision claimed on a parked wait that its run has not taken, by the same key; resolves to how many went out. */
+  async resendClaims(olderThanSeconds: number): Promise<number> {
+    const em = this.dataSource?.manager;
+    if (!em || !this.dbosEnabled) return 0;
+    const claimed = await em.find(RuntimeRunStepEntity, {
+      where: { ...PARKED_STEP, claimedAt: LessThan(new Date(Date.now() - olderThanSeconds * 1000)) },
+    });
+    let sent = 0;
+    for (const lead of claimLeads(claimed)) if (await this.resend(lead.runId, lead)) sent++;
+    return sent;
+  }
+
+  private async resend(scoped: string, lead: RuntimeRunStepEntity): Promise<boolean> {
+    if (!this.dbosEnabled || !lead.waitingTopic || !stillInTime(lead)) return false;
+    try {
+      await this.dbos.sendEvent(
+        scoped,
+        lead.deliveryTopic ?? lead.waitingTopic,
+        eventMessage(lead.claimedPayload),
+        claimKey(scoped, lead),
+      );
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `Resending the decision for ${scoped} step ${lead.stepKey} failed: ${errorMessage(err)}`,
+      );
+      return false;
+    }
+  }
+
+  private async deliver(
+    em: EntityManager,
+    runId: string,
+    scoped: string,
+    lead: RuntimeRunStepEntity,
+    topic: string,
+    payload: unknown,
+  ): Promise<void> {
     if (this.dbosEnabled) {
-      await this.dbos.sendEvent(scoped, topic, payload);
-      await this.stampDecision(em, scoped, access.userId);
+      await this.dbos.sendEvent(scoped, topic, eventMessage(payload), claimKey(scoped, lead));
       return;
     }
-    const delivered = this.waiters.get(scoped)?.deliver(topic, payload) ?? false;
-    if (!delivered) {
-      // Stale waiting row (direct-path run lost to a restart) — nothing to resume.
-      throw new DomainError(
-        `Run ${runId} is no longer waiting (the run did not survive a restart; re-run the workflow)`,
-        409,
-      );
-    }
-    await this.stampDecision(em, scoped, access.userId);
+    if (this.waiters.get(scoped)?.deliver(topic, eventMessage(payload))) return;
+    const run = await em.findOneBy(RuntimeRunEntity, { id: scoped });
+    if (run?.status === 'cancelled') throw new DomainError(`Run ${runId} was cancelled`, 409);
+    throw new DomainError(
+      `Run ${runId} is no longer waiting (the run did not survive a restart; re-run the workflow)`,
+      409,
+    );
   }
 
   /**
@@ -883,32 +1002,21 @@ export class RunsService {
     }
     const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
-    if (row.status === 'completed' || row.status === 'error' || row.status === 'cancelled') {
-      return { runId, status: row.status };
-    }
-    if (this.dbosEnabled) {
-      try {
+    if (isTerminal(row.status)) return { runId, status: row.status };
+    // Under the run's lock, so an event either lands before the cancel or finds its wait ended — never both.
+    return em.transaction(async (tx): Promise<RunStatus> => {
+      await lockRunRow(tx, row.id);
+      const fresh = await tx.findOne(RuntimeRunEntity, { where: { id: row.id } });
+      if (fresh && isTerminal(fresh.status)) return { runId, status: fresh.status };
+      if (this.dbosEnabled) {
         await this.dbos.cancelWorkflow(row.id);
-      } catch (err) {
-        // The run may have finished on a worker between our read and the cancel;
-        // only a still-in-flight run is a real failure to surface.
-        const fresh = await em.findOne(RuntimeRunEntity, { where: { id: row.id } });
-        const terminal =
-          fresh && (fresh.status === 'completed' || fresh.status === 'error' || fresh.status === 'cancelled');
-        if (!terminal) throw err;
-        return { runId, status: fresh.status };
+      } else {
+        // Direct path: forget any HITL waiter (the in-process run can't be interrupted).
+        this.waiters.delete(row.id);
       }
-    } else {
-      // Direct path: forget any HITL waiter (the in-process run can't be interrupted).
-      this.waiters.delete(row.id);
-    }
-    await this.recorder?.runCancelled(row.id);
-    return { runId, status: 'cancelled' };
-  }
-
-  /** Record who resolved a waiting run — separate columns from status/outputs, so it never races the run's completion write. */
-  private async stampDecision(em: EntityManager, scoped: string, deciderId: string): Promise<void> {
-    await em.update(RuntimeRunEntity, { id: scoped }, { decidedBy: deciderId, decidedAt: new Date() });
+      await recordCancel(tx, row.id);
+      return { runId, status: 'cancelled' };
+    });
   }
 
   /** Linkage guard: the workflow must exist AND live in the caller's active org — anything else is an indistinguishable 404. */
@@ -998,7 +1106,11 @@ function findAgentNode(plan: DagPlan, nodeId: string): DagAgentNode | null {
 }
 
 /** One step of the run log; payload fields are WITHHELD, never blanked, when the read asked for no outputs. */
-function stepLog(s: RuntimeRunStepEntity, includeOutputs: boolean): Record<string, unknown> {
+function stepLog(
+  s: RuntimeRunStepEntity,
+  includeOutputs: boolean,
+  deciders = new Map<string, Decider>(),
+): Record<string, unknown> {
   return {
     step_key: s.stepKey,
     node_id: s.nodeId,
@@ -1021,6 +1133,7 @@ function stepLog(s: RuntimeRunStepEntity, includeOutputs: boolean): Record<strin
     error: s.error,
     // Non-fatal reference warnings: full-string `{{ref}}`s that resolved to nothing on this step.
     warnings: s.warnings ?? null,
+    waiting: stepWaitingOf(s, deciders),
     started_at: s.startedAt?.toISOString() ?? null,
     finished_at: s.finishedAt?.toISOString() ?? null,
   };

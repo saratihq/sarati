@@ -30,9 +30,10 @@ export class RunReaperJob implements OnModuleInit {
         await boss.createQueue(QUEUE);
         await boss.work(QUEUE, async () => {
           const r = await this.reaper.reapStale();
-          if (r.crashedRuns + r.timedOutWaits + r.orphanSteps > 0) {
+          if (r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
             this.logger.warn(
-              `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ${r.orphanSteps} orphan step(s)`,
+              `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
+                `${r.orphanSteps} orphan step(s), ${r.strandedDecisions} stranded decision(s)`,
             );
           }
         });

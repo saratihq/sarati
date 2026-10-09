@@ -351,7 +351,15 @@ CREATE TABLE public.runtime_run_steps (
     pinned boolean DEFAULT false NOT NULL,
     continued boolean DEFAULT false NOT NULL,
     attempts integer DEFAULT 1 NOT NULL,
-    warnings json
+    warnings json,
+    waiting_topic character varying(200),
+    waiting_since timestamp with time zone,
+    waiting_timeout_at timestamp with time zone,
+    claimed_at timestamp with time zone,
+    delivery_topic character varying(500),
+    claimed_by uuid,
+    claimed_payload json,
+    resumed_at timestamp with time zone
 );
 
 
@@ -1063,6 +1071,13 @@ CREATE INDEX ix_review_approvals_review ON public.review_approvals USING btree (
 --
 
 CREATE INDEX ix_runtime_blobs_run ON public.runtime_blobs USING btree (run_id);
+
+
+--
+-- Name: ix_runtime_run_steps_waiting; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_run_steps_waiting ON public.runtime_run_steps USING btree (run_id) WHERE (waiting_topic IS NOT NULL);
 
 
 --

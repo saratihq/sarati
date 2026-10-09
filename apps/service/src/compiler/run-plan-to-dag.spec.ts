@@ -164,6 +164,23 @@ describe('runPlanToDag — structure', () => {
       );
     }
   });
+
+  it('refuses a waitForEvent on a topic spelled like a step’s own receive, wherever it is nested', () => {
+    const squat: RunPlan['nodes'][number] = {
+      kind: 'waitForEvent',
+      id: 'ask',
+      topic: 'orchestr:wait:fork|0/a',
+      timeoutMs: 1000,
+    };
+    for (const nodes of [
+      [squat],
+      [{ kind: 'parallel', id: 'fork', branches: [[act('a')], [squat]] }],
+    ] as Array<RunPlan['nodes']>) {
+      expect(() => runPlanToDag({ id: 'squat', nodes })).toThrow(
+        'Wait for event "ask" can\'t use the topic "orchestr:wait:fork|0/a" — topics starting "orchestr:wait:" are reserved',
+      );
+    }
+  });
 });
 
 describe('runPlanToDag — execution (raw plans run correctly on the one engine)', () => {
