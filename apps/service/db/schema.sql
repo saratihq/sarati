@@ -386,7 +386,8 @@ CREATE TABLE public.runtime_runs (
     dry_run boolean DEFAULT false NOT NULL,
     parent_run_id character varying(200),
     parent_step_key character varying(500),
-    org_id uuid
+    org_id uuid,
+    resumed_at timestamp with time zone
 );
 
 

@@ -100,8 +100,7 @@ export class EnvConfig {
   @Min(0)
   triggerPollIntervalSeconds = 60;
 
-  /** Max wall-clock seconds a run may stay in-flight before the reaper errors it (also the ceiling
-   *  on a `waiting` HITL run). 0 disables the reaper. */
+  /** Max seconds a run may stay in flight since it started or last resumed from a wait before the reaper errors it. 0 disables the reaper. */
   @IsInt()
   @Min(0)
   runMaxDurationSeconds = 3600;
