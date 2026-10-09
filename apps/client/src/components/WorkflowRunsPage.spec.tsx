@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import WorkflowRunsPage from "@/components/WorkflowRunsPage";
 
@@ -34,6 +34,10 @@ const run = (over: Partial<api.RunSummary>): api.RunSummary => ({
 });
 
 describe("WorkflowRunsPage", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   // The statuses are the service's own words; `error` used to fall through as a grey, lower-case "error".
   it("names each status the service reports, and a failed run reads Failed in the failure colour", async () => {
     listRuns.mockResolvedValue({
@@ -103,6 +107,8 @@ describe("WorkflowRunsPage", () => {
   });
 
   it("an opened waiting run says what it waits for: a Wait step its wake time, an approval the inbox", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T10:00:00.000Z"));
     listRuns.mockResolvedValue({
       runs: [run({ run_id: "r-sleep", status: "waiting" }), run({ run_id: "r-ask", status: "waiting" })],
     });

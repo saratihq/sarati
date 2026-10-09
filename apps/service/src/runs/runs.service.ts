@@ -58,6 +58,9 @@ export interface RunDispatchOptions {
 /** Dispatch options for the IR entry points, which additionally resolve the caller's org. */
 export type IrRunOptions = RunDispatchOptions & { activeOrgId?: string | null };
 
+/** What an entry point asks to run: a raw client-supplied plan, or a workflow document. */
+export type PlanSource = { plan: RunPlan } | { ir: WorkflowIR };
+
 /** Read options for {@link RunsService.getRun}. */
 export interface GetRunOptions {
   /** Default true. False withholds every step payload (`output` AND `output_preview`) from the read itself. */
@@ -169,8 +172,9 @@ export class RunsService {
   }
 
   /** Run a raw client-supplied `RunPlan` (POST /runs), lowered to a `DagPlan` for the one engine. */
-  run(plan: RunPlan, opts: RunDispatchOptions): Promise<RunResult> {
-    return this.runExecutable(this.compiler.fromRunPlan(plan), opts);
+  async run(plan: RunPlan, opts: RunDispatchOptions): Promise<RunResult> {
+    const runId = opts.runId ?? randomUUID();
+    return this.runExecutable(await this.compile({ plan }, opts, runId), { ...opts, runId });
   }
 
   /** Dispatch a COMPILED `DagPlan`: record the run, then execute via DBOS or the interpreter. Every entry point funnels here. */
@@ -346,7 +350,7 @@ export class RunsService {
   ): Promise<{ runId: string; pending: Promise<RunResult> }> {
     if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
     const runId = opts.runId ?? randomUUID();
-    const plan = await this.compileIr(ir, opts, runId);
+    const plan = await this.compile({ ir }, opts, runId);
     return {
       runId,
       pending: this.runExecutable(plan, {
@@ -357,11 +361,13 @@ export class RunsService {
     };
   }
 
-  /** The ONE compile seam every IR entry point takes — sync, bounded and async all lower a document here. */
-  private async compileIr(ir: WorkflowIR, opts: IrRunOptions, runId: string): Promise<DagPlan> {
+  /** The ONE compile seam every entry point takes: a plan or document that can't compile is refused before any step runs. */
+  private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
-      return this.compiler.compile(ir, opts.workflowId ?? undefined);
+      return 'ir' in source
+        ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)
+        : this.compiler.fromRunPlan(source.plan);
     } catch (err) {
       // A document that can't compile is the CALLER's problem → 400, recorded as a failed
       // run first (there is no plan yet, so the interpreter never writes one).
@@ -523,23 +529,16 @@ export class RunsService {
 
   /**
    * Start a run without waiting (long-running / human-in-the-loop). Requires DBOS — an unattended
-   * run has to survive a restart. A WorkflowIR takes the SAME compile seam as `from-ir`.
+   * run has to survive a restart. A plan or a WorkflowIR takes the SAME compile seam as the sync routes.
    */
-  async startRun(
-    source: { plan: RunPlan } | { ir: WorkflowIR },
-    opts: IrRunOptions,
-  ): Promise<{ runId: string }> {
+  async startRun(source: PlanSource, opts: IrRunOptions): Promise<{ runId: string }> {
     this.requireDbos();
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
-    let dag: DagPlan;
-    if ('ir' in source) {
-      if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
-      dag = await this.compileIr(source.ir, opts, runId);
-    } else {
-      // The async raw-plan path carries no env context (no workflow/tag) — personal.
-      dag = this.compiler.fromRunPlan(source.plan);
+    if ('ir' in source && opts.workflowId) {
+      await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
     }
+    const dag = await this.compile(source, opts, runId);
     await this.recorder?.runStarted(scoped, runId, opts.externalUserId, dag, {
       workflowId: opts.workflowId ?? null,
       source: opts.source ?? 'api',

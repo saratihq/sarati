@@ -5,7 +5,7 @@ import type { ApiScope } from '../../auth/scopes';
 import { DomainError } from '../../common/domain-error';
 import { PolicyService } from '../../policy/policy.service';
 import { runAccessOf } from '../../runs/run-access';
-import { RunsService } from '../../runs/runs.service';
+import { RunsService, type RunWaiting } from '../../runs/runs.service';
 import { failedNodeIdOf } from '../../runs/run-failure';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
@@ -38,6 +38,11 @@ const Step = z.object({
   output: z.unknown().optional(),
 });
 
+const Waiting = z.object({
+  kind: z.enum(['timer', 'event']),
+  until: z.string().nullable(),
+}) satisfies z.ZodType<RunWaiting>;
+
 const Output = z.object({
   run_id: z.string(),
   status: z.string(),
@@ -52,6 +57,8 @@ const Output = z.object({
   finished_at: z.string().nullable(),
   duration_ms: z.number().nullable(),
   error: z.string().nullable(),
+  /** Set while `waiting`: `timer` resumes on its own at `until`; `event` waits for someone to answer it. */
+  waiting: Waiting.nullable(),
   /** The node whose failure ended the run; null when it completed or every failure was tolerated. */
   failed_node_id: z.string().nullable(),
   /** Non-fatal notes from the rails and from `{{ref}}`s that resolved to nothing. */
@@ -104,7 +111,7 @@ export class GetRunTool implements McpTool {
   readonly scope: ApiScope = 'workflow:read';
   readonly title = 'Get a run';
   readonly description =
-    'Run status, per-step log, the failing node and any warnings. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
+    'Run status, per-step log, the failing node and any warnings — and, for a waiting run, whether it resumes on its own or waits for someone to answer it. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {
@@ -146,6 +153,7 @@ export class GetRunTool implements McpTool {
       finished_at: detail.finished_at ?? null,
       duration_ms: detail.duration_ms,
       error: detail.error ?? null,
+      waiting: detail.waiting,
       failed_node_id: failedNodeIdOf(steps),
       warnings: warningsOf(steps),
       steps: steps.map((s) => toStep(s, include_step_outputs)),

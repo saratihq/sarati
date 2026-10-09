@@ -13,7 +13,7 @@ Configure the step with a topic and how long to wait:
 
 | Field | |
 |---|---|
-| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved: a workflow using one can't run, and a raw plan using one fails at that step. |
+| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved: a workflow or raw plan that uses one is refused before any step runs. |
 | `timeout_ms` | How long to wait before giving up |
 
 ## While it waits
@@ -27,8 +27,9 @@ own.
 
 A run paused by a **Wait** step of more than a minute is also `waiting`, but it is not in the inbox:
 it resumes when its time is up, and nothing else can wake it. The editor and **Runs** show it as
-**Waiting until** its wake time; a run waiting for an event reads **Waiting for a decision**, with a
-link to the inbox. Over the API, `GET /api/runs/<run-id>` says which:
+**Waiting until** its wake time, or **Was due at** it once that time has passed; a run waiting for an
+event reads **Waiting for a decision**, with a link to the inbox. Over the API,
+`GET /api/runs/<run-id>` and the MCP tool `orchestr_get_run` say which:
 
 ```json
 {"status": "waiting", "waiting": {"kind": "timer", "until": "2026-10-12T09:30:00.000Z"}}

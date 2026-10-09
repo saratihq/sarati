@@ -383,6 +383,56 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
     expect(detail.body.decided_at).toBeTruthy();
   }, 40_000);
 
+  it('says what a waiting run waits for: a Wait step its own clock, an approval a person', async () => {
+    const raw = (runId: string, node: Record<string, unknown>): Promise<request.Response> =>
+      asSessionA(
+        http()
+          .post('/api/runs')
+          .send({ plan: { id: `plan-${runId}`, nodes: [node] }, run_id: runId }),
+      ).then((r) => r);
+    const getRun = async (runId: string): Promise<Record<string, unknown>> => {
+      const result = await call(keyA, 'orchestr_get_run', { run_id: `${userA}:${runId}` });
+      expect(result.isError).toBeFalsy();
+      return result.structuredContent as Record<string, unknown>;
+    };
+    const parked = async (runId: string): Promise<Record<string, unknown>> => {
+      for (let i = 0; i < 100; i++) {
+        const run = await getRun(runId);
+        if (run.status === 'waiting') return run;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error(`run ${runId} never parked`);
+    };
+    const dueAt = async (runId: string): Promise<string> => {
+      const res = await db.query(
+        `SELECT waiting_timeout_at FROM runtime_runs WHERE run_id = $1 AND user_id = $2`,
+        [runId, userA],
+      );
+      return (res.rows[0] as { waiting_timeout_at: Date }).waiting_timeout_at.toISOString();
+    };
+
+    const sleeper = raw('mcp-sleeper', { kind: 'delay', id: 'pause', ms: 60_001 });
+    const asker = raw('mcp-asker', { kind: 'waitForEvent', id: 'ask', topic: 'go', timeoutMs: 20_000 });
+
+    expect((await parked('mcp-sleeper')).waiting).toEqual({
+      kind: 'timer',
+      until: await dueAt('mcp-sleeper'),
+    });
+    expect((await parked('mcp-asker')).waiting).toEqual({ kind: 'event', until: await dueAt('mcp-asker') });
+    expect((await getRun(runIdA)).waiting).toBeNull();
+
+    await asSessionA(
+      http()
+        .post(`/api/runs/${encodeURIComponent(`${userA}:mcp-asker`)}/events`)
+        .send({ topic: 'go', payload: { ok: true } }),
+    ).expect(200);
+    expect((await asker).status).toBe(201);
+    expect(await getRun('mcp-asker')).toMatchObject({ status: 'completed', waiting: null });
+
+    expect((await sleeper).status).toBe(201);
+    expect(await getRun('mcp-sleeper')).toMatchObject({ status: 'completed', waiting: null });
+  }, 90_000);
+
   // ── include_step_outputs is a read option, not a post-hoc filter ──
 
   it('include_step_outputs defaults to false and the payloads are ABSENT, not blanked', async () => {

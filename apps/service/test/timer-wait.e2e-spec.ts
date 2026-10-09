@@ -1,3 +1,6 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
@@ -15,6 +18,9 @@ const PARK_MS = 61_000;
 describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mock auth)', () => {
   let app: INestApplication;
   let db: Client;
+  let hitServer: Server;
+  let hitUrl: string;
+  let posts = 0;
   let sleeper: Promise<Response>;
   let asker: Promise<Response>;
 
@@ -46,9 +52,15 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
 
   beforeAll(async () => {
     process.env.DATABASE_URL = await createE2eDatabase(ADMIN_URL);
-    // Held open for the whole minute-long sleep: a database with no live backend is reaped by other suites.
     db = new Client({ connectionString: process.env.DATABASE_URL });
     await db.connect();
+    hitServer = createServer((req, res) => {
+      if (req.method === 'POST') posts++;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"charged":true}');
+    });
+    await new Promise<void>((resolve) => hitServer.listen(0, '127.0.0.1', resolve));
+    hitUrl = `http://127.0.0.1:${(hitServer.address() as AddressInfo).port}`;
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
@@ -86,6 +98,7 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
   afterAll(async () => {
     await app.close();
     await db.end();
+    await new Promise<void>((resolve, reject) => hitServer.close((e) => (e ? reject(e) : resolve())));
     process.env.DATABASE_URL = ADMIN_URL;
     process.env.MOCK_AUTH = 'false';
     process.env.DBOS_ENABLED = 'false';
@@ -136,27 +149,40 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
     }
   });
 
-  it('fails a raw plan that would park a person on a timer topic, sync or async, instead of waiting forever', async () => {
+  it('refuses a raw plan that would park a person on a timer topic, sync or async, before any step runs', async () => {
     const plan = {
       id: 'plan-squat',
-      nodes: [{ kind: 'waitForEvent', id: 'approve', topic: 'orchestr:timer:pause', timeoutMs: 3_000 }],
+      nodes: [
+        {
+          kind: 'action',
+          id: 'charge',
+          actionId: 'http.send_request',
+          props: { method: 'POST', url: `${hitUrl}/charge`, body: { amount: 100 } },
+        },
+        { kind: 'waitForEvent', id: 'approve', topic: 'orchestr:timer:x', timeoutMs: 3_000 },
+      ],
     };
-    const reserved =
-      /Wait for event "approve" can't use the topic "orchestr:timer:pause" — it is reserved for timed waits/;
 
-    const sync = await http().post('/api/runs').send({ plan, run_id: 'squatter' });
-    expect(sync.status).toBe(422);
-    expect(sync.body).toMatchObject({ code: 'run_failed', failed_node_id: 'approve' });
-    expect(sync.body.detail).toMatch(reserved);
-
-    await http().post('/api/runs/async').send({ plan, run_id: 'async-squatter' }).expect(201);
-    const failed = await until('async-squatter', 'error');
-    expect(failed.error).toMatch(reserved);
-    expect(failed.waiting).toBeNull();
-
-    for (const runId of ['squatter', 'async-squatter']) {
+    for (const [route, runId] of [
+      ['/api/runs', 'squatter'],
+      ['/api/runs/async', 'async-squatter'],
+    ] as const) {
+      const refused = await http().post(route).send({ plan, run_id: runId });
+      expect(refused.status).toBe(400);
+      expect(refused.body).toEqual({
+        code: 'compile_failed',
+        run_id: runId,
+        failed_node_id: null,
+        steps: [],
+        detail:
+          'Workflow can\'t run: Wait for event "approve" can\'t use the topic "orchestr:timer:x" — it is reserved for timed waits',
+      });
       expect(await parkedOn(runId)).toEqual({ status: 'error', waiting_topic: null });
+      const recorded = await until(runId, 'error');
+      expect(recorded.steps).toEqual([]);
+      expect(recorded.waiting).toBeNull();
     }
+    expect(posts).toBe(0);
   });
 
   it('still lets a person answer a run waiting on them', async () => {

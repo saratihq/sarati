@@ -145,6 +145,25 @@ describe('runPlanToDag — structure', () => {
       }
     }
   });
+
+  it('refuses a wait for event on a timer topic, however deeply it is nested', () => {
+    const squat: RunPlan['nodes'][number] = {
+      kind: 'waitForEvent',
+      id: 'ask',
+      topic: 'orchestr:timer:x',
+      timeoutMs: 1000,
+    };
+    const shapes: Array<RunPlan['nodes']> = [
+      [act('first'), squat],
+      [{ kind: 'forEach', id: 'each', items: '{{xs}}', itemVar: 'x', body: [squat] }],
+      [{ kind: 'parallel', id: 'fork', branches: [[act('a')], [squat]] }],
+    ];
+    for (const nodes of shapes) {
+      expect(() => runPlanToDag({ id: 'squat', nodes })).toThrow(
+        'Wait for event "ask" can\'t use the topic "orchestr:timer:x" — it is reserved for timed waits',
+      );
+    }
+  });
 });
 
 describe('runPlanToDag — execution (raw plans run correctly on the one engine)', () => {

@@ -23,7 +23,7 @@ import { channelKey } from '../runtime/agent-step-bus';
 import type { RunHandle, RunOutcome, RunPlan, RunResult } from '../runtime/run-plan';
 import { runAccessOf, type RunAccess } from './run-access';
 import { PolicyService } from '../policy/policy.service';
-import { RunsService, type IrRunOptions } from './runs.service';
+import { RunsService, type IrRunOptions, type PlanSource } from './runs.service';
 import { Scope } from '../auth/scope.decorator';
 import { DomainError } from '../common/domain-error';
 
@@ -178,7 +178,7 @@ class TestAgentDto {
 const AGENT_TEST_ENV = 'draft';
 
 /** Exactly one of `plan` / `workflow_ir` — a body carrying both, or neither, is a caller bug rather than a guess. */
-function asyncRunSource(body: StartAsyncDto): { plan: RunPlan } | { ir: WorkflowIR } {
+function asyncRunSource(body: StartAsyncDto): PlanSource {
   if (body.plan && body.workflow_ir) {
     throw new DomainError('Send either `plan` or `workflow_ir`, not both.', 400);
   }
