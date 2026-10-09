@@ -17,6 +17,7 @@ import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provi
 import { SDK_POLLING_FETCH } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH } from '../src/providers/sdk-webhook.provider';
 import { withActivationLock } from '../src/triggers/activation-lock';
+import { TriggerReconcilerJob } from '../src/triggers/canvas/trigger-reconciler.job';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
@@ -59,6 +60,8 @@ const providerCalls: Array<{ method: string; url: string; body: string; authoriz
 const stripeEndpoints = new Map<string, string>();
 let endpointSeq = 0;
 let stripeRefuses: { method: string; status: number } | null = null;
+// When set, a DELETE of this endpoint waits for `release`, reporting through `reached` that it has started.
+let stripeDeleteGate: { endpoint: string; reached: () => void; release: Promise<void> } | null = null;
 
 // Live GitHub hooks, by their `/repos/<owner>/<repo>/hooks/<id>` path.
 const githubHooks = new Set<string>();
@@ -128,6 +131,17 @@ const webhookFetch: FetchLike = (input, init) => {
     body: typeof init?.body === 'string' ? init.body : '',
     authorization,
   });
+  const gate = stripeDeleteGate;
+  if (
+    url.host === 'api.stripe.com' &&
+    method === 'DELETE' &&
+    gate &&
+    url.pathname.endsWith(`/${gate.endpoint}`)
+  ) {
+    stripeDeleteGate = null;
+    gate.reached();
+    return gate.release.then(() => stripe(method, url.pathname, authorization));
+  }
   if (url.host === 'api.stripe.com') return Promise.resolve(stripe(method, url.pathname, authorization));
   if (url.host === 'api.github.com') return Promise.resolve(github(method, url.pathname));
   if (url.host === 'api.typeform.com') return Promise.resolve(typeform(method, url.pathname, authorization));
@@ -135,6 +149,7 @@ const webhookFetch: FetchLike = (input, init) => {
 };
 
 let feed = { contentType: 'application/json', body: '[]' };
+let feedDown = false;
 
 const rss = (items: Array<{ guid: string; title: string }>): typeof feed => ({
   contentType: 'application/rss+xml',
@@ -179,6 +194,7 @@ const pollingFetch: FetchLike = (input, init) => {
   if (url === 'https://api.intercom.io/conversations/search')
     return Promise.resolve(intercomSearch(init?.body));
   if (url === 'https://api.hubapi.com/crm/v3/objects/contacts/search') return hubspotSearch(init?.body);
+  if (feedDown) return Promise.resolve(respond(503, 'text/plain', 'unavailable'));
   return Promise.resolve(respond(200, feed.contentType, feed.body));
 };
 
@@ -426,6 +442,21 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     }
   };
 
+  const poll = (): Promise<void> => app.get(TriggersService).runActivationPollCycle();
+
+  // Publish while the publish's own reconcile is held back, as a busy queue holds it.
+  const publishUnreconciled = async (wfId: string, doc: Record<string, unknown>): Promise<void> => {
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    try {
+      await commitAndPublish(wfId, doc);
+    } finally {
+      held.mockRestore();
+    }
+  };
+
+  const announced = async (runId: string): Promise<unknown> =>
+    ((await awaitRun(runId)).outputs as Record<string, unknown>).announce;
+
   const triggerRuns = async (wfId: string): Promise<Array<{ run_id: string }>> => {
     const rows = await db.query<{ run_id: string }>(
       `SELECT run_id FROM runtime_runs WHERE workflow_id = $1 AND source = 'trigger' ORDER BY started_at`,
@@ -576,6 +607,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     stripeRefuses = null;
     githubRefuses = null;
     typeformRefuses = null;
+    feedDown = false;
   });
 
   it('registered webhook: the old endpoint is deleted and the new event type is registered', async () => {
@@ -696,13 +728,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const oldEndpoint = await endpointOf(id);
 
     // What a released build's promote left: the row retyped, nothing torn down, nothing recorded as live.
-    const reconciler = app.get(TriggerReconcilerService);
-    const held = jest.spyOn(reconciler, 'reconcile').mockResolvedValue();
-    try {
-      await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'left by an earlier build'));
-    } finally {
-      held.mockRestore();
-    }
+    await publishUnreconciled(wfId, triggerDoc('stripe.payment_succeeded', {}, 'left by an earlier build'));
     await db.query(
       `UPDATE runtime_trigger_activations a
           SET trigger_type = 'stripe.payment_succeeded', materialized = NULL, version_id = p.version_id
@@ -810,7 +836,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       `UPDATE runtime_trigger_activations SET created_at = now() - interval '1 day' WHERE workflow_id = $1`,
       [wfId],
     );
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     expect(await triggerRuns(wfId)).toEqual([]);
     expect(await activations(wfId)).toEqual([]);
@@ -1059,18 +1085,17 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       { guid: 'r1', title: 'rss backlog' },
       { guid: 'r2', title: 'rss new' },
     ]);
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     const runs = await triggerRuns(wfId);
     expect(runs).toHaveLength(1);
-    const run = await awaitRun(runs[0]!.run_id);
-    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: rss new');
+    expect(await announced(runs[0]!.run_id)).toBe('fired: rss new');
   });
 
   it("polling: a retype across apps starts the new trigger from nothing, never from the old one's cursor", async () => {
     conversations.push({ id: 'conv_backlog', created_at: nowSec() - 3600 });
     const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'hubspot to intercom', 'id'));
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     await commitAndPublish(wfId, triggerDoc('intercom.new_conversation', {}, 'hubspot to intercom', 'id'));
     expect(await activation(wfId)).toMatchObject({
@@ -1079,12 +1104,11 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     });
 
     conversations.push({ id: 'conv_new', created_at: nowSec() });
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     const runs = await triggerRuns(wfId);
     expect(runs).toHaveLength(1);
-    const run = await awaitRun(runs[0]!.run_id);
-    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: conv_new');
+    expect(await announced(runs[0]!.run_id)).toBe('fired: conv_new');
   });
 
   it('a retype that changes the rail tears down the OLD rail and stands up the new one', async () => {
@@ -1122,13 +1146,13 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     conversations.length = 0;
     conversations.push({ id: 'conv_gated_backlog', created_at: nowSec() - 3600 });
     const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'gated retype', 'id'));
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     let reached = (): void => undefined;
     let release = (): void => undefined;
     const atGate = new Promise<void>((resolve) => (reached = resolve));
     hubspotGate = { reached, release: new Promise<void>((resolve) => (release = resolve)) };
-    const cycle = app.get(TriggersService).runActivationPollCycle();
+    const cycle = poll();
     await atGate;
 
     const retype = commitAndPublish(wfId, triggerDoc('intercom.new_conversation', {}, 'gated retype', 'id'));
@@ -1138,12 +1162,11 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     await retype;
 
     conversations.push({ id: 'conv_gated_new', created_at: nowSec() });
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     const runs = await triggerRuns(wfId);
     expect(runs).toHaveLength(1);
-    const run = await awaitRun(runs[0]!.run_id);
-    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: conv_gated_new');
+    expect(await announced(runs[0]!.run_id)).toBe('fired: conv_gated_new');
   });
 
   it('a poll passes over an activation a reconcile is changing, and polls it on the next cycle', async () => {
@@ -1156,10 +1179,10 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     );
     await db.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [id]);
 
-    await withActivationLock(app.get(PG_POOL), id, () => app.get(TriggersService).runActivationPollCycle());
+    await withActivationLock(app.get(PG_POOL), id, poll);
     expect(await triggerRuns(wfId)).toEqual([]);
 
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
     expect(await triggerRuns(wfId)).toHaveLength(1);
   });
 
@@ -1172,7 +1195,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     );
     await db.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [id]);
 
-    const cycle = app.get(TriggersService).runActivationPollCycle();
+    const cycle = poll();
     let runs = await triggerRuns(wfId);
     for (let i = 0; i < 400 && runs.length === 0; i++) {
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1207,7 +1230,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     contacts.length = 0;
     contacts.push({ id: 'contact_backlog', createdAt: new Date(Date.now() - 3_600_000).toISOString() });
     const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'stale row', 'id'));
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     // The cycle loads its rows, and the retype completes before it polls them.
     const em = app.get(DataSource).manager;
@@ -1218,7 +1241,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       return rows;
     }) as never);
     try {
-      await app.get(TriggersService).runActivationPollCycle();
+      await poll();
     } finally {
       loaded.mockRestore();
     }
@@ -1228,12 +1251,11 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     });
 
     conversations.push({ id: 'conv_stale_new', created_at: nowSec() });
-    await app.get(TriggersService).runActivationPollCycle();
+    await poll();
 
     const runs = await triggerRuns(wfId);
     expect(runs).toHaveLength(1);
-    const run = await awaitRun(runs[0]!.run_id);
-    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: conv_stale_new');
+    expect(await announced(runs[0]!.run_id)).toBe('fired: conv_stale_new');
   });
 
   it('a stand-up cut off before it was recorded tears down the webhook it registered, not the one before', async () => {
@@ -1262,12 +1284,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const endpoint = await endpointOf(id);
 
     // What v0.2.22 left after a retype to a schedule: the row already the new kind, the bare handle still stored.
-    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
-    try {
-      await commitAndPublish(wfId, triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'left behind'));
-    } finally {
-      held.mockRestore();
-    }
+    await publishUnreconciled(wfId, triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'left behind'));
     await db.query(
       `UPDATE runtime_trigger_activations a
           SET kind = 'schedule', trigger_type = 'orchestr:schedule', props = '{"interval_minutes":5}',
@@ -1348,6 +1365,156 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     await app.get(TriggerReconcilerService).sweepAll();
 
     expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('a trigger whose new seed failed is passed over by the poll, keeping its error, until a reconcile seeds it', async () => {
+    feed = rss([{ guid: 'seed-1', title: 'backlog' }]);
+    const wfId = await deploy(triggerDoc('rss.new_item', { url: FEED_URL }, 'failed seed'));
+    feed = rss([
+      { guid: 'seed-1', title: 'backlog' },
+      { guid: 'seed-2', title: 'fired before the change' },
+    ]);
+    await poll();
+    expect(await triggerRuns(wfId)).toHaveLength(1);
+
+    feedDown = true;
+    await commitAndPublish(wfId, triggerDoc('rss.new_item', { url: `${FEED_URL}?v=2` }, 'failed seed'));
+    feedDown = false;
+    expect(await activation(wfId)).toMatchObject({
+      last_error: expect.stringMatching(/HTTP 503/),
+      materialized: { props: { url: FEED_URL } },
+    });
+
+    await poll();
+
+    expect(await triggerRuns(wfId)).toHaveLength(1);
+    expect((await activation(wfId)).last_error).toMatch(/HTTP 503/);
+
+    await reconcile(wfId);
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { props: { url: `${FEED_URL}?v=2` } },
+    });
+    feed = rss([
+      { guid: 'seed-1', title: 'backlog' },
+      { guid: 'seed-2', title: 'fired before the change' },
+      { guid: 'seed-3', title: 'new after the seed' },
+    ]);
+    await poll();
+
+    const runs = await triggerRuns(wfId);
+    expect(runs).toHaveLength(2);
+    expect(await announced(runs[1]!.run_id)).toBe('fired: new after the seed');
+  });
+
+  it('a poll between a publish and its reconcile polls nothing, and the reconcile starts the new trigger fresh', async () => {
+    contacts.length = 0;
+    conversations.length = 0;
+    const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'publish before reconcile', 'id'));
+    await poll();
+
+    await publishUnreconciled(
+      wfId,
+      triggerDoc('intercom.new_conversation', {}, 'publish before reconcile', 'id'),
+    );
+    contacts.push({ id: 'contact_after_publish', createdAt: new Date().toISOString() });
+    await poll();
+
+    expect(await triggerRuns(wfId)).toEqual([]);
+    expect(await activation(wfId)).toMatchObject({ trigger_type: 'hubspot.new_contact', last_error: null });
+
+    await reconcile(wfId);
+    conversations.push({ id: 'conv_after_reconcile', created_at: nowSec() });
+    await poll();
+
+    const runs = await triggerRuns(wfId);
+    expect(runs).toHaveLength(1);
+    expect(await announced(runs[0]!.run_id)).toBe('fired: conv_after_reconcile');
+  });
+
+  it('a due schedule a publish removed fires nothing before the reconcile removes it', async () => {
+    const wfId = await deploy(
+      triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'schedule removed', 'scheduled_at'),
+    );
+    const { id } = await activation(wfId);
+    await db.query(
+      `UPDATE runtime_trigger_activations SET created_at = now() - interval '1 day' WHERE id = $1`,
+      [id],
+    );
+    await db.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [id]);
+
+    await publishUnreconciled(wfId, triggerDoc('orchestr:trigger', {}, 'schedule removed'));
+    await poll();
+
+    expect(await triggerRuns(wfId)).toEqual([]);
+    await reconcile(wfId);
+    expect(await activations(wfId)).toEqual([]);
+  });
+
+  it('a trigger with nothing recorded as live is passed over by the poll and reconciled when the service starts', async () => {
+    const url = `${FEED_URL}?upgraded`;
+    feed = rss([{ guid: 'up-1', title: 'before the upgrade' }]);
+    const wfId = await deploy(triggerDoc('rss.new_item', { url }, 'upgraded'));
+    const { id } = await activation(wfId);
+    // What an upgrade from v0.2.22 finds.
+    await db.query(`UPDATE runtime_trigger_activations SET materialized = NULL WHERE id = $1`, [id]);
+    feed = rss([
+      { guid: 'up-1', title: 'before the upgrade' },
+      { guid: 'up-2', title: 'while upgrading' },
+    ]);
+    await poll();
+    expect(await triggerRuns(wfId)).toEqual([]);
+
+    await app.get(TriggerReconcilerJob).onModuleInit();
+    for (let i = 0; i < 200 && (await activation(wfId)).materialized === null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(await activation(wfId)).toMatchObject({ last_error: null, materialized: { props: { url } } });
+    feed = rss([
+      { guid: 'up-1', title: 'before the upgrade' },
+      { guid: 'up-2', title: 'while upgrading' },
+      { guid: 'up-3', title: 'after the upgrade' },
+    ]);
+    await poll();
+
+    const runs = await triggerRuns(wfId);
+    expect(runs).toHaveLength(1);
+    expect(await announced(runs[0]!.run_id)).toBe('fired: after the upgrade');
+  });
+
+  it('a pending webhook delete is retried only once the publish it rides with has converged', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'retried after converging'));
+    const pending = await endpointOf((await activation(wfId)).id);
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'retried after converging'));
+    stripeRefuses = null;
+    expect(await retired(wfId)).toEqual([{ hook: pending, last_error: expect.any(String) }]);
+
+    let reached = (): void => undefined;
+    let release = (): void => undefined;
+    const atGate = new Promise<void>((resolve) => (reached = resolve));
+    stripeDeleteGate = {
+      endpoint: pending,
+      reached,
+      release: new Promise<void>((resolve) => (release = resolve)),
+    };
+    const publishing = commitAndPublish(
+      wfId,
+      triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'retried after converging'),
+    );
+    await atGate;
+
+    const converged = await activation(wfId);
+    release();
+    await publishing;
+    expect(converged).toMatchObject({
+      kind: 'schedule',
+      materialized: { kind: 'schedule' },
+      last_error: null,
+    });
+    expect(stripeEndpoints.has(pending)).toBe(false);
     expect(await retired(wfId)).toEqual([]);
   });
 });

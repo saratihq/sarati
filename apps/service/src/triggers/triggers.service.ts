@@ -23,6 +23,8 @@ import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
 import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
+import { actualOf } from './canvas/activation-row';
+import { applyFinished } from './canvas/trigger-activation';
 import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -94,7 +96,7 @@ interface ActivationTarget {
   ir: WorkflowIR;
 }
 
-// What one locked poll yields: the events to fire, on the version that was live when they were polled.
+// What one locked poll yields: its events, to fire on the version live when they were polled, which holds the trigger.
 interface PolledEvents {
   row: RuntimeTriggerActivationEntity;
   target: ActivationTarget;
@@ -599,8 +601,8 @@ export class TriggersService {
       const row = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
         where: { id: loaded.id },
       });
-      // Removed, or torn down and stood up again, since the cycle loaded it: its store is not this row's.
-      if (!row || !sameLiveTrigger(row, loaded)) return null;
+      // Removed or changed since the cycle loaded it, or not stood up as it reads: its store is not this row's.
+      if (!row || !sameLiveTrigger(row, loaded) || !applyFinished(actualOf(row))) return null;
       return this.pollLockedActivation(row);
     }).catch((err: unknown) => {
       this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);
@@ -616,6 +618,8 @@ export class TriggersService {
     const em = this.dataSource.manager;
     try {
       const target = await this.resolveActivationTarget(row);
+      // A pointer moved and its reconcile has yet to run: the live version does not hold this trigger.
+      if (!holdsTrigger(target.ir, row)) return null;
       const plan = this.compiler.compile(target.ir, target.wf.id);
       const store = new DbActivationStore(this.dataSource, row.id);
       const events = await this.pollableEvents(row, store, target.wf);
@@ -854,6 +858,11 @@ async function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): P
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {
+  const node = ir.nodes.find((n) => n.id === row.triggerNodeId);
+  return node?.node_type === row.triggerType && deepEqual(node.parameters, row.props ?? {});
 }
 
 function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {

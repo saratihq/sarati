@@ -3,6 +3,7 @@ import type { IRNode, WorkflowIR } from '../../ir/models';
 import {
   activationDescriptorEqual,
   activationKeyString,
+  applyFinished,
   type ActivationKind,
   type ActualActivation,
   type ConnectionRef,
@@ -115,8 +116,6 @@ export function reconcileActivations(
   return { toCreate, toUpdate, toDelete };
 }
 
-// The row is written before its side-effects, so a row that differs from what was stood up is an apply that never finished.
 function isLive(desired: DesiredActivation, actual: ActualActivation): boolean {
-  const live = actual.materialized;
-  return live !== null && activationDescriptorEqual(actual, live) && activationDescriptorEqual(desired, live);
+  return applyFinished(actual) && activationDescriptorEqual(desired, actual.materialized);
 }

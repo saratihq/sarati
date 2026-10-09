@@ -82,3 +82,10 @@ function activationTargetEqual(a: MaterializedActivation, b: MaterializedActivat
 export function activationDescriptorEqual(a: MaterializedActivation, b: MaterializedActivation): boolean {
   return activationTargetEqual(a, b) && deepEqual(a.props, b.props);
 }
+
+/** Whether the row's last apply finished: a row is written before its side-effects, so one unlike what is recorded as live did not. */
+export function applyFinished(
+  actual: ActualActivation,
+): actual is ActualActivation & { materialized: MaterializedActivation } {
+  return actual.materialized !== null && activationDescriptorEqual(actual, actual.materialized);
+}

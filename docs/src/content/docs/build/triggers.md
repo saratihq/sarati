@@ -109,6 +109,9 @@ registration:
 1. The old one is deleted, with the account and settings that created it.
 2. The new one starts fresh from that moment; it never picks up where the old one was.
 
+Until the new one is in place, an old polled trigger is not checked, so nothing it finds starts the
+version you promoted.
+
 A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
 a polled trigger carries on from where it was.
 
@@ -121,7 +124,9 @@ credential (a rate limit is not a rejection): the service log then names the web
 repository or form it is on (at warn level), and you delete it in the app yourself.
 
 A registration that failed to start shows its error on the workflow overview and is retried every
-fifteen minutes.
+fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
+polled trigger whose feed could not be read when it started is not checked, so it never fires the
+items that were already in its feed.
 
 ## Localhost and inbound triggers
 

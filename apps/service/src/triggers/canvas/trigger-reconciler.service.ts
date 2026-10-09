@@ -52,11 +52,12 @@ import {
 import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { webhookUrlFor } from './webhook-url';
+import { activationKeyOf, actualOf } from './activation-row';
 import {
   type ActivationKey,
   activationKeyString,
   type ActivationKind,
-  type ActualActivation,
+  applyFinished,
   type ConnectionRef,
   type DesiredActivation,
   type MaterializedActivation,
@@ -131,8 +132,8 @@ export class TriggerReconcilerService {
   }
 
   private async reconcileOnce(workflowId: string, opts: { selfHeal?: boolean }): Promise<void> {
-    await this.retryRetiredWebhooks(workflowId);
     const em = this.dataSource.manager;
+    const pendingDeletes = await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } });
     const pointers = await rawQuery<PointerRow>(
       em,
       `SELECT environment_id, environment, version_id
@@ -159,8 +160,8 @@ export class TriggerReconcilerService {
     });
 
     const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
-    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(keyOf(r)), r]));
-    const actual: ActualActivation[] = actualRows.map((r) => toActual(r));
+    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
+    const actual = actualRows.map((r) => actualOf(r));
 
     const plan = reconcileActivations(desired, actual);
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
@@ -181,6 +182,7 @@ export class TriggerReconcilerService {
         await this.applyDelete(row, envNameById).catch((err) => this.logApplyError('delete', d.key, err));
     }
     if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
+    await this.retryRetiredWebhooks(pendingDeletes);
   }
 
   /**
@@ -240,6 +242,13 @@ export class TriggerReconcilerService {
       }
     }
     if (rows.length > 0) this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
+  }
+
+  /** Queue a reconcile of every workflow with an activation whose last apply did not finish, which a poll passes over. */
+  async reconcileUnfinished(): Promise<void> {
+    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity);
+    const workflowIds = new Set(rows.filter((r) => !applyFinished(actualOf(r))).map((r) => r.workflowId));
+    for (const workflowId of workflowIds) await this.signals.enqueue(workflowId);
   }
 
   // ─── apply ───
@@ -353,8 +362,7 @@ export class TriggerReconcilerService {
         await this.registerWebhook(activationId, desired, envName);
         return;
       case 'polling':
-        // A discarded seed poll primes the dedup watermark, so only items appearing
-        // AFTER activation fire. (Each SDK trigger also self-baselines if this seed fails.)
+        // A discarded seed primes the dedup watermark; until one succeeds the poll cycle passes the activation over.
         if (this.sdkPolling.isPollingTrigger(desired.triggerType)) {
           await this.sdkPolling.enable(desired.triggerType, {
             externalUserId: desired.connection?.ownerUserId ?? '',
@@ -440,7 +448,7 @@ export class TriggerReconcilerService {
       triggerType: live.triggerType,
       props: live.props,
       connection: live.connection,
-      webhookUrl: this.webhookUrl(keyOf(row), envName),
+      webhookUrl: this.webhookUrl(activationKeyOf(row), envName),
       secret: (await store.get<string>(WEBHOOK_SECRET_KEY)) ?? '',
       registration,
     };
@@ -487,9 +495,9 @@ export class TriggerReconcilerService {
     await em.save(TriggerRetiredWebhookEntity, entry);
   }
 
-  private async retryRetiredWebhooks(workflowId: string): Promise<void> {
+  private async retryRetiredWebhooks(entries: TriggerRetiredWebhookEntity[]): Promise<void> {
     const em = this.dataSource.manager;
-    for (const entry of await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } })) {
+    for (const entry of entries) {
       if ((await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry))) {
         await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
       }
@@ -816,29 +824,6 @@ export class TriggerReconcilerService {
 
 // ─── row ⇄ descriptor mapping + small pure helpers ───
 
-function keyOf(row: RuntimeTriggerActivationEntity): DesiredActivation['key'] {
-  return { workflowId: row.workflowId, environmentId: row.environmentId, triggerNodeId: row.triggerNodeId };
-}
-
-function connOf(row: RuntimeTriggerActivationEntity): ConnectionRef | null {
-  return row.connectionId && row.connectionOwnerUserId
-    ? { connectionId: row.connectionId, ownerUserId: row.connectionOwnerUserId }
-    : null;
-}
-
-function toActual(row: RuntimeTriggerActivationEntity): ActualActivation {
-  return {
-    key: keyOf(row),
-    kind: row.kind as ActivationKind,
-    triggerType: row.triggerType,
-    versionId: row.versionId ?? '',
-    props: row.props ?? {},
-    connection: connOf(row),
-    paused: row.paused,
-    materialized: row.materialized,
-  };
-}
-
 function materializedOf(a: MaterializedActivation): MaterializedActivation {
   return {
     kind: a.kind,
@@ -851,7 +836,7 @@ function materializedOf(a: MaterializedActivation): MaterializedActivation {
 
 // Read before the row is overwritten; a row with nothing recorded is best guessed by its own columns.
 function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
-  return row.materialized ?? materializedOf(toActual(row));
+  return row.materialized ?? materializedOf(actualOf(row));
 }
 
 // The props locate the hook in the app (a GitHub hook id exists only under its repository).
