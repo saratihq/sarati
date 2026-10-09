@@ -616,6 +616,9 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
       parent_step_key: 'callwf',
       status: 'completed',
     });
+    // The child id is persisted and re-derived on crash-replay, so its derivation must never drift.
+    const childDigest = createHash('sha256').update(`${callerId}:${parentRunId}\0callwf`).digest('hex');
+    expect(child.rows[0].run_id).toBe(`sub_${childDigest.slice(0, 32)}`);
 
     // Its steps are recorded too — the whole point: a failure inside is readable.
     const steps = await db.query(`SELECT node_id, status FROM runtime_run_steps WHERE run_id = $1`, [
