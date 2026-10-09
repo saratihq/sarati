@@ -121,7 +121,11 @@ In the client that means `lint` and unit tests plus a production `build`, since 
 strict type-check as well as a compile. Working on one app, `pnpm --filter @sarati/service check`
 narrows it, but the root run is the gate.
 
-The service's e2e suite talks to the Postgres database from step 2 — it has to be up.
+The service's e2e suite talks to the Postgres database from step 2 — it has to be up. It reaches
+nothing else: its test environment refuses every connection and DNS query the test process makes to
+anything but loopback and that database, and fails the test or suite that made it, so a suite serves
+its fixtures on `127.0.0.1` or injects a fake. Child processes and worker threads are outside that
+guard.
 
 ## The vault
 
