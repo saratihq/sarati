@@ -149,6 +149,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '031_trigger_retired_webhooks.sql',
     probe: "SELECT 1 FROM information_schema.tables WHERE table_name='trigger_retired_webhooks'",
   },
+  {
+    migration: '033_run_step_waits.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_run_steps' AND column_name='claimed_at'",
+  },
 ];
 
 /**

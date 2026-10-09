@@ -20,6 +20,9 @@ cd sarati && docker compose pull && docker compose up -d
 
 Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`.
 
+Going back to an earlier version this way keeps an approval a run is waiting on answerable there. A run
+waiting on more than one thing at once shows only one of them in the earlier version's inbox.
+
 Running it by hand, without the installer:
 
 ```bash

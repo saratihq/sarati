@@ -4,8 +4,8 @@ import { create } from "zustand";
 import * as api from "@/api/client";
 import type { WaitingRun } from "@/api/client";
 
-// Waiting runs (approvals inbox), shared by the header badge and the /approvals page so an optimistic
-// removal decrements the badge at once. Both poll fetchWaiting; concurrent calls are deduped here.
+// Waits for a person (approvals inbox), one per parked step, shared by the header badge and the /approvals page so
+// an optimistic removal decrements the badge at once. Both poll fetchWaiting; concurrent calls are deduped here.
 interface ApprovalsState {
   /** null = never loaded (skeleton); [] = loaded and empty. */
   waiting: WaitingRun[] | null;
@@ -14,12 +14,17 @@ interface ApprovalsState {
   error: string | null;
 
   fetchWaiting: () => Promise<void>;
-  /** Optimistic removal on a sent decision; also shields the run from poll re-adds until it settles. */
-  remove: (runId: string) => void;
-  /** Rollback (undo, or a failed decision) — the run is still waiting server-side. */
-  restore: (run: WaitingRun) => void;
+  /** Optimistic removal on a sent decision; also shields the wait from poll re-adds until it settles. */
+  remove: (wait: WaitingRun) => void;
+  /** Rollback (undo, or a failed decision) — the wait is still parked server-side. */
+  restore: (wait: WaitingRun) => void;
   /** The decision reached the server — drop the poll shield. */
-  settle: (runId: string) => void;
+  settle: (wait: WaitingRun) => void;
+}
+
+/** One wait's identity: a run parked on several steps is several entries. */
+export function waitKeyOf(wait: WaitingRun): string {
+  return `${wait.id}\u0000${wait.step_key}`;
 }
 
 function byWaitingSince(a: WaitingRun, b: WaitingRun): number {
@@ -40,7 +45,7 @@ export const useApprovals = create<ApprovalsState>((set, get) => ({
     try {
       const { runs } = await api.listWaitingRuns();
       set({
-        waiting: runs.filter((r) => !suppressed.has(r.id)).sort(byWaitingSince),
+        waiting: runs.filter((r) => !suppressed.has(waitKeyOf(r))).sort(byWaitingSince),
         isLoading: false,
         error: null,
       });
@@ -52,21 +57,23 @@ export const useApprovals = create<ApprovalsState>((set, get) => ({
     }
   },
 
-  // Keyed on the UNIQUE run id, NOT run_id, which can collide across users in an org-wide list.
-  remove: (id) => {
-    suppressed.add(id);
-    set((s) => ({ waiting: (s.waiting ?? []).filter((r) => r.id !== id) }));
+  // Keyed per wait: the UNIQUE run id (never run_id, which collides across users) plus the step.
+  remove: (wait) => {
+    const key = waitKeyOf(wait);
+    suppressed.add(key);
+    set((s) => ({ waiting: (s.waiting ?? []).filter((r) => waitKeyOf(r) !== key) }));
   },
 
-  restore: (run) => {
-    suppressed.delete(run.id);
+  restore: (wait) => {
+    const key = waitKeyOf(wait);
+    suppressed.delete(key);
     set((s) => {
-      const rest = (s.waiting ?? []).filter((r) => r.id !== run.id);
-      return { waiting: [...rest, run].sort(byWaitingSince) };
+      const rest = (s.waiting ?? []).filter((r) => waitKeyOf(r) !== key);
+      return { waiting: [...rest, wait].sort(byWaitingSince) };
     });
   },
 
-  settle: (id) => {
-    suppressed.delete(id);
+  settle: (wait) => {
+    suppressed.delete(waitKeyOf(wait));
   },
 }));

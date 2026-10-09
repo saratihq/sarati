@@ -55,8 +55,9 @@ These strings are written into saved data, issued tokens, live cookies or the da
 - The `--orchestr-*` CSS custom properties — the client's token names.
 - The `{{$account.*}}` reference and its field names (`email`, `handle`, `id`, `name`) — in every
   saved workflow that uses them.
-- The `orchestr:timer:` waiting-topic prefix — in `runtime_runs.waiting_topic` and the DBOS recv
-  topic of every in-flight timed wait.
+- The `orchestr:timer:` waiting-topic prefix — in `runtime_run_steps.waiting_topic` and the DBOS
+  recv topic of every in-flight timed wait.
+- The `orchestr:wait:` prefix — the DBOS recv topic of every in-flight wait-for-event step.
 
 The user-visible product name is Sarati and is free to change; none of the above is user-visible.
 

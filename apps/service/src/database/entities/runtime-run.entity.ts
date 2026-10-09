@@ -68,19 +68,6 @@ export class RuntimeRunEntity {
   @Column({ name: 'dry_run', type: 'boolean', default: false })
   dryRun!: boolean;
 
-  // ── Approval state, set while status = 'waiting' and cleared on resume ──
-  @Column({ name: 'waiting_node_id', type: 'varchar', length: 200, nullable: true })
-  waitingNodeId!: string | null;
-
-  @Column({ name: 'waiting_topic', type: 'varchar', length: 200, nullable: true })
-  waitingTopic!: string | null;
-
-  @Column({ name: 'waiting_since', type: 'timestamptz', nullable: true })
-  waitingSince!: Date | null;
-
-  @Column({ name: 'waiting_timeout_at', type: 'timestamptz', nullable: true })
-  waitingTimeoutAt!: Date | null;
-
   // Who resolved the wait — org-wide approvals mean this may differ from `user_id`.
   @Column({ name: 'decided_by', type: 'uuid', nullable: true })
   decidedBy!: string | null;
@@ -148,6 +135,22 @@ export class RuntimeRunStepEntity {
   /** Non-fatal `{{ref}}`s that resolved to nothing at run time; null when none. */
   @Column({ type: 'json', nullable: true })
   warnings!: string[] | null;
+
+  /** The topic this step is parked on — set only while it waits; a timer's is reserved (`isTimerWait`). */
+  @Column({ name: 'waiting_topic', type: 'varchar', length: 200, nullable: true })
+  waitingTopic!: string | null;
+
+  /** When this step parked. */
+  @Column({ name: 'waiting_since', type: 'timestamptz', nullable: true })
+  waitingSince!: Date | null;
+
+  /** When this step's wait times out — for a timer, when it wakes. */
+  @Column({ name: 'waiting_timeout_at', type: 'timestamptz', nullable: true })
+  waitingTimeoutAt!: Date | null;
+
+  /** When an event claimed this wait; it stays parked until the run takes the event. */
+  @Column({ name: 'claimed_at', type: 'timestamptz', nullable: true })
+  claimedAt!: Date | null;
 
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt!: Date;

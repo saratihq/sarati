@@ -1,6 +1,7 @@
 import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import { DagInterpreter } from './dag-interpreter';
+import { eventTopicFor } from './event-wait';
 import type { DagActionNode, DagNode, DagPlan, Guard } from './dag-plan';
 
 /**
@@ -167,6 +168,151 @@ describe('DagInterpreter (gating scheduler)', () => {
     const result = await runPromise;
     expect(result.outputs.approval).toEqual({ decision: 'ok' });
     expect(result.outputs.act).toEqual({ ran: 'act.act', props: { decision: 'ok' } });
+  });
+
+  describe('waits parked at once', () => {
+    type Parking = { op: 'waiting' | 'resumed'; stepKey: string; topic?: string };
+
+    const recorderInto = (
+      log: Parking[],
+      park: (stepKey: string) => Promise<Date | null> = () => Promise.resolve(null),
+    ): Parameters<typeof interpreter.run>[1]['recorder'] =>
+      ({
+        runStarted: () => Promise.resolve(),
+        runFinished: () => Promise.resolve(),
+        stepStarted: () => Promise.resolve(),
+        stepFinished: () => Promise.resolve(),
+        stepWaiting: (_runId: string, stepKey: string, topic: string) => {
+          log.push({ op: 'waiting', stepKey, topic });
+          return park(stepKey);
+        },
+        stepResumed: (_runId: string, stepKey: string) => {
+          log.push({ op: 'resumed', stepKey });
+          return Promise.resolve();
+        },
+      }) as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
+
+    const deliverWhenParked = async (
+      durable: PassThroughDurableStep,
+      topic: string,
+      payload: unknown,
+    ): Promise<void> => {
+      for (let i = 0; i < 100 && !durable.deliver(topic, payload); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+
+    it('parks two waits on one topic at once, each receiving on its own step, so an event answers only the step it names', async () => {
+      const durable = new PassThroughDurableStep();
+      const log: Parking[] = [];
+      const running = interpreter.run(
+        plan([
+          { kind: 'waitForEvent', id: 'first', topic: 'approval', timeoutMs: 5_000, guards: [] },
+          { kind: 'waitForEvent', id: 'second', topic: 'approval', timeoutMs: 5_000, guards: [] },
+        ]),
+        { externalUserId: 'u', durable, runId: 'run-1', recorder: recorderInto(log) },
+      );
+
+      for (let i = 0; i < 100 && log.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(log).toEqual([
+        { op: 'waiting', stepKey: 'first', topic: 'approval' },
+        { op: 'waiting', stepKey: 'second', topic: 'approval' },
+      ]);
+      expect(durable.deliver('approval', { decision: 'nobody' })).toBe(false);
+      await deliverWhenParked(durable, eventTopicFor('second'), { decision: 'two' });
+      await deliverWhenParked(durable, eventTopicFor('first'), { decision: 'one' });
+
+      expect((await running).outputs).toMatchObject({
+        first: { decision: 'one' },
+        second: { decision: 'two' },
+      });
+    });
+
+    it('waits on different topics park side by side, each answered on its own', async () => {
+      const durable = new PassThroughDurableStep();
+      const log: Parking[] = [];
+      const running = interpreter.run(
+        plan([
+          { kind: 'waitForEvent', id: 'legal', topic: 'legal', timeoutMs: 5_000, guards: [] },
+          { kind: 'waitForEvent', id: 'finance', topic: 'finance', timeoutMs: 5_000, guards: [] },
+        ]),
+        { externalUserId: 'u', durable, runId: 'run-1', recorder: recorderInto(log) },
+      );
+
+      for (let i = 0; i < 100 && log.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(log).toEqual([
+        { op: 'waiting', stepKey: 'legal', topic: 'legal' },
+        { op: 'waiting', stepKey: 'finance', topic: 'finance' },
+      ]);
+      await deliverWhenParked(durable, eventTopicFor('finance'), { decision: 'yes' });
+      await deliverWhenParked(durable, eventTopicFor('legal'), { decision: 'no' });
+
+      expect((await running).outputs).toMatchObject({
+        legal: { decision: 'no' },
+        finance: { decision: 'yes' },
+      });
+    });
+
+    it.each([
+      [
+        'an approval',
+        { kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: 5_000, guards: [] },
+      ],
+      ['a timer', { kind: 'delay', id: 'pause', ms: 61_000, guards: [] }],
+    ] as Array<[string, DagNode]>)(
+      'fails the step, never the process, when %s is cancelled while its park is still being written',
+      async (_label, node) => {
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown): void => {
+          unhandled.push(reason);
+        };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+          const cancelled: DurableStep = {
+            run: (_n, fn) => fn(),
+            sleep: () => Promise.resolve(),
+            waitForEvent: () => Promise.reject(new Error('Workflow has been cancelled')),
+          };
+          const slowPark = (): Promise<null> => new Promise((r) => setTimeout(() => r(null), 50));
+          await expect(
+            interpreter.run(plan([node]), {
+              externalUserId: 'u',
+              durable: cancelled,
+              runId: 'run-1',
+              recorder: recorderInto([], slowPark),
+            }),
+          ).rejects.toThrow('Workflow has been cancelled');
+          await new Promise((r) => setImmediate(r));
+          expect(unhandled).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
+      },
+    );
+
+    it('reports a replayed timer as due when it first parked, not a fresh wait from now', async () => {
+      const firstParked = new Date('2026-10-09T09:00:00.000Z');
+      const finished: Record<string, unknown> = {};
+      const recorder = {
+        ...recorderInto([], () => Promise.resolve(firstParked)),
+        stepFinished: (_runId: string, stepKey: string, output: unknown) => {
+          finished[stepKey] = output;
+          return Promise.resolve();
+        },
+      } as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
+      const woke: DurableStep = {
+        run: (_n, fn) => fn(),
+        sleep: () => Promise.resolve(),
+        waitForEvent: () => Promise.resolve(null),
+      };
+      await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
+        externalUserId: 'u',
+        durable: woke,
+        runId: 'run-1',
+        recorder,
+      });
+      expect(finished.pause).toEqual({ slept_until: firstParked.toISOString() });
+    });
   });
 
   it('pinning: a pinned action replays its output and never calls the provider', async () => {

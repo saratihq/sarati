@@ -140,6 +140,31 @@ describe("WorkflowRunsPage", () => {
     );
   });
 
+  it("a run parked on a timer and an approval at once says, on each step, what that step waits for", async () => {
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-both", status: "waiting" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-both", status: "waiting" }),
+      steps: [
+        { node_id: "pause", status: "running", waiting: { kind: "timer", until: "2026-10-12T09:30:00.000Z" } },
+        { node_id: "approve", status: "running", waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" } },
+        { node_id: "fetch", status: "completed", waiting: null },
+      ],
+      waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" },
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect((await screen.findByTestId("run-waiting")).textContent).toBe(
+      "Waiting for a decision. Paused on an approval step — open the approvals inbox.",
+    );
+    expect(screen.getAllByTestId("run-step-waiting").map((line) => line.textContent)).toEqual([
+      "Waiting until Oct 12, 9:30 AM",
+      "Waiting for a decision",
+    ]);
+  });
+
   it("a real run's step that returns an object shaped like a marker is shown as its output", async () => {
     listRuns.mockResolvedValue({ runs: [run({ run_id: "r-live" })] });
     getRun.mockResolvedValue({
