@@ -57,6 +57,29 @@ account, production hits the real one, and the workflow document never contains 
 
 Sharing a workflow therefore never shares a credential.
 
+## Rename and delete
+
+An environment's name is part of its URLs, so renaming `staging` to `qa` moves
+`/api/hooks/<id>/staging` to `/api/hooks/<id>/qa`. A trigger registered with an app — a GitHub or
+Stripe webhook — follows on its own: the webhook at the old URL is deleted and a new one is
+registered at the new URL. A URL you gave a sender yourself, for an incoming webhook or a chat,
+changes too, so update it there.
+
+When a rename would move one of those, Sarati asks first: the confirmation lists each incoming
+webhook and chat in the environment with its new URL. Through the API, the rename answers `409`
+with the same list in `url_changes` until you send it again with `"confirm_url_changes": true`:
+
+```
+PATCH /api/environments/<id>
+{"name":"qa","confirm_url_changes":true}
+```
+
+Deleting an environment unpromotes every workflow from it and removes its triggers from their apps
+before the environment goes: webhooks are deleted and subscriptions cancelled. A webhook the app
+can't delete just then is retried on later reconciles after the environment is gone, every fifteen
+minutes when pg-boss is enabled; see
+[Changing a live app trigger](/build/triggers/#changing-a-live-app-trigger).
+
 ## Publishing
 
 **Publish** is promote-to-production. See

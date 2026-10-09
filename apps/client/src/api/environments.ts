@@ -50,7 +50,28 @@ export class ConnectionInUseError extends ApiError {
   }
 }
 
-// Mirrors client.ts's request(), plus the parsed error body this surface needs (the 409 `references` payload).
+/** An incoming-webhook or chat trigger whose URL a rename moves — a sender was given it by hand. */
+export interface UrlChange {
+  workflow_id: string;
+  workflow_name: string;
+  trigger: "webhook" | "chat";
+  /** Service-relative intake path before the rename. */
+  from: string;
+  /** Service-relative intake path after it. */
+  to: string;
+}
+
+/** A rename 409 — carries the trigger URLs it would move so the caller can confirm and retry. */
+export class RenameMovesUrlsError extends ApiError {
+  readonly changes: UrlChange[];
+  constructor(message: string, changes: UrlChange[]) {
+    super(message, 409);
+    this.name = "RenameMovesUrlsError";
+    this.changes = changes;
+  }
+}
+
+// Mirrors client.ts's request(), plus the parsed error bodies this surface needs (the 409 `references` and `url_changes` payloads).
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await getAuthToken();
   const headers: Record<string, string> = {
@@ -81,8 +102,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 function toApiError(body: unknown, status: number): ApiError {
   let message = `API error ${status}`;
   let references: ConnectionReference[] | null = null;
+  let urlChanges: UrlChange[] | null = null;
   if (body && typeof body === "object") {
-    const b = body as { detail?: unknown; message?: unknown; references?: unknown };
+    const b = body as { detail?: unknown; message?: unknown; references?: unknown; url_changes?: unknown };
+    if (Array.isArray(b.url_changes)) urlChanges = b.url_changes as UrlChange[];
     if (typeof b.detail === "string" && b.detail) message = b.detail;
     else if (typeof b.message === "string" && b.message) message = b.message;
     if (Array.isArray(b.references)) references = b.references as ConnectionReference[];
@@ -92,6 +115,7 @@ function toApiError(body: unknown, status: number): ApiError {
     }
   }
   if (status === 409 && references) return new ConnectionInUseError(message, references);
+  if (status === 409 && urlChanges) return new RenameMovesUrlsError(message, urlChanges);
   return new ApiError(message, status);
 }
 
@@ -103,9 +127,10 @@ export async function createEnvironment(name: string): Promise<void> {
   await request("/environments", { method: "POST", body: JSON.stringify({ name }) });
 }
 
-/** Rename an environment (label edit — pointers/triggers reference the id). 409 on prod. */
-export async function renameEnvironment(id: string, name: string): Promise<void> {
-  await request(`/environments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+/** Rename an environment. 409 on prod, and RenameMovesUrlsError until `confirmUrlChanges` when it moves a hand-given URL. */
+export async function renameEnvironment(id: string, name: string, confirmUrlChanges = false): Promise<void> {
+  const body = confirmUrlChanges ? { name, confirm_url_changes: true } : { name };
+  await request(`/environments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
 }
 
 /** Delete an environment — a guarded cascade. 409 on prod. */

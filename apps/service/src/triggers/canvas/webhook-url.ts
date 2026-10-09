@@ -20,6 +20,11 @@ export function webhookPathFor(workflowId: string, environment: string): string 
   return `/${HOOKS_PREFIX}/${workflowId}/${canonicalEnvName(environment)}`;
 }
 
+/** The canonical per-`(workflow, env)` chat PATH. */
+export function chatPathFor(workflowId: string, environment: string): string {
+  return `/api/chat/${workflowId}/${canonicalEnvName(environment)}`;
+}
+
 /** The absolute URL, given a public base (a trailing slash on the base is trimmed). */
 export function webhookUrlFor(baseUrl: string, workflowId: string, environment: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${webhookPathFor(workflowId, environment)}`;

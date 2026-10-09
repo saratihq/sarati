@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { Button } from "./button";
 
@@ -12,6 +12,8 @@ interface ConfirmDialogProps {
   message: string;
   /** Extra consequence line, rendered in danger color (e.g. "This cannot be undone."). */
   consequence?: string;
+  /** What the message refers to, when it is a list (rendered under it). */
+  children?: ReactNode;
   /** Require the user to type this exact string to enable the confirm CTA (destructive ops). */
   nameEcho?: string;
   confirmLabel?: string;
@@ -36,6 +38,7 @@ function ConfirmDialogBody({
   title = "Are you sure?",
   message,
   consequence,
+  children,
   nameEcho,
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
@@ -113,6 +116,7 @@ function ConfirmDialogBody({
         <p className="text-[13px] m-0 leading-relaxed" style={{ color: "var(--orchestr-ink-muted)" }}>
           {message}
         </p>
+        {children}
         {consequence && (
           <p className="text-xs mt-2 m-0 font-medium" style={{ color: "var(--orchestr-danger)" }}>
             {consequence}

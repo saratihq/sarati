@@ -172,6 +172,11 @@ export class TriggerReconcilerService {
       pointers: pointerInputs,
       kindOf: (node) => this.kindOf(node),
       connectionOf: (envId, node) => connByEnvApp.get(slotKey(envId, node)) ?? null,
+      // Only a registered webhook hands its intake URL to a provider.
+      webhookUrlOf: (envId, kind) =>
+        kind === 'registered_webhook'
+          ? this.webhookUrl({ workflowId, environmentId: envId }, envNameById)
+          : null,
     });
 
     const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
@@ -182,7 +187,7 @@ export class TriggerReconcilerService {
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
     // rest of the sweep — the next reconcile re-converges.
     for (const d of plan.toCreate) {
-      await this.applyCreate(d, envNameById).catch((err) => this.logApplyError('create', d.key, err));
+      await this.applyCreate(d).catch((err) => this.logApplyError('create', d.key, err));
     }
     for (const u of plan.toUpdate) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
@@ -227,7 +232,7 @@ export class TriggerReconcilerService {
       targets.push({ id: row.id, desired: d });
     }
     await runBounded(targets, SELFHEAL_CONCURRENCY, ({ id, desired: d }) =>
-      withActivationLock(this.pool, id, () => this.standUp(id, d, new Map())).catch((err) =>
+      withActivationLock(this.pool, id, () => this.standUp(id, d)).catch((err) =>
         this.logApplyError('selfheal', d.key, err),
       ),
     );
@@ -268,7 +273,7 @@ export class TriggerReconcilerService {
 
   // ─── apply ───
 
-  private async applyCreate(desired: DesiredActivation, envName: Map<string, string>): Promise<void> {
+  private async applyCreate(desired: DesiredActivation): Promise<void> {
     const id = newId();
     const ts = now();
     const missingSlot = this.needsConnection(desired) && desired.connection === null;
@@ -285,6 +290,7 @@ export class TriggerReconcilerService {
       connectionId: desired.connection?.connectionId ?? null,
       connectionOwnerUserId: desired.connection?.ownerUserId ?? null,
       paused: desired.paused,
+      webhookUrl: desired.webhookUrl,
       lastPolledAt: null,
       lastError: missingSlot ? this.slotError(desired) : null,
       createdAt: ts,
@@ -294,7 +300,7 @@ export class TriggerReconcilerService {
     });
     await withActivationLock(this.pool, id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-      if (standsUp) await this.standUp(id, desired, envName);
+      if (standsUp) await this.standUp(id, desired);
     });
   }
 
@@ -313,6 +319,7 @@ export class TriggerReconcilerService {
     row.connectionId = desired.connection?.connectionId ?? null;
     row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
     row.paused = desired.paused;
+    row.webhookUrl = desired.webhookUrl;
     row.lastError = missingSlot ? this.slotError(desired) : null;
     row.updatedAt = now();
     await withActivationLock(this.pool, row.id, async () => {
@@ -324,7 +331,7 @@ export class TriggerReconcilerService {
         await this.recordMaterialized(row.id, desired);
         return;
       }
-      await this.standUp(row.id, desired, envName);
+      await this.standUp(row.id, desired);
     });
   }
 
@@ -338,13 +345,9 @@ export class TriggerReconcilerService {
     });
   }
 
-  private async standUp(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
+  private async standUp(activationId: string, desired: DesiredActivation): Promise<void> {
     try {
-      await this.materialize(activationId, desired, envName);
+      await this.materialize(activationId, desired);
     } catch (err) {
       await this.recordError(activationId, err);
       return;
@@ -363,18 +366,14 @@ export class TriggerReconcilerService {
   // ─── provider materialization / teardown (per kind) ───
 
   /** Stand up the live side-effect for an activation; throws so the caller records the failure. */
-  private async materialize(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
+  private async materialize(activationId: string, desired: DesiredActivation): Promise<void> {
     const store = new DbActivationStore(this.dataSource, activationId);
     switch (desired.kind) {
       case 'schedule':
         await store.put(SCHEDULE_CURSOR_KEY, now().toISOString());
         return;
       case 'registered_webhook':
-        await this.registerWebhook(activationId, desired, envName);
+        await this.registerWebhook(activationId, desired);
         return;
       case 'polling':
         // A discarded seed primes the dedup watermark; until one succeeds the poll cycle passes the activation over.
@@ -591,23 +590,19 @@ export class TriggerReconcilerService {
   }
 
   /** Register a fresh provider subscription pointing at the per-(workflow,env) intake URL. */
-  private registerWebhook(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
-    return this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired, envName));
+  private registerWebhook(activationId: string, desired: DesiredActivation): Promise<void> {
+    return this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired));
   }
 
   private async registerWebhookOnce(
     activationId: string,
     desired: DesiredActivation,
-    envName: Map<string, string>,
   ): Promise<RegisteredWebhook | null> {
+    const { webhookUrl } = desired;
+    if (!webhookUrl) throw new Error(`No intake URL resolved for ${desired.triggerType}`);
     const store = new DbActivationStore(this.dataSource, activationId);
     const secret = randomBytes(32).toString('hex');
     await store.put(WEBHOOK_SECRET_KEY, secret);
-    const webhookUrl = this.webhookUrl(desired.key, envName);
     const registration = await this.sdkWebhooks.enable({
       externalUserId: desired.connection?.ownerUserId ?? '',
       type: desired.triggerType,
@@ -826,7 +821,10 @@ export class TriggerReconcilerService {
     return `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
   }
 
-  private webhookUrl(key: ActivationKey, envName: Map<string, string>): string {
+  private webhookUrl(
+    key: Pick<ActivationKey, 'workflowId' | 'environmentId'>,
+    envName: Map<string, string>,
+  ): string {
     const name = envName.get(key.environmentId) ?? key.environmentId;
     return webhookUrlFor(this.publicBaseUrl(), key.workflowId, name);
   }
@@ -869,12 +867,14 @@ function materializedOf(a: MaterializedActivation): MaterializedActivation {
     props: a.props,
     connection: a.connection,
     paused: a.paused,
+    webhookUrl: a.webhookUrl,
   };
 }
 
 // Read before the row is overwritten; a row with nothing recorded is best guessed by its own columns.
 function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
-  return row.materialized ?? materializedOf(actualOf(row));
+  const actual = actualOf(row);
+  return actual.materialized ?? materializedOf(actual);
 }
 
 // The props locate the hook in the app (a GitHub hook id exists only under its repository).

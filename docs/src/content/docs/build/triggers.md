@@ -115,6 +115,10 @@ version you promoted.
 A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
 a polled trigger carries on from where it was.
 
+Renaming the environment replaces a webhook the same way, because the address the app calls carries
+the environment's name: the webhook at the old address is deleted and one is registered at the new
+one.
+
 If the app can't delete the old webhook, the new trigger goes live anyway, and the delete is tried
 again every fifteen minutes — even after you remove the trigger, its workflow or its environment.
 A webhook that a live trigger has registered again is never deleted: Typeform keeps one webhook per
@@ -137,5 +141,9 @@ A webhook is a push. A service on the internet cannot reach `http://localhost`.
 
 For local development, expose your instance with a tunnel and set `PUBLIC_BASE_URL` to the public
 URL so generated webhook URLs are the ones a sender can actually reach.
+
+If the tunnel's address changes, update `PUBLIC_BASE_URL` and restart. Webhooks registered with apps
+move to the new address on the next reconcile, every fifteen minutes when pg-boss is enabled. A URL
+you gave a sender yourself has to be updated there.
 
 Your own `curl` on the same machine works without any of this.

@@ -46,12 +46,14 @@ export interface DesiredActivation {
   connection: ConnectionRef | null;
   /** Operator override: a paused activation is desired-present but not firing. */
   paused: boolean;
+  /** The intake URL the provider is told to deliver to (public base + env name); `null` for a kind that registers none. */
+  webhookUrl: string | null;
 }
 
 /** What the reconciler last stood up for an activation: the descriptor less its key and version. */
 export type MaterializedActivation = Pick<
   DesiredActivation,
-  'kind' | 'triggerType' | 'props' | 'connection' | 'paused'
+  'kind' | 'triggerType' | 'props' | 'connection' | 'paused' | 'webhookUrl'
 >;
 
 /** A `runtime_trigger_activations` row: the descriptor last applied to it, and what is actually live. */
@@ -80,6 +82,7 @@ function activationTargetEqual(a: MaterializedActivation, b: MaterializedActivat
     a.kind === b.kind &&
     a.triggerType === b.triggerType &&
     a.paused === b.paused &&
+    a.webhookUrl === b.webhookUrl &&
     connectionEqual(a.connection, b.connection)
   );
 }
