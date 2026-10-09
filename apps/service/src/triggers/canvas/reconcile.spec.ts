@@ -155,6 +155,12 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
     expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
   });
 
+  it('trigger RETYPED across the promote with identical props → update, cursor RESET', () => {
+    const d = desired({ key, versionId: 'v6', triggerType: 'gmail.poll_new_label', props: { url: 'x' } });
+    const a = desired({ key, versionId: 'v5', triggerType: 'gmail.poll_new_email', props: { url: 'x' } });
+    expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
+  });
+
   it('a slot swap (connection change, same version) → update, cursor RESET', () => {
     const d = desired({
       key,

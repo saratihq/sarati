@@ -42,9 +42,9 @@ import { TriggerSignalsService } from '../trigger-signals.service';
 import { webhookUrlFor } from './webhook-url';
 import {
   activationKeyString,
+  activationTargetEqual,
   type ActivationKind,
   type ActualActivation,
-  connectionEqual,
   type ConnectionRef,
   type DesiredActivation,
 } from './trigger-activation';
@@ -259,7 +259,9 @@ export class TriggerReconcilerService {
     envName: Map<string, string>,
     irByVersion: Map<string, WorkflowIR>,
   ): Promise<void> {
-    const cursorAction = this.cursorActionFor(row, desired, irByVersion);
+    // Teardown removes what the row stood up, so it reads the row as it was before this update.
+    const live = toDesired(row);
+    const cursorAction = this.cursorActionFor(live, desired, irByVersion);
     const missingSlot = this.needsConnection(desired) && desired.connection === null;
     row.kind = desired.kind;
     row.triggerType = desired.triggerType;
@@ -271,24 +273,20 @@ export class TriggerReconcilerService {
     row.lastError = missingSlot ? this.slotError(desired) : null;
     row.updatedAt = now();
     await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-    if (desired.paused) {
-      // A pause tears down the live side-effect (subscription/poller) but keeps the row.
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
-      return;
-    }
-    if (missingSlot) {
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
+    if (desired.paused || missingSlot) {
+      // A pause or an emptied slot tears down the live side-effect but keeps the row.
+      await this.teardown(row.id, live, envName);
       return;
     }
     // A 'keep' leaves the cursor/subscription untouched; a 'reset' re-materializes from now.
     if (cursorAction === 'reset') {
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
+      await this.teardown(row.id, live, envName);
       await this.materialize(row.id, desired, envName, 'reset');
     }
   }
 
   private async applyDelete(row: RuntimeTriggerActivationEntity): Promise<void> {
-    await this.teardown(row.id, row.kind as ActivationKind, toDesired(row), new Map());
+    await this.teardown(row.id, toDesired(row), new Map());
     await this.dataSource.manager.delete(RuntimeTriggerActivationEntity, { id: row.id }); // store cascades
   }
 
@@ -298,19 +296,18 @@ export class TriggerReconcilerService {
    * `triggerConfigChangedAcrossVersions` → `computeDiff` (invariant #4), never a byte compare.
    */
   private cursorActionFor(
-    row: RuntimeTriggerActivationEntity,
+    live: ActualActivation,
     desired: DesiredActivation,
     irByVersion: Map<string, WorkflowIR>,
   ): 'keep' | 'reset' {
-    if (!connectionEqual(desired.connection, connOf(row))) return 'reset';
-    if (desired.paused !== row.paused) return 'reset';
-    if (!row.versionId || row.versionId === desired.versionId) return 'keep'; // nothing moved
-    const oldIr = irByVersion.get(row.versionId);
+    if (!activationTargetEqual(desired, live)) return 'reset';
+    if (!live.versionId || live.versionId === desired.versionId) return 'keep'; // nothing moved
+    const oldIr = irByVersion.get(live.versionId);
     const newIr = irByVersion.get(desired.versionId);
-    if (!oldIr || !newIr) return deepEqual(desired.props, row.props ?? {}) ? 'keep' : 'reset';
+    if (!oldIr || !newIr) return deepEqual(desired.props, live.props) ? 'keep' : 'reset';
     if (!triggerConfigChangedAcrossVersions(oldIr, newIr, desired.key.triggerNodeId)) return 'keep';
     // That check is a coarse upper bound (a position nudge flags too) — narrow it on props.
-    return deepEqual(desired.props, row.props ?? {}) ? 'keep' : 'reset';
+    return deepEqual(desired.props, live.props) ? 'keep' : 'reset';
   }
 
   // ─── provider materialization / teardown (per kind) ───
@@ -364,49 +361,48 @@ export class TriggerReconcilerService {
     }
   }
 
-  /** Tear the live side-effect down (best-effort — teardown failures must not wedge the sweep). */
+  /** Tear down what `live` stood up (best-effort — teardown failures must not wedge the sweep). */
   private async teardown(
     activationId: string,
-    kind: ActivationKind,
-    desired: DesiredActivation,
+    live: ActualActivation,
     envName: Map<string, string>,
   ): Promise<void> {
     try {
       const store = new DbActivationStore(this.dataSource, activationId);
-      if (kind === 'registered_webhook') {
+      if (live.kind === 'registered_webhook') {
         const registration = (await store.get<WebhookRegistration>(WEBHOOK_REGISTRATION_KEY)) ?? undefined;
         const secret = (await store.get<string>(WEBHOOK_SECRET_KEY)) ?? '';
         await this.sdkWebhooks.disable({
-          externalUserId: desired.connection?.ownerUserId ?? '',
-          type: desired.triggerType,
-          props: desired.props,
-          auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
+          externalUserId: live.connection?.ownerUserId ?? '',
+          type: live.triggerType,
+          props: live.props,
+          auth: live.connection ? { connectionId: live.connection.connectionId } : null,
           store,
-          webhookUrl: this.webhookUrl(desired, envName),
+          webhookUrl: this.webhookUrl(live, envName),
           secret,
           registration,
         });
         await store.delete(WEBHOOK_REGISTRATION_KEY);
         await store.delete(WEBHOOK_SECRET_KEY);
-      } else if (kind === 'polling') {
+      } else if (live.kind === 'polling') {
         // SDK polling holds no remote subscription (its cursor cascade-deletes with the
         // row); only the hand-polled Composio-poll rail has a disable.
-        if (!this.sdkPolling.isPollingTrigger(desired.triggerType)) {
+        if (!this.sdkPolling.isPollingTrigger(live.triggerType)) {
           await this.lifecycle.disableTrigger({
-            externalUserId: desired.connection?.ownerUserId ?? '',
-            triggerId: desired.triggerType,
-            props: desired.props,
-            auth: desired.connection ? { connectionId: desired.connection.connectionId } : undefined,
+            externalUserId: live.connection?.ownerUserId ?? '',
+            triggerId: live.triggerType,
+            props: live.props,
+            auth: live.connection ? { connectionId: live.connection.connectionId } : undefined,
             store,
           });
         }
-      } else if (kind === 'composio_subscription') {
-        await this.unsubscribeComposio(activationId, desired.key.workflowId);
-      } else if (kind === 'schedule') {
+      } else if (live.kind === 'composio_subscription') {
+        await this.unsubscribeComposio(activationId, live.key.workflowId);
+      } else if (live.kind === 'schedule') {
         await store.delete(SCHEDULE_CURSOR_KEY);
       }
     } catch (err) {
-      this.logger.warn(`activation ${activationId} teardown (${kind}) failed: ${errorMessage(err)}`);
+      this.logger.warn(`activation ${activationId} teardown (${live.kind}) failed: ${errorMessage(err)}`);
     }
   }
 

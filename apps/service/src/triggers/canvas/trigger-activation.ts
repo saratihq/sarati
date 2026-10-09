@@ -61,16 +61,21 @@ export function connectionEqual(a: ConnectionRef | null, b: ConnectionRef | null
   return a.connectionId === b.connectionId && a.ownerUserId === b.ownerUserId;
 }
 
+/** Is the same live side-effect behind both (kind, trigger type, connection, paused)? If not, the old one is torn down. */
+export function activationTargetEqual(a: DesiredActivation, b: ActualActivation): boolean {
+  return (
+    a.kind === b.kind &&
+    a.triggerType === b.triggerType &&
+    a.paused === b.paused &&
+    connectionEqual(a.connection, b.connection)
+  );
+}
+
 /**
- * Does the ACTIVATION INTENT match (kind, props, connection, paused)? `props` equality MUST use the
+ * Does the ACTIVATION INTENT match (target and props)? `props` equality MUST use the
  * vault's `deepEqual`, never `JSON.stringify` (invariant #4). The authoritative cross-version
  * "did the trigger config change" primitive lives in `trigger-config-diff.ts`.
  */
 export function activationDescriptorEqual(a: DesiredActivation, b: ActualActivation): boolean {
-  return (
-    a.kind === b.kind &&
-    a.paused === b.paused &&
-    connectionEqual(a.connection, b.connection) &&
-    deepEqual(a.props, b.props)
-  );
+  return activationTargetEqual(a, b) && deepEqual(a.props, b.props);
 }
