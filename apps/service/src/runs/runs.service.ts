@@ -20,10 +20,15 @@ import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
 import { rawQuery } from '../database/raw-query';
-import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.service';
+import {
+  REFUSED_RUN_ERROR_PREFIX,
+  RunRecorderService,
+  truncatedValueOf,
+} from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
+import { isTimerWait, TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
 import { reachesRun, runReachSql, type RunAccess } from './run-access';
 import { failedNodeIdOf, type RunFailureDetails } from './run-failure';
 
@@ -57,6 +62,9 @@ export interface RunDispatchOptions {
 /** Dispatch options for the IR entry points, which additionally resolve the caller's org. */
 export type IrRunOptions = RunDispatchOptions & { activeOrgId?: string | null };
 
+/** What an entry point asks to run: a raw client-supplied plan, or a workflow document. */
+export type PlanSource = { plan: RunPlan } | { ir: WorkflowIR };
+
 /** Read options for {@link RunsService.getRun}. */
 export interface GetRunOptions {
   /** Default true. False withholds every step payload (`output` AND `output_preview`) from the read itself. */
@@ -79,6 +87,35 @@ interface SubWorkflowRunRow {
   workflow_id: string | null;
   workflow_name: string | null;
   status: string;
+}
+
+function timerWaitRefusal(message: string): DomainError {
+  return new DomainError(message, 409, { code: 'timer_wait' });
+}
+
+function parkedTimerRefusal(runId: string, wakesAt: Date | null): DomainError {
+  if (wakesAt && wakesAt.getTime() <= Date.now()) {
+    return timerWaitRefusal(
+      `Run ${runId} was due at ${wakesAt.toISOString()}, not waiting for an event — it resumes on its own`,
+    );
+  }
+  const until = wakesAt ? ` until ${wakesAt.toISOString()}` : '';
+  return timerWaitRefusal(`Run ${runId} is waiting${until}, not for an event — it resumes on its own`);
+}
+
+/** What a parked run is waiting for: its own clock (`timer`) or someone sending an event. */
+export interface RunWaiting {
+  kind: 'timer' | 'event';
+  /** When a timer wakes, or when an event wait times out. */
+  until: string | null;
+}
+
+function waitingOf(row: RuntimeRunEntity): RunWaiting | null {
+  if (row.status !== 'waiting' || !row.waitingTopic) return null;
+  return {
+    kind: isTimerWait(row.waitingTopic) ? 'timer' : 'event',
+    until: row.waitingTimeoutAt?.toISOString() ?? null,
+  };
 }
 
 function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
@@ -111,6 +148,8 @@ export type RunDetail = RunStatus & {
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
   decided_by: { id: string; name: string | null; email: string | null } | null;
   decided_at: string | null;
+  /** Set while the run is `waiting`: what it waits for, and until when. */
+  waiting: RunWaiting | null;
 };
 
 /**
@@ -137,8 +176,9 @@ export class RunsService {
   }
 
   /** Run a raw client-supplied `RunPlan` (POST /runs), lowered to a `DagPlan` for the one engine. */
-  run(plan: RunPlan, opts: RunDispatchOptions): Promise<RunResult> {
-    return this.runExecutable(this.compiler.fromRunPlan(plan), opts);
+  async run(plan: RunPlan, opts: RunDispatchOptions): Promise<RunResult> {
+    const runId = opts.runId ?? randomUUID();
+    return this.runExecutable(await this.compile({ plan }, opts, runId), { ...opts, runId });
   }
 
   /** Dispatch a COMPILED `DagPlan`: record the run, then execute via DBOS or the interpreter. Every entry point funnels here. */
@@ -314,7 +354,7 @@ export class RunsService {
   ): Promise<{ runId: string; pending: Promise<RunResult> }> {
     if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
     const runId = opts.runId ?? randomUUID();
-    const plan = await this.compileIr(ir, opts, runId);
+    const plan = await this.compile({ ir }, opts, runId);
     return {
       runId,
       pending: this.runExecutable(plan, {
@@ -325,27 +365,32 @@ export class RunsService {
     };
   }
 
-  /** The ONE compile seam every IR entry point takes — sync, bounded and async all lower a document here. */
-  private async compileIr(ir: WorkflowIR, opts: IrRunOptions, runId: string): Promise<DagPlan> {
+  /** Compile what a run start was given; one that can't compile is answered 400 before any step runs, and recorded as refused unless its id already holds a run. */
+  private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
-      return this.compiler.compile(ir, opts.workflowId ?? undefined);
+      return 'ir' in source
+        ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)
+        : this.compiler.fromRunPlan(source.plan);
     } catch (err) {
-      // A document that can't compile is the CALLER's problem → 400, recorded as a failed
-      // run first (there is no plan yet, so the interpreter never writes one).
-      const message = `Workflow can't run: ${errorMessage(err)}`;
-      const scoped = this.scopedRunId(opts.externalUserId, runId);
+      const message = `${REFUSED_RUN_ERROR_PREFIX}${errorMessage(err)}`;
       // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review / env.
-      await this.recorder?.runStarted(scoped, runId, opts.externalUserId, null, {
-        workflowId: opts.workflowId ?? null,
-        source: opts.source ?? 'api',
-        environment: opts.environment ?? null,
-        environmentId: opts.environmentId ?? null,
-        workflowVersionId: opts.workflowVersionId ?? null,
-        reviewId: opts.reviewId ?? null,
-        orgId: opts.orgId ?? opts.activeOrgId ?? null,
-      });
-      await this.recorder?.runFinished(scoped, null, message);
+      await this.recorder?.runRefused(
+        this.scopedRunId(opts.externalUserId, runId),
+        runId,
+        opts.externalUserId,
+        message,
+        {
+          workflowId: opts.workflowId ?? null,
+          source: opts.source ?? 'api',
+          environment: opts.environment ?? null,
+          environmentId: opts.environmentId ?? null,
+          workflowVersionId: opts.workflowVersionId ?? null,
+          reviewId: opts.reviewId ?? null,
+          dryRun: opts.dryRun ?? false,
+          orgId: opts.orgId ?? opts.activeOrgId ?? null,
+        },
+      );
       throw new DomainError(message, 400, {
         code: 'compile_failed',
         run_id: runId,
@@ -491,23 +536,14 @@ export class RunsService {
 
   /**
    * Start a run without waiting (long-running / human-in-the-loop). Requires DBOS — an unattended
-   * run has to survive a restart. A WorkflowIR takes the SAME compile seam as `from-ir`.
+   * run has to survive a restart. A plan or a WorkflowIR takes the SAME compile seam as the sync routes.
    */
-  async startRun(
-    source: { plan: RunPlan } | { ir: WorkflowIR },
-    opts: IrRunOptions,
-  ): Promise<{ runId: string }> {
+  async startRun(source: PlanSource, opts: IrRunOptions): Promise<{ runId: string }> {
     this.requireDbos();
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
-    let dag: DagPlan;
-    if ('ir' in source) {
-      if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
-      dag = await this.compileIr(source.ir, opts, runId);
-    } else {
-      // The async raw-plan path carries no env context (no workflow/tag) — personal.
-      dag = this.compiler.fromRunPlan(source.plan);
-    }
+    if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
+    const dag = await this.compile(source, opts, runId);
     await this.recorder?.runStarted(scoped, runId, opts.externalUserId, dag, {
       workflowId: opts.workflowId ?? null,
       source: opts.source ?? 'api',
@@ -554,6 +590,7 @@ export class RunsService {
         duration_ms: null,
         decided_by: null,
         decided_at: null,
+        waiting: null,
         called_by: null,
         calls: [],
       };
@@ -587,6 +624,7 @@ export class RunsService {
       ...status,
       decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
       decided_at: row.decidedAt?.toISOString() ?? null,
+      waiting: waitingOf(row),
       steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false)),
       ...(em ? await this.subWorkflowLinks(em, row, scoped, access) : { called_by: null, calls: [] }),
       started_at: row.startedAt?.toISOString() ?? null,
@@ -742,8 +780,10 @@ export class RunsService {
       access.orgWide ? access.activeOrgId : null,
       access.orgIds,
       access.pinned,
+      TIMER_TOPIC_SQL_PREFIX,
     ];
     let where = `r.status = 'waiting'
+        AND r.waiting_topic NOT LIKE $5 || '%'
         AND (r.waiting_timeout_at IS NULL OR r.waiting_timeout_at > now())
         AND (r.user_id = $1 OR w.org_id = $2)
         AND ${runReachSql(3, 4)}`;
@@ -794,6 +834,9 @@ export class RunsService {
     if (!em) {
       // Bare embedding (no history tables): DBOS buffers sends itself, and without the
       // runtime_runs row the caller may only resume their own run.
+      if (isTimerWait(topic)) {
+        throw timerWaitRefusal(`Topic "${topic}" belongs to a timed wait and can't be sent to`);
+      }
       this.requireDbos();
       return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, payload);
     }
@@ -803,6 +846,7 @@ export class RunsService {
     if (row.status !== 'waiting' || !row.waitingTopic) {
       throw new DomainError(`Run ${runId} is not waiting for an event`, 409);
     }
+    if (isTimerWait(row.waitingTopic)) throw parkedTimerRefusal(runId, row.waitingTimeoutAt);
     if (row.waitingTopic !== topic) {
       throw new DomainError(`Run ${runId} is waiting on topic "${row.waitingTopic}", not "${topic}"`, 409);
     }

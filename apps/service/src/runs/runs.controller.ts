@@ -23,7 +23,7 @@ import { channelKey } from '../runtime/agent-step-bus';
 import type { RunHandle, RunOutcome, RunPlan, RunResult } from '../runtime/run-plan';
 import { runAccessOf, type RunAccess } from './run-access';
 import { PolicyService } from '../policy/policy.service';
-import { RunsService, type IrRunOptions } from './runs.service';
+import { RunsService, type IrRunOptions, type PlanSource } from './runs.service';
 import { Scope } from '../auth/scope.decorator';
 import { DomainError } from '../common/domain-error';
 
@@ -178,7 +178,7 @@ class TestAgentDto {
 const AGENT_TEST_ENV = 'draft';
 
 /** Exactly one of `plan` / `workflow_ir` — a body carrying both, or neither, is a caller bug rather than a guess. */
-function asyncRunSource(body: StartAsyncDto): { plan: RunPlan } | { ir: WorkflowIR } {
+function asyncRunSource(body: StartAsyncDto): PlanSource {
   if (body.plan && body.workflow_ir) {
     throw new DomainError('Send either `plan` or `workflow_ir`, not both.', 400);
   }
@@ -204,11 +204,7 @@ export class RunsController {
     return runAccessOf(requirePrincipal(req), this.policy);
   }
 
-  /**
-   * The run id a caller may set. A non-interactive principal may NOT: `runtime_runs` inserts
-   * `ON CONFLICT DO NOTHING`, so replaying a prior id would execute with no new history row —
-   * an agent could erase its own audit trail. Use `Idempotency-Key` for retry safety instead.
-   */
+  /** The run id a caller may set; never an API key's, since a replayed id reuses or overwrites that id's history row, so a key could rewrite its own audit trail. */
   private requestedRunId(req: Request, runId: string | undefined): string | undefined {
     if (runId === undefined) return undefined;
     if (requirePrincipal(req).kind !== 'api_key') return runId;
@@ -378,6 +374,7 @@ export class RunsController {
       duration_ms: s.duration_ms,
       decided_by: s.decided_by,
       decided_at: s.decided_at,
+      waiting: s.waiting,
       // Both ends of a sub-workflow call — a nested run is recorded under the workflow
       // that ran it, so these are the only path between the two.
       called_by: s.called_by,

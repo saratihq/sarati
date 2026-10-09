@@ -15,6 +15,13 @@ export function formatDate(iso: string | null | undefined): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+/** "Oct 9, 3:05 PM" — a moment that is minutes or days away. */
+export function formatDateTime(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return DASH;
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 /** "420ms" / "3.2s" / "2m 14s" / "1h 4m" — run durations from milliseconds. */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return DASH;

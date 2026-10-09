@@ -14,6 +14,9 @@ const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
 
+/** How every refused run's error begins; a run that executes records its own outcome over it. */
+export const REFUSED_RUN_ERROR_PREFIX = "Workflow can't run: ";
+
 /** An oversized stored value: the head of its JSON, plus the size it actually had. */
 export interface TruncatedValue {
   truncated: true;
@@ -109,6 +112,7 @@ export class RunRecorderService implements RunRecorder {
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
+  /** Record a run as started; it takes over an id only a refusal holds, and leaves any run already on it as it was. */
   async runStarted(
     scopedRunId: string,
     runId: string,
@@ -116,11 +120,48 @@ export class RunRecorderService implements RunRecorder {
     plan: unknown,
     meta?: RunStartMeta,
   ): Promise<void> {
-    await this.write('runStarted', scopedRunId, [
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
-       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12, $13, $14,
+    await this.insertRun('runStarted', scopedRunId, runId, userId, plan, meta, null);
+  }
+
+  /** Record a run refused before any step ran, as already failed; it replaces an earlier refusal on the id, and leaves any run on it as it was. */
+  async runRefused(
+    scopedRunId: string,
+    runId: string,
+    userId: string,
+    error: string,
+    meta?: RunStartMeta,
+  ): Promise<void> {
+    await this.insertRun('runRefused', scopedRunId, runId, userId, null, meta, error);
+  }
+
+  private async insertRun(
+    op: string,
+    scopedRunId: string,
+    runId: string,
+    userId: string,
+    plan: unknown,
+    meta: RunStartMeta | undefined,
+    error: string | null,
+  ): Promise<void> {
+    await this.write(op, scopedRunId, [
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
+       VALUES ($1, $2, $3, $4, CAST($5 AS json),
+               CASE WHEN $16::text IS NULL THEN 'running' ELSE 'error' END, $16, now(),
+               CASE WHEN $16::text IS NULL THEN NULL ELSE now() END,
+               $6, $7, $8, $9, $10, $11, $12, $13, $14,
                COALESCE((SELECT org_id FROM workflows WHERE id = $6), $15))
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (id) DO UPDATE
+          SET plan_id = EXCLUDED.plan_id, plan = EXCLUDED.plan, status = EXCLUDED.status,
+              error = EXCLUDED.error, outputs = NULL, started_at = EXCLUDED.started_at,
+              finished_at = EXCLUDED.finished_at, workflow_id = EXCLUDED.workflow_id,
+              source = EXCLUDED.source, environment = EXCLUDED.environment,
+              environment_id = EXCLUDED.environment_id, workflow_version_id = EXCLUDED.workflow_version_id,
+              review_id = EXCLUDED.review_id, dry_run = EXCLUDED.dry_run,
+              parent_run_id = EXCLUDED.parent_run_id, parent_step_key = EXCLUDED.parent_step_key,
+              org_id = EXCLUDED.org_id
+        WHERE runtime_runs.status = 'error' AND starts_with(runtime_runs.error, $17)
+          AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
+          AND NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = runtime_runs.id)`,
       [
         scopedRunId,
         runId,
@@ -137,6 +178,8 @@ export class RunRecorderService implements RunRecorder {
         meta?.parentRunId ?? null,
         meta?.parentStepKey ?? null,
         meta?.orgId ?? null,
+        error,
+        REFUSED_RUN_ERROR_PREFIX,
       ],
     ]);
   }
