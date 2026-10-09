@@ -16,7 +16,7 @@ import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import type { RunPlan } from '../src/runtime/run-plan';
-import { ADMIN_URL, withDatabase } from './support/test-db';
+import { ADMIN_URL, e2eDatabaseName, withDatabase } from './support/test-db';
 
 // A ManagedIntegrationProvider backed by the SDK http.send_request action (auth `none`, in-process).
 const sdkConfig = {
@@ -51,7 +51,7 @@ describe('DBOS durable execution (Phase 1b)', () => {
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
     // Fresh, empty system database — DBOS builds its own checkpoint schema on launch.
-    sysDbName = `orchestr_e2e_dbos_${randomBytes(4).toString('hex')}`;
+    sysDbName = `${e2eDatabaseName()}_dbos`;
     const admin = new Client({ connectionString: ADMIN_URL });
     await admin.connect();
     try {
