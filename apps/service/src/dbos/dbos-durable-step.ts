@@ -29,7 +29,12 @@ export class DbosDurableStep implements DurableStep {
     return DBOS.recv<T>(topic, timeoutMs / 1000);
   }
 
+  // A step's body may not call DBOS, and DBOS raises a cancel only at its next call.
+  waitInStep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   isCancellation(err: unknown): boolean {
-    return isDurableCancellation(err);
+    return err instanceof DbosErrors.DBOSWorkflowCancelledError;
   }
 }

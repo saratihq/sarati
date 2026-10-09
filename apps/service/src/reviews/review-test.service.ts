@@ -12,7 +12,7 @@ import { ReviewTestResultEntity } from '../database/entities/review-test-result.
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { now } from '../database/ids';
 import type { WorkflowIR } from '../ir/models';
-import { RunsService } from '../runs/runs.service';
+import { isRunCancelled, RunsService } from '../runs/runs.service';
 import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
@@ -35,6 +35,7 @@ interface SideRun {
   status: 'completed' | 'error';
   outputs: Record<string, unknown> | null;
   error: string | null;
+  cancelled: boolean;
 }
 
 /**
@@ -81,6 +82,12 @@ export class ReviewTestService {
       this.runSide(baseIr, payload, workflowId, reviewId, opts),
       this.runSide(headIr, payload, workflowId, reviewId, opts),
     ]);
+    // A cancelled run neither passed nor failed, so the test has no result to keep or to gate a merge on.
+    if (base.cancelled || head.cancelled) {
+      throw new DomainError('The test was cancelled before it finished, so it has no result', 409, {
+        code: 'test_cancelled',
+      });
+    }
 
     const regression =
       base.outputs && head.outputs
@@ -168,13 +175,14 @@ export class ReviewTestService {
         orgId: opts.activeOrgId,
         initialScope: payload !== undefined ? { trigger: payload } : undefined,
       });
-      return { runId, status: 'completed', outputs: result.outputs, error: null };
+      return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
     } catch (err) {
       return {
         runId,
         status: 'error',
         outputs: null,
         error: errorMessage(err),
+        cancelled: isRunCancelled(err),
       };
     }
   }

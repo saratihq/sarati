@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
 import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
-import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, RunCancelledError, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import {
   AgentStepsExhausted,
@@ -415,15 +415,15 @@ export abstract class BasePlanInterpreter {
         stepKey,
         node.id,
         kind,
-        () => (isPinned ? Promise.resolve(ctx.pins!.get(node.id)) : run(stepKey)),
+        () => (isPinned ? this.replayPin(ctx, node.id) : run(stepKey)),
         isPinned,
       );
       scope[node.id] = output;
       const warnings = ctx.stepWarnings.get(stepKey);
       ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
-      // A cancel unwinds the run: no error lane or continue-on-fail may absorb it.
-      if (ctx.durable.isCancellation(err)) throw err;
+      // A cancel unwinds the run: no error lane or continue-on-fail may absorb it, nor a failure after it.
+      if (ctx.durable.isCancellation(err) || (await this.isCancelled(ctx))) throw err;
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
       // read `{{node.text}}` (the partial answer is never discarded).
@@ -472,6 +472,8 @@ export abstract class BasePlanInterpreter {
       const topic = timerTopicFor(stepKey);
       const wake = new Date(Date.now() + node.ms);
       const sleeping = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, topic, node.ms);
+      // Handled from birth: a cancel can reject it while the pause below is still being written.
+      void sleeping.catch(() => undefined);
       await record?.recorder.runWaiting(record.runId, node.id, topic, wake);
       try {
         await sleeping;
@@ -502,6 +504,8 @@ export abstract class BasePlanInterpreter {
       // Register the receiver BEFORE persisting the pause, so anyone who observes the
       // waiting row is guaranteed a receiver already exists to deliver to.
       const wait = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, node.topic, node.timeoutMs);
+      // Handled from birth: a cancel can reject it while the pause below is still being written.
+      void wait.catch(() => undefined);
       await record?.recorder.runWaiting(
         record.runId,
         node.id,
@@ -610,9 +614,12 @@ export abstract class BasePlanInterpreter {
     runBranch: (branchScope: Record<string, unknown>, index: number, childPath: string) => Promise<void>,
   ): Promise<void> {
     const branchScopes = Array.from({ length: branchCount }, () => ({ ...scope }));
-    await Promise.all(
+    // Every branch settles before one's failure ends the node, so nothing is still running as the run unwinds.
+    const settled = await Promise.allSettled(
       branchScopes.map((branchScope, i) => runBranch(branchScope, i, `${path}${node.id}|${i}/`)),
     );
+    const failed = settled.find((outcome) => outcome.status === 'rejected');
+    if (failed) throw failed.reason;
     // Merge each branch's new outputs back into the shared scope.
     for (const branchScope of branchScopes) {
       for (const key of Object.keys(branchScope)) {
@@ -956,9 +963,7 @@ export abstract class BasePlanInterpreter {
   ): Promise<T> {
     const maxAttempts = retry?.maxAttempts ?? 1;
     const backoffMs = retry?.backoffMs ?? 0;
-    let tries = 0;
-    for (;;) {
-      tries += 1;
+    for (let tries = 1; ; tries++) {
       try {
         const result = await attempt();
         if (tries > 1) await this.recordAttempts(ctx, stepKey, tries);
@@ -968,9 +973,24 @@ export abstract class BasePlanInterpreter {
           if (maxAttempts > 1) await this.recordAttempts(ctx, stepKey, tries);
           throw err;
         }
-        if (backoffMs > 0) await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        if (backoffMs > 0) await ctx.durable.waitInStep(backoffMs);
+        // No attempt starts after a cancel, on either rail.
+        if (await this.isCancelled(ctx)) {
+          await this.recordAttempts(ctx, stepKey, tries);
+          throw err;
+        }
       }
     }
+  }
+
+  private async replayPin(ctx: RunContext, nodeId: string): Promise<unknown> {
+    // A replay fires nothing, but nothing replays after a cancel either: it would read as the run going on.
+    if (await this.isCancelled(ctx)) throw new RunCancelledError();
+    return ctx.pins!.get(nodeId);
+  }
+
+  private isCancelled(ctx: RunContext): Promise<boolean> {
+    return ctx.record ? ctx.record.recorder.isCancelled(ctx.record.runId) : Promise.resolve(false);
   }
 
   private async recordAttempts(ctx: RunContext, stepKey: string, attempts: number): Promise<void> {

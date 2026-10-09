@@ -36,10 +36,18 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
   let base = '';
   const hits = new Map<string, number>();
   const held: ServerResponse[] = [];
+  const unhandled: unknown[] = [];
+  const collectUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
   const hitsOn = (path: string): number => hits.get(path) ?? 0;
-  /** Answer every request `/gate` is holding, so a step that was in flight can finish. */
-  const openGate = (): void => {
-    for (const res of held.splice(0)) res.end('{"ok":true}');
+  const pause = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  /** Answer every request a `/gate…` path is holding, so a step that was in flight can finish. */
+  const openGate = (status = 200): void => {
+    for (const res of held.splice(0)) {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(status === 200 ? '{"ok":true}' : '{"error":"refused"}');
+    }
   };
   const get = (id: string, path: string) => ({
     kind: 'action',
@@ -47,6 +55,59 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
     actionId: 'http.send_request',
     props: { method: 'GET', url: `${base}${path}` },
   });
+  const post = (id: string, path: string, extra: Record<string, unknown> = {}) => ({
+    kind: 'action',
+    id,
+    actionId: 'http.send_request',
+    props: { method: 'POST', url: `${base}${path}`, body: {} },
+    ...extra,
+  });
+  const http = (): ReturnType<typeof request> => request(app.getHttpServer());
+  /** Start a raw plan and leave it in flight; the answer settles only when the run does. */
+  const start = (runId: string, nodes: unknown[]) =>
+    http()
+      .post('/api/runs')
+      .send({ plan: { id: `plan-${runId}`, nodes }, run_id: runId })
+      .then((res) => res);
+  const cancel = (runId: string) => http().post(`/api/runs/${runId}/cancel`);
+  const node = (id: string, nodeType: string, parameters: Record<string, unknown>) => ({
+    id,
+    name: id,
+    node_type: nodeType,
+    type_version: 1,
+    parameters,
+    position: { x: 0, y: 0 },
+    metadata: {},
+  });
+  const edge = (from: string, to: string) => ({
+    id: `${from}->${to}`,
+    source_node_id: from,
+    source_port: 0,
+    target_node_id: to,
+    target_port: 0,
+    port_type: 'main',
+  });
+  const doc = (nodes: unknown[], edges: unknown[]) => ({
+    version: '1.0',
+    name: 'called by another',
+    description: '',
+    nodes,
+    edges,
+    settings: { execution_order: 'v1', extra: {} },
+    metadata: {},
+  });
+  /** Wait until some backend is blocked on a lock running a statement that matches `pattern`. */
+  async function untilBlocked(pattern: string): Promise<void> {
+    for (let i = 0; i < 200; i++) {
+      const rows = await db.query(
+        `SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1`,
+        [pattern],
+      );
+      if (rows.rows.length > 0) return;
+      await pause(25);
+    }
+    throw new Error(`nothing ever waited on ${pattern}`);
+  }
   async function untilHit(path: string): Promise<void> {
     for (let i = 0; i < 200 && hitsOn(path) === 0; i++) await new Promise((r) => setTimeout(r, 25));
     if (hitsOn(path) === 0) throw new Error(`never saw a request on ${path}`);
@@ -63,10 +124,14 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
     server = createServer((req, res) => {
       const path = new URL(req.url ?? '/', 'http://local').pathname;
       hits.set(path, hitsOn(path) + 1);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      if (path === '/gate') held.push(res);
-      else res.end('{"ok":true}');
+      if (path.startsWith('/gate')) {
+        held.push(res);
+        return;
+      }
+      res.writeHead(path === '/flaky' ? 500 : 200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
     });
+    process.on('unhandledRejection', collectUnhandled);
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -92,6 +157,7 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
   });
 
   afterAll(async () => {
+    process.off('unhandledRejection', collectUnhandled);
     await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
     await db.end();
     await app.close();
@@ -198,6 +264,230 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
       answer: 'run_cancelled',
       afterCalls: 0,
       after: 'Cancelled before it finished',
+    });
+  }, 60_000);
+
+  it.each([
+    [
+      'a wait for an event',
+      'wait',
+      { kind: 'waitForEvent', id: 'next', topic: 'approval', timeoutMs: 120_000 },
+    ],
+    ['a delay that parks', 'park', { kind: 'delay', id: 'next', ms: 120_000 }],
+  ])(
+    'a cancel that lands just before %s never takes the service down',
+    async (_what, shape, next) => {
+      unhandled.length = 0;
+      for (let round = 0; round < 3; round++) {
+        const runId = `before-${shape}-${round}`;
+        const answer = start(runId, [post('gate', '/gate'), next, post('after', '/after')]);
+        await untilHit('/gate');
+        await cancel(runId).expect(200);
+        openGate();
+        expect((await answer).body.code).toBe('run_cancelled');
+        hits.clear();
+      }
+      await pause(200);
+      expect({ unhandled: unhandled.map(String), afterCalls: hitsOn('/after') }).toEqual({
+        unhandled: [],
+        afterCalls: 0,
+      });
+    },
+    60_000,
+  );
+
+  it('a step in flight at the cancel that then fails answers cancelled, as the row reads', async () => {
+    const answer = start('fails-after', [post('gate', '/gate'), post('after', '/after')]);
+    await untilHit('/gate');
+    await cancel('fails-after').expect(200);
+    openGate(500);
+    const res = await answer;
+
+    const detail = await until('fails-after', 'cancelled');
+    expect({ answer: [res.status, res.body.code], gate: stepsOf(detail).get('gate')?.status }).toEqual({
+      answer: [409, 'run_cancelled'],
+      gate: 'error',
+    });
+  }, 60_000);
+
+  it('a retrying step makes no attempt after the cancel', async () => {
+    const answer = start('retrying', [
+      post('flaky', '/flaky', { retry: { maxAttempts: 3, backoffMs: 1_500 } }),
+      post('after', '/after'),
+    ]);
+    await untilHit('/flaky');
+    await cancel('retrying').expect(200);
+    const res = await answer;
+    await pause(2_000);
+
+    expect({ answer: res.body.code, flakyCalls: hitsOn('/flaky'), afterCalls: hitsOn('/after') }).toEqual({
+      answer: 'run_cancelled',
+      flakyCalls: 1,
+      afterCalls: 0,
+    });
+  }, 60_000);
+
+  it('a run id whose run was cancelled is not run again', async () => {
+    const first = start('reused', approvalPlan('plan-reused').nodes);
+    await until('reused', 'waiting');
+    await cancel('reused').expect(200);
+    await first;
+
+    const again = await start('reused', [post('b1', '/b1')]);
+    expect({ answer: [again.status, again.body.code], calls: hitsOn('/b1') }).toEqual({
+      answer: [409, 'run_cancelled'],
+      calls: 0,
+    });
+  }, 60_000);
+
+  it("a cancel the finish overtook says completed, and the run's caller is told it completed too", async () => {
+    const answer = start('finish-first', [post('gate', '/gate')]);
+    await untilHit('/gate');
+    const lock = new Client({ connectionString: process.env.DATABASE_URL });
+    await lock.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query(`SELECT 1 FROM runtime_runs WHERE run_id = $1 FOR UPDATE`, ['finish-first']);
+      openGate();
+      await untilBlocked('%outputs = CAST%');
+      const cancelling = cancel('finish-first').then((res) => res);
+      await untilBlocked(`%SET status = 'cancelled', finished_at%`);
+      await lock.query('COMMIT');
+      const cancelled = await cancelling;
+      const res = await answer;
+
+      const row = await db.query(`SELECT status FROM runtime_runs WHERE run_id = $1`, ['finish-first']);
+      expect({ cancel: cancelled.body.status, answer: res.status, row: row.rows[0].status }).toEqual({
+        cancel: 'completed',
+        answer: 201,
+        row: 'completed',
+      });
+    } finally {
+      await lock.query('ROLLBACK').catch(() => undefined);
+      await lock.end();
+    }
+  }, 60_000);
+
+  it('a run another run is calling cannot be cancelled on its own, and goes on untouched', async () => {
+    const child = (
+      await http()
+        .post('/api/deploy')
+        .send({
+          workflow_json: doc(
+            [
+              node('trigger', 'orchestr:tool_trigger', {
+                tool_name: 'gated',
+                description: 'gated for the cancel suite',
+                inputs: [{ name: 'q', type: 'string', description: 'unused', required: false }],
+              }),
+              node('gate', 'http.send_request', { method: 'POST', url: `${base}/gate-child`, body: {} }),
+            ],
+            [edge('trigger', 'gate')],
+          ),
+        })
+        .expect(201)
+    ).body.workflow_id as string;
+    const answer = http()
+      .post('/api/runs/from-ir')
+      .send({
+        run_id: 'caller-gated',
+        workflow_ir: doc(
+          [
+            node('call', 'orchestr:call_workflow', { workflow_id: child }),
+            node('after', 'http.send_request', { method: 'POST', url: `${base}/parent-after`, body: {} }),
+          ],
+          [edge('call', 'after')],
+        ),
+      })
+      .then((res) => res);
+    await untilHit('/gate-child');
+    const called = await db.query<{ run_id: string }>(
+      `SELECT r.run_id FROM runtime_runs r JOIN runtime_runs p ON p.id = r.parent_run_id WHERE p.run_id = $1`,
+      ['caller-gated'],
+    );
+    const refused = await cancel(called.rows[0]!.run_id);
+    openGate();
+    const res = await answer;
+
+    const row = await db.query(`SELECT status FROM runtime_runs WHERE run_id = $1`, [called.rows[0]!.run_id]);
+    expect({
+      refused: [refused.status, refused.body.code],
+      answer: res.status,
+      called: row.rows[0].status,
+      afterCalls: hitsOn('/parent-after'),
+    }).toEqual({ refused: [409, 'called_run'], answer: 201, called: 'completed', afterCalls: 1 });
+  }, 60_000);
+
+  it('a pre-merge test whose run is cancelled has no result, and leaves the merge gate as it was', async () => {
+    const trigger = node('trigger', 'orchestr:trigger', {});
+    const announce = (text: string) => node('announce', 'text.concat', { texts: [text], separator: '' });
+    const mainDoc = doc([trigger, announce('v1')], [edge('trigger', 'announce')]);
+    const laneDoc = doc(
+      [
+        trigger,
+        node('gate', 'http.send_request', { method: 'POST', url: `${base}/gate-test`, body: {} }),
+        announce('lane'),
+      ],
+      [edge('trigger', 'gate'), edge('gate', 'announce')],
+    );
+    const wf = (await http().post('/api/deploy').send({ workflow_json: mainDoc }).expect(201)).body
+      .workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: laneDoc, branch: 'lane' })
+      .expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/main/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+    const review = (
+      await http()
+        .post(`/api/workflows/${wf}/reviews`)
+        .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+        .expect(201)
+    ).body.id as string;
+    await http()
+      .post(`/api/workflows/${wf}/reviews/${review}/approve`)
+      .send({ decision: 'approved' })
+      .expect(201);
+    const heads = await db.query<{ name: string; head_version_id: string }>(
+      `SELECT name, head_version_id FROM workflow_branches WHERE workflow_id = $1`,
+      [wf],
+    );
+    const head = (name: string) => heads.rows.find((r) => r.name === name)!.head_version_id;
+    await db.query(
+      `INSERT INTO review_test_results
+         (id, workflow_id, review_id, source_version_id, target_version_id, verdict, decisive, tested_at, summary)
+       VALUES ($1, $2, $3, $4, $5, 'green', true, now() - interval '1 minute', '{}'::json)`,
+      [randomUUID(), wf, review, head('lane'), head('main')],
+    );
+    const blocked = async () =>
+      (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.merge_blocked_by_test;
+    expect(await blocked()).toBeNull();
+
+    const tested = http()
+      .post(`/api/workflows/${wf}/reviews/${review}/test`)
+      .send({ trigger_payload: {} })
+      .then((res) => res);
+    await untilHit('/gate-test');
+    const run = await db.query<{ run_id: string }>(
+      `SELECT r.run_id FROM runtime_runs r JOIN runtime_run_steps s ON s.run_id = r.id
+        WHERE r.review_id = $1 AND s.node_id = 'gate'`,
+      [review],
+    );
+    await cancel(run.rows[0]!.run_id).expect(200);
+    openGate();
+    const res = await tested;
+
+    const kept = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM review_test_results WHERE workflow_id = $1`,
+      [wf],
+    );
+    expect({ test: [res.status, res.body.code], kept: kept.rows[0]!.n, blocked: await blocked() }).toEqual({
+      test: [409, 'test_cancelled'],
+      kept: 1,
+      blocked: null,
     });
   }, 60_000);
 

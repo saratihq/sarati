@@ -322,6 +322,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
         return Promise.resolve();
       },
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
     };
     const plan: RunPlan = {
@@ -341,6 +342,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       },
       sleep: () => Promise.resolve(),
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
     };
     const plan: RunPlan = {
@@ -366,6 +368,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       },
       sleep: () => Promise.resolve(),
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
     };
     const plan: RunPlan = {

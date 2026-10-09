@@ -89,10 +89,18 @@ curl -X POST http://localhost:8080/api/runs/<run-id>/cancel
 Idempotent — cancelling an already-finished run is not an error, and answers with the status it
 finished in.
 
-The run stops at its next step and is listed as **Cancelled**. A step already making its call
-finishes, because a request that has gone out can't be taken back, and nothing after it starts. A
-wait or delay the run is parked on ends at once and says *Cancelled before it finished*. A caller
-still waiting on the run's answer gets `409` with the code `run_cancelled`.
+The run is listed as **Cancelled** at once and stops at its next step. A step already making its
+call finishes, because a request that has gone out can't be taken back, but it makes no further
+retry, and nothing after it starts. A caller still waiting on the run's answer gets `409` with the
+code `run_cancelled`.
+
+A wait or delay the run is parked on ends and says *Cancelled before it finished*. On a durable run
+(the default) that can take up to about ten seconds, and a delay of a minute or less runs out first.
+On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
+workflow the run is calling; a durable run's called workflow finishes first.
+
+A run that another run's step started can't be cancelled on its own (`409`, code `called_run`).
+Cancel the run that called it.
 
 ## When a worker dies
 

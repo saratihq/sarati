@@ -140,6 +140,7 @@ describe('DagInterpreter (gating scheduler)', () => {
         return Promise.resolve();
       },
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
     };
     await interpreter.run(
@@ -179,6 +180,7 @@ describe('DagInterpreter (gating scheduler)', () => {
       },
       sleep: () => Promise.resolve(),
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
     };
     const result = await interpreter.run(

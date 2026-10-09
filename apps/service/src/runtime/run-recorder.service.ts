@@ -96,6 +96,8 @@ export interface RunRecorder {
   runCancelled(scopedRunId: string): Promise<void>;
   /** A cancel unwinds the run as a failure `runFinished` has just recorded; restore what actually ended it. */
   runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void>;
+  /** Whether the run's row reads cancelled — the one answer to whether a cancel has landed, on either rail. */
+  isCancelled(scopedRunId: string): Promise<boolean>;
 }
 
 /**
@@ -253,6 +255,20 @@ export class RunRecorderService implements RunRecorder {
       `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
       [scopedRunId, unwindError, CANCELLED_STEP_ERROR],
     ]);
+  }
+
+  async isCancelled(scopedRunId: string): Promise<boolean> {
+    try {
+      const rows: unknown[] = await this.dataSource.query(
+        `SELECT 1 FROM runtime_runs WHERE id = $1 AND status = 'cancelled'`,
+        [scopedRunId],
+      );
+      return rows.length > 0;
+    } catch (err) {
+      // Fail open: a history read must never stop or fail a run that nobody cancelled.
+      this.logger.warn(`run history isCancelled failed for ${scopedRunId}: ${errorMessage(err)}`);
+      return false;
+    }
   }
 
   private async write(op: string, scopedRunId: string, [sql, params]: [string, unknown[]]): Promise<void> {
