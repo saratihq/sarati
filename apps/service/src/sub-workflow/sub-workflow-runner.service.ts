@@ -158,7 +158,7 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
  * chain WAS is recorded in `parent_run_id`/`parent_step_key`, not encoded in the id.
  */
 function childRunId(parentRunId: string, callKey: string): string {
-  const digest = createHash('sha256').update(`${parentRunId} ${callKey}`).digest('hex');
+  const digest = createHash('sha256').update(`${parentRunId}\0${callKey}`).digest('hex');
   return `sub_${digest.slice(0, 32)}`;
 }
 

@@ -63,9 +63,10 @@ export function e2eDatabaseName(): string {
   return `${E2E_DB_PREFIX}_${Date.now()}_${randomBytes(4).toString('hex')}`;
 }
 
+// An unstamped name predates the stamp, so nothing still creates it.
 function isReapable(datname: string): boolean {
   const stamp = new RegExp(`^${E2E_DB_PREFIX}_(\\d{13})_`).exec(datname);
-  return stamp !== null && Date.now() - Number(stamp[1]) > REAP_AFTER_MS;
+  return stamp === null || Date.now() - Number(stamp[1]) > REAP_AFTER_MS;
 }
 
 export function withDatabase(url: string, database: string): string {
