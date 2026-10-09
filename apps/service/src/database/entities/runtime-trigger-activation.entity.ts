@@ -70,6 +70,10 @@ export class RuntimeTriggerActivationEntity {
   @Column({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
+  /** The intake URL a provider is told to deliver to; `null` for a kind that registers none. */
+  @Column({ name: 'webhook_url', type: 'text', nullable: true })
+  webhookUrl!: string | null;
+
   /** What the reconciler last stood up — the columns above are what is DESIRED; `null` = not known. */
   @Column({ type: 'jsonb', nullable: true })
   materialized!: MaterializedActivation | null;

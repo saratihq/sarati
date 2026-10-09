@@ -542,7 +542,7 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     const receipt = await asA(http().delete(`/api/environments/${qaId}`).set('X-Org-Id', orgId)).expect(200);
     expect(receipt.body).toEqual({ removed_pointers: 1, unbound_triggers: 1 });
 
-    // The activation died with the env (FK CASCADE); the pointer is gone too.
+    // The activation was torn down before the env went; the pointer is gone too.
     const remaining = await db.query(
       `SELECT 1 FROM runtime_trigger_activations WHERE workflow_id = $1 AND environment_id = $2`,
       [wfId, qaId],

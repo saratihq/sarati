@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 import { type INestApplication, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
@@ -11,6 +12,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
+import type { EnvConfig } from '../src/config/env.config';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
@@ -21,7 +23,7 @@ import { TriggerReconcilerJob } from '../src/triggers/canvas/trigger-reconciler.
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
-import { seedPlatformKeyEverywhere } from './support/platform-keys';
+import { seedPlatformKeyEverywhere, setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 // An allowlisted host, so the SDK's SSRF guard skips its DNS lookup; the fetch itself is stubbed.
@@ -334,21 +336,30 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
 
   interface ActivationRow {
     id: string;
+    environment_id: string;
     kind: string;
     trigger_type: string;
     composio_trigger_instance_id: string | null;
     last_error: string | null;
+    webhook_url: string | null;
     materialized: Record<string, unknown> | null;
   }
 
   const activations = async (wfId: string): Promise<ActivationRow[]> =>
     (
       await db.query<ActivationRow>(
-        `SELECT id, kind, trigger_type, composio_trigger_instance_id, last_error, materialized
+        `SELECT id, environment_id, kind, trigger_type, composio_trigger_instance_id, last_error, webhook_url,
+                materialized
            FROM runtime_trigger_activations WHERE workflow_id = $1`,
         [wfId],
       )
     ).rows;
+
+  const activationIn = async (wfId: string, envId: string): Promise<ActivationRow> => {
+    const rows = (await activations(wfId)).filter((r) => r.environment_id === envId);
+    expect(rows).toHaveLength(1);
+    return rows[0]!;
+  };
 
   const activation = async (wfId: string): Promise<ActivationRow> => {
     const rows = await activations(wfId);
@@ -383,6 +394,17 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       .slice(since)
       .filter((c) => c.method === 'DELETE' && c.url.includes('api.typeform.com'))
       .map((c) => c.url);
+
+  const hookUrls = (since = 0): string[] =>
+    providerCalls
+      .slice(since)
+      .filter(
+        (c) => c.method === 'POST' && c.url.startsWith('https://api.github.com/') && c.url.endsWith('/hooks'),
+      )
+      .map((c) => String((JSON.parse(c.body) as { config: { url: string } }).config.url));
+
+  const hookOf = async (repo: string, activationId: string): Promise<string> =>
+    `/repos/acme/${repo}/hooks/${await endpointOf(activationId)}`;
 
   const subscribedEvents = (since = 0): string[] =>
     providerCalls
@@ -430,6 +452,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     wfId: string,
     activationId: string,
     token: string,
+    env = 'production',
   ): Promise<Record<string, unknown>> => {
     const record = await stored<{ secret: string }>(activationId, 'webhook.registration');
     const raw = JSON.stringify({
@@ -439,7 +462,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     });
     const sig = `sha256=${createHmac('sha256', String(record?.secret)).update(raw).digest('base64')}`;
     const fired = await http()
-      .post(`/api/hooks/${wfId}/production`)
+      .post(`/api/hooks/${wfId}/${env}`)
       .set('Content-Type', 'application/json')
       .set('typeform-signature', sig)
       .send(raw)
@@ -527,6 +550,64 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         .set('X-Org-Id', org)
         .send({ connection_id: connectionId }),
     ).expect(200);
+
+  const createEnv = async (org: string, name: string): Promise<string> => {
+    const res = await asA(http().post('/api/environments').set('X-Org-Id', org).send({ name })).expect(201);
+    return res.body.id as string;
+  };
+
+  const promote = async (org: string, wfId: string, environment: string): Promise<void> => {
+    const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', org)).expect(
+      200,
+    );
+    const head = (versions.body.versions as Array<{ id: string; version_number: number }>).reduce((a, b) =>
+      b.version_number > a.version_number ? b : a,
+    );
+    await asA(
+      http()
+        .post(`/api/workflows/${wfId}/promote`)
+        .set('X-Org-Id', org)
+        .send({ environment, version_id: head.id }),
+    ).expect(201);
+    await reconcile(wfId);
+  };
+
+  const eventually = async (done: () => Promise<boolean>): Promise<void> => {
+    for (let i = 0; i < 50; i++) {
+      if (await done()) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('never converged');
+  };
+
+  const renameEnv = (org: string, envId: string, name: string, confirm = false): request.Test =>
+    asA(
+      http()
+        .patch(`/api/environments/${envId}`)
+        .set('X-Org-Id', org)
+        .send({ name, ...(confirm ? { confirm_url_changes: true } : {}) }),
+    );
+
+  // No reconcile from the test: the rename itself must start the one that moves the webhook.
+  const movedTo = async (wfId: string, envId: string, name: string): Promise<ActivationRow> => {
+    await eventually(async () =>
+      String((await activationIn(wfId, envId)).materialized?.webhookUrl).endsWith(`/${name}`),
+    );
+    await retried();
+    return activationIn(wfId, envId);
+  };
+
+  const typeformUrls = (since = 0): string[] =>
+    providerCalls
+      .slice(since)
+      .filter((c) => c.method === 'PUT' && c.url.includes('api.typeform.com'))
+      .map((c) => String((JSON.parse(c.body) as { url: string }).url));
+
+  const pointersAt = async (envId: string): Promise<unknown[]> =>
+    (await db.query(`SELECT 1 FROM workflow_env_pointers WHERE environment_id = $1`, [envId])).rows;
+
+  const envExists = async (envId: string): Promise<boolean> =>
+    (await db.query(`SELECT 1 FROM environments WHERE id = $1`, [envId])).rows.length === 1;
 
   beforeAll(async () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
@@ -1651,5 +1732,317 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await retired(wfId)).toEqual([]);
     const run = await fireTypeform(wfId, back.id, 'tok_beside');
     expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_beside');
+  });
+
+  it('renaming an environment registers its webhook at the new URL and deletes the one at the old URL', async () => {
+    const { org, production } = await workspace('Rename');
+    const github = await tokenConnection('github', 'ghp_rename', org);
+    await assignSlot(org, production, 'github', github);
+    const qa = await createEnv(org, 'qa');
+    await assignSlot(org, qa, 'github', github);
+    const wfId = await deploy(
+      triggerDoc('github.new_push', { owner: 'acme', repo: 'renamed' }, 'rename env', 'after'),
+      org,
+    );
+    await promote(org, wfId, 'qa');
+    const atQa = await activationIn(wfId, qa);
+    expect(atQa.webhook_url).toMatch(new RegExp(`/api/hooks/${wfId}/qa$`));
+    const oldHook = await hookOf('renamed', atQa.id);
+    const prodHook = await hookOf('renamed', (await activationIn(wfId, production)).id);
+    const mark = providerCalls.length;
+
+    await renameEnv(org, qa, 'qa-two').expect(200);
+
+    const renamed = await movedTo(wfId, qa, 'qa-two');
+    const newUrl = String(renamed.webhook_url);
+    expect(newUrl).toBe(atQa.webhook_url!.replace(/\/qa$/, '/qa-two'));
+    expect(hookUrls(mark)).toEqual([newUrl]);
+    expect(githubHooks.has(oldHook)).toBe(false);
+    expect(githubHooks.has(await hookOf('renamed', renamed.id))).toBe(true);
+    expect(githubHooks.has(prodHook)).toBe(true);
+    expect(renamed).toMatchObject({
+      last_error: null,
+      materialized: expect.objectContaining({ webhookUrl: newUrl }),
+    });
+
+    // GitHub's next push, signed with the new hook's secret, reaches the new URL and fires.
+    const raw = JSON.stringify({
+      ref: 'refs/heads/main',
+      before: '0000000',
+      after: 'renamed-sha',
+      repository: { full_name: 'acme/renamed' },
+      commits: [],
+    });
+    const secret = String(await stored<string>(renamed.id, 'webhook.secret'));
+    const push = (env: string): request.Test =>
+      http()
+        .post(`/api/hooks/${wfId}/${env}`)
+        .set('Content-Type', 'application/json')
+        .set('x-github-event', 'push')
+        .set('x-github-delivery', 'delivery-renamed')
+        .set('x-hub-signature-256', `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`)
+        .send(raw);
+    await push('qa').expect(404);
+    const fired = await push('qa-two').expect(202);
+    const run = await awaitRun(fired.body.run_id as string);
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: renamed-sha');
+  });
+
+  it("renaming an environment deletes its Typeform webhook by the recorded tag and registers the new URL's own", async () => {
+    const { org, production } = await workspace('Typeform rename');
+    const key = await tokenConnection('typeform', 'tfp_rename', org);
+    await assignSlot(org, production, 'typeform', key);
+    const qa = await createEnv(org, 'tf-qa');
+    await assignSlot(org, qa, 'typeform', key);
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'FQ' }, 'typeform rename', 'token'),
+      org,
+    );
+    await promote(org, wfId, 'tf-qa');
+    const { id } = await activationIn(wfId, qa);
+    const oldHook = await typeformHookOf(id);
+    const prodHook = await typeformHookOf((await activationIn(wfId, production)).id);
+    const mark = providerCalls.length;
+
+    await renameEnv(org, qa, 'tf-qa-two').expect(200);
+    const renamed = await movedTo(wfId, qa, 'tf-qa-two');
+
+    const newHook = await typeformHookOf(id);
+    expect(newHook).not.toBe(oldHook);
+    expect(typeformDeletes(mark)).toEqual([
+      `https://api.typeform.com/forms/FQ/webhooks/${oldHook.split('/')[1]}`,
+    ]);
+    expect(typeformUrls(mark)).toEqual([renamed.webhook_url]);
+    expect(renamed.webhook_url).toMatch(new RegExp(`/api/hooks/${wfId}/tf-qa-two$`));
+    expect([...typeformHooks.keys()].filter((h) => h.startsWith('FQ/')).sort()).toEqual(
+      [newHook, prodHook].sort(),
+    );
+    expect(await retired(wfId)).toEqual([]);
+    const run = await fireTypeform(wfId, id, 'tok_renamed', 'tf-qa-two');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_renamed');
+  });
+
+  it('a Typeform trigger renamed away while its old webhook will not delete, then renamed back, stays live and fires', async () => {
+    const { org, production } = await workspace('Typeform rename back');
+    const key = await tokenConnection('typeform', 'tfp_back', org);
+    await assignSlot(org, production, 'typeform', key);
+    const env = await createEnv(org, 'tf-back');
+    await assignSlot(org, env, 'typeform', key);
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'FB' }, 'typeform rename back', 'token'),
+      org,
+    );
+    await promote(org, wfId, 'tf-back');
+    const { id } = await activationIn(wfId, env);
+    const hook = await typeformHookOf(id);
+
+    typeformRefuses = { method: 'DELETE', status: 500 };
+    await renameEnv(org, env, 'tf-away').expect(200);
+    await movedTo(wfId, env, 'tf-away');
+    const away = await typeformHookOf(id);
+    expect(await retired(wfId)).toEqual([
+      { hook: hook.split('/')[1], last_error: expect.stringMatching(/HTTP 500/) },
+    ]);
+
+    await renameEnv(org, env, 'tf-back').expect(200);
+    await movedTo(wfId, env, 'tf-back');
+    typeformRefuses = null;
+    await app.get(TriggerReconcilerService).sweepAll();
+    await retried();
+
+    expect(await typeformHookOf(id)).toBe(hook);
+    expect(typeformHooks.has(hook)).toBe(true);
+    expect(typeformHooks.has(away)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
+    expect(await activationIn(wfId, env)).toMatchObject({ last_error: null });
+    const run = await fireTypeform(wfId, id, 'tok_back_again', 'tf-back');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_back_again');
+  });
+
+  it('renaming an environment whose webhook or chat URL a sender was given asks for confirmation and lists them', async () => {
+    const { org } = await workspace('Rename warning');
+    const env = await createEnv(org, 'hooks');
+    const github = await tokenConnection('github', 'ghp_warning', org);
+    await assignSlot(org, env, 'github', github);
+    const webhookWf = await deploy(triggerDoc('orchestr:webhook', {}, 'hand-given webhook'), org);
+    const chatWf = await deploy(triggerDoc('orchestr:chat', {}, 'hand-given chat'), org);
+    const githubWf = await deploy(
+      triggerDoc('github.new_push', { owner: 'acme', repo: 'warning' }, 'registered webhook', 'after'),
+      org,
+    );
+    for (const wf of [webhookWf, chatWf, githubWf]) await promote(org, wf, 'hooks');
+
+    const refused = await renameEnv(org, env, 'hooks-two').expect(409);
+
+    expect(refused.body.detail).toBe(
+      "Renaming 'hooks' to 'hooks-two' changes the URL of 2 incoming webhook and chat triggers, so anything still sending to the old URL gets a 404 — confirm the rename to go ahead",
+    );
+    expect(refused.body.url_changes).toEqual([
+      {
+        workflow_id: chatWf,
+        workflow_name: 'hand-given chat',
+        trigger: 'chat',
+        from: `/api/chat/${chatWf}/hooks`,
+        to: `/api/chat/${chatWf}/hooks-two`,
+      },
+      {
+        workflow_id: webhookWf,
+        workflow_name: 'hand-given webhook',
+        trigger: 'webhook',
+        from: `/api/hooks/${webhookWf}/hooks`,
+        to: `/api/hooks/${webhookWf}/hooks-two`,
+      },
+    ]);
+    expect((await db.query(`SELECT name FROM environments WHERE id = $1`, [env])).rows).toEqual([
+      { name: 'hooks' },
+    ]);
+    await http().post(`/api/hooks/${webhookWf}/hooks`).send({ title: 'still here' }).expect(202);
+
+    const renamed = await renameEnv(org, env, 'hooks-two', true).expect(200);
+
+    expect(renamed.body).toEqual({ id: env, name: 'hooks-two' });
+    await http().post(`/api/hooks/${webhookWf}/hooks`).send({ title: 'old' }).expect(404);
+    await http().post(`/api/hooks/${webhookWf}/hooks-two`).send({ title: 'new' }).expect(202);
+    await movedTo(githubWf, env, 'hooks-two');
+  });
+
+  it('a new public base URL registers the webhook again at it', async () => {
+    const wfId = await deploy(
+      triggerDoc('github.new_push', { owner: 'acme', repo: 'tunnel' }, 'new base url'),
+    );
+    const { id } = await activation(wfId);
+    const oldHook = await hookOf('tunnel', id);
+    const mark = providerCalls.length;
+
+    const env = app.get<ConfigService<{ env: EnvConfig }, true>>(ConfigService).get('env', { infer: true });
+    const previous = env.publicBaseUrl;
+    env.publicBaseUrl = 'https://new-tunnel.example.com';
+    try {
+      await reconcile(wfId);
+    } finally {
+      env.publicBaseUrl = previous;
+    }
+
+    const url = `https://new-tunnel.example.com/api/hooks/${wfId}/production`;
+    expect(hookUrls(mark)).toEqual([url]);
+    expect(githubHooks.has(oldHook)).toBe(false);
+    expect(githubHooks.has(await hookOf('tunnel', id))).toBe(true);
+    expect(await activation(wfId)).toMatchObject({ webhook_url: url, last_error: null });
+  });
+
+  it("deleting an environment deletes its webhook and its Composio subscription at the provider, and leaves production's", async () => {
+    const { org, production } = await workspace('Delete env');
+    await setPlatformKey(app, { kind: 'org', orgId: org }, 'composio_api_key', 'ck_e2e_fake_key');
+    const stripeKey = await tokenConnection('stripe', 'sk_test_doomed', org);
+    await assignSlot(org, production, 'stripe', stripeKey);
+    const doomed = await createEnv(org, 'doomed');
+    await assignSlot(org, doomed, 'stripe', stripeKey);
+    const managed = await app.get(ConnectionsService).createManaged(userA, 'acmecrm', 'ca_doomed');
+    await app.get(ConnectionsService).setStatus(managed.id, 'active');
+    await assignSlot(org, doomed, 'acmecrm', managed.id);
+
+    const webhookWf = await deploy(triggerDoc('stripe.new_customer', {}, 'doomed webhook'), org);
+    const composioWf = await deploy(triggerDoc('acmecrm.deal_lost', {}, 'doomed subscription'), org);
+    await promote(org, webhookWf, 'doomed');
+    await promote(org, composioWf, 'doomed');
+    const endpoint = await endpointOf((await activationIn(webhookWf, doomed)).id);
+    const prodEndpoint = await endpointOf((await activationIn(webhookWf, production)).id);
+    expect(stripeEndpoints.has(endpoint)).toBe(true);
+    expect((await activationIn(composioWf, doomed)).composio_trigger_instance_id).toBe('ti_deal_lost');
+    deleteSpy.mockClear();
+
+    const receipt = await asA(http().delete(`/api/environments/${doomed}`).set('X-Org-Id', org)).expect(200);
+
+    expect(receipt.body).toEqual({ removed_pointers: 2, unbound_triggers: 2 });
+    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(stripeEndpoints.has(prodEndpoint)).toBe(true);
+    expect(deleteSpy).toHaveBeenCalledWith(expect.any(Object), 'ti_deal_lost');
+    expect(await envExists(doomed)).toBe(false);
+    expect((await activations(webhookWf)).map((r) => r.environment_id)).toEqual([production]);
+  });
+
+  it('deleting an environment whose webhook the app will not delete yet still goes, and the sweep deletes the webhook', async () => {
+    const { org, production } = await workspace('Stubborn env');
+    const stripeKey = await tokenConnection('stripe', 'sk_test_stubborn', org);
+    await assignSlot(org, production, 'stripe', stripeKey);
+    const stubborn = await createEnv(org, 'stubborn');
+    await assignSlot(org, stubborn, 'stripe', stripeKey);
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'stubborn env'), org);
+    await promote(org, wfId, 'stubborn');
+    const endpoint = await endpointOf((await activationIn(wfId, stubborn)).id);
+
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await asA(http().delete(`/api/environments/${stubborn}`).set('X-Org-Id', org)).expect(200);
+    await retried();
+    stripeRefuses = null;
+
+    expect(await envExists(stubborn)).toBe(false);
+    expect(stripeEndpoints.has(endpoint)).toBe(true);
+    expect(await retired(wfId)).toEqual([{ hook: endpoint, last_error: expect.any(String) }]);
+
+    await app.get(TriggerReconcilerService).sweepAll();
+    await retried();
+
+    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('an environment whose triggers were not torn down is kept, unpromoted, until a delete that tears them down', async () => {
+    const { org, production } = await workspace('Undrained env');
+    const stripeKey = await tokenConnection('stripe', 'sk_test_undrained', org);
+    await assignSlot(org, production, 'stripe', stripeKey);
+    const undrained = await createEnv(org, 'undrained');
+    await assignSlot(org, undrained, 'stripe', stripeKey);
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'undrained env'), org);
+    await promote(org, wfId, 'undrained');
+    const endpoint = await endpointOf((await activationIn(wfId, undrained)).id);
+
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    let refused: request.Response;
+    try {
+      refused = await asA(http().delete(`/api/environments/${undrained}`).set('X-Org-Id', org)).expect(409);
+    } finally {
+      held.mockRestore();
+    }
+
+    expect(refused.body.detail).toBe(
+      "'undrained' is no longer live, but one of its triggers couldn't be removed from its app yet, so 'undrained' was kept — delete it again to retry.",
+    );
+    expect(await envExists(undrained)).toBe(true);
+    expect(await pointersAt(undrained)).toEqual([]);
+    expect(stripeEndpoints.has(endpoint)).toBe(true);
+    await http().post(`/api/hooks/${wfId}/undrained`).send({}).expect(404);
+
+    const receipt = await asA(http().delete(`/api/environments/${undrained}`).set('X-Org-Id', org)).expect(
+      200,
+    );
+
+    expect(receipt.body).toEqual({ removed_pointers: 0, unbound_triggers: 1 });
+    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(await envExists(undrained)).toBe(false);
+  });
+
+  it('deleting a live workflow deletes its webhook at the provider, and is refused while its triggers were not torn down', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'live workflow deleted'));
+    const endpoint = await endpointOf((await activation(wfId)).id);
+
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    let refused: request.Response;
+    try {
+      refused = await asA(http().delete(`/api/workflows/${wfId}`).set('X-Org-Id', orgId)).expect(409);
+    } finally {
+      held.mockRestore();
+    }
+
+    expect(refused.body.detail).toMatch(
+      /^'live workflow deleted' is no longer live, but one of its triggers/,
+    );
+    expect(stripeEndpoints.has(endpoint)).toBe(true);
+    await http().post(`/api/hooks/${wfId}/production`).send({}).expect(404);
+
+    await asA(http().delete(`/api/workflows/${wfId}`).set('X-Org-Id', orgId)).expect(200);
+
+    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(await activations(wfId)).toEqual([]);
   });
 });

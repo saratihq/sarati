@@ -5,11 +5,13 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { DomainError } from '../common/domain-error';
 import { accountLabel, storedAccount } from '../connections/account-identity';
 import { isIdShape } from '../database/ids';
-import { rawMutate, rawQuery } from '../database/raw-query';
+import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { EventsService } from '../events/events.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
+import { assertTriggersReleased } from '../triggers/trigger-release';
+import { chatPathFor, webhookPathFor } from '../triggers/canvas/webhook-url';
 import {
   canonicalEnvName,
   ENV_NAME_SHAPE,
@@ -39,6 +41,17 @@ export interface EnvironmentView {
   slots: SlotView[];
   pointer_count: number;
   trigger_count: number;
+}
+
+/** An incoming-webhook or chat trigger whose URL a rename moves; a sender was given it by hand. */
+export interface UrlChange {
+  workflow_id: string;
+  workflow_name: string;
+  trigger: 'webhook' | 'chat';
+  /** The service-relative intake path before the rename. */
+  from: string;
+  /** The service-relative intake path after it. */
+  to: string;
 }
 
 /** One environment referencing a connection (the delete-warning payload). */
@@ -146,15 +159,16 @@ export class EnvironmentsService {
     });
   }
 
-  /** Rename (label edit — pointers/activations follow via environment_id). 409 on is_prod. */
+  /** Rename; registered webhooks move to the new URL, and a hand-given URL it moves needs `confirmUrlChanges` (409 lists them). 409 on is_prod. */
   async rename(
     orgId: string,
     envId: string,
     rawName: string,
     actorUserId: string,
+    confirmUrlChanges = false,
   ): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
-    return this.dataSource.transaction(async (em) => {
+    const renamed = await this.dataSource.transaction(async (em) => {
       const env = await this.byIdForOrg(em, orgId, envId);
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be renamed`, 409);
@@ -164,6 +178,16 @@ export class EnvironmentsService {
       const taken = await this.findByName(em, orgId, name);
       if (taken && taken.id !== env.id) {
         throw new DomainError(`An environment named '${name}' already exists`, 409);
+      }
+      const urlChanges = await this.urlChangesOf(em, env, name);
+      if (urlChanges.length > 0 && !confirmUrlChanges) {
+        const one = urlChanges.length === 1;
+        throw new DomainError(
+          `Renaming '${env.name}' to '${name}' changes the URL of ${one ? 'an incoming webhook or chat trigger' : `${urlChanges.length} incoming webhook and chat triggers`}, ` +
+            `so anything still sending to the old URL gets a 404 — confirm the rename to go ahead`,
+          409,
+          { url_changes: urlChanges },
+        );
       }
       await em.query(`UPDATE environments SET name = $2 WHERE id = $1`, [env.id, name]);
       // Dual-write the legacy pointer name string, or a pre-006 reader resolves the old name.
@@ -181,47 +205,76 @@ export class EnvironmentsService {
       });
       return { id: env.id, name };
     });
+    // The env's intake URLs carry its name, so its registered webhooks must be pointed at the new one.
+    await this.enqueueEnvWorkflows(envId);
+    return renamed;
   }
 
-  /** Delete an env: pointers dropped, slots and trigger activations cascade; 409 on is_prod. */
+  /** Delete an env: unpromote its workflows, tear its triggers down, then drop it and its slots; 409 on is_prod. */
   async remove(
     orgId: string,
     envId: string,
     actorUserId: string,
   ): Promise<{ removed_pointers: number; unbound_triggers: number }> {
+    const { env, removedPointers, holders } = await this.unpromoteAll(orgId, envId, actorUserId);
+    // With the pointers gone each reconcile tears this env's activations down at their providers.
+    for (const workflowId of new Set(holders)) await this.triggerSignals.reconcileNow(workflowId);
     return this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
-      if (env.isProd)
-        throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
-      if (env.name === UAT_ENV)
-        throw new DomainError(`'uat' is a predefined environment — it cannot be deleted`, 409);
-      // Also match legacy name-only rows, or the delete leaves a same-named ghost binding behind.
-      const removedPointers = await rawMutate(
-        em,
-        `DELETE FROM workflow_env_pointers p
-          USING workflows w
-         WHERE w.id = p.workflow_id
-           AND (p.environment_id = $1
-                OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))`,
-        [env.id, env.name, orgId],
-      );
-      // Count the activations the env delete will cascade away, for the receipt.
-      const activationCount = await rawQuery<{ n: number }>(
-        em,
-        `SELECT COUNT(*)::int AS n FROM runtime_trigger_activations WHERE environment_id = $1`,
-        [env.id],
-      );
-      const unboundTriggers = activationCount[0]?.n ?? 0;
+      await em.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE`, [env.id]);
+      await assertTriggersReleased(em, { environmentId: env.id }, `'${env.name}'`);
       await em.query(`DELETE FROM environments WHERE id = $1`, [env.id]);
+      const receipt = { removed_pointers: removedPointers, unbound_triggers: holders.length };
       await this.events.emit(em, {
         orgId,
         actorUserId,
         type: 'environment.deleted',
         subjectType: 'environment',
         subjectId: env.id,
-        payload: { name: env.name, removed_pointers: removedPointers, unbound_triggers: unboundTriggers },
+        payload: { name: env.name, ...receipt },
       });
-      return { removed_pointers: removedPointers, unbound_triggers: unboundTriggers };
+      return receipt;
+    });
+  }
+
+  /** Remove every pointer at a deletable env; `holders` has one entry per activation still in it. */
+  private unpromoteAll(
+    orgId: string,
+    envId: string,
+    actorUserId: string,
+  ): Promise<{ env: EnvironmentEntity; removedPointers: number; holders: string[] }> {
+    return this.dataSource.transaction(async (em) => {
+      const env = await this.byIdForOrg(em, orgId, envId);
+      if (env.isProd)
+        throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
+      if (env.name === UAT_ENV)
+        throw new DomainError(`'uat' is a predefined environment — it cannot be deleted`, 409);
+      const activations = await rawQuery<{ workflow_id: string }>(
+        em,
+        `SELECT workflow_id FROM runtime_trigger_activations WHERE environment_id = $1`,
+        [env.id],
+      );
+      // Also match legacy name-only rows, or the delete leaves a same-named ghost binding behind.
+      const removed = await rawMutateReturning<{ workflow_id: string }>(
+        em,
+        `DELETE FROM workflow_env_pointers p
+          USING workflows w
+         WHERE w.id = p.workflow_id
+           AND (p.environment_id = $1
+                OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))
+        RETURNING p.workflow_id`,
+        [env.id, env.name, orgId],
+      );
+      for (const { workflow_id } of removed) {
+        await this.events.emit(em, {
+          orgId,
+          actorUserId,
+          type: 'workflow.unpromoted',
+          subjectType: 'workflow',
+          subjectId: workflow_id,
+          payload: { environment: env.name },
+        });
+      }
+      return { env, removedPointers: removed.length, holders: activations.map((a) => a.workflow_id) };
     });
   }
 
@@ -287,6 +340,28 @@ export class EnvironmentsService {
     }
     // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
+  }
+
+  private async urlChangesOf(em: EntityManager, env: EnvironmentEntity, name: string): Promise<UrlChange[]> {
+    const rows = await rawQuery<{ workflow_id: string; workflow_name: string; kind: 'webhook' | 'chat' }>(
+      em,
+      `SELECT DISTINCT a.workflow_id, w.name AS workflow_name, a.kind
+         FROM runtime_trigger_activations a
+         JOIN workflows w ON w.id = a.workflow_id
+        WHERE a.environment_id = $1 AND a.kind IN ('webhook', 'chat')
+        ORDER BY workflow_name, a.kind`,
+      [env.id],
+    );
+    return rows.map((r) => {
+      const pathFor = r.kind === 'chat' ? chatPathFor : webhookPathFor;
+      return {
+        workflow_id: r.workflow_id,
+        workflow_name: r.workflow_name,
+        trigger: r.kind,
+        from: pathFor(r.workflow_id, env.name),
+        to: pathFor(r.workflow_id, name),
+      };
+    });
   }
 
   /** Enqueue a trigger-activation reconcile for every workflow promoted to this env. */

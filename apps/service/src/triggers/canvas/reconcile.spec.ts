@@ -54,6 +54,8 @@ const MANUAL = node({ id: 'trigmanual001', node_type: 'orchestr:trigger', parame
 const kindOf = (n: IRNode): ActivationKind | null =>
   n.node_type === 'orchestr:trigger' ? null : n.node_type === 'orchestr:webhook' ? 'webhook' : 'polling';
 
+const noWebhookUrl = (): null => null;
+
 function desired(over: Partial<DesiredActivation> & Pick<DesiredActivation, 'key'>): DesiredActivation {
   return {
     kind: 'polling',
@@ -62,6 +64,7 @@ function desired(over: Partial<DesiredActivation> & Pick<DesiredActivation, 'key
     props: {},
     connection: null,
     paused: false,
+    webhookUrl: null,
     ...over,
   };
 }
@@ -73,6 +76,7 @@ function live(d: DesiredActivation): MaterializedActivation {
     props: d.props,
     connection: d.connection,
     paused: d.paused,
+    webhookUrl: d.webhookUrl,
   };
 }
 
@@ -93,6 +97,7 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
       pointers,
       kindOf,
       connectionOf: (_env, n) => (kindOf(n) === 'polling' ? { connectionId: 'c1', ownerUserId: 'u1' } : null),
+      webhookUrlOf: noWebhookUrl,
     });
     expect(result).toHaveLength(2);
     expect(result.map((r) => r.key.triggerNodeId).sort()).toEqual([WEBHOOK.id, POLLER.id].sort());
@@ -106,7 +111,13 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
     const pointers: EnvPointerInput[] = [
       { environmentId: PROD, versionId: 'v5', ir: ir([MANUAL, POLLER, ACTION]) },
     ];
-    const result = deriveDesiredActivations({ workflowId: WF, pointers, kindOf, connectionOf: () => null });
+    const result = deriveDesiredActivations({
+      workflowId: WF,
+      pointers,
+      kindOf,
+      connectionOf: () => null,
+      webhookUrlOf: noWebhookUrl,
+    });
     expect(result.map((r) => r.key.triggerNodeId)).toEqual([POLLER.id]);
   });
 
@@ -115,7 +126,13 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
       { environmentId: PROD, versionId: 'v5', ir: ir([WEBHOOK]) },
       { environmentId: STAGING, versionId: 'v7', ir: ir([WEBHOOK]) },
     ];
-    const result = deriveDesiredActivations({ workflowId: WF, pointers, kindOf, connectionOf: () => null });
+    const result = deriveDesiredActivations({
+      workflowId: WF,
+      pointers,
+      kindOf,
+      connectionOf: () => null,
+      webhookUrlOf: noWebhookUrl,
+    });
     expect(result.map((r) => r.key.environmentId).sort()).toEqual([PROD, STAGING].sort());
   });
 
@@ -129,6 +146,7 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
         pointers,
         kindOf,
         connectionOf: () => null,
+        webhookUrlOf: noWebhookUrl,
       });
       expect(result!.props).toEqual({});
       expect(reconcileActivations([result!], [settled(result!)])).toEqual({
@@ -138,6 +156,25 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
       });
     },
   );
+
+  it("carries each env's intake URL for the kind that hands one to a provider", () => {
+    const pointers: EnvPointerInput[] = [
+      { environmentId: PROD, versionId: 'v5', ir: ir([WEBHOOK, POLLER]) },
+      { environmentId: STAGING, versionId: 'v7', ir: ir([POLLER]) },
+    ];
+    const result = deriveDesiredActivations({
+      workflowId: WF,
+      pointers,
+      kindOf,
+      connectionOf: () => null,
+      webhookUrlOf: (env, kind) => (kind === 'polling' ? `https://hooks.example/${env}` : null),
+    });
+    expect(result.map((r) => [r.key.environmentId, r.kind, r.webhookUrl])).toEqual([
+      [PROD, 'webhook', null],
+      [PROD, 'polling', `https://hooks.example/${PROD}`],
+      [STAGING, 'polling', `https://hooks.example/${STAGING}`],
+    ]);
+  });
 });
 
 // ─── reconcileActivations ───
@@ -229,6 +266,16 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
     const d = desired({ key, versionId: 'v5', props: { url: 'x' }, paused: true });
     const a = settled(desired({ key, versionId: 'v5', props: { url: 'x' }, paused: false }));
     expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
+  });
+
+  it('the intake URL moved (env renamed, or a new public base URL) → update, cursor RESET', () => {
+    const at = (url: string): DesiredActivation =>
+      desired({ key, kind: 'registered_webhook', triggerType: 'github.new_push', webhookUrl: url });
+    const plan = reconcileActivations(
+      [at('https://hooks.example/api/hooks/wf/qa')],
+      [settled(at('https://hooks.example/api/hooks/wf/staging'))],
+    );
+    expect(plan.toUpdate.map((u) => u.cursorAction)).toEqual(['reset']);
   });
 
   it('nothing recorded as live (a row from before it was) → update, cursor RESET, even when the row matches', () => {

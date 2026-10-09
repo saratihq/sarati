@@ -6,7 +6,7 @@ import type { DataSource } from 'typeorm';
 import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { newId, now } from '../database/ids';
-import { rawQuery } from '../database/raw-query';
+import { rawMutateReturning, rawQuery } from '../database/raw-query';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
@@ -17,6 +17,7 @@ import { assertAuthoredIrValid } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
+import { assertTriggersReleased } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
@@ -219,7 +220,13 @@ export class WorkflowLifecycleService {
     const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
     if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
 
+    await this.unpromoteEverywhere(wf, actorId);
+    // With the pointers gone the reconcile tears every activation down at its provider.
+    await this.triggerSignals.reconcileNow(wf.id);
+
     await this.dataSource.transaction(async (tx) => {
+      await tx.query(`SELECT 1 FROM workflows WHERE id = $1 FOR UPDATE`, [wf.id]);
+      await assertTriggersReleased(tx, { workflowId: wf.id }, `'${wf.name}'`);
       // The circular FKs must be broken before the cascade delete.
       await tx.query(
         `UPDATE workflows SET active_version_id = NULL, default_branch_id = NULL WHERE id = $1`,
@@ -238,6 +245,27 @@ export class WorkflowLifecycleService {
     });
 
     return { status: 'deleted' };
+  }
+
+  private unpromoteEverywhere(wf: WorkflowEntity, actorId: string | null): Promise<void> {
+    return this.dataSource.transaction(async (tx) => {
+      const removed = await rawMutateReturning<{ environment: string }>(
+        tx,
+        `DELETE FROM workflow_env_pointers WHERE workflow_id = $1 RETURNING environment`,
+        [wf.id],
+      );
+      await tx.query(`UPDATE workflows SET active_version_id = NULL WHERE id = $1`, [wf.id]);
+      for (const { environment } of removed) {
+        await this.events.emit(tx, {
+          orgId: wf.orgId,
+          actorUserId: actorId,
+          type: 'workflow.unpromoted',
+          subjectType: 'workflow',
+          subjectId: wf.id,
+          payload: { environment },
+        });
+      }
+    });
   }
 
   /** Metadata-only save (name/description). */
