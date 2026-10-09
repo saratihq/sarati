@@ -1315,6 +1315,8 @@ export interface RunStepInfo {
   error?: string | null;
   /** Non-fatal honesty warnings: inputs the action ignored, or `{{refs}}` that resolved to nothing. */
   warnings?: string[] | null;
+  /** Set while this step is parked — a run can wait on several steps at once. */
+  waiting?: RunWaiting | null;
 }
 
 /** One end of a sub-workflow call — the run that called this one, or one it called. */
@@ -1340,7 +1342,7 @@ export interface RunDetail extends RunSummary {
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
   decided_by?: { id: string; name: string | null; email: string | null } | null;
   decided_at?: string | null;
-  /** Set while the run is waiting — absent from a service that predates the field. */
+  /** Set while the run is waiting: a decision a person owes before a timer, then whichever is due first. */
   waiting?: RunWaiting | null;
   /** The run that called this one, when another workflow started it. */
   called_by?: SubWorkflowRunLink | null;
@@ -1348,12 +1350,15 @@ export interface RunDetail extends RunSummary {
   calls?: SubWorkflowRunLink[];
 }
 
+/** One wait parked on a person — a run waiting on several is listed once per wait. */
 export interface WaitingRun {
   /** Unique run handle (`<owner>:<run>`) — echo this back to resume/view. */
   id: string;
   run_id: string;
   workflow_id: string | null;
   workflow_name: string | null;
+  /** The parked step; with `id`, names this one wait. */
+  step_key: string;
   node_id: string;
   topic: string;
   waiting_since: string | null;
@@ -1377,7 +1382,7 @@ export async function getRun(runId: string): Promise<RunDetail> {
   return request(`/runs/${encodeURIComponent(runId)}`);
 }
 
-/** Runs parked on a wait-for-event node (approvals inbox), oldest first. */
+/** Waits parked on a wait-for-event step (approvals inbox), oldest first. */
 export async function listWaitingRuns(
   workflowId?: string,
 ): Promise<{ runs: WaitingRun[] }> {
@@ -1385,10 +1390,10 @@ export async function listWaitingRuns(
   return request(`/runs/waiting${q}`);
 }
 
-/** Deliver an event to a waiting run (e.g. an approval decision) — resumes it. */
+/** Answer one of a run's waits (e.g. an approval decision): the named step, else the oldest on the topic. */
 export async function sendRunEvent(
   runId: string,
-  body: { topic: string; payload?: unknown },
+  body: { topic: string; step_key?: string; payload?: unknown },
 ): Promise<void> {
   await request(`/runs/${encodeURIComponent(runId)}/events`, {
     method: "POST",

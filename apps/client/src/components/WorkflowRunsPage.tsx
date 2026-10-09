@@ -129,6 +129,11 @@ function StepRow({ step, dry }: { step: RunStepInfo; dry: boolean }) {
             </span>
           )}
         </div>
+        {step.waiting && (
+          <p className="text-[12px] m-0 mt-1" style={{ color: "var(--orchestr-warning)" }} data-testid="run-step-waiting">
+            {waitingLabel(step.waiting)}
+          </p>
+        )}
         {step.error && (
           <p className="text-[12px] m-0 mt-1 break-words" style={{ color: "var(--orchestr-danger)" }}>
             {step.error}

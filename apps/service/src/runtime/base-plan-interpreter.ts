@@ -24,6 +24,7 @@ import type { BlobStore } from './blob-store';
 import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
+import { eventTopicFor } from './event-wait';
 import { assertAnswerableTopic, PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
@@ -464,15 +465,17 @@ export abstract class BasePlanInterpreter {
       // never applies to one that is deliberately asleep. Nobody can send to a timer topic — its
       // own timeout is the wake.
       const topic = timerTopicFor(stepKey);
-      const wake = new Date(Date.now() + node.ms);
       const sleeping = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, topic, node.ms);
-      await record?.recorder.runWaiting(record.runId, node.id, topic, wake);
+      // Handled at once: a cancel can reject it while the park below is still being written.
+      sleeping.catch(() => undefined);
+      const wake = new Date(Date.now() + node.ms);
+      const due = (await record?.recorder.stepWaiting(record.runId, stepKey, topic, wake)) ?? wake;
       try {
         await sleeping;
       } finally {
-        await record?.recorder.runResumed(record.runId);
+        await record?.recorder.stepResumed(record.runId, stepKey);
       }
-      return { slept_until: wake.toISOString() };
+      return { slept_until: due.toISOString() };
     });
     // Still no scope output, but a dry run's trace accounts for every step it did not carry out.
     if (ctx.dryRun) ctx.trace.push({ nodeId: stepKey, output: waited });
@@ -494,19 +497,20 @@ export abstract class BasePlanInterpreter {
       assertAnswerableTopic(node.id, node.topic);
       // Dry run: don't park the preview waiting for a human — return a stub.
       if (ctx.dryRun) return withheldWait();
-      // Register the receiver BEFORE persisting the pause, so anyone who observes the
-      // waiting row is guaranteed a receiver already exists to deliver to.
-      const wait = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, node.topic, node.timeoutMs);
-      await record?.recorder.runWaiting(
+      // Registered before the park is written; with no run history there is no step to route an event by.
+      const recvTopic = record ? eventTopicFor(stepKey) : node.topic;
+      const wait = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, recvTopic, node.timeoutMs);
+      wait.catch(() => undefined);
+      await record?.recorder.stepWaiting(
         record.runId,
-        node.id,
+        stepKey,
         node.topic,
         new Date(Date.now() + node.timeoutMs),
       );
       try {
         return await wait;
       } finally {
-        await record?.recorder.runResumed(record.runId);
+        await record?.recorder.stepResumed(record.runId, stepKey);
       }
     });
     scope[node.id] = payload;

@@ -16,22 +16,44 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
   let reaper: RunReaperService;
   const userId = randomUUID();
 
+  /** A step parked on `topic` (a timer wakes itself; anything else waits on a person) until `timeoutAt`, a SQL expr. */
+  interface ParkedWait {
+    stepKey?: string;
+    topic?: string;
+    timeoutAt: string;
+  }
+
   const insertRun = async (over: {
     status: string;
     startedAgo: string; // interval, e.g. '2 hours'
-    waitingTimeoutAt?: string | null; // SQL expr or null
-    /** What the run is parked on — a timer wakes itself; anything else waits on a person. */
-    waitingTopic?: string;
+    parked?: ParkedWait[];
   }): Promise<string> => {
     const id = randomUUID();
     await db.query(
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_timeout_at, waiting_node_id, waiting_topic)
-       VALUES ($1, $2, $3, 'plan-x', $4, now() - ($5)::interval, ${over.waitingTimeoutAt ?? 'NULL'},
-               ${over.status === 'waiting' ? `'n1'` : 'NULL'}, $6)`,
-      [id, `rid-${id.slice(0, 8)}`, userId, over.status, over.startedAgo, over.waitingTopic ?? null],
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at)
+       VALUES ($1, $2, $3, 'plan-x', $4, now() - ($5)::interval)`,
+      [id, `rid-${id.slice(0, 8)}`, userId, over.status, over.startedAgo],
     );
+    for (const wait of over.parked ?? []) {
+      const topic = wait.topic ?? 'approve';
+      const stepKey = wait.stepKey ?? 'n1';
+      await db.query(
+        `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at,
+                                        waiting_topic, waiting_since, waiting_timeout_at)
+         VALUES (gen_random_uuid(), $1, $2, $2, $3, 'running', now() - ($4)::interval,
+                 $5, now() - ($4)::interval, ${wait.timeoutAt})`,
+        [id, stepKey, topic.startsWith('orchestr:timer:') ? 'delay' : 'waitForEvent', over.startedAgo, topic],
+      );
+    }
     return id;
   };
+  const stepsOf = async (id: string): Promise<Array<{ status: string; waiting_topic: string | null }>> =>
+    (
+      await db.query(
+        `SELECT status, waiting_topic FROM runtime_run_steps WHERE run_id = $1 ORDER BY step_key`,
+        [id],
+      )
+    ).rows as Array<{ status: string; waiting_topic: string | null }>;
   const statusOf = async (
     id: string,
   ): Promise<{ status: string; finished: boolean; error: string | null }> => {
@@ -83,12 +105,12 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const expired = await insertRun({
       status: 'waiting',
       startedAgo: '30 minutes',
-      waitingTimeoutAt: `now() - interval '5 minutes'`,
+      parked: [{ timeoutAt: `now() - interval '5 minutes'` }],
     });
     const pending = await insertRun({
       status: 'waiting',
       startedAgo: '30 minutes',
-      waitingTimeoutAt: `now() + interval '1 hour'`,
+      parked: [{ timeoutAt: `now() + interval '1 hour'` }],
     });
 
     const result = await reaper.reapStale();
@@ -119,8 +141,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const sleeping = await insertRun({
       status: 'waiting',
       startedAgo: '3 days',
-      waitingTimeoutAt: `now() + interval '1 day'`,
-      waitingTopic: 'orchestr:timer:pause',
+      parked: [{ topic: 'orchestr:timer:pause', timeoutAt: `now() + interval '1 day'` }],
     });
     await reaper.reapStale();
     expect(await statusOf(sleeping)).toMatchObject({ status: 'waiting', finished: false });
@@ -130,30 +151,85 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const sleeping = await insertRun({
       status: 'waiting',
       startedAgo: '3 days',
-      waitingTimeoutAt: `now() + interval '1 day'`,
-      waitingTopic: 'orchestr:timer:pause',
+      parked: [{ topic: 'orchestr:timer:pause', timeoutAt: `now() + interval '1 day'` }],
     });
-    await db.query(
-      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
-       VALUES (gen_random_uuid(), $1, 'pause', 'pause', 'delay', 'running', now() - interval '3 days')`,
-      [sleeping],
-    );
     await reaper.reapStale();
-    const step = await db.query(`SELECT status FROM runtime_run_steps WHERE run_id = $1`, [sleeping]);
-    expect(step.rows[0].status).toBe('running');
+    expect(await stepsOf(sleeping)).toEqual([{ status: 'running', waiting_topic: 'orchestr:timer:pause' }]);
   });
 
   it('does reap a timer wait that is far past its wake — nothing brought it back', async () => {
     const overdue = await insertRun({
       status: 'waiting',
       startedAgo: '5 days',
-      waitingTimeoutAt: `now() - interval '2 days'`,
-      waitingTopic: 'orchestr:timer:pause',
+      parked: [{ topic: 'orchestr:timer:pause', timeoutAt: `now() - interval '2 days'` }],
     });
     await reaper.reapStale();
     const row = await statusOf(overdue);
     expect(row.status).toBe('error');
     expect(row.error).toMatch(/never woke/i);
+  });
+
+  it('leaves a run parked on a timer and an approval alone while both are within their windows', async () => {
+    const both = await insertRun({
+      status: 'waiting',
+      startedAgo: '3 days',
+      parked: [
+        { stepKey: 'approve', timeoutAt: `now() + interval '1 hour'` },
+        { stepKey: 'pause', topic: 'orchestr:timer:pause', timeoutAt: `now() + interval '1 day'` },
+      ],
+    });
+    await reaper.reapStale();
+    expect(await statusOf(both)).toMatchObject({ status: 'waiting', finished: false });
+    expect(await stepsOf(both)).toEqual([
+      { status: 'running', waiting_topic: 'approve' },
+      { status: 'running', waiting_topic: 'orchestr:timer:pause' },
+    ]);
+  });
+
+  it('reaps a run once ANY parked wait has lapsed, and ends every step it had parked', async () => {
+    const lapsed = await insertRun({
+      status: 'waiting',
+      startedAgo: '30 minutes',
+      parked: [
+        { stepKey: 'approve', timeoutAt: `now() - interval '5 minutes'` },
+        { stepKey: 'pause', topic: 'orchestr:timer:pause', timeoutAt: `now() + interval '1 day'` },
+      ],
+    });
+    await reaper.reapStale();
+    const row = await statusOf(lapsed);
+    expect(row).toMatchObject({ status: 'error', finished: true });
+    expect(row.error).toMatch(/approval window/i);
+    expect(await stepsOf(lapsed)).toEqual([
+      { status: 'error', waiting_topic: null },
+      { status: 'error', waiting_topic: null },
+    ]);
+  });
+
+  it('never reaps a run over a lapsed wait left on a step that already finished', async () => {
+    const parkedLater = await insertRun({
+      status: 'waiting',
+      startedAgo: '30 minutes',
+      parked: [{ stepKey: 'approve2', topic: 'approval2', timeoutAt: `now() + interval '1 hour'` }],
+    });
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at, finished_at,
+                                      waiting_topic, waiting_since, waiting_timeout_at)
+       VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'completed', now() - interval '30 minutes',
+               now() - interval '20 minutes', 'approval', now() - interval '30 minutes', now() - interval '5 minutes')`,
+      [parkedLater],
+    );
+    await reaper.reapStale();
+    expect(await statusOf(parkedLater)).toMatchObject({ status: 'waiting', finished: false });
+  });
+
+  it('reaps a waiting run with nothing parked once past the max duration — nothing can bring it back', async () => {
+    const stranded = await insertRun({ status: 'waiting', startedAgo: '2 hours' });
+    const fresh = await insertRun({ status: 'waiting', startedAgo: '1 minute' });
+    await reaper.reapStale();
+    const row = await statusOf(stranded);
+    expect(row.status).toBe('error');
+    expect(row.error).toMatch(/did not complete/i);
+    expect((await statusOf(fresh)).status).toBe('waiting');
   });
 
   it('is idempotent — a second sweep reaps nothing new', async () => {

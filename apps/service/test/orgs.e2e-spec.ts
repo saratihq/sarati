@@ -613,18 +613,17 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     const seedRun = async (owner: string, workflowId: string | null, status: string): Promise<string> => {
       const runId = `reach-${randomUUID()}`;
       await db.query(
-        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, outputs, workflow_id, waiting_topic, finished_at, org_id)
-         VALUES ($1, $2, $3, 'p', $4, '{"trigger":{"secret":"acme"}}'::json, $5, $6, now(), $7)`,
-        [
-          `${owner}:${runId}`,
-          runId,
-          owner,
-          status,
-          workflowId,
-          status === 'waiting' ? 'approve' : null,
-          orgId,
-        ],
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, outputs, workflow_id, finished_at, org_id)
+         VALUES ($1, $2, $3, 'p', $4, '{"trigger":{"secret":"acme"}}'::json, $5, now(), $6)`,
+        [`${owner}:${runId}`, runId, owner, status, workflowId, orgId],
       );
+      if (status === 'waiting') {
+        await db.query(
+          `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at, waiting_topic, waiting_since)
+           VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'running', now(), 'approve', now())`,
+          [`${owner}:${runId}`],
+        );
+      }
       return `${owner}:${runId}`;
     };
     const done = await seedRun(userB, theirs, 'completed');

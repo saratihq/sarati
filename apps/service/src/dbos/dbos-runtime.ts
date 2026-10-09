@@ -91,9 +91,9 @@ export class DbosRuntime {
     return DBOS.withNextWorkflowID(opts.runId, () => runPlanWorkflow({ plan, ...opts }));
   }
 
-  /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. */
-  sendEvent(runId: string, topic: string, payload: unknown): Promise<void> {
-    return DBOS.send(runId, payload, topic);
+  /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. A repeat of `key` is dropped. */
+  sendEvent(runId: string, topic: string, payload: unknown, key?: string): Promise<void> {
+    return DBOS.send(runId, payload, topic, key);
   }
 
   /** Cancel a durable run at its next step boundary; throws `DBOSNonExistentWorkflowError` if unknown. */

@@ -10,7 +10,7 @@ import { timeAgo } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import { useAuth } from "@/store/useAuth";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
-import { useApprovals } from "@/store/useApprovals";
+import { useApprovals, waitKeyOf } from "@/store/useApprovals";
 import { SaratiLoader } from "./SaratiLogo";
 
 const PAGE_POLL_MS = 10_000;
@@ -30,8 +30,8 @@ function timeoutCountdown(timeoutAt: string | null, now: number): string | null 
   return `${Math.floor(hours / 24)}d ${hours % 24}h left`;
 }
 
-// One waiting run. Decisions drop the row optimistically and roll back on failure; Approve sends
-// immediately, Reject holds the event behind an Undo toast and sends nothing if undone.
+// One wait a run is parked on. Decisions drop the row optimistically and roll back on failure; Approve
+// sends immediately, Reject holds the event behind an Undo toast and sends nothing if undone.
 function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: boolean }) {
   const remove = useApprovals((s) => s.remove);
   const restore = useApprovals((s) => s.restore);
@@ -50,8 +50,9 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
   const deliver = async (payload: unknown): Promise<boolean> => {
     try {
       // Resume by the UNIQUE run id (org-wide: this may be a teammate's run).
-      await api.sendRunEvent(run.id, { topic: run.topic, payload });
-      settle(run.id);
+      // Names the step, so a row answered meanwhile is refused instead of deciding the next wait on its topic.
+      await api.sendRunEvent(run.id, { topic: run.topic, step_key: run.step_key, payload });
+      settle(run);
       return true;
     } catch (e) {
       restore(run);
@@ -61,7 +62,7 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
   };
 
   const send = (payload: unknown, doneTitle: string) => {
-    remove(run.id);
+    remove(run);
     void deliver(payload).then((ok) => {
       if (ok) toast.success(doneTitle, run.workflow_name ?? undefined);
     });
@@ -70,8 +71,8 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
   const approve = () => send({ decision: "approved", decided_at: new Date().toISOString() }, "Approved");
 
   const reject = () => {
-    remove(run.id);
-    toast.undoable("Run rejected", run.workflow_name ?? undefined, {
+    remove(run);
+    toast.undoable("Rejected", run.workflow_name ?? undefined, {
       // The rejection is only sent once the Undo window closes.
       onCommit: () => void deliver({ decision: "rejected", decided_at: new Date().toISOString() }),
       onUndo: () => restore(run),
@@ -185,7 +186,7 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
   );
 }
 
-// Global approvals inbox: every run parked on a wait-for-event node across the org, on a poll.
+// Global approvals inbox: every wait-for-event step parked across the org, one row per wait, on a poll.
 export default function ApprovalsInboxPage() {
   useDocumentTitle("Approvals");
   const waiting = useApprovals((s) => s.waiting);
@@ -231,8 +232,8 @@ export default function ApprovalsInboxPage() {
           )}
         </div>
         <p className="text-[12px] m-0 mb-5" style={{ color: "var(--orchestr-ink-muted)" }}>
-          Runs paused on a wait-for-event step anywhere in this organization. Approving or rejecting resumes the
-          run with your decision — you can act on a teammate&apos;s run, not just your own.
+          Every wait-for-event step paused anywhere in this organization. Approving or rejecting resumes what comes
+          after it with your decision — you can act on a teammate&apos;s run, not just your own.
         </p>
 
         {/* Mine/all lens — only shown once someone else's run is on the list. */}
@@ -284,18 +285,18 @@ export default function ApprovalsInboxPage() {
             }}
           >
             <p className="text-[13px] m-0" style={{ color: "var(--orchestr-ink-muted)" }}>
-              {waiting.length > 0 && scope === "mine" ? "None of the waiting runs are yours." : "Nothing waiting for approval."}
+              {waiting.length > 0 && scope === "mine" ? "None of the waiting approvals are yours." : "Nothing waiting for approval."}
             </p>
             <p className="text-[12px] m-0 mt-1" style={{ color: "var(--orchestr-ink-subtle)" }}>
               {waiting.length > 0 && scope === "mine"
-                ? "Switch to All to see the rest of the organization's runs."
-                : "Runs pause here when they reach a wait-for-event step."}
+                ? "Switch to All to see the rest of the organization's approvals."
+                : "A run's wait-for-event step lands here while it waits."}
             </p>
           </div>
         ) : (
           <ul className="list-none m-0 p-0 space-y-3">
             {visible.map((run) => (
-              <WaitingRow key={run.id} run={run} now={now} mine={isMine(run)} />
+              <WaitingRow key={waitKeyOf(run)} run={run} now={now} mine={isMine(run)} />
             ))}
           </ul>
         )}
