@@ -37,6 +37,12 @@ credentials. Removing a container removes nothing you care about. An upgrade kee
 count and leaves connected accounts `active`, because the `FERNET_KEY` it already had still decrypts
 them.
 
+**Upgrading from v0.2.22 or earlier** starts every live trigger over once, within fifteen minutes:
+webhooks registered with an app are deleted and registered again, subscriptions are renewed, polled
+triggers start from that moment, and schedules restart their interval. An item that arrives between
+a polled trigger's last check and that moment may not start a run. Earlier releases did not record
+what each trigger had registered, so this is the one time it is rebuilt from scratch.
+
 ## Back up
 
 Your install is one container or five — `docker compose ps` in the `sarati` directory tells you

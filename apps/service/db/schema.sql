@@ -411,7 +411,8 @@ CREATE TABLE public.runtime_trigger_activations (
     last_polled_at timestamp with time zone,
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    materialized jsonb
 );
 
 

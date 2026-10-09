@@ -87,8 +87,10 @@ export interface ReconcilePlan {
 }
 
 /**
- * The idempotent desired-vs-actual sweep. Cursor handoff: an UNCHANGED descriptor keeps its cursor
- * across a version move (a promote must not replay dedup); a changed one resets it from now.
+ * The idempotent desired-vs-actual sweep, against what is actually LIVE. Cursor handoff: a desired
+ * descriptor equal to what was stood up keeps its cursor across a version move (a promote must not
+ * replay dedup); anything else — a changed descriptor, nothing recorded, or an apply that never
+ * finished — tears down and stands up again from now.
  */
 export function reconcileActivations(
   desired: DesiredActivation[],
@@ -106,7 +108,7 @@ export function reconcileActivations(
       toCreate.push(d);
       continue;
     }
-    if (!activationDescriptorEqual(d, match)) {
+    if (!isLive(d, match)) {
       toUpdate.push({ desired: d, actual: match, cursorAction: 'reset' });
     } else if (d.versionId !== match.versionId) {
       // Same config, new version answering: keep the cursor, but record the version.
@@ -116,4 +118,10 @@ export function reconcileActivations(
 
   const toDelete = actual.filter((a) => !desiredKeys.has(activationKeyString(a.key)));
   return { toCreate, toUpdate, toDelete };
+}
+
+// The row is written before its side-effects, so a row that differs from what was stood up is an apply that never finished.
+function isLive(desired: DesiredActivation, actual: ActualActivation): boolean {
+  const live = actual.materialized;
+  return live !== null && activationDescriptorEqual(actual, live) && activationDescriptorEqual(desired, live);
 }

@@ -140,6 +140,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='review_approvals' AND column_name='source_version_id'",
   },
+  {
+    migration: '030_activation_materialized.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='materialized'",
+  },
 ];
 
 /**

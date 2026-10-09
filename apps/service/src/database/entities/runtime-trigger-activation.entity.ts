@@ -1,5 +1,7 @@
 import { Column, Entity, Index, PrimaryColumn, Unique } from 'typeorm';
 
+import type { MaterializedActivation } from '../../triggers/canvas/trigger-activation';
+
 /**
  * A materialized trigger ACTIVATION — DERIVED STATE the reconciler converges. Only an
  * env-pointer move or slot change alters one; a commit never does (Save ≠ Live, invariant #2).
@@ -67,6 +69,10 @@ export class RuntimeTriggerActivationEntity {
 
   @Column({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
+
+  /** What the reconciler last stood up — the columns above are what is DESIRED; `null` = not known. */
+  @Column({ type: 'jsonb', nullable: true })
+  materialized!: MaterializedActivation | null;
 }
 
 /** Per-activation persistent KV (cursors, webhook secret/handle); rows cascade with the activation. */

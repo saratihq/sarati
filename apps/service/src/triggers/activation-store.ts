@@ -39,4 +39,12 @@ export class DbActivationStore implements ProviderStore {
       [this.activationId, key],
     );
   }
+
+  /** Delete every key except `keep`. */
+  async clear(keep: readonly string[]): Promise<void> {
+    await this.dataSource.query(
+      `DELETE FROM runtime_activation_store WHERE activation_id = $1 AND NOT (key = ANY($2::text[]))`,
+      [this.activationId, keep],
+    );
+  }
 }

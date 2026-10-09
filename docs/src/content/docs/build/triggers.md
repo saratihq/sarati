@@ -99,6 +99,23 @@ event instead.
 
 Catching a sample does not run the workflow.
 
+## Changing a live app trigger
+
+An app trigger that is live in an environment is registered with the app — a webhook in GitHub or
+Stripe, a subscription, or a place in a polled feed. Promoting a version that changes the trigger's
+type or its settings, or giving the environment's slot a different account, replaces that
+registration:
+
+1. The old one is deleted, with the account and settings that created it.
+2. The new one starts fresh from that moment; it never picks up where the old one was.
+
+A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
+a polled trigger carries on from where it was.
+
+If the app refuses to delete the old webhook, the trigger shows the error on the workflow overview
+and the delete is tried again every fifteen minutes. Deleting that webhook in the app yourself
+clears it. A registration that failed to start is retried on the same schedule.
+
 ## Localhost and inbound triggers
 
 A webhook is a push. A service on the internet cannot reach `http://localhost`.

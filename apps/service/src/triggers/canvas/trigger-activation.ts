@@ -47,22 +47,29 @@ export interface DesiredActivation {
   paused: boolean;
 }
 
-/** The materialized "what IS live" — mirrors a `runtime_trigger_activations` row. */
-export type ActualActivation = DesiredActivation;
+/** What the reconciler last stood up for an activation: the descriptor less its key and version. */
+export type MaterializedActivation = Pick<
+  DesiredActivation,
+  'kind' | 'triggerType' | 'props' | 'connection' | 'paused'
+>;
+
+/** A `runtime_trigger_activations` row: the descriptor last applied to it, and what is actually live. */
+export interface ActualActivation extends DesiredActivation {
+  /** What was last stood up; `null` when nothing is known to be (a row from before this was recorded). */
+  materialized: MaterializedActivation | null;
+}
 
 /** Canonical string form of a key — the map/dedup key across desired and actual. */
 export function activationKeyString(key: ActivationKey): string {
   return `${key.workflowId}:${key.environmentId}:${key.triggerNodeId}`;
 }
 
-/** Whether two connection refs name the same account (both `null` counts as equal). */
-export function connectionEqual(a: ConnectionRef | null, b: ConnectionRef | null): boolean {
+function connectionEqual(a: ConnectionRef | null, b: ConnectionRef | null): boolean {
   if (a === null || b === null) return a === b;
   return a.connectionId === b.connectionId && a.ownerUserId === b.ownerUserId;
 }
 
-/** Is the same live side-effect behind both (kind, trigger type, connection, paused)? If not, the old one is torn down. */
-export function activationTargetEqual(a: DesiredActivation, b: ActualActivation): boolean {
+function activationTargetEqual(a: MaterializedActivation, b: MaterializedActivation): boolean {
   return (
     a.kind === b.kind &&
     a.triggerType === b.triggerType &&
@@ -71,11 +78,7 @@ export function activationTargetEqual(a: DesiredActivation, b: ActualActivation)
   );
 }
 
-/**
- * Does the ACTIVATION INTENT match (target and props)? `props` equality MUST use the
- * vault's `deepEqual`, never `JSON.stringify` (invariant #4). The authoritative cross-version
- * "did the trigger config change" primitive lives in `trigger-config-diff.ts`.
- */
-export function activationDescriptorEqual(a: DesiredActivation, b: ActualActivation): boolean {
+/** Same target and same props — `props` compared by the vault's `deepEqual`, never `JSON.stringify` (invariant #4). */
+export function activationDescriptorEqual(a: MaterializedActivation, b: MaterializedActivation): boolean {
   return activationTargetEqual(a, b) && deepEqual(a.props, b.props);
 }
