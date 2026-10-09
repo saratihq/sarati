@@ -19,6 +19,7 @@ import type { RunDetail, RunStepInfo, RunSummary } from "@/api/client";
 import { DRY_RUN_EXPLAINED, dryRunMarkerOf, withheldSummary } from "@/lib/dryRun";
 import { formatDuration, timeAgo } from "@/lib/format";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
+import RunWaitingNote, { waitingLabel } from "./RunWaitingNote";
 import { SaratiLoader } from "./SaratiLogo";
 import { useWorkflowContext } from "./WorkflowDetail";
 
@@ -258,6 +259,11 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
         {detail.dry_run && (
           <p className="text-[12px] m-0 mt-2" style={{ color: "var(--orchestr-ink-muted)" }}>
             A dry run. {DRY_RUN_EXPLAINED}
+          </p>
+        )}
+        {detail.waiting && (
+          <p className="text-[12px] m-0 mt-2" style={{ color: "var(--orchestr-ink-muted)" }} data-testid="run-waiting">
+            {`${waitingLabel(detail.waiting)}.`} <RunWaitingNote waiting={detail.waiting} />
           </p>
         )}
         {/* The run error usually copies the failing step's — only render it when it adds something. */}

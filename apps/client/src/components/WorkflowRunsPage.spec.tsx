@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import WorkflowRunsPage from "@/components/WorkflowRunsPage";
 
@@ -34,6 +34,10 @@ const run = (over: Partial<api.RunSummary>): api.RunSummary => ({
 });
 
 describe("WorkflowRunsPage", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   // The statuses are the service's own words; `error` used to fall through as a grey, lower-case "error".
   it("names each status the service reports, and a failed run reads Failed in the failure colour", async () => {
     listRuns.mockResolvedValue({
@@ -100,6 +104,40 @@ describe("WorkflowRunsPage", () => {
     // A step that ran shows its output; a withheld one shows the sentence instead of its marker.
     expect(screen.getByText('{"status":200}')).toBeInTheDocument();
     expect(screen.queryByText(/"withheld"/)).not.toBeInTheDocument();
+  });
+
+  it("an opened waiting run says what it waits for: a Wait step its wake time, an approval the inbox", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T10:00:00.000Z"));
+    listRuns.mockResolvedValue({
+      runs: [run({ run_id: "r-sleep", status: "waiting" }), run({ run_id: "r-ask", status: "waiting" })],
+    });
+    getRun.mockImplementation(async (runId) => ({
+      ...run({ run_id: runId, status: "waiting" }),
+      steps: [],
+      waiting:
+        runId === "r-sleep"
+          ? { kind: "timer", until: "2026-10-12T09:30:00.000Z" }
+          : { kind: "event", until: "2026-10-09T10:00:00.000Z" },
+    }));
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+    const [sleeping, asking] = await screen.findAllByRole("button", { expanded: false });
+
+    await user.click(sleeping!);
+    expect((await screen.findByTestId("run-waiting")).textContent).toBe(
+      "Waiting until Oct 12, 9:30 AM. Paused on a Wait step — it resumes on its own.",
+    );
+    expect(screen.queryByRole("link", { name: /approvals inbox/ })).not.toBeInTheDocument();
+
+    await user.click(asking!);
+    expect(await screen.findByRole("link", { name: "open the approvals inbox" })).toHaveAttribute(
+      "href",
+      "/approvals",
+    );
+    expect(screen.getByTestId("run-waiting").textContent).toBe(
+      "Waiting for a decision. Paused on an approval step — open the approvals inbox.",
+    );
   });
 
   it("a real run's step that returns an object shaped like a marker is shown as its output", async () => {

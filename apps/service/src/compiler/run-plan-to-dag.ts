@@ -9,6 +9,7 @@ import type {
   Guard,
 } from '../runtime/dag-plan';
 import type { RunNode, RunPlan } from '../runtime/run-plan';
+import { assertAnswerableTopic } from '../runtime/timer-wait';
 import { toDagCodeNode } from './code-node';
 
 /**
@@ -110,6 +111,7 @@ function lowerNode(node: RunNode, guards: Guard[]): Lowered {
     case 'delay':
       return { nodes: [{ kind: 'delay', id: node.id, ms: node.ms, guards }], exits: exit };
     case 'waitForEvent':
+      assertAnswerableTopic(node.id, node.topic);
       return {
         nodes: [{ kind: 'waitForEvent', id: node.id, topic: node.topic, timeoutMs: node.timeoutMs, guards }],
         exits: exit,

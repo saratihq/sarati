@@ -1327,12 +1327,21 @@ export interface SubWorkflowRunLink {
   status: string;
 }
 
+/** What a waiting run waits for — the service's call: its own clock, or someone sending an event. */
+export interface RunWaiting {
+  kind: "timer" | "event";
+  /** When a timer wakes, or when an event wait times out. */
+  until: string | null;
+}
+
 export interface RunDetail extends RunSummary {
   steps: RunStepInfo[];
   outputs?: Record<string, unknown> | null;
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
   decided_by?: { id: string; name: string | null; email: string | null } | null;
   decided_at?: string | null;
+  /** Set while the run is waiting — absent from a service that predates the field. */
+  waiting?: RunWaiting | null;
   /** The run that called this one, when another workflow started it. */
   called_by?: SubWorkflowRunLink | null;
   /** The runs this one started by calling other workflows. */

@@ -16,7 +16,16 @@ export function isTimerWait(topic: string | null | undefined): boolean {
   return typeof topic === 'string' && topic.startsWith(TIMER_TOPIC_PREFIX);
 }
 
-/** SQL-side form of {@link isTimerWait}, for the reaper's set-based sweep. */
+/** Refuses a wait-for-event on a timer topic: nobody could ever answer it. */
+export function assertAnswerableTopic(step: string, topic: string): void {
+  if (isTimerWait(topic)) {
+    throw new Error(
+      `Wait for event "${step}" can't use the topic "${topic}" — it is reserved for timed waits`,
+    );
+  }
+}
+
+/** SQL-side form of {@link isTimerWait}, for set-based queries (the reaper, the approvals inbox). */
 export const TIMER_TOPIC_SQL_PREFIX = TIMER_TOPIC_PREFIX;
 
 /** Below this a delay just sleeps in place: parking costs two writes and buys nothing. */

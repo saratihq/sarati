@@ -7,6 +7,7 @@ import * as api from "@/api/client";
 import { useWorkflow } from "@/store/useWorkflow";
 import { runPinsFor, useStepSamples } from "@/store/useStepSamples";
 import { Button } from "@/components/ui/button";
+import RunWaitingNote, { waitingLabel } from "@/components/RunWaitingNote";
 import { DRY_RUN_EXPLAINED, dryRunMarkerOf, withheldSummary } from "@/lib/dryRun";
 import { REAL_RUN_CONSEQUENCE } from "@/lib/realRun";
 import { useMissingRequired } from "@/lib/workflow-validation";
@@ -18,6 +19,8 @@ const RUN_POLL_CAP_MS = 5 * 60_000;
 interface RunView {
   status: "running" | "waiting" | "completed" | "failed" | "cancelled";
   dry: boolean;
+  /** What a waiting run waits for, as the service reports it. */
+  waiting?: api.RunWaiting | null;
   outputs?: Record<string, unknown>;
   /** The ordered step log — a dry run's accounts for steps that have no output, such as a wait. */
   trace?: api.RunTraceEntry[];
@@ -26,7 +29,7 @@ interface RunView {
 
 const VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
   running: { label: "Running…", color: "var(--orchestr-ai-bright)" },
-  waiting: { label: "Waiting for a decision", color: "var(--orchestr-warning)" },
+  waiting: { label: "Waiting", color: "var(--orchestr-warning)" },
   completed: { label: "Completed", color: "var(--orchestr-success)" },
   failed: { label: "Failed", color: "var(--orchestr-danger)" },
   cancelled: { label: "Cancelled", color: "var(--orchestr-ink-muted)" },
@@ -42,7 +45,7 @@ const DRY_VIEW_META: Record<RunView["status"], { label: string; color: string }>
 
 /**
  * Runs the WORKING DRAFT on the canvas, not a committed version — for real, or as a dry run. A real run
- * is one sync `runWorkflowIr` call, which stays open while the run is parked on an approval; `getRun` is
+ * is one sync `runWorkflowIr` call, which stays open while the run is parked on a wait; `getRun` is
  * polled meanwhile so the panel can say so. A dry run never parks, so it is that call alone.
  */
 export default function EditorRunButton() {
@@ -74,8 +77,8 @@ export default function EditorRunButton() {
     const interval = setInterval(async () => {
       try {
         const d = await api.getRun(runId);
-        if (d.status === "waiting") {
-          if (activeRun.current === runId) setView({ status: "waiting", dry: false });
+        if (d.status === "waiting" || d.status === "running") {
+          if (activeRun.current === runId) setView({ status: d.status, dry: false, waiting: d.waiting });
         } else if (d.status === "completed") {
           settle(runId, { status: "completed", dry: false, outputs: d.outputs ?? undefined });
         } else if (d.status === "cancelled") {
@@ -133,7 +136,7 @@ export default function EditorRunButton() {
     missing.length > 0
       ? `Fill ${missing.length} required field${missing.length !== 1 ? "s" : ""} before running`
       : undefined;
-  const meta = view ? (view.dry ? DRY_VIEW_META : VIEW_META)[view.status] : null;
+  const meta = view ? metaOf(view) : null;
   const withheld = view?.dry ? withheldSteps(view.trace, workflowJson) : [];
 
   return (
@@ -201,13 +204,9 @@ export default function EditorRunButton() {
             </div>
           )}
 
-          {view.status === "waiting" && (
+          {view.status === "waiting" && view.waiting && (
             <p className="text-[11px] m-0 mt-2" style={{ color: "var(--orchestr-ink-muted)" }}>
-              Paused on an approval step —{" "}
-              <Link href="/approvals" className="underline underline-offset-2" style={{ color: "var(--orchestr-ink)" }}>
-                open the approvals inbox
-              </Link>
-              .
+              <RunWaitingNote waiting={view.waiting} />
             </p>
           )}
 
@@ -248,6 +247,11 @@ export default function EditorRunButton() {
       )}
     </div>
   );
+}
+
+function metaOf(view: RunView): { label: string; color: string } {
+  const meta = (view.dry ? DRY_VIEW_META : VIEW_META)[view.status];
+  return view.status === "waiting" ? { ...meta, label: waitingLabel(view.waiting) } : meta;
 }
 
 /** The steps a dry run did not carry out, in the order it reached them, each with what it did instead. */
