@@ -338,6 +338,16 @@ describe('compileWorkflowIrDag — node mapping + translation (via the shared he
       });
     });
 
+    it('refuses an orchestr:wait_for_event topic reserved for timed waits — nobody could answer it', () => {
+      const workflow = ir(
+        [irNode('approval', 'orchestr:wait_for_event', { topic: 'orchestr:timer:pause' })],
+        [],
+      );
+      expect(() => compileWorkflowIrDag(workflow)).toThrow(
+        /topic "orchestr:timer:pause" — it is reserved for timed waits/,
+      );
+    });
+
     it('rejects an orchestr:if with an unknown op', () => {
       const workflow = ir(
         [

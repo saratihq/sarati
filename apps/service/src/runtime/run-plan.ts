@@ -127,7 +127,7 @@ export type RunOutcome = RunResult | RunHandle;
 /** Status of a run — the shape polled via GET /api/runs/:runId. */
 export interface RunStatus {
   runId: string;
-  /** `waiting` = parked on a `waitForEvent` node (resume via POST /runs/:id/events);
+  /** `waiting` = parked on a `waitForEvent` node (resume via POST /runs/:id/events) or a timed wait (wakes only at its deadline);
    *  `cancelled` = terminated by the user (POST /runs/:id/cancel). */
   status: 'running' | 'waiting' | 'completed' | 'error' | 'cancelled' | 'not_found';
   /** Present when `completed`. */

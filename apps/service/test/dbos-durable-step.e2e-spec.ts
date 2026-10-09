@@ -200,4 +200,24 @@ describe('DBOS durable execution (Phase 1b)', () => {
     await runs.run(plan(), { externalUserId: 'bob', runId });
     expect(requestCount).toBe(before + 2);
   }, 30_000);
+
+  it('RunsService never wakes a timed wait early, even with no run history to check the run against', async () => {
+    const config = {
+      get: () => ({ dbosEnabled: true }),
+    } as unknown as ConfigService<{ env: EnvConfig }, true>;
+    const runs = new RunsService(new DagInterpreter(sdkProvider()), new RuntimeCompiler(), runtime, config);
+    const runId = `sleep-${randomBytes(4).toString('hex')}`;
+    const scoped = `alice:${runId}`;
+    const sleepPlan: RunPlan = { id: 'sleep-plan', nodes: [{ kind: 'delay', id: 'pause', ms: 61_000 }] };
+    await runtime.startDurably(runPlanToDag(sleepPlan), { externalUserId: 'alice', runId: scoped });
+
+    const alice: RunAccess = { userId: 'alice', activeOrgId: null, orgWide: true, orgIds: [], pinned: false };
+    await expect(runs.sendEvent(runId, 'orchestr:timer:pause', {}, alice)).rejects.toMatchObject({
+      status: 409,
+      details: { code: 'timer_wait' },
+    });
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect((await runtime.getRunStatus(scoped)).status).toBe('running');
+    await runtime.cancelWorkflow(scoped);
+  }, 30_000);
 });

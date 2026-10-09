@@ -24,6 +24,7 @@ import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.se
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
+import { isTimerWait, TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
 import { reachesRun, runReachSql, type RunAccess } from './run-access';
 import { failedNodeIdOf, type RunFailureDetails } from './run-failure';
 
@@ -79,6 +80,13 @@ interface SubWorkflowRunRow {
   workflow_id: string | null;
   workflow_name: string | null;
   status: string;
+}
+
+function timerWaitRefusal(runId: string, wakesAt: Date | null): DomainError {
+  const until = wakesAt ? ` until ${wakesAt.toISOString()}` : '';
+  return new DomainError(`Run ${runId} is waiting${until}, not for an event — it resumes on its own`, 409, {
+    code: 'timer_wait',
+  });
 }
 
 function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
@@ -742,8 +750,10 @@ export class RunsService {
       access.orgWide ? access.activeOrgId : null,
       access.orgIds,
       access.pinned,
+      TIMER_TOPIC_SQL_PREFIX,
     ];
     let where = `r.status = 'waiting'
+        AND r.waiting_topic NOT LIKE $5 || '%'
         AND (r.waiting_timeout_at IS NULL OR r.waiting_timeout_at > now())
         AND (r.user_id = $1 OR w.org_id = $2)
         AND ${runReachSql(3, 4)}`;
@@ -794,6 +804,7 @@ export class RunsService {
     if (!em) {
       // Bare embedding (no history tables): DBOS buffers sends itself, and without the
       // runtime_runs row the caller may only resume their own run.
+      if (isTimerWait(topic)) throw timerWaitRefusal(runId, null);
       this.requireDbos();
       return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, payload);
     }
@@ -803,6 +814,7 @@ export class RunsService {
     if (row.status !== 'waiting' || !row.waitingTopic) {
       throw new DomainError(`Run ${runId} is not waiting for an event`, 409);
     }
+    if (isTimerWait(row.waitingTopic)) throw timerWaitRefusal(runId, row.waitingTimeoutAt);
     if (row.waitingTopic !== topic) {
       throw new DomainError(`Run ${runId} is waiting on topic "${row.waitingTopic}", not "${topic}"`, 409);
     }

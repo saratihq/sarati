@@ -13,7 +13,7 @@ Configure the step with a topic and how long to wait:
 
 | Field | |
 |---|---|
-| `topic` | The event name the run waits for, e.g. `manager_approval` |
+| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved. |
 | `timeout_ms` | How long to wait before giving up |
 
 ## While it waits
@@ -21,8 +21,12 @@ Configure the step with a topic and how long to wait:
 The run's status is `waiting`, and the waiting step shows in the run's step log. Nothing after it
 has executed.
 
-Every waiting run appears in the **Approvals inbox** in the header, org-wide — so an approval is not
-something one person has to remember. You can act on a teammate's run, not only your own.
+Every run waiting for an event appears in the **Approvals inbox** in the header, org-wide — so an
+approval is not something one person has to remember. You can act on a teammate's run, not only your
+own.
+
+A run paused by a **Wait** step of more than a minute is also `waiting`, but it is not in the inbox:
+it resumes when its time is up, and nothing else can wake it.
 
 <img class="shot shot-dark" src="/shots/approvals-dark.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
 <img class="shot shot-light" src="/shots/approvals-light.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
@@ -49,6 +53,9 @@ The run picks up where it stopped and the remaining steps execute. The run recor
 and **when**, and it drops out of the inbox.
 
 The payload is available to later steps, so the decision itself can drive what happens next.
+
+An event sent to a run paused by a **Wait** step is refused with `409` — with the code `timer_wait`
+once the run is `waiting` — and the run keeps waiting.
 
 ## If nobody decides
 

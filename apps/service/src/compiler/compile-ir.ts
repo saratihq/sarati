@@ -1,6 +1,7 @@
 import type { IRNode } from '../ir/models';
 import type { Condition, CompareOp } from '../runtime/conditions';
 import type { CodeNode, RunNode } from '../runtime/run-plan';
+import { isTimerWait } from '../runtime/timer-wait';
 
 /**
  * Shared helpers for lowering a `WorkflowIR` to an executable plan, reused by the ONE compiler
@@ -99,6 +100,11 @@ export function mapNode(node: IRNode, translate: (value: unknown) => unknown): R
   if (node.node_type === ORCHESTR_WAIT) {
     const topic =
       typeof node.parameters.topic === 'string' && node.parameters.topic ? node.parameters.topic : node.id;
+    if (isTimerWait(topic)) {
+      throw new Error(
+        `Wait for event "${node.name}" can't use the topic "${topic}" — it is reserved for timed waits`,
+      );
+    }
     const rawTimeout = Number(node.parameters.timeout_ms);
     return {
       kind: 'waitForEvent',
