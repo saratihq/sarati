@@ -71,7 +71,8 @@ The run and the failing step both carry the reason, for example
 ## A run is stuck `running`
 
 If the worker came back, it resumes on its own. If it never comes back, the reaper moves the run to
-`error` once it passes `RUN_MAX_DURATION_SECONDS`, within five minutes.
+`error` once it has been in flight for `RUN_MAX_DURATION_SECONDS` since it started or last resumed
+from a wait, within five minutes.
 
 ## The composer is not there
 

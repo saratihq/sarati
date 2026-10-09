@@ -102,6 +102,10 @@ export class RuntimeRunEntity {
   /** The org the run executed in — its workflow's, else the caller's; kept when the workflow is deleted. */
   @Column({ name: 'org_id', type: 'uuid', nullable: true })
   orgId!: string | null;
+
+  /** When the run last resumed from a wait; its time in flight counts from this, else `startedAt`. */
+  @Column({ name: 'resumed_at', type: 'timestamptz', nullable: true })
+  resumedAt!: Date | null;
 }
 
 /** One executed step (action/delay/waitForEvent); `step_key` is loop-iteration-unique. */
