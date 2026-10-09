@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatDate, formatDuration, humanizeKey, timeAgo } from "@/lib/format";
+import { formatDate, formatDateTime, formatDuration, humanizeKey, timeAgo } from "@/lib/format";
 
 const DASH = "—";
 
@@ -15,6 +15,17 @@ describe("formatDate", () => {
 
   it.each([null, undefined, "", "not-a-date", "2026-13-45"])("degrades to an em dash on %s", (iso) => {
     expect(formatDate(iso)).toBe(DASH);
+  });
+});
+
+describe("formatDateTime", () => {
+  it("renders the day and the minute", () => {
+    expect(formatDateTime("2026-10-09T15:05:00Z")).toBe("Oct 9, 3:05 PM");
+    expect(formatDateTime("2026-10-12T00:00:00Z")).toBe("Oct 12, 12:00 AM");
+  });
+
+  it.each([null, undefined, "", "not-a-date"])("degrades to an em dash on %s", (iso) => {
+    expect(formatDateTime(iso)).toBe(DASH);
   });
 });
 

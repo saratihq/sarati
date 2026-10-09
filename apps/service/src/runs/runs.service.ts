@@ -82,11 +82,33 @@ interface SubWorkflowRunRow {
   status: string;
 }
 
-function timerWaitRefusal(runId: string, wakesAt: Date | null): DomainError {
+function timerWaitRefusal(message: string): DomainError {
+  return new DomainError(message, 409, { code: 'timer_wait' });
+}
+
+function parkedTimerRefusal(runId: string, wakesAt: Date | null): DomainError {
+  if (wakesAt && wakesAt.getTime() <= Date.now()) {
+    return timerWaitRefusal(
+      `Run ${runId} was due at ${wakesAt.toISOString()}, not waiting for an event — it resumes on its own`,
+    );
+  }
   const until = wakesAt ? ` until ${wakesAt.toISOString()}` : '';
-  return new DomainError(`Run ${runId} is waiting${until}, not for an event — it resumes on its own`, 409, {
-    code: 'timer_wait',
-  });
+  return timerWaitRefusal(`Run ${runId} is waiting${until}, not for an event — it resumes on its own`);
+}
+
+/** What a parked run is waiting for: its own clock (`timer`) or someone sending an event. */
+export interface RunWaiting {
+  kind: 'timer' | 'event';
+  /** When a timer wakes, or when an event wait times out. */
+  until: string | null;
+}
+
+function waitingOf(row: RuntimeRunEntity): RunWaiting | null {
+  if (row.status !== 'waiting' || !row.waitingTopic) return null;
+  return {
+    kind: isTimerWait(row.waitingTopic) ? 'timer' : 'event',
+    until: row.waitingTimeoutAt?.toISOString() ?? null,
+  };
 }
 
 function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
@@ -119,6 +141,8 @@ export type RunDetail = RunStatus & {
   /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
   decided_by: { id: string; name: string | null; email: string | null } | null;
   decided_at: string | null;
+  /** Set while the run is `waiting`: what it waits for, and until when. */
+  waiting: RunWaiting | null;
 };
 
 /**
@@ -562,6 +586,7 @@ export class RunsService {
         duration_ms: null,
         decided_by: null,
         decided_at: null,
+        waiting: null,
         called_by: null,
         calls: [],
       };
@@ -595,6 +620,7 @@ export class RunsService {
       ...status,
       decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
       decided_at: row.decidedAt?.toISOString() ?? null,
+      waiting: waitingOf(row),
       steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false)),
       ...(em ? await this.subWorkflowLinks(em, row, scoped, access) : { called_by: null, calls: [] }),
       started_at: row.startedAt?.toISOString() ?? null,
@@ -804,7 +830,9 @@ export class RunsService {
     if (!em) {
       // Bare embedding (no history tables): DBOS buffers sends itself, and without the
       // runtime_runs row the caller may only resume their own run.
-      if (isTimerWait(topic)) throw timerWaitRefusal(runId, null);
+      if (isTimerWait(topic)) {
+        throw timerWaitRefusal(`Topic "${topic}" belongs to a timed wait and can't be sent to`);
+      }
       this.requireDbos();
       return this.dbos.sendEvent(this.scopedRunId(access.userId, runId), topic, payload);
     }
@@ -814,7 +842,7 @@ export class RunsService {
     if (row.status !== 'waiting' || !row.waitingTopic) {
       throw new DomainError(`Run ${runId} is not waiting for an event`, 409);
     }
-    if (isTimerWait(row.waitingTopic)) throw timerWaitRefusal(runId, row.waitingTimeoutAt);
+    if (isTimerWait(row.waitingTopic)) throw parkedTimerRefusal(runId, row.waitingTimeoutAt);
     if (row.waitingTopic !== topic) {
       throw new DomainError(`Run ${runId} is waiting on topic "${row.waitingTopic}", not "${topic}"`, 409);
     }

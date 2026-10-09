@@ -13,7 +13,7 @@ Configure the step with a topic and how long to wait:
 
 | Field | |
 |---|---|
-| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved. |
+| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved: a workflow using one can't run, and a raw plan using one fails at that step. |
 | `timeout_ms` | How long to wait before giving up |
 
 ## While it waits
@@ -26,7 +26,15 @@ approval is not something one person has to remember. You can act on a teammate'
 own.
 
 A run paused by a **Wait** step of more than a minute is also `waiting`, but it is not in the inbox:
-it resumes when its time is up, and nothing else can wake it.
+it resumes when its time is up, and nothing else can wake it. The editor and **Runs** show it as
+**Waiting until** its wake time; a run waiting for an event reads **Waiting for a decision**, with a
+link to the inbox. Over the API, `GET /api/runs/<run-id>` says which:
+
+```json
+{"status": "waiting", "waiting": {"kind": "timer", "until": "2026-10-12T09:30:00.000Z"}}
+```
+
+`kind` is `timer` or `event`; `until` is when a timer wakes, or when an event wait times out.
 
 <img class="shot shot-dark" src="/shots/approvals-dark.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
 <img class="shot shot-light" src="/shots/approvals-light.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />

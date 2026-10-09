@@ -96,13 +96,42 @@ describe("EditorRunButton watching a run whose call is still open", () => {
   });
 
   it("a run parked on an approval says it is waiting, and keeps being watched", async () => {
-    getRun.mockResolvedValue(watched({ status: "waiting" }));
+    getRun.mockResolvedValue(
+      watched({ status: "waiting", waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" } }),
+    );
     await startAndWatchOnce();
 
     expect(screen.getByText("Waiting for a decision")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "open the approvals inbox" })).toHaveAttribute("href", "/approvals");
     expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
     await act(() => vi.advanceTimersByTimeAsync(3100));
     expect(getRun).toHaveBeenCalledTimes(2);
+  });
+
+  // A Wait step is not in the approvals inbox: pointing there sent people to a page that never listed the run.
+  it("a run paused on a Wait step says when it wakes, with no inbox and no decision", async () => {
+    getRun.mockResolvedValue(
+      watched({ status: "waiting", waiting: { kind: "timer", until: "2026-10-12T09:30:00.000Z" } }),
+    );
+    await startAndWatchOnce();
+
+    expect(screen.getByText("Waiting until Oct 12, 9:30 AM")).toBeInTheDocument();
+    expect(screen.getByText("Paused on a Wait step — it resumes on its own.")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /approvals inbox/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/decision/)).not.toBeInTheDocument();
+  });
+
+  it("a run that wakes from its wait reads as running again", async () => {
+    getRun
+      .mockResolvedValueOnce(watched({ status: "waiting", waiting: { kind: "timer", until: "2026-10-12T09:30:00.000Z" } }))
+      .mockResolvedValue(watched({ status: "running" }));
+    await startAndWatchOnce();
+    expect(screen.getByText("Waiting until Oct 12, 9:30 AM")).toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(3100));
+    expect(screen.queryByText(/^Waiting/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Paused on/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("Running…")).toHaveLength(2);
   });
 
   it("the answer to a run the watcher already settled never overwrites the run started after it", async () => {

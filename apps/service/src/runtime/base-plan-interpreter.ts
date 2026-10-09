@@ -24,7 +24,7 @@ import type { BlobStore } from './blob-store';
 import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
-import { PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
+import { assertAnswerableTopic, PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
 import type { RunResult, TraceEntry } from './run-plan';
@@ -491,6 +491,7 @@ export abstract class BasePlanInterpreter {
     const stepKey = `${path}${node.id}`;
     const record = ctx.record;
     const payload = await this.recorded(ctx, stepKey, node.id, 'waitForEvent', async () => {
+      assertAnswerableTopic(node.id, node.topic);
       // Dry run: don't park the preview waiting for a human — return a stub.
       if (ctx.dryRun) return withheldWait();
       // Register the receiver BEFORE persisting the pause, so anyone who observes the

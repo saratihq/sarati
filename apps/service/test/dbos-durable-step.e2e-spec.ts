@@ -215,6 +215,7 @@ describe('DBOS durable execution (Phase 1b)', () => {
     await expect(runs.sendEvent(runId, 'orchestr:timer:pause', {}, alice)).rejects.toMatchObject({
       status: 409,
       details: { code: 'timer_wait' },
+      message: `Topic "orchestr:timer:pause" belongs to a timed wait and can't be sent to`,
     });
     await new Promise((r) => setTimeout(r, 1_000));
     expect((await runtime.getRunStatus(scoped)).status).toBe('running');

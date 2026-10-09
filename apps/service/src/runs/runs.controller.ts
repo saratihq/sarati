@@ -378,6 +378,7 @@ export class RunsController {
       duration_ms: s.duration_ms,
       decided_by: s.decided_by,
       decided_at: s.decided_at,
+      waiting: s.waiting,
       // Both ends of a sub-workflow call — a nested run is recorded under the workflow
       // that ran it, so these are the only path between the two.
       called_by: s.called_by,
