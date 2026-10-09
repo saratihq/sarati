@@ -51,6 +51,7 @@ import {
 } from '../trigger-catalog.service';
 import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
+import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
 import { activationKeyOf, actualOf } from './activation-row';
 import {
@@ -107,31 +108,45 @@ export class TriggerReconcilerService {
   /** The last queued reconcile per workflow; absent when none is in flight. In-process only. */
   private readonly tails = new Map<string, Promise<void>>();
 
+  /** Pending deletes queued for a retry or being retried, by id. In-process only. */
+  private readonly retrying = new Set<string>();
+
+  /** The queued retries of pending deletes, which run one at a time, apart from every reconcile. */
+  private retries: Promise<void> = Promise.resolve();
+
+  private readonly deleteFence = new WebhookDeleteFence();
+
   /** Wire the inline reconcile path so pointer/slot moves converge even when pg-boss is off. */
   registerInline(): void {
     // Inline reconciles do NOT run the self-heal re-verify pass — that is sweep-only.
     this.signals.registerInline((workflowId) => this.reconcile(workflowId));
   }
 
-  /**
-   * Converge ONE workflow's activations to its desired set — total + idempotent. Reads
-   * COMMITTED pointers, so callers must enqueue after their move's transaction commits.
-   * `selfHeal` is sweep-only: it costs a Composio round trip per subscription row.
-   * Reconciles of one workflow run one at a time, so a caller that awaits this sees converged state.
-   */
+  /** Converge one workflow to its desired set from COMMITTED pointers, one reconcile at a time; its pending deletes are then queued for a retry it never waits for. */
   async reconcile(workflowId: string, opts: { selfHeal?: boolean } = {}): Promise<void> {
     const previous = this.tails.get(workflowId) ?? Promise.resolve();
     const run = previous.then(() => this.reconcileOnce(workflowId, opts));
-    const tail = run.catch(() => undefined);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
     this.tails.set(workflowId, tail);
     try {
-      await run;
+      this.queueRetries(await run);
     } finally {
       if (this.tails.get(workflowId) === tail) this.tails.delete(workflowId);
     }
   }
 
-  private async reconcileOnce(workflowId: string, opts: { selfHeal?: boolean }): Promise<void> {
+  /** Resolves once every pending delete queued for a retry so far has been retried. */
+  async retriesSettled(): Promise<void> {
+    await this.retries;
+  }
+
+  private async reconcileOnce(
+    workflowId: string,
+    opts: { selfHeal?: boolean },
+  ): Promise<TriggerRetiredWebhookEntity[]> {
     const em = this.dataSource.manager;
     const pendingDeletes = await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } });
     const pointers = await rawQuery<PointerRow>(
@@ -182,7 +197,7 @@ export class TriggerReconcilerService {
         await this.applyDelete(row, envNameById).catch((err) => this.logApplyError('delete', d.key, err));
     }
     if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
-    await this.retryRetiredWebhooks(pendingDeletes);
+    return pendingDeletes;
   }
 
   /**
@@ -493,13 +508,29 @@ export class TriggerReconcilerService {
     await em.save(TriggerRetiredWebhookEntity, entry);
   }
 
+  private queueRetries(entries: TriggerRetiredWebhookEntity[]): void {
+    const queued = entries.filter((entry) => !this.retrying.has(entry.id));
+    if (queued.length === 0) return;
+    for (const entry of queued) this.retrying.add(entry.id);
+    this.retries = this.retries.then(() => this.retryRetiredWebhooks(queued));
+  }
+
   private async retryRetiredWebhooks(entries: TriggerRetiredWebhookEntity[]): Promise<void> {
-    const em = this.dataSource.manager;
     for (const entry of entries) {
-      if ((await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry))) {
-        await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
-      }
+      await this.retryRetiredWebhook(entry)
+        .catch((err: unknown) =>
+          this.logger.warn(`pending webhook delete ${entry.id} was not retried: ${errorMessage(err)}`),
+        )
+        .finally(() => this.retrying.delete(entry.id));
     }
+  }
+
+  private async retryRetiredWebhook(entry: TriggerRetiredWebhookEntity): Promise<void> {
+    const done = await this.deleteFence.deleting(
+      entry.webhook,
+      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry)),
+    );
+    if (done) await this.dataSource.manager.delete(TriggerRetiredWebhookEntity, { id: entry.id });
   }
 
   // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
@@ -560,11 +591,19 @@ export class TriggerReconcilerService {
   }
 
   /** Register a fresh provider subscription pointing at the per-(workflow,env) intake URL. */
-  private async registerWebhook(
+  private registerWebhook(
     activationId: string,
     desired: DesiredActivation,
     envName: Map<string, string>,
   ): Promise<void> {
+    return this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired, envName));
+  }
+
+  private async registerWebhookOnce(
+    activationId: string,
+    desired: DesiredActivation,
+    envName: Map<string, string>,
+  ): Promise<RegisteredWebhook | null> {
     const store = new DbActivationStore(this.dataSource, activationId);
     const secret = randomBytes(32).toString('hex');
     await store.put(WEBHOOK_SECRET_KEY, secret);
@@ -578,7 +617,7 @@ export class TriggerReconcilerService {
       secret,
       auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
     });
-    if (!registration) return;
+    if (!registration) return null;
     const webhook: RegisteredWebhook = {
       triggerType: desired.triggerType,
       props: desired.props,
@@ -589,6 +628,7 @@ export class TriggerReconcilerService {
     };
     await store.put(WEBHOOK_REGISTRATION_KEY, webhook);
     await this.forgetRetiredHeldBy(webhook);
+    return webhook;
   }
 
   /**

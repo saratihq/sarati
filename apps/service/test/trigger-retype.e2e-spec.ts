@@ -60,8 +60,8 @@ const providerCalls: Array<{ method: string; url: string; body: string; authoriz
 const stripeEndpoints = new Map<string, string>();
 let endpointSeq = 0;
 let stripeRefuses: { method: string; status: number } | null = null;
-// When set, a DELETE of this endpoint waits for `release`, reporting through `reached` that it has started.
-let stripeDeleteGate: { endpoint: string; reached: () => void; release: Promise<void> } | null = null;
+// When set, a DELETE of this handle, in any app, waits for `release`, reporting through `reached` that it has started.
+let deleteGate: { handle: string; reached: () => void; release: Promise<void> } | null = null;
 
 // Live GitHub hooks, by their `/repos/<owner>/<repo>/hooks/<id>` path.
 const githubHooks = new Set<string>();
@@ -121,6 +121,13 @@ function typeform(method: string, path: string, authorization: string): FetchLik
   return json(404, { code: 'NOT_FOUND' });
 }
 
+function answer(method: string, url: URL, authorization: string): FetchLikeResponse {
+  if (url.host === 'api.stripe.com') return stripe(method, url.pathname, authorization);
+  if (url.host === 'api.github.com') return github(method, url.pathname);
+  if (url.host === 'api.typeform.com') return typeform(method, url.pathname, authorization);
+  return json(404, {});
+}
+
 const webhookFetch: FetchLike = (input, init) => {
   const method = (init?.method ?? 'GET').toUpperCase();
   const url = new URL(String(input));
@@ -131,21 +138,13 @@ const webhookFetch: FetchLike = (input, init) => {
     body: typeof init?.body === 'string' ? init.body : '',
     authorization,
   });
-  const gate = stripeDeleteGate;
-  if (
-    url.host === 'api.stripe.com' &&
-    method === 'DELETE' &&
-    gate &&
-    url.pathname.endsWith(`/${gate.endpoint}`)
-  ) {
-    stripeDeleteGate = null;
+  const gate = deleteGate;
+  if (method === 'DELETE' && gate && url.pathname.endsWith(`/${gate.handle}`)) {
+    deleteGate = null;
     gate.reached();
-    return gate.release.then(() => stripe(method, url.pathname, authorization));
+    return gate.release.then(() => answer(method, url, authorization));
   }
-  if (url.host === 'api.stripe.com') return Promise.resolve(stripe(method, url.pathname, authorization));
-  if (url.host === 'api.github.com') return Promise.resolve(github(method, url.pathname));
-  if (url.host === 'api.typeform.com') return Promise.resolve(typeform(method, url.pathname, authorization));
-  return Promise.resolve(json(404, {}));
+  return Promise.resolve(answer(method, url, authorization));
 };
 
 let feed = { contentType: 'application/json', body: '[]' };
@@ -298,7 +297,12 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
 
   const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
-  const reconcile = (wfId: string): Promise<void> => app.get(TriggerReconcilerService).reconcile(wfId);
+  const converge = (wfId: string): Promise<void> => app.get(TriggerReconcilerService).reconcile(wfId);
+  const retried = (): Promise<void> => app.get(TriggerReconcilerService).retriesSettled();
+  const reconcile = async (wfId: string): Promise<void> => {
+    await converge(wfId);
+    await retried();
+  };
 
   const deploy = async (doc: Record<string, unknown>, org = orgId): Promise<string> => {
     const res = await asA(
@@ -307,7 +311,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     return res.body.workflow_id as string;
   };
 
-  const commitAndPublish = async (wfId: string, doc: Record<string, unknown>, org = orgId): Promise<void> => {
+  const publish = async (wfId: string, doc: Record<string, unknown>, org = orgId): Promise<void> => {
     const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', org)).expect(
       200,
     );
@@ -321,6 +325,10 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         .send({ workflow_ir: doc, commit_message: 'retype', base_version_id: head.id }),
     ).expect(201);
     await asA(http().post(`/api/workflows/${wfId}/publish`).set('X-Org-Id', org).send({})).expect(201);
+  };
+
+  const commitAndPublish = async (wfId: string, doc: Record<string, unknown>, org = orgId): Promise<void> => {
+    await publish(wfId, doc, org);
     await reconcile(wfId);
   };
 
@@ -396,6 +404,15 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         [wfId],
       )
     ).rows;
+
+  // A DELETE of `handle` that waits until `release()`; `reached` resolves once it has been sent.
+  const gateDelete = (handle: string): { reached: Promise<void>; release: () => void } => {
+    let sent = (): void => undefined;
+    let release = (): void => undefined;
+    const reached = new Promise<void>((resolve) => (sent = resolve));
+    deleteGate = { handle, reached: sent, release: new Promise<void>((resolve) => (release = resolve)) };
+    return { reached, release: () => release() };
+  };
 
   const deliverStripe = (wfId: string, secret: unknown, event: Record<string, unknown>): request.Test => {
     const raw = JSON.stringify({ object: 'event', created: 1700000000, livemode: false, ...event });
@@ -604,6 +621,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   });
 
   afterEach(() => {
+    deleteGate = null;
     stripeRefuses = null;
     githubRefuses = null;
     typeformRefuses = null;
@@ -1400,6 +1418,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     stripeRefuses = null;
 
     await app.get(TriggerReconcilerService).sweepAll();
+    await retried();
 
     expect(stripeEndpoints.has(endpoint)).toBe(false);
     expect(await retired(wfId)).toEqual([]);
@@ -1561,37 +1580,76 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await announced(runs[0]!.run_id)).toBe('fired: after the upgrade');
   });
 
-  it('a pending webhook delete is retried only once the publish it rides with has converged', async () => {
-    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'retried after converging'));
+  it('a publish converges while an earlier reconcile is still retrying a pending webhook delete, which is sent once', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'retried beside a publish'));
     const pending = await endpointOf((await activation(wfId)).id);
     stripeRefuses = { method: 'DELETE', status: 500 };
-    await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'retried after converging'));
+    await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'retried beside a publish'));
     stripeRefuses = null;
     expect(await retired(wfId)).toEqual([{ hook: pending, last_error: expect.any(String) }]);
 
-    let reached = (): void => undefined;
-    let release = (): void => undefined;
-    const atGate = new Promise<void>((resolve) => (reached = resolve));
-    stripeDeleteGate = {
-      endpoint: pending,
-      reached,
-      release: new Promise<void>((resolve) => (release = resolve)),
-    };
-    const publishing = commitAndPublish(
-      wfId,
-      triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'retried after converging'),
-    );
-    await atGate;
+    const gate = gateDelete(pending);
+    const mark = providerCalls.length;
+    const sweeping = converge(wfId);
+    try {
+      await gate.reached;
+      await publish(
+        wfId,
+        triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'retried beside a publish'),
+      );
+      const converged = await Promise.race([
+        converge(wfId).then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
+      ]);
 
-    const converged = await activation(wfId);
-    release();
-    await publishing;
-    expect(converged).toMatchObject({
-      kind: 'schedule',
-      materialized: { kind: 'schedule' },
-      last_error: null,
-    });
+      expect(converged).toBe(true);
+      expect(await activation(wfId)).toMatchObject({
+        kind: 'schedule',
+        materialized: { kind: 'schedule' },
+        last_error: null,
+      });
+    } finally {
+      gate.release();
+    }
+    await sweeping;
+    await retried();
+
+    expect(deletedEndpoints(mark).filter((endpoint) => endpoint === pending)).toEqual([pending]);
     expect(stripeEndpoints.has(pending)).toBe(false);
     expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('a Typeform trigger added back while a retry is deleting its webhook registers it again once the delete lands, and fires', async () => {
+    const name = 'typeform beside a retry';
+    const wfId = await deploy(triggerDoc('typeform.new_response', { formId: 'F4' }, name, 'token'));
+    const hook = await typeformHookOf((await activation(wfId)).id);
+    const tag = hook.split('/')[1]!;
+    typeformRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, name));
+    typeformRefuses = null;
+    expect(await retired(wfId)).toEqual([{ hook: tag, last_error: expect.stringMatching(/HTTP 500/) }]);
+
+    const gate = gateDelete(tag);
+    await converge(wfId);
+    await gate.reached;
+    const mark = providerCalls.length;
+    try {
+      await publish(wfId, triggerDoc('typeform.new_response', { formId: 'F4' }, name, 'token'));
+      const upserted = (): boolean =>
+        providerCalls.slice(mark).some((c) => c.method === 'PUT' && c.url.includes(`/webhooks/${tag}`));
+      for (let i = 0; i < 200 && !upserted(); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(upserted()).toBe(true);
+    } finally {
+      gate.release();
+    }
+    await reconcile(wfId);
+
+    const back = await activation(wfId);
+    expect(back).toMatchObject({ last_error: null, materialized: { kind: 'registered_webhook' } });
+    expect(await typeformHookOf(back.id)).toBe(hook);
+    expect(typeformHooks.has(hook)).toBe(true);
+    expect(await retired(wfId)).toEqual([]);
+    const run = await fireTypeform(wfId, back.id, 'tok_beside');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_beside');
   });
 });
