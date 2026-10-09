@@ -5,8 +5,8 @@ import type { ProviderStore } from '../providers/provider-store';
 
 /**
  * The persistent KV (ProviderStore) for ONE trigger activation — cursors, webhook
- * secret, subscription handle. Single-writer by construction (reconciler + poll sweep are both
- * pg-boss singletons), so per-key upsert atomicity suffices.
+ * secret, subscription handle. The reconciler and the poll sweep write it only while holding the
+ * activation's lock (`activation-lock.ts`), so per-key upsert atomicity suffices.
  */
 export class DbActivationStore implements ProviderStore {
   constructor(
@@ -40,11 +40,10 @@ export class DbActivationStore implements ProviderStore {
     );
   }
 
-  /** Delete every key except `keep`. */
-  async clear(keep: readonly string[]): Promise<void> {
-    await this.dataSource.query(
-      `DELETE FROM runtime_activation_store WHERE activation_id = $1 AND NOT (key = ANY($2::text[]))`,
-      [this.activationId, keep],
-    );
+  /** Delete every key. */
+  async clear(): Promise<void> {
+    await this.dataSource.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [
+      this.activationId,
+    ]);
   }
 }

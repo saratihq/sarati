@@ -41,7 +41,10 @@ them.
 webhooks registered with an app are deleted and registered again, subscriptions are renewed, polled
 triggers start from that moment, and schedules restart their interval. An item that arrives between
 a polled trigger's last check and that moment may not start a run. Earlier releases did not record
-what each trigger had registered, so this is the one time it is rebuilt from scratch.
+what each trigger had registered, so this is the one time it is rebuilt from scratch. If an earlier
+release changed an app-webhook trigger into a different kind of trigger, the webhook it left
+registered can't be deleted for you: the service log names it at warn level on that first rebuild,
+so you can delete it in the app.
 
 ## Back up
 

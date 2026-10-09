@@ -9,10 +9,13 @@ import {
   type WebhookTrigger,
 } from '@sarati/actions-sdk';
 
+import { errorMessage } from '../common/error-message';
 import { ConnectionsService } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
 import {
   buildDirectAuth,
+  buildObservedDirectAuth,
+  ConnectionGoneError,
   loadTriggerOptions,
   resolveTriggerCredential,
   sdkStore,
@@ -24,8 +27,11 @@ export const SDK_WEBHOOK_FETCH = Symbol('SDK_WEBHOOK_FETCH');
 
 /** The per-trigger secret WE generated — SINGLE definition site (reconciler writes, intake reads). */
 export const WEBHOOK_SECRET_KEY = 'webhook.secret';
-/** The durable {@link WebhookRegistration} handle `onEnable` returned — carries any PROVIDER-minted signing secret. */
+/** The record of what `onEnable` registered; its {@link WebhookRegistration} handle carries any PROVIDER-minted signing secret. */
 export const WEBHOOK_REGISTRATION_KEY = 'webhook.registration';
+
+/** A webhook delete its credential can never perform: the connection is gone, or the app rejects it (401/403). */
+export class WebhookCredentialError extends Error {}
 
 /** Common shape the three lifecycle entrypoints share (one trigger row's context). */
 interface SdkWebhookContext {
@@ -143,18 +149,38 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** Delete the subscription named by `registration`. Best-effort teardown — see callers. */
+  /** Delete the subscription named by `registration`; throws {@link WebhookCredentialError} when retrying cannot help. */
   async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<void> {
     const trigger = this.require(ctx.type);
-    const auth = await this.authFor(ctx.externalUserId, ctx.auth, trigger);
-    await trigger.disable({
-      auth,
-      props: ctx.props,
-      store: sdkStore(ctx.store),
-      webhookUrl: ctx.webhookUrl,
-      secret: ctx.secret,
-      ...(ctx.registration ? { registration: ctx.registration } : {}),
-    });
+    let status = 0;
+    try {
+      const credential = await resolveTriggerCredential(
+        this.connections,
+        ctx.externalUserId,
+        ctx.auth,
+        trigger.auth,
+      );
+      await trigger.disable({
+        auth: buildObservedDirectAuth(trigger.auth, credential, this.fetchImpl, (s) => (status = s)),
+        props: ctx.props,
+        store: sdkStore(ctx.store),
+        webhookUrl: ctx.webhookUrl,
+        secret: ctx.secret,
+        ...(ctx.registration ? { registration: ctx.registration } : {}),
+      });
+    } catch (err) {
+      if (err instanceof ConnectionGoneError) {
+        throw new WebhookCredentialError('the connection it was registered with no longer exists', {
+          cause: err,
+        });
+      }
+      if (status === 401 || status === 403) {
+        throw new WebhookCredentialError(`the app rejected its credential: ${errorMessage(err)}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
   }
 
   private require(type: string): WebhookTrigger<never, unknown> {

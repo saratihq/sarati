@@ -4,7 +4,7 @@ import type { FetchLike, FetchLikeResponse, WebhookRegistration } from '@sarati/
 
 import type { ConnectionsService } from '../connections/connections.service';
 import { InMemoryStore } from './provider-store';
-import { SdkWebhookProvider } from './sdk-webhook.provider';
+import { SdkWebhookProvider, WebhookCredentialError } from './sdk-webhook.provider';
 
 function res(status: number, body: unknown): FetchLikeResponse {
   const text = body === undefined ? '' : JSON.stringify(body);
@@ -208,5 +208,46 @@ describe('SdkWebhookProvider', () => {
     });
     const del = fetch.calls.find((c) => c.method === 'DELETE');
     expect(del?.url).toBe('https://api.github.com/repos/octocat/hello-world/hooks/555');
+  });
+
+  describe('disable — whether a failed delete is worth retrying', () => {
+    const disable = (provider: SdkWebhookProvider, auth: Record<string, unknown>): Promise<void> =>
+      provider.disable({
+        externalUserId: 'u1',
+        auth,
+        store: new InMemoryStore(),
+        registration: { subscriptionId: '555' },
+        ...BASE,
+      });
+    const answering =
+      (status: number): FetchLike =>
+      () =>
+        Promise.resolve(res(status, { message: 'refused' }));
+
+    it.each([401, 403])('a %i from the app can never succeed', async (status) => {
+      const provider = new SdkWebhookProvider(undefined, answering(status));
+      await expect(disable(provider, { token: 'ghp_revoked' })).rejects.toBeInstanceOf(
+        WebhookCredentialError,
+      );
+    });
+
+    it('a 500 from the app may succeed later', async () => {
+      const provider = new SdkWebhookProvider(undefined, answering(500));
+      const failure = disable(provider, { token: 'ghp_inline' });
+      await expect(failure).rejects.toThrow(/HTTP 500/);
+      await expect(failure).rejects.not.toBeInstanceOf(WebhookCredentialError);
+    });
+
+    it('a connection that no longer exists can never succeed, and the app is never called', async () => {
+      const fetch = stubFetch();
+      const connections = {
+        getCredential: jest.fn().mockResolvedValue(null),
+      } as unknown as ConnectionsService;
+      const provider = new SdkWebhookProvider(connections, fetch);
+      await expect(disable(provider, { connectionId: 'conn-gone' })).rejects.toBeInstanceOf(
+        WebhookCredentialError,
+      );
+      expect(fetch.calls).toEqual([]);
+    });
   });
 });

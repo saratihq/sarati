@@ -145,6 +145,10 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='materialized'",
   },
+  {
+    migration: '031_trigger_retired_webhooks.sql',
+    probe: "SELECT 1 FROM information_schema.tables WHERE table_name='trigger_retired_webhooks'",
+  },
 ];
 
 /**

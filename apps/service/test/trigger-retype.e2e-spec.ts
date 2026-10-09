@@ -1,19 +1,22 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 
-import type { INestApplication } from '@nestjs/common';
+import { type INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 import { Client } from 'pg';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH } from '../src/providers/sdk-webhook.provider';
+import { withActivationLock } from '../src/triggers/activation-lock';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
@@ -115,13 +118,30 @@ function intercomSearch(body: unknown): FetchLikeResponse {
   return json(200, { conversations: matched, pages: {} });
 }
 
+const contacts: Array<{ id: string; createdAt: string }> = [];
+
+// When set, the next HubSpot search waits for `release`, reporting through `reached` that it has started.
+let hubspotGate: { reached: () => void; release: Promise<void> } | null = null;
+
+// HubSpot's search applies the `createdate GT` filter (epoch ms) it is sent, as the real one does.
+function hubspotSearch(body: unknown): Promise<FetchLikeResponse> {
+  const search = JSON.parse(String(body)) as { filterGroups: Array<{ filters: Array<{ value: string }> }> };
+  const since = Number(search.filterGroups[0]!.filters[0]!.value);
+  const results = contacts
+    .filter((c) => Date.parse(c.createdAt) > since)
+    .map((c) => ({ ...c, properties: {} }));
+  const gate = hubspotGate;
+  hubspotGate = null;
+  if (!gate) return Promise.resolve(json(200, { results }));
+  gate.reached();
+  return gate.release.then(() => json(200, { results }));
+}
+
 const pollingFetch: FetchLike = (input, init) => {
   const url = String(input);
   if (url === 'https://api.intercom.io/conversations/search')
     return Promise.resolve(intercomSearch(init?.body));
-  if (url === 'https://api.hubapi.com/crm/v3/objects/contacts/search') {
-    return Promise.resolve(json(200, { results: [] }));
-  }
+  if (url === 'https://api.hubapi.com/crm/v3/objects/contacts/search') return hubspotSearch(init?.body);
   return Promise.resolve(respond(200, feed.contentType, feed.body));
 };
 
@@ -183,6 +203,8 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   let createSpy: jest.SpyInstance;
   let deleteSpy: jest.SpyInstance;
   let listSpy: jest.SpyInstance;
+  const warnSpy = jest.spyOn(Logger.prototype, 'warn');
+  const warnings = (since = 0): string[] => warnSpy.mock.calls.slice(since).map((call) => String(call[0]));
 
   const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
@@ -195,8 +217,8 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     return res.body.workflow_id as string;
   };
 
-  const commitAndPublish = async (wfId: string, doc: Record<string, unknown>): Promise<void> => {
-    const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', orgId)).expect(
+  const commitAndPublish = async (wfId: string, doc: Record<string, unknown>, org = orgId): Promise<void> => {
+    const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', org)).expect(
       200,
     );
     const head = (versions.body.versions as Array<{ id: string; version_number: number }>).reduce((a, b) =>
@@ -205,10 +227,10 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     await asA(
       http()
         .post(`/api/workflows/${wfId}/commit`)
-        .set('X-Org-Id', orgId)
+        .set('X-Org-Id', org)
         .send({ workflow_ir: doc, commit_message: 'retype', base_version_id: head.id }),
     ).expect(201);
-    await asA(http().post(`/api/workflows/${wfId}/publish`).set('X-Org-Id', orgId).send({})).expect(201);
+    await asA(http().post(`/api/workflows/${wfId}/publish`).set('X-Org-Id', org).send({})).expect(201);
     await reconcile(wfId);
   };
 
@@ -244,8 +266,11 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     return rows.rows[0]?.value ?? null;
   };
 
-  const registration = (activationId: string): Promise<Record<string, unknown> | null> =>
-    stored<Record<string, unknown>>(activationId, 'webhook.registration');
+  // The app's handle inside the stored record (a bare handle where an earlier build stored one).
+  const registration = async (activationId: string): Promise<Record<string, unknown> | null> => {
+    const value = await stored<Record<string, unknown>>(activationId, 'webhook.registration');
+    return (value?.registration as Record<string, unknown> | undefined) ?? value;
+  };
 
   const endpointOf = async (activationId: string): Promise<string> =>
     String((await registration(activationId))?.subscriptionId);
@@ -261,6 +286,38 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       .slice(since)
       .filter((c) => c.method === 'DELETE' && c.url.includes('/v1/webhook_endpoints/'))
       .map((c) => decodeURIComponent(c.url.slice(c.url.lastIndexOf('/') + 1)));
+
+  const retired = async (wfId: string): Promise<Array<{ hook: string; last_error: string | null }>> =>
+    (
+      await db.query<{ hook: string; last_error: string | null }>(
+        `SELECT webhook->'registration'->>'subscriptionId' AS hook, last_error
+           FROM trigger_retired_webhooks WHERE workflow_id = $1 ORDER BY created_at`,
+        [wfId],
+      )
+    ).rows;
+
+  const deliverStripe = (wfId: string, secret: unknown, event: Record<string, unknown>): request.Test => {
+    const raw = JSON.stringify({ object: 'event', created: 1700000000, livemode: false, ...event });
+    const t = '1700000000';
+    const sig = createHmac('sha256', String(secret)).update(`${t}.${raw}`).digest('hex');
+    return http()
+      .post(`/api/hooks/${wfId}/production`)
+      .set('Content-Type', 'application/json')
+      .set('stripe-signature', `t=${t},v1=${sig}`)
+      .send(raw);
+  };
+
+  // Resolves once a two-key advisory lock in this database has a waiter: a reconcile queued behind a poll.
+  const activationLockWaiter = async (): Promise<void> => {
+    for (let i = 0; i < 400; i++) {
+      const { rows } = await db.query(
+        `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+          WHERE l.locktype = 'advisory' AND l.objsubid = 2 AND NOT l.granted AND d.datname = current_database()`,
+      );
+      if (rows.length > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
 
   const triggerRuns = async (wfId: string): Promise<Array<{ run_id: string }>> => {
     const rows = await db.query<{ run_id: string }>(
@@ -401,6 +458,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     createSpy.mockRestore();
     deleteSpy.mockRestore();
     listSpy.mockRestore();
+    warnSpy.mockRestore();
     await app.close();
     await db.end();
     process.env.DATABASE_URL = ADMIN_URL;
@@ -542,6 +600,11 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         WHERE a.id = $1 AND p.workflow_id = a.workflow_id AND p.environment_id = a.environment_id`,
       [id],
     );
+    await db.query(
+      `UPDATE runtime_activation_store SET value = (value::jsonb -> 'registration')::json
+        WHERE activation_id = $1 AND key = 'webhook.registration'`,
+      [id],
+    );
     const mark = providerCalls.length;
 
     await reconcile(wfId);
@@ -553,12 +616,12 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect((await activation(wfId)).materialized).toMatchObject({ triggerType: 'stripe.payment_succeeded' });
   });
 
-  it('an old registration whose delete fails is kept, reported, and deleted by a later reconcile', async () => {
+  it('an old webhook whose delete fails moves off the trigger, which goes live, and a later reconcile deletes it', async () => {
     const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'stubborn endpoint'));
     const { id } = await activation(wfId);
     const oldEndpoint = await endpointOf(id);
 
-    stripeRefuses = { method: 'DELETE', status: 403 };
+    stripeRefuses = { method: 'DELETE', status: 500 };
     await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'stubborn endpoint'));
     stripeRefuses = null;
 
@@ -566,33 +629,137 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(fresh).not.toBe(oldEndpoint);
     expect(stripeEndpoints.has(oldEndpoint)).toBe(true);
     expect(stripeEndpoints.has(fresh)).toBe(true);
-    expect((await activation(wfId)).last_error).toMatch(/previous stripe\.new_customer webhook/);
-    expect(await stored(id, 'webhook.retired')).toEqual([
-      expect.objectContaining({ registration: expect.objectContaining({ subscriptionId: oldEndpoint }) }),
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { triggerType: 'stripe.payment_succeeded' },
+    });
+    expect(await retired(wfId)).toEqual([
+      { hook: oldEndpoint, last_error: expect.stringMatching(/HTTP 500/) },
     ]);
 
     await reconcile(wfId);
 
     expect(stripeEndpoints.has(oldEndpoint)).toBe(false);
     expect(stripeEndpoints.has(fresh)).toBe(true);
-    expect(await stored(id, 'webhook.retired')).toBeNull();
+    expect(await retired(wfId)).toEqual([]);
     expect((await activation(wfId)).last_error).toBeNull();
   });
 
-  it('a removed trigger whose endpoint delete fails keeps its row until a later reconcile deletes it', async () => {
-    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'removed trigger'));
-    const endpoint = await endpointOf((await activation(wfId)).id);
+  it('a removed trigger whose webhook delete fails is gone at once, and adding it back stands up a live registration', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'removed and re-added', 'customerId'));
+    const oldEndpoint = await endpointOf((await activation(wfId)).id);
 
-    stripeRefuses = { method: 'DELETE', status: 403 };
-    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, 'removed trigger'));
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, 'removed and re-added'));
+    expect(await activations(wfId)).toEqual([]);
+    expect(stripeEndpoints.has(oldEndpoint)).toBe(true);
+    expect(await retired(wfId)).toEqual([
+      { hook: oldEndpoint, last_error: expect.stringMatching(/HTTP 500/) },
+    ]);
+
+    // The identical trigger comes back while the old delete is still refused.
+    await commitAndPublish(wfId, triggerDoc('stripe.new_customer', {}, 'removed and re-added', 'customerId'));
     stripeRefuses = null;
-    expect(stripeEndpoints.has(endpoint)).toBe(true);
-    expect((await activation(wfId)).last_error).toMatch(/previous stripe\.new_customer webhook/);
-
     await reconcile(wfId);
 
-    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    const back = await activation(wfId);
+    const live = await registration(back.id);
+    expect(live?.subscriptionId).not.toBe(oldEndpoint);
+    expect(stripeEndpoints.has(String(live?.subscriptionId))).toBe(true);
+    expect(stripeEndpoints.has(oldEndpoint)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
+    expect(back).toMatchObject({
+      last_error: null,
+      materialized: { kind: 'registered_webhook', triggerType: 'stripe.new_customer' },
+    });
+
+    const fired = await deliverStripe(wfId, live?.signingSecret, {
+      id: 'evt_back_1',
+      type: 'customer.created',
+      data: { object: { id: 'cus_back_1' } },
+    }).expect(202);
+    const run = await awaitRun(fired.body.run_id as string);
+    expect(run.status).toBe('completed');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: cus_back_1');
+  });
+
+  it('a removed schedule never fires while the webhook it replaced still awaits its delete', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'removed schedule'));
+    const endpoint = await endpointOf((await activation(wfId)).id);
+
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(
+      wfId,
+      triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'removed schedule'),
+    );
+    expect(await activation(wfId)).toMatchObject({ kind: 'schedule' });
+    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, 'removed schedule'));
+
+    // Long past due, were anything still scheduled.
+    await db.query(
+      `UPDATE runtime_trigger_activations SET created_at = now() - interval '1 day' WHERE workflow_id = $1`,
+      [wfId],
+    );
+    await app.get(TriggersService).runActivationPollCycle();
+
+    expect(await triggerRuns(wfId)).toEqual([]);
     expect(await activations(wfId)).toEqual([]);
+    expect(await retired(wfId)).toEqual([{ hook: endpoint, last_error: expect.any(String) }]);
+  });
+
+  it("a pending delete whose account was deleted is given up, and the trigger on the slot's new account is healthy", async () => {
+    const { org, production } = await workspace('Deleted account');
+    const first = await tokenConnection('stripe', 'sk_test_deleted', org);
+    await assignSlot(org, production, 'stripe', first);
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'deleted account'), org);
+    const { id } = await activation(wfId);
+    const original = await endpointOf(id);
+
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'deleted account'), org);
+    stripeRefuses = null;
+    const replaced = await endpointOf(id);
+
+    const mark = warnSpy.mock.calls.length;
+    await asA(http().delete(`/api/orgs/${org}/clusters/connections/${first}`)).expect(200);
+    const second = await tokenConnection('stripe', 'sk_test_replacement', org);
+    await assignSlot(org, production, 'stripe', second);
+    await reconcile(wfId);
+
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { triggerType: 'stripe.payment_succeeded', connection: { connectionId: second } },
+    });
+    expect(stripeEndpoints.get(await endpointOf(id))).toBe('Bearer sk_test_replacement');
+    expect(await retired(wfId)).toEqual([]);
+    // Nothing can delete the first account's endpoints any more, so the operator is told which they are.
+    expect(stripeEndpoints.has(original)).toBe(true);
+    expect(stripeEndpoints.has(replaced)).toBe(true);
+    const abandoned = warnings(mark).filter((w) => w.includes('can never be deleted'));
+    expect(abandoned).toEqual(
+      expect.arrayContaining([expect.stringContaining(original), expect.stringContaining(replaced)]),
+    );
+  });
+
+  it('a pending delete the app answers with 403 is given up and named in the log', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'rejected credential'));
+    const { id } = await activation(wfId);
+    const original = await endpointOf(id);
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('stripe.payment_succeeded', {}, 'rejected credential'));
+
+    stripeRefuses = { method: 'DELETE', status: 403 };
+    const mark = warnSpy.mock.calls.length;
+    await reconcile(wfId);
+
+    expect((await activation(wfId)).last_error).toBeNull();
+    expect(warnings(mark)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(new RegExp(`${original} .*can never be deleted.*HTTP 403`)),
+      ]),
+    );
+    expect(stripeEndpoints.has(original)).toBe(true);
+    expect(await retired(wfId)).toEqual([]);
   });
 
   it('Composio subscription: the old instance is deleted and the new trigger is subscribed', async () => {
@@ -688,5 +855,157 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       composio_trigger_instance_id: 'ti_subscription_created',
       last_error: null,
     });
+  });
+  it('a poll in flight when its trigger is retyped finishes before the old trigger is torn down', async () => {
+    conversations.length = 0;
+    conversations.push({ id: 'conv_gated_backlog', created_at: nowSec() - 3600 });
+    const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'gated retype', 'id'));
+    await app.get(TriggersService).runActivationPollCycle();
+
+    let reached = (): void => undefined;
+    let release = (): void => undefined;
+    const atGate = new Promise<void>((resolve) => (reached = resolve));
+    hubspotGate = { reached, release: new Promise<void>((resolve) => (release = resolve)) };
+    const cycle = app.get(TriggersService).runActivationPollCycle();
+    await atGate;
+
+    const retype = commitAndPublish(wfId, triggerDoc('intercom.new_conversation', {}, 'gated retype', 'id'));
+    await Promise.race([retype, activationLockWaiter()]);
+    release();
+    await cycle;
+    await retype;
+
+    conversations.push({ id: 'conv_gated_new', created_at: nowSec() });
+    await app.get(TriggersService).runActivationPollCycle();
+
+    const runs = await triggerRuns(wfId);
+    expect(runs).toHaveLength(1);
+    const run = await awaitRun(runs[0]!.run_id);
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: conv_gated_new');
+  });
+
+  it('a poll passes over an activation a reconcile is changing, and polls it on the next cycle', async () => {
+    const wfId = await deploy(triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'held schedule'));
+    const { id } = await activation(wfId);
+    // Due since a day ago.
+    await db.query(
+      `UPDATE runtime_trigger_activations SET created_at = now() - interval '1 day' WHERE id = $1`,
+      [id],
+    );
+    await db.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [id]);
+
+    await withActivationLock(app.get(PG_POOL), id, () => app.get(TriggersService).runActivationPollCycle());
+    expect(await triggerRuns(wfId)).toEqual([]);
+
+    await app.get(TriggersService).runActivationPollCycle();
+    expect(await triggerRuns(wfId)).toHaveLength(1);
+  });
+
+  it("a poll of a row loaded before its trigger was retyped is skipped, never run on the new trigger's store", async () => {
+    conversations.length = 0;
+    contacts.length = 0;
+    contacts.push({ id: 'contact_backlog', createdAt: new Date(Date.now() - 3_600_000).toISOString() });
+    const wfId = await deploy(triggerDoc('hubspot.new_contact', {}, 'stale row', 'id'));
+    await app.get(TriggersService).runActivationPollCycle();
+
+    // The cycle loads its rows, and the retype completes before it polls them.
+    const em = app.get(DataSource).manager;
+    const find = em.find.bind(em) as (...args: unknown[]) => Promise<unknown[]>;
+    const loaded = jest.spyOn(em, 'find').mockImplementationOnce((async (...args: unknown[]) => {
+      const rows = await find(...args);
+      await commitAndPublish(wfId, triggerDoc('intercom.new_conversation', {}, 'stale row', 'id'));
+      return rows;
+    }) as never);
+    try {
+      await app.get(TriggersService).runActivationPollCycle();
+    } finally {
+      loaded.mockRestore();
+    }
+    expect(await activation(wfId)).toMatchObject({
+      trigger_type: 'intercom.new_conversation',
+      last_error: null,
+    });
+
+    conversations.push({ id: 'conv_stale_new', created_at: nowSec() });
+    await app.get(TriggersService).runActivationPollCycle();
+
+    const runs = await triggerRuns(wfId);
+    expect(runs).toHaveLength(1);
+    const run = await awaitRun(runs[0]!.run_id);
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: conv_stale_new');
+  });
+
+  it('a stand-up cut off before it was recorded tears down the webhook it registered, not the one before', async () => {
+    const wfId = await deploy(triggerDoc('github.new_push', { owner: 'acme', repo: 'cut' }, 'cut off'));
+    const { id, materialized } = await activation(wfId);
+    await commitAndPublish(wfId, triggerDoc('github.new_push', { owner: 'globex', repo: 'cut' }, 'cut off'));
+    const registered = `/repos/globex/cut/hooks/${await endpointOf(id)}`;
+    // A crash between storing the new registration and recording it leaves the old trigger recorded as live.
+    await db.query(`UPDATE runtime_trigger_activations SET materialized = $2 WHERE id = $1`, [
+      id,
+      JSON.stringify(materialized),
+    ]);
+
+    await reconcile(wfId);
+
+    const hooksOn = (repo: string): string[] =>
+      [...githubHooks].filter((h) => h.startsWith(`${repo}/hooks/`));
+    expect(githubHooks.has(registered)).toBe(false);
+    expect(hooksOn('/repos/globex/cut')).toEqual([`/repos/globex/cut/hooks/${await endpointOf(id)}`]);
+    expect(hooksOn('/repos/acme/cut')).toEqual([]);
+  });
+
+  it('a webhook an earlier release left under a trigger it changed to another kind is named in the log', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'left behind'));
+    const { id } = await activation(wfId);
+    const endpoint = await endpointOf(id);
+
+    // What v0.2.22 left after a retype to a schedule: the row already the new kind, the bare handle still stored.
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    try {
+      await commitAndPublish(wfId, triggerDoc('orchestr:schedule', { interval_minutes: 5 }, 'left behind'));
+    } finally {
+      held.mockRestore();
+    }
+    await db.query(
+      `UPDATE runtime_trigger_activations a
+          SET kind = 'schedule', trigger_type = 'orchestr:schedule', props = '{"interval_minutes":5}',
+              connection_id = NULL, connection_owner_user_id = NULL, materialized = NULL, version_id = p.version_id
+         FROM workflow_env_pointers p
+        WHERE a.id = $1 AND p.workflow_id = a.workflow_id AND p.environment_id = a.environment_id`,
+      [id],
+    );
+    await db.query(
+      `UPDATE runtime_activation_store SET value = (value::jsonb -> 'registration')::json
+        WHERE activation_id = $1 AND key = 'webhook.registration'`,
+      [id],
+    );
+    const mark = warnSpy.mock.calls.length;
+
+    await reconcile(wfId);
+
+    expect(warnings(mark)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(new RegExp(`webhook ${endpoint} .*delete it in the app`)),
+      ]),
+    );
+    expect(await registration(id)).toBeNull();
+    expect(await activation(wfId)).toMatchObject({ kind: 'schedule', last_error: null });
+  });
+
+  it('a pending delete outlives its workflow and is retried by the sweep', async () => {
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'deleted workflow'));
+    const endpoint = await endpointOf((await activation(wfId)).id);
+
+    stripeRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, 'deleted workflow'));
+    await asA(http().delete(`/api/workflows/${wfId}`).set('X-Org-Id', orgId)).expect(200);
+    expect(await retired(wfId)).toEqual([{ hook: endpoint, last_error: expect.any(String) }]);
+    stripeRefuses = null;
+
+    await app.get(TriggerReconcilerService).sweepAll();
+
+    expect(stripeEndpoints.has(endpoint)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
   });
 });

@@ -112,9 +112,14 @@ registration:
 A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
 a polled trigger carries on from where it was.
 
-If the app refuses to delete the old webhook, the trigger shows the error on the workflow overview
-and the delete is tried again every fifteen minutes. Deleting that webhook in the app yourself
-clears it. A registration that failed to start is retried on the same schedule.
+If the app can't delete the old webhook, the new trigger goes live anyway, and the delete is tried
+again every fifteen minutes — even after you remove the trigger, its workflow or its environment.
+The delete is given up when the account that created the webhook has been removed, or when the app
+rejects its credential: the service log then names the webhook (at warn level), and you delete it in
+the app yourself.
+
+A registration that failed to start shows its error on the workflow overview and is retried every
+fifteen minutes.
 
 ## Localhost and inbound triggers
 

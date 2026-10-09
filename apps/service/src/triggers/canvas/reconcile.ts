@@ -86,12 +86,7 @@ export interface ReconcilePlan {
   toDelete: ActualActivation[];
 }
 
-/**
- * The idempotent desired-vs-actual sweep, against what is actually LIVE. Cursor handoff: a desired
- * descriptor equal to what was stood up keeps its cursor across a version move (a promote must not
- * replay dedup); anything else — a changed descriptor, nothing recorded, or an apply that never
- * finished — tears down and stands up again from now.
- */
+/** The idempotent desired-vs-LIVE plan: a desired descriptor equal to what is live keeps its cursor, anything else resets. */
 export function reconcileActivations(
   desired: DesiredActivation[],
   actual: ActualActivation[],

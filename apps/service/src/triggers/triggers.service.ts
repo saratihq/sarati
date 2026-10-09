@@ -1,9 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
+import type { Pool } from 'pg';
 import { In } from 'typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
-
-import type { WebhookRegistration } from '@sarati/actions-sdk';
 
 import type { Principal } from '../auth/principal';
 import { runBounded } from '../common/bounded';
@@ -17,11 +16,14 @@ import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { RuntimeTriggerActivationEntity } from '../database/entities/runtime-trigger-activation.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
+import { PG_POOL } from '../database/tokens';
 import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
-import type { IRNode, WorkflowIR } from '../ir/models';
+import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
+import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
+import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
 import {
@@ -141,6 +143,7 @@ export class TriggersService {
     private readonly agentStepBus: AgentStepBus,
     private readonly triggerCatalog: TriggerCatalogService,
     private readonly platformKeys: PlatformKeysService,
+    @Inject(PG_POOL) private readonly pool: Pool,
   ) {}
 
   /** The trigger palette for the client's canvas picker — served verbatim from the one trigger source. */
@@ -276,7 +279,7 @@ export class TriggersService {
     const store = new DbActivationStore(this.dataSource, row.id);
     const [secret, registration] = await Promise.all([
       store.get<string>(WEBHOOK_SECRET_KEY),
-      store.get<WebhookRegistration>(WEBHOOK_REGISTRATION_KEY),
+      store.get<unknown>(WEBHOOK_REGISTRATION_KEY).then(webhookRegistrationOf),
     ]);
 
     let events: unknown[];
@@ -574,7 +577,23 @@ export class TriggersService {
   }
 
   /** Fire one due activation (schedule/polling). Compile/resolve failures land on its `last_error`. */
-  private async pollActivation(row: RuntimeTriggerActivationEntity): Promise<number> {
+  private async pollActivation(loaded: RuntimeTriggerActivationEntity): Promise<number> {
+    // A reconcile holding the lock is changing this activation; the next cycle polls what it leaves.
+    const events = await ifActivationUnlocked(this.pool, loaded.id, async () => {
+      const row = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
+        where: { id: loaded.id },
+      });
+      // Removed, or torn down and stood up again, since the cycle loaded it: its store is not this row's.
+      if (!row || !sameLiveTrigger(row, loaded)) return 0;
+      return this.pollLockedActivation(row);
+    }).catch((err: unknown) => {
+      this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);
+      return 0;
+    });
+    return events ?? 0;
+  }
+
+  private async pollLockedActivation(row: RuntimeTriggerActivationEntity): Promise<number> {
     const em = this.dataSource.manager;
     try {
       const { wf, env, versionId, ir } = await this.resolveActivationTarget(row);
@@ -816,6 +835,14 @@ async function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): P
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {
+  return (
+    a.triggerType === b.triggerType &&
+    deepEqual(a.props, b.props) &&
+    deepEqual(a.materialized, b.materialized)
+  );
 }
 
 /** Roll an activation row up to a single health status (paused → error → ok → idle). */
