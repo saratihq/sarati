@@ -29,7 +29,7 @@ class StreamDto {
   @IsUUID()
   session_id?: string;
 
-  /** The workflow being edited (seeds the draft when no ir is sent). */
+  /** The workflow being edited. */
   @IsOptional()
   @IsString()
   workflow_id?: string;
@@ -38,6 +38,11 @@ class StreamDto {
   @IsOptional()
   @IsObject()
   ir?: WorkflowIr | null;
+
+  /** The branch the canvas belongs to. */
+  @IsOptional()
+  @IsString()
+  branch?: string;
 }
 
 class AnswerDto {

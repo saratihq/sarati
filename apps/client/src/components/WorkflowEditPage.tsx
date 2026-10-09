@@ -73,12 +73,9 @@ export default function WorkflowEditPage() {
   // stream and thread alive.
   const [panelOpen, setPanelOpen] = useState(false);
   const state = failedId === id ? "error" : loadedId === id ? "ready" : "loading";
-  // The composer serves canvases on main only — its merge base and save path
-  // target main's draft; branch edits keep the classic surface. An instance
-  // without the composer falls to that same classic surface; while the probe
-  // is still out we assume present, so the common install never flashes.
+  // The composer serves every canvas; an instance without one gets the classic surface, and while the probe is out we assume present.
   const composer = useComposerAvailable();
-  const composerHere = state === "ready" && onMain && composer?.available !== false;
+  const composerHere = state === "ready" && composer?.available !== false;
   useDocumentTitle("Edit", workflowName ?? undefined);
 
   // Read the user id through a ref so the async load decision below stays
@@ -137,6 +134,7 @@ export default function WorkflowEditPage() {
 
   // The server refuses a commit to a protected branch; say so before the edit, not after it.
   const [branchProtected, setBranchProtected] = useState(false);
+  const saveBlocked = branchProtected ? `${branch} is protected — changes come in through a review` : null;
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -278,7 +276,7 @@ export default function WorkflowEditPage() {
             size="sm"
             onClick={handleSave}
             disabled={!dirty || isLoading || missing.length > 0 || branchProtected}
-            title={branchProtected ? `${branch} is protected — changes come in through a review` : undefined}
+            title={saveBlocked ?? undefined}
           >
             {isLoading ? (
               <>
@@ -314,7 +312,7 @@ export default function WorkflowEditPage() {
               >
                 <ComposerPanelHeader onClose={() => setPanelOpen(false)} />
                 <div className="flex-1 min-h-0 flex flex-col">
-                  <ComposerBar panel workflowId={id} />
+                  <ComposerBar panel workflowId={id} saveBlocked={saveBlocked} />
                 </div>
               </div>
             </div>

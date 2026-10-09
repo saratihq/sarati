@@ -144,6 +144,8 @@ export interface ComposerStreamParams {
   workflowId?: string;
   /** The current canvas document — sent every message so manual edits win. */
   ir?: Record<string, unknown> | null;
+  /** The branch that canvas belongs to. */
+  branch?: string;
   /** Where the panel is docked this message (default: editor). */
   surface?: "editor" | "overview";
 }
@@ -158,6 +160,7 @@ export function composerStream(
     session_id: params.sessionId,
     workflow_id: params.workflowId,
     ir: params.ir ?? undefined,
+    branch: params.branch,
     surface: params.surface,
   }, signal);
 }
