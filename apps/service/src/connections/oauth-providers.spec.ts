@@ -181,6 +181,18 @@ describe('assertSafeOAuthEndpoint (store-time BYO endpoint guard)', () => {
     );
   });
 
+  it('rejects an IPv4-mapped IPv6 spelling of a private address', async () => {
+    await expect(
+      assertSafeOAuthEndpoint('token_url', 'https://[::ffff:169.254.169.254]/token'),
+    ).rejects.toThrow(/private or internal/);
+  });
+
+  it('rejects a host that does not resolve rather than letting it through', async () => {
+    await expect(
+      assertSafeOAuthEndpoint('token_url', 'https://does-not-exist.invalid/token'),
+    ).rejects.toThrow(/must resolve to a public address/);
+  });
+
   it('rejects a malformed URL', async () => {
     await expect(assertSafeOAuthEndpoint('authorization_url', 'not a url')).rejects.toThrow(
       /not a valid URL/,

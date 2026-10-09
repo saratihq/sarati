@@ -95,8 +95,14 @@ describe('postToken SSRF guard (both grant paths)', () => {
   const savedAllowlist = process.env.ORCHESTR_HTTP_ALLOWED_HOSTS;
 
   beforeAll(async () => {
-    server = createServer((_req, res) => {
+    server = createServer((req, res) => {
       hits += 1; // any request that reaches the socket counts
+      if (req.url?.endsWith('?redirect=1')) {
+        const { port } = server.address() as AddressInfo;
+        res.writeHead(307, { location: `http://[::ffff:127.0.0.1]:${port}/token` });
+        res.end();
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ access_token: 'unit-token', token_type: 'Bearer', expires_in: 3600 }));
     });
@@ -140,6 +146,16 @@ describe('postToken SSRF guard (both grant paths)', () => {
       code: 'ssrf_blocked',
     });
     expect(hits).toBe(0);
+  });
+
+  it('refuses a redirect from an allowlisted endpoint to the hex IPv4-mapped spelling of loopback', async () => {
+    process.env.ORCHESTR_HTTP_ALLOWED_HOSTS = '127.0.0.1';
+    await expect(
+      exchangeAuthorizationCode(cfg(`${tokenUrl}?redirect=1`), 'code-1', null),
+    ).rejects.toMatchObject({
+      code: 'ssrf_blocked',
+    });
+    expect(hits).toBe(1);
   });
 
   it('lets an allowlisted host through the guard and reaches the server', async () => {

@@ -232,8 +232,8 @@ importers:
         specifier: ^11.0.3
         version: 11.0.3(@nestjs/common@11.1.28(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)(typeorm@1.1.0(pg@8.22.0)(ts-node@10.9.2(@types/node@22.20.1)(typescript@5.9.3)))
       '@sarati/actions-sdk':
-        specifier: ^0.1.4
-        version: 0.1.4
+        specifier: ^0.1.5
+        version: 0.1.5
       class-transformer:
         specifier: ^0.5.1
         version: 0.5.1
@@ -2464,8 +2464,8 @@ packages:
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
 
-  '@sarati/actions-sdk@0.1.4':
-    resolution: {integrity: sha512-aqhqKl8TZHONFzOqa0fT7+L3e8hudGTiHtuZksWVb9v3HKjwt+zyQ4olL6BmaBUlRJ9FUIN4Y3dj5zrk5ZDnAA==}
+  '@sarati/actions-sdk@0.1.5':
+    resolution: {integrity: sha512-53JSGiZusbt2AWa2F7Lwf7DVE+9NRVivM2naU5zuwG7Ha+tIVy9Lbks+4mLmY/zGuPrD0+WpjnjZPiMBSnYXFQ==}
     engines: {node: '>=22'}
 
   '@sinclair/typebox@0.27.12':
@@ -6621,6 +6621,10 @@ packages:
     resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
     engines: {node: '>=20.18.1'}
 
+  undici@7.30.0:
+    resolution: {integrity: sha512-dkrQXeHSaoamnItlYbmzG0wFYrM0ZwDxCIg0A7aKjTyyhh9svRzCNFEzV+Vm05/yehjCzjDZ31KXfGEjYSztDQ==}
+    engines: {node: '>=20.18.1'}
+
   undici@8.10.0:
     resolution: {integrity: sha512-HvltHd7avK13QIw/oLe4qoOLyoVSoafqJ2jYOrtMRBkbYT31eiBQ8O0ehRKZiEZCMEyLFQNIADpgCWC5fALvYQ==}
     engines: {node: '>=22.19.0'}
@@ -9249,7 +9253,7 @@ snapshots:
 
   '@rtsao/scc@1.1.0': {}
 
-  '@sarati/actions-sdk@0.1.4':
+  '@sarati/actions-sdk@0.1.5':
     dependencies:
       exceljs: 4.4.0
       fast-xml-parser: 4.5.7
@@ -9259,6 +9263,7 @@ snapshots:
       qrcode: 1.5.4
       showdown: 2.1.0
       turndown: 7.2.4
+      undici: 7.30.0
       unpdf: 1.8.0
     transitivePeerDependencies:
       - '@napi-rs/canvas'
@@ -13933,6 +13938,8 @@ snapshots:
   undici-types@6.21.0: {}
 
   undici@7.29.0: {}
+
+  undici@7.30.0: {}
 
   undici@8.10.0: {}
 
