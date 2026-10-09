@@ -271,7 +271,11 @@ export abstract class BasePlanInterpreter {
         }
         // Terminal state is written HERE, not by the caller, so a DBOS crash-resume
         // that finishes the workflow also finishes the record.
-        await ctx.record?.recorder.runFinished(ctx.record.runId, null, errorMessage(err));
+        if (ctx.durable.isCancellation(err)) {
+          await ctx.record?.recorder.runUnwoundByCancel(ctx.record.runId, errorMessage(err));
+        } else {
+          await ctx.record?.recorder.runFinished(ctx.record.runId, null, errorMessage(err));
+        }
         throw err;
       }
       await ctx.record?.recorder.runFinished(ctx.record.runId, scope, null);
@@ -418,6 +422,8 @@ export abstract class BasePlanInterpreter {
       const warnings = ctx.stepWarnings.get(stepKey);
       ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
+      // A cancel unwinds the run: no error lane or continue-on-fail may absorb it.
+      if (ctx.durable.isCancellation(err)) throw err;
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
       // read `{{node.text}}` (the partial answer is never discarded).
@@ -756,6 +762,7 @@ export abstract class BasePlanInterpreter {
         try {
           output = await this.invokeAgentTool(node, call, scope, `${stepKey}#${round}`, ctx);
         } catch (err) {
+          if (ctx.durable.isCancellation(err)) throw err;
           // §7: a tool error is fed back as its result — the model may recover within the budget.
           output = { error: { message: errorMessage(err) } };
         }

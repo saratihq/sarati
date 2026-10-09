@@ -86,10 +86,13 @@ step boom  : error — http.send_request failed: HTTP 500
 curl -X POST http://localhost:8080/api/runs/<run-id>/cancel
 ```
 
-Idempotent — cancelling an already-finished run is not an error.
+Idempotent — cancelling an already-finished run is not an error, and answers with the status it
+finished in.
 
-The run is listed as **Cancelled**, and the step it was on says *Cancelled before it finished*. A
-caller still waiting on the run's answer gets `409` with the code `run_cancelled`.
+The run stops at its next step and is listed as **Cancelled**. A step already making its call
+finishes, because a request that has gone out can't be taken back, and nothing after it starts. A
+wait or delay the run is parked on ends at once and says *Cancelled before it finished*. A caller
+still waiting on the run's answer gets `409` with the code `run_cancelled`.
 
 ## When a worker dies
 

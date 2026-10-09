@@ -399,7 +399,7 @@ export class RunsController {
     return { status: 'sent' };
   }
 
-  /** Cancel a run — DBOS interrupts durable runs, direct runs are best-effort. Idempotent when already terminal. */
+  /** Cancel a run at its next step boundary, on either rail. Idempotent when already terminal. */
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @HttpCode(200)
   @Scope('run:execute')

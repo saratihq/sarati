@@ -1,6 +1,15 @@
-import { DBOS } from '@dbos-inc/dbos-sdk';
+import { DBOS, Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
-import type { DurableStep } from '../providers/durable-step';
+import { RunCancelledError, type DurableStep } from '../providers/durable-step';
+
+/** Whether a run's rejection is the cancel someone asked for, on either rail — not a failure. */
+export function isDurableCancellation(err: unknown): boolean {
+  return (
+    err instanceof RunCancelledError ||
+    err instanceof DbosErrors.DBOSWorkflowCancelledError ||
+    err instanceof DbosErrors.DBOSAwaitedWorkflowCancelledError
+  );
+}
 
 /**
  * `DurableStep` backed by DBOS: each step's result is checkpointed, so a resume returns the
@@ -18,5 +27,9 @@ export class DbosDurableStep implements DurableStep {
   /** DBOS durable receive: resumed by `DBOS.send(runId, payload, topic)` (DbosRuntime.sendEvent). */
   waitForEvent<T = unknown>(_name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return DBOS.recv<T>(topic, timeoutMs / 1000);
+  }
+
+  isCancellation(err: unknown): boolean {
+    return isDurableCancellation(err);
   }
 }

@@ -140,6 +140,7 @@ describe('DagInterpreter (gating scheduler)', () => {
         return Promise.resolve();
       },
       waitForEvent: () => Promise.resolve(null),
+      isCancellation: () => false,
     };
     await interpreter.run(
       plan([
@@ -178,6 +179,7 @@ describe('DagInterpreter (gating scheduler)', () => {
       },
       sleep: () => Promise.resolve(),
       waitForEvent: () => Promise.resolve(null),
+      isCancellation: () => false,
     };
     const result = await interpreter.run(
       plan([action('fetch'), action('push', { up: '{{fetch.id}}' }, [guard('fetch')])]),
