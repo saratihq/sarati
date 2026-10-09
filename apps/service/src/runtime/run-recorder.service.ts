@@ -14,6 +14,9 @@ const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
 
+/** How every refused run's error begins; a run that executes records its own outcome over it. */
+export const REFUSED_RUN_ERROR_PREFIX = "Workflow can't run: ";
+
 /** An oversized stored value: the head of its JSON, plus the size it actually had. */
 export interface TruncatedValue {
   truncated: true;
@@ -156,8 +159,8 @@ export class RunRecorderService implements RunRecorder {
               review_id = EXCLUDED.review_id, dry_run = EXCLUDED.dry_run,
               parent_run_id = EXCLUDED.parent_run_id, parent_step_key = EXCLUDED.parent_step_key,
               org_id = EXCLUDED.org_id
-        -- Only runRefused writes a null plan.
-        WHERE runtime_runs.status = 'error' AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
+        WHERE runtime_runs.status = 'error' AND starts_with(runtime_runs.error, $17)
+          AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
           AND NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = runtime_runs.id)`,
       [
         scopedRunId,
@@ -176,6 +179,7 @@ export class RunRecorderService implements RunRecorder {
         meta?.parentStepKey ?? null,
         meta?.orgId ?? null,
         error,
+        REFUSED_RUN_ERROR_PREFIX,
       ],
     ]);
   }

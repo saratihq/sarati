@@ -20,7 +20,11 @@ import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
 import { rawQuery } from '../database/raw-query';
-import { RunRecorderService, truncatedValueOf } from '../runtime/run-recorder.service';
+import {
+  REFUSED_RUN_ERROR_PREFIX,
+  RunRecorderService,
+  truncatedValueOf,
+} from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
@@ -369,7 +373,7 @@ export class RunsService {
         ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)
         : this.compiler.fromRunPlan(source.plan);
     } catch (err) {
-      const message = `Workflow can't run: ${errorMessage(err)}`;
+      const message = `${REFUSED_RUN_ERROR_PREFIX}${errorMessage(err)}`;
       // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review / env.
       await this.recorder?.runRefused(
         this.scopedRunId(opts.externalUserId, runId),

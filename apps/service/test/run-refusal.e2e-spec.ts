@@ -109,7 +109,7 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
   async function row(runId: string): Promise<Record<string, unknown> | undefined> {
     const res = await db.query(
       `SELECT status, outputs, error, finished_at, waiting_node_id, waiting_topic, waiting_timeout_at,
-              workflow_id, org_id, dry_run, plan
+              workflow_id, org_id, dry_run, plan, plan_id
          FROM runtime_runs WHERE run_id = $1`,
       [runId],
     );
@@ -276,42 +276,54 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
     }
   }, 120_000);
 
-  it('leaves a failed run with no recorded plan as it was when a start reuses its id, on every route', async () => {
-    const failed = await http()
-      .post('/api/runs')
-      .send({
-        plan: {
-          id: 'plan-legacy',
-          nodes: [{ kind: 'code', id: 'boom', language: 'js', code: 'throw new Error("legacy failure");' }],
-        },
-        run_id: 'legacy',
-      });
-    expect(failed.body.detail).toContain('legacy failure');
-    await db.query(`UPDATE runtime_runs SET plan = NULL WHERE run_id = 'legacy'`);
-    const before = await row('legacy');
-    expect(before).toMatchObject({ status: 'error', plan: null });
-    const stepsBefore = await stepsOf('legacy');
-    expect(stepsBefore).toMatchObject([{ node_id: 'boom', status: 'error' }]);
+  it.each([
+    [
+      'a step',
+      'legacy',
+      [{ kind: 'code', id: 'boom', language: 'js', code: 'throw new Error("legacy failure");' }],
+      'legacy failure',
+      [{ node_id: 'boom', status: 'error' }],
+    ],
+    [
+      'no step',
+      'nostep',
+      [{ kind: 'forEach', id: 'each', items: '{{nope}}', itemVar: 'it', body: [] }],
+      'Reference {{nope}} points at unknown step',
+      [],
+    ],
+  ])(
+    'leaves a failed run with no recorded plan and %s as it was when a start reuses its id, on every route',
+    async (_, runId, nodes, failure, steps) => {
+      const failed = await http()
+        .post('/api/runs')
+        .send({ plan: { id: `plan-${runId}`, nodes }, run_id: runId });
+      expect(failed.body.detail).toContain(failure);
+      await db.query(`UPDATE runtime_runs SET plan = NULL WHERE run_id = $1`, [runId]);
+      const before = await row(runId);
+      expect(before).toMatchObject({ status: 'error', plan: null });
+      const stepsBefore = await stepsOf(runId);
+      expect(stepsBefore).toMatchObject(steps);
 
-    for (const [route, body] of [
-      ['/api/runs', { plan: CONCAT_PLAN, run_id: 'legacy' }],
-      ['/api/runs/async', { plan: CONCAT_PLAN, run_id: 'legacy' }],
-      ['/api/runs/from-ir', { workflow_ir: deployableIr('legacy-retry'), run_id: 'legacy' }],
-      ['/api/runs/async', { workflow_ir: deployableIr('legacy-retry'), run_id: 'legacy' }],
-    ] as const) {
-      await http().post(route).send(body);
-      expect(await row('legacy')).toEqual(before);
-      expect(await stepsOf('legacy')).toEqual(stepsBefore);
-    }
-    const detail = await until('legacy', 'error');
-    expect(String(detail.error)).toContain('legacy failure');
-    const list = await http().get('/api/runs').expect(200);
-    const listed = (list.body.runs as Array<{ run_id: string; status: string }>).find(
-      (r) => r.run_id === 'legacy',
-    );
-    expect(listed?.status).toBe('error');
-    expect(await inboxRunIds()).not.toContain('legacy');
-  });
+      for (const [route, body] of [
+        ['/api/runs', { plan: CONCAT_PLAN, run_id: runId }],
+        ['/api/runs/async', { plan: CONCAT_PLAN, run_id: runId }],
+        ['/api/runs/from-ir', { workflow_ir: deployableIr(`${runId}-retry`), run_id: runId }],
+        ['/api/runs/async', { workflow_ir: deployableIr(`${runId}-retry`), run_id: runId }],
+      ] as const) {
+        await http().post(route).send(body);
+        expect(await row(runId)).toEqual(before);
+        expect(await stepsOf(runId)).toEqual(stepsBefore);
+      }
+      const detail = await until(runId, 'error');
+      expect(String(detail.error)).toContain(failure);
+      const list = await http().get('/api/runs').expect(200);
+      const listed = (list.body.runs as Array<{ run_id: string; status: string }>).find(
+        (r) => r.run_id === runId,
+      );
+      expect(listed?.status).toBe('error');
+      expect(await inboxRunIds()).not.toContain(runId);
+    },
+  );
 
   it('records the latest refusal when an id that only a refusal holds is refused again', async () => {
     const first = await http().post('/api/runs').send({ plan: UNCOMPILABLE_PLAN, run_id: 'twice' });
