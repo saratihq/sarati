@@ -297,23 +297,46 @@ export class BranchService {
       `SELECT DISTINCT source_version_id, target_version_id FROM review_test_results WHERE workflow_id = $1 AND decisive`,
       [workflowId],
     );
-    const ids = new Set([
+    const sameContent = await this.contentMatcher(em, [
       heads.source,
       heads.target,
       ...pairs.flatMap((p) => [p.source_version_id, p.target_version_id]),
     ]);
-    const versions = await em.find(WorkflowVersionEntity, { where: { id: In([...ids]) } });
+    const matching = pairs.filter(
+      (p) => sameContent(heads.source, p.source_version_id) && sameContent(heads.target, p.target_version_id),
+    );
+    return [matching.map((p) => p.source_version_id), matching.map((p) => p.target_version_id)];
+  }
+
+  /** Whether a test of `tested` ran on the content these heads hold now, by the merge gate's own comparison. */
+  async testCoversHeads(
+    em: EntityManager,
+    tested: { source: string; target: string },
+    heads: { source: string; target: string },
+  ): Promise<boolean> {
+    if (tested.source === heads.source && tested.target === heads.target) return true;
+    const sameContent = await this.contentMatcher(em, [
+      tested.source,
+      tested.target,
+      heads.source,
+      heads.target,
+    ]);
+    return sameContent(heads.source, tested.source) && sameContent(heads.target, tested.target);
+  }
+
+  /** Answers "does version `id` hold `headId`'s content?" for the versions named, by `computeDiff`. */
+  private async contentMatcher(
+    em: EntityManager,
+    ids: string[],
+  ): Promise<(headId: string, id: string) => boolean> {
+    const versions = await em.find(WorkflowVersionEntity, { where: { id: In([...new Set(ids)]) } });
     const irOf = new Map(versions.map((v) => [v.id, this.loadIrFor(v)]));
-    const sameContent = (headId: string, id: string): boolean => {
+    return (headId, id) => {
       if (id === headId) return true;
       const head = irOf.get(headId);
       const other = irOf.get(id);
       return !!head && !!other && computeDiff(head, other).entries.length === 0;
     };
-    const matching = pairs.filter(
-      (p) => sameContent(heads.source, p.source_version_id) && sameContent(heads.target, p.target_version_id),
-    );
-    return [matching.map((p) => p.source_version_id), matching.map((p) => p.target_version_id)];
   }
 
   /** Whether `versionId` is `headId` or in its history — parents AND merge parents — so the head already has it. */

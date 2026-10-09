@@ -159,6 +159,16 @@ function ApprovalRow({ approval }: { approval: ReviewApproval }) {
   );
 }
 
+/** Whether a test result covers what the branches hold now: the service's content answer once the detail has caught up with it. */
+function testIsCurrent(result: ReviewTestSummary | null, detail: ReviewDetail | null): boolean {
+  if (!detail || !result) return true;
+  if (result.tested_at === detail.last_test?.tested_at) return detail.last_test_current !== false;
+  return (
+    result.source_version_id === detail.source_head_version_id &&
+    result.target_version_id === detail.target_head_version_id
+  );
+}
+
 interface ReviewFeedCardProps {
   workflowId: string;
   review: ReviewSummary;
@@ -379,12 +389,7 @@ function ReviewFeedCard({
               reviewId={review.id}
               environments={environments}
               result={testResult}
-              current={
-                !detail ||
-                !testResult ||
-                (testResult.source_version_id === detail.source_head_version_id &&
-                  testResult.target_version_id === detail.target_head_version_id)
-              }
+              current={testIsCurrent(testResult, detail)}
               gate={
                 actionable &&
                 detail?.target_protected &&
@@ -404,7 +409,9 @@ function ReviewFeedCard({
           <div className="mt-3 pt-3 space-y-3" style={{ borderTop: "1px solid var(--orchestr-line)" }}>
             {detailError && (
               <div className="text-[11px]" style={{ color: "var(--orchestr-danger)" }}>
-                Couldn&apos;t load the conversation. Reopen to retry.
+                {actionable
+                  ? "Couldn't load this review, so you can't approve it or request changes yet. Reopen to retry."
+                  : "Couldn't load the conversation. Reopen to retry."}
               </div>
             )}
 
@@ -499,14 +506,19 @@ function ReviewFeedCard({
               <div className="flex gap-2">
                 {!nothingToReview && (
                   <>
-                    <Button variant="success" size="sm" onClick={() => submitApproval("approved")} disabled={busy}>
+                    <Button
+                      variant="success"
+                      size="sm"
+                      onClick={() => submitApproval("approved")}
+                      disabled={busy || !detail}
+                    >
                       Approve
                     </Button>
                     <Button
                       variant="destructive"
                       size="sm"
                       onClick={() => submitApproval("rejected")}
-                      disabled={busy}
+                      disabled={busy || !detail}
                     >
                       Request changes
                     </Button>

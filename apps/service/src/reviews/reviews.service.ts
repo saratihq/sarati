@@ -159,6 +159,7 @@ export class ReviewsService {
       merge_blocked_by_test: await this.mergeBlockedByTest(em, review),
       description: review.description,
       last_test: review.lastTest ?? null,
+      last_test_current: await this.lastTestCurrent(em, review, source, target),
       comments: comments.map((c) => ({
         id: c.id,
         author_name: nameOf.get(c.authorId) ?? null,
@@ -370,6 +371,29 @@ export class ReviewsService {
         subjectId: review.id,
       });
     });
+  }
+
+  /** Whether the review's last test ran on what the branches hold now; null when it was never tested. */
+  private async lastTestCurrent(
+    em: EntityManager,
+    review: WorkflowReviewEntity,
+    source: WorkflowBranchEntity | null,
+    target: WorkflowBranchEntity | null,
+  ): Promise<boolean | null> {
+    const tested = review.lastTest;
+    if (!tested) return null;
+    if (
+      !tested.source_version_id ||
+      !tested.target_version_id ||
+      !source?.headVersionId ||
+      !target?.headVersionId
+    )
+      return false;
+    return this.branches.testCoversHeads(
+      em,
+      { source: tested.source_version_id, target: tested.target_version_id },
+      { source: source.headVersionId, target: target.headVersionId },
+    );
   }
 
   /** Whether the approval covers the source's current head and, when it doesn't, why — the protected merge gate's answer. */

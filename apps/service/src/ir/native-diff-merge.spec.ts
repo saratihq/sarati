@@ -527,6 +527,66 @@ describe('threeWayMerge (native) — add/add whole-node conflict', () => {
     expect((n.parameters as { texts: string[] }).texts).toEqual(['T']);
   });
 
+  it('a custom node keeps the wiring both sides gave it, each edge once', () => {
+    const source = ir(
+      [node('a', 'http.send_request'), node('n', 'text.concat', { texts: ['S'] }, 'Src')],
+      [edge('a', 'n', { id: 'e-a-n' })],
+    );
+    const target = ir(
+      [node('a', 'http.send_request'), node('n', 'text.concat', { texts: ['T'] }, 'Tgt')],
+      [edge('a', 'n', { id: 'e-a-n' }), edge('n', 'a', { id: 'e-n-a', portType: 'error' })],
+    );
+    const custom = { ...node('n', 'text.concat', { texts: ['Both'] }, 'Both'), id: 'renamed' };
+    const r = threeWayMerge(base(), source, target, [
+      { node_id: 'n', field_path: null, choice: 'custom', value: custom },
+    ]);
+    expect(r.success).toBe(true);
+    const n = r.merged!.nodes.find((x) => x.id === 'n')!;
+    expect((n.parameters as { texts: string[] }).texts).toEqual(['Both']);
+    const keys = r.merged!.edges.map((e) => `${e.source_node_id}->${e.target_node_id}:${e.port_type}`).sort();
+    expect(keys).toEqual(['a->n:main', 'n->a:error']);
+  });
+
+  it.each([
+    ['a string', 'not a node'],
+    ['an empty object', {}],
+    ['bare parameters', { parameters: { texts: ['C'] } }],
+  ])('refuses %s as a custom node, rather than landing a step with no name or type', (_label, value) => {
+    const resolve = () =>
+      threeWayMerge(base(), withNode({ texts: ['S'] }, 'Src'), withNode({ texts: ['T'] }, 'Tgt'), [
+        { node_id: 'n', field_path: null, choice: 'custom', value },
+      ]);
+    expect(resolve).toThrow(
+      "A custom resolution of node 'n' must be the whole node, with its name and node_type",
+    );
+  });
+
+  it.each([
+    ['custom', 'p', 'q'],
+    ['custom', 'q', 'p'],
+    ['target', 'p', 'q'],
+    ['target', 'q', 'p'],
+  ] as const)(
+    'keeps the edge between two added nodes whatever their ids, resolving one %s (wired %s→%s) and the other source',
+    (choice, from, to) => {
+      const pair = (texts: string, name: string) => [
+        node('p', 'text.concat', { texts: [texts] }, `${name} p`),
+        node('q', 'text.concat', { texts: [texts] }, `${name} q`),
+      ];
+      const source = ir([node('a', 'http.send_request'), ...pair('S', 'Src')], []);
+      const target = ir([node('a', 'http.send_request'), ...pair('T', 'Tgt')], [edge(from, to, { id: 'e' })]);
+      const custom = node(from, 'text.concat', { texts: ['C'] }, 'Custom');
+      const r = threeWayMerge(base(), source, target, [
+        { node_id: from, field_path: null, choice, ...(choice === 'custom' ? { value: custom } : {}) },
+        { node_id: to, field_path: null, choice: 'source' },
+      ]);
+      expect(r.success).toBe(true);
+      expect(r.merged!.edges.map((e) => `${e.source_node_id}->${e.target_node_id}`)).toEqual([
+        `${from}->${to}`,
+      ]);
+    },
+  );
+
   it('the chosen side keeps its incident edges (node + wiring restored together)', () => {
     // source adds `n` AND a main edge a→n; target adds `n` with no edge.
     const source = ir(

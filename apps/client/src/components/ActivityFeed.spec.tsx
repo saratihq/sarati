@@ -186,6 +186,73 @@ describe("ActivityFeed protected merges", () => {
     expect(screen.queryByText(/latest changes to lane/)).not.toBeInTheDocument();
   });
 
+  it("keeps Approve and Request changes off until the card has the version they would record", async () => {
+    let load: (d: api.ReviewDetail) => void = () => undefined;
+    vi.mocked(api.getReview).mockReturnValue(new Promise((resolve) => (load = resolve)));
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Request changes" })).toBeDisabled();
+    load({ ...approvedDetail, status: "open", approval_stale_reason: null });
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());
+  });
+
+  it("says why Approve is off when the review can't load, and turns it on once it does", async () => {
+    vi.mocked(api.getReview).mockRejectedValueOnce(new Error("down")).mockResolvedValue({
+      ...approvedDetail,
+      status: "open",
+      approval_stale_reason: null,
+    });
+    const user = userEvent.setup();
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    expect(
+      await screen.findByText("Couldn't load this review, so you can't approve it or request changes yet. Reopen to retry."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Request changes" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled());
+  });
+
+  it("reads a test the service says ran on other content as earlier, even when its ids match, and never as lifted", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({
+      ...approvedDetail,
+      status: "open",
+      approval_stale_reason: null,
+      last_test: { ...failing, source_version_id: "v-lane-2" },
+      last_test_current: false,
+    });
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    expect(await screen.findByTestId("test-standing")).toHaveTextContent("tested earlier versions");
+    expect(screen.queryByText(/no longer blocks merging/)).not.toBeInTheDocument();
+  });
+
+  it("reads a test of the branches' current content as current, whatever version ids it ran on", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({
+      ...approvedDetail,
+      status: "open",
+      approval_stale_reason: null,
+      last_test: { ...failing, source_version_id: "v-lane-1" },
+      last_test_current: true,
+    });
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    expect(await screen.findByText("Failing")).toBeInTheDocument();
+    expect(screen.queryByText(/tested earlier versions/)).not.toBeInTheDocument();
+  });
+
   it("approves the version it showed, and reloads the review when the branch has moved since", async () => {
     vi.mocked(api.getReview).mockResolvedValue({ ...approvedDetail, status: "open", approval_stale_reason: null });
     vi.mocked(api.approveReview).mockRejectedValue(

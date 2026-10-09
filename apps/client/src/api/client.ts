@@ -1041,6 +1041,8 @@ export interface ReviewDetail extends ReviewSummary {
   approvals: ReviewApproval[];
   /** The most recent pre-merge test, or null if never tested. */
   last_test?: ReviewTestSummary | null;
+  /** Whether `last_test` ran on the content the branches hold now, compared as the merge gate compares; null when never tested. */
+  last_test_current?: boolean | null;
   /** The source branch's head — the version the review proposes. */
   source_head_version_id?: string | null;
   /** The target branch's head — the version the review is held against. */

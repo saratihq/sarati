@@ -249,6 +249,46 @@ describe('pre-merge test results (e2e, isolated DB, mock auth)', () => {
     expect(await blocked(wf, review)).toBeNull();
   });
 
+  it("says whether the review's last test covers what the branches hold now, by content as the gate decides", async () => {
+    const { wf, review, lane, main } = await setUp();
+    expect((await detail(wf, review)).last_test_current).toBeNull();
+    await http()
+      .post(`/api/workflows/${wf}/reviews/${review}/test`)
+      .send({ trigger_payload: {} })
+      .expect(201);
+    // A newer failing result for the same pair, so the gate blocks exactly while that test is current.
+    await record(wf, review, { source: lane, target: main }, 'red', '2099-01-01T00:00:00Z');
+    const agrees = async (current: boolean): Promise<void> => {
+      const d = await detail(wf, review);
+      expect(d.last_test_current).toBe(current);
+      expect(d.merge_blocked_by_test !== null).toBe(current);
+    };
+    const commitMain = async (marker: string): Promise<void> => {
+      await http()
+        .patch(`/api/workflows/${wf}/branches/main/protection`)
+        .send({ is_protected: false })
+        .expect(200);
+      await http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: doc(marker), branch: 'main' })
+        .expect(201);
+      await http()
+        .patch(`/api/workflows/${wf}/branches/main/protection`)
+        .send({ is_protected: true })
+        .expect(200);
+    };
+    await agrees(true);
+
+    await commitLane(wf, 'lane-2');
+    await agrees(false);
+    await commitLane(wf, 'lane');
+    await agrees(true);
+    await commitMain('hotfix');
+    await agrees(false);
+    await commitMain('v1');
+    await agrees(true);
+  });
+
   it('refuses an approval of a version the reviewer was not shown, and says when one is from before the latest changes', async () => {
     const { wf, review, lane } = await setUp();
     const moved = await commitLane(wf, 'lane-2');
