@@ -8,8 +8,12 @@ export interface ClerkProfile {
 }
 
 /** Backend-API profile fetch — used once, at first provisioning. */
-export async function fetchClerkUser(clerkUserId: string, secretKey: string): Promise<ClerkProfile> {
-  const res = await request(`https://api.clerk.com/v1/users/${clerkUserId}`, {
+export async function fetchClerkUser(
+  apiUrl: string,
+  clerkUserId: string,
+  secretKey: string,
+): Promise<ClerkProfile> {
+  const res = await request(`${apiUrl}/v1/users/${clerkUserId}`, {
     headers: { authorization: `Bearer ${secretKey}` },
     headersTimeout: 5_000,
     bodyTimeout: 5_000,

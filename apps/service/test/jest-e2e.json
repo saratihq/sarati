@@ -5,7 +5,9 @@
     "ts"
   ],
   "rootDir": "..",
-  "testEnvironment": "node",
+  "testEnvironment": "<rootDir>/test/support/no-egress-environment.ts",
+  "globalTeardown": "<rootDir>/test/support/no-egress-teardown.ts",
+  "maxWorkers": 1,
   "setupFiles": ["<rootDir>/test/support/test-env.ts"],
   "testRegex": ".e2e-spec.ts$",
   "transform": {

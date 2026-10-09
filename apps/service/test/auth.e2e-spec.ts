@@ -14,11 +14,31 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 // Throwaway e2e Fernet key (32 zero bytes base64url) — never a real secret.
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const CLERK_SECRET_KEY = 'sk_test_e2e';
+
+// What the local Clerk Backend API knows; every other sub is a 404, so it provisions as a placeholder.
+const CLERK_PROFILES: Record<string, unknown> = {
+  user_real: {
+    primary_email_address_id: 'e1',
+    email_addresses: [
+      { id: 'e0', email_address: 'secondary@e2e.local' },
+      { id: 'e1', email_address: 'real@e2e.local' },
+    ],
+    first_name: 'Real',
+    last_name: 'Person',
+  },
+  user_adopt_real: {
+    primary_email_address_id: 'e1',
+    email_addresses: [{ id: 'e1', email_address: 'legacy@e2e.local' }],
+    first_name: 'Clerk',
+    last_name: 'Name',
+  },
+};
 
 describe('auth slice (e2e, isolated DB)', () => {
   let app: INestApplication;
   let e2eUrl: string;
-  let jwksServer: Server;
+  let clerkServer: Server;
   let issuer: string;
   let privateKey: Awaited<ReturnType<typeof generateKeyPair>>['privateKey'];
   const kid = 'e2e-key-1';
@@ -37,18 +57,30 @@ describe('auth slice (e2e, isolated DB)', () => {
     const pair = await generateKeyPair('RS256');
     privateKey = pair.privateKey;
     const jwk = { ...(await exportJWK(pair.publicKey)), kid, alg: 'RS256', use: 'sig' };
-    jwksServer = createServer((req, res) => {
+    clerkServer = createServer((req, res) => {
+      if (req.url?.startsWith('/v1/users/')) {
+        if (req.headers.authorization !== `Bearer ${CLERK_SECRET_KEY}`) {
+          res.writeHead(401, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ errors: [{ code: 'authentication_invalid' }] }));
+          return;
+        }
+        const profile = CLERK_PROFILES[req.url.slice('/v1/users/'.length)];
+        res.writeHead(profile ? 200 : 404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(profile ?? { errors: [{ code: 'resource_not_found' }] }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ keys: [jwk] }));
     });
-    await new Promise<void>((resolve) => jwksServer.listen(0, '127.0.0.1', resolve));
-    issuer = `http://127.0.0.1:${(jwksServer.address() as AddressInfo).port}`;
+    await new Promise<void>((resolve) => clerkServer.listen(0, '127.0.0.1', resolve));
+    issuer = `http://127.0.0.1:${(clerkServer.address() as AddressInfo).port}`;
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.CLERK_ISSUER = issuer;
-    process.env.CLERK_SECRET_KEY = 'sk_test_e2e_invalid'; // profile fetch fails → placeholder path
+    process.env.CLERK_API_URL = issuer;
+    process.env.CLERK_SECRET_KEY = CLERK_SECRET_KEY;
     process.env.CLERK_AUTHORIZED_PARTIES = 'http://localhost:5173';
     process.env.MOCK_AUTH = 'false';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
@@ -62,7 +94,7 @@ describe('auth slice (e2e, isolated DB)', () => {
 
   afterAll(async () => {
     await app.close();
-    await new Promise<void>((resolve, reject) => jwksServer.close((e) => (e ? reject(e) : resolve())));
+    await new Promise<void>((resolve, reject) => clerkServer.close((e) => (e ? reject(e) : resolve())));
     process.env.DATABASE_URL = ADMIN_URL;
   });
 
@@ -116,7 +148,7 @@ describe('auth slice (e2e, isolated DB)', () => {
       .set('Authorization', `Bearer ${token}`)
       .expect(200);
 
-    // Placeholder identity (profile fetch fails with the invalid test secret) — parity.
+    // Placeholder identity (Clerk has no profile for this sub) — parity.
     expect(res.body.user.email).toBe('user_fresh_1@users.clerk.local');
     // `settings` is a stable, empty shape.
     expect(res.body.settings).toEqual({});
@@ -162,6 +194,31 @@ describe('auth slice (e2e, isolated DB)', () => {
       `SELECT count(*)::int AS n FROM users WHERE email = 'user_adopt_me@users.clerk.local'`,
     );
     expect(rows[0]!.n).toBe(1);
+  });
+
+  it('provisions from the Clerk profile when there is one: the primary email and the full name', async () => {
+    const token = await signToken({ sub: 'user_real', azp: 'http://localhost:5173' });
+    const res = await request(app.getHttpServer())
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(res.body.user).toMatchObject({ email: 'real@e2e.local', name: 'Real Person' });
+  });
+
+  it('adopts a legacy password-era row by the real email Clerk reports', async () => {
+    await query(
+      `INSERT INTO users (id, email, hashed_password, name, created_at, updated_at)
+       VALUES (gen_random_uuid(), 'legacy@e2e.local', 'legacy-hash', 'Legacy Real', now(), now())`,
+    );
+    const token = await signToken({ sub: 'user_adopt_real', azp: 'http://localhost:5173' });
+    const res = await request(app.getHttpServer())
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(res.body.user.name).toBe('Legacy Real');
+
+    const rows = await query(`SELECT clerk_user_id FROM users WHERE email = 'legacy@e2e.local'`);
+    expect(rows).toEqual([{ clerk_user_id: 'user_adopt_real' }]);
   });
 });
 
