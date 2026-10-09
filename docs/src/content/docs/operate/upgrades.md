@@ -45,7 +45,10 @@ record what each trigger had registered, so this is the one time it is rebuilt f
 earlier release changed an app-webhook trigger into a different kind of trigger, or emptied the
 environment slot one ran on, the webhook it left registered can't be deleted for you: the service
 log names it at warn level after that first rebuild, at the latest on the fifteen-minute sweep that
-follows it, so you can delete it in the app.
+follows it, so you can delete it in the app. A webhook that an earlier release replaced after the
+slot moved to another account, or after a GitHub trigger's repository changed, was never recorded,
+so it is neither deleted nor named in the log: look in the old account or repository for webhooks
+that point at this install, and delete them there.
 
 ## Back up
 
