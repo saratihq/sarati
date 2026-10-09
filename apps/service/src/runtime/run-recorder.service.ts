@@ -156,8 +156,9 @@ export class RunRecorderService implements RunRecorder {
               review_id = EXCLUDED.review_id, dry_run = EXCLUDED.dry_run,
               parent_run_id = EXCLUDED.parent_run_id, parent_step_key = EXCLUDED.parent_step_key,
               org_id = EXCLUDED.org_id
-        -- Only a refusal records no plan, and no step ever ran under it.
-        WHERE runtime_runs.status = 'error' AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'`,
+        -- Only runRefused writes a null plan.
+        WHERE runtime_runs.status = 'error' AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
+          AND NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = runtime_runs.id)`,
       [
         scopedRunId,
         runId,

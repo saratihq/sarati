@@ -38,6 +38,11 @@ const UNCOMPILABLE_IR = {
   metadata: {},
 };
 
+const CONCAT_PLAN = {
+  id: 'plan-ok',
+  nodes: [{ kind: 'action', id: 'c', actionId: 'text.concat', props: { texts: ['4', '2'], separator: '' } }],
+};
+
 const askPlan = (id: string) => ({
   id,
   nodes: [{ kind: 'waitForEvent', id: 'ask', topic: 'go', timeoutMs: 60_000 }],
@@ -104,11 +109,21 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
   async function row(runId: string): Promise<Record<string, unknown> | undefined> {
     const res = await db.query(
       `SELECT status, outputs, error, finished_at, waiting_node_id, waiting_topic, waiting_timeout_at,
-              workflow_id, org_id, dry_run
+              workflow_id, org_id, dry_run, plan
          FROM runtime_runs WHERE run_id = $1`,
       [runId],
     );
     return res.rows[0] as Record<string, unknown> | undefined;
+  }
+
+  async function stepsOf(runId: string): Promise<unknown[]> {
+    const res = await db.query(
+      `SELECT s.node_id, s.status, s.error, s.output
+         FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+        WHERE r.run_id = $1 ORDER BY s.step_key`,
+      [runId],
+    );
+    return res.rows;
   }
 
   async function scopedIdOf(runId: string): Promise<string> {
@@ -148,18 +163,7 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
   }, 60_000);
 
   it('leaves a finished run as it was when a refused plan or document reuses its id, on every route', async () => {
-    const done = await http()
-      .post('/api/runs')
-      .send({
-        plan: {
-          id: 'plan-ok',
-          nodes: [
-            { kind: 'action', id: 'c', actionId: 'text.concat', props: { texts: ['4', '2'], separator: '' } },
-          ],
-        },
-        run_id: 'victim',
-      })
-      .expect(201);
+    const done = await http().post('/api/runs').send({ plan: CONCAT_PLAN, run_id: 'victim' }).expect(201);
     expect(done.body.outputs.c).toBe('42');
     const before = await row('victim');
     expect(before).toMatchObject({ status: 'completed', error: null, outputs: { c: '42' } });
@@ -271,6 +275,43 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
       }
     }
   }, 120_000);
+
+  it('leaves a failed run with no recorded plan as it was when a start reuses its id, on every route', async () => {
+    const failed = await http()
+      .post('/api/runs')
+      .send({
+        plan: {
+          id: 'plan-legacy',
+          nodes: [{ kind: 'code', id: 'boom', language: 'js', code: 'throw new Error("legacy failure");' }],
+        },
+        run_id: 'legacy',
+      });
+    expect(failed.body.detail).toContain('legacy failure');
+    await db.query(`UPDATE runtime_runs SET plan = NULL WHERE run_id = 'legacy'`);
+    const before = await row('legacy');
+    expect(before).toMatchObject({ status: 'error', plan: null });
+    const stepsBefore = await stepsOf('legacy');
+    expect(stepsBefore).toMatchObject([{ node_id: 'boom', status: 'error' }]);
+
+    for (const [route, body] of [
+      ['/api/runs', { plan: CONCAT_PLAN, run_id: 'legacy' }],
+      ['/api/runs/async', { plan: CONCAT_PLAN, run_id: 'legacy' }],
+      ['/api/runs/from-ir', { workflow_ir: deployableIr('legacy-retry'), run_id: 'legacy' }],
+      ['/api/runs/async', { workflow_ir: deployableIr('legacy-retry'), run_id: 'legacy' }],
+    ] as const) {
+      await http().post(route).send(body);
+      expect(await row('legacy')).toEqual(before);
+      expect(await stepsOf('legacy')).toEqual(stepsBefore);
+    }
+    const detail = await until('legacy', 'error');
+    expect(String(detail.error)).toContain('legacy failure');
+    const list = await http().get('/api/runs').expect(200);
+    const listed = (list.body.runs as Array<{ run_id: string; status: string }>).find(
+      (r) => r.run_id === 'legacy',
+    );
+    expect(listed?.status).toBe('error');
+    expect(await inboxRunIds()).not.toContain('legacy');
+  });
 
   it('records the latest refusal when an id that only a refusal holds is refused again', async () => {
     const first = await http().post('/api/runs').send({ plan: UNCOMPILABLE_PLAN, run_id: 'twice' });

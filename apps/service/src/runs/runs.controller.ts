@@ -204,11 +204,7 @@ export class RunsController {
     return runAccessOf(requirePrincipal(req), this.policy);
   }
 
-  /**
-   * The run id a caller may set. A non-interactive principal may NOT: `runtime_runs` inserts
-   * `ON CONFLICT DO NOTHING`, so replaying a prior id would execute with no new history row —
-   * an agent could erase its own audit trail. Use `Idempotency-Key` for retry safety instead.
-   */
+  /** The run id a caller may set; never an API key's, since a replayed id reuses or overwrites that id's history row, so a key could rewrite its own audit trail. */
   private requestedRunId(req: Request, runId: string | undefined): string | undefined {
     if (runId === undefined) return undefined;
     if (requirePrincipal(req).kind !== 'api_key') return runId;
