@@ -4,6 +4,7 @@ import {
   activationDescriptorEqual,
   activationKeyString,
   applyFinished,
+  triggerPropsOf,
   type ActivationKind,
   type ActualActivation,
   type ConnectionRef,
@@ -63,7 +64,7 @@ export function deriveDesiredActivations(input: DeriveInput): DesiredActivation[
         kind,
         triggerType: node.node_type,
         versionId: pointer.versionId,
-        props: node.parameters,
+        props: triggerPropsOf(node),
         connection: input.connectionOf(pointer.environmentId, node),
         paused: pausedOf(pointer.environmentId, node),
       });

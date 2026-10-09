@@ -118,6 +118,26 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
     const result = deriveDesiredActivations({ workflowId: WF, pointers, kindOf, connectionOf: () => null });
     expect(result.map((r) => r.key.environmentId).sort()).toEqual([PROD, STAGING].sort());
   });
+
+  it.each([undefined, null, ['x']])(
+    'a trigger node saved with %p parameters has empty props, so it is live once stood up',
+    (parameters) => {
+      const bare = { ...POLLER, parameters } as unknown as IRNode;
+      const pointers: EnvPointerInput[] = [{ environmentId: PROD, versionId: 'v5', ir: ir([bare]) }];
+      const [result] = deriveDesiredActivations({
+        workflowId: WF,
+        pointers,
+        kindOf,
+        connectionOf: () => null,
+      });
+      expect(result!.props).toEqual({});
+      expect(reconcileActivations([result!], [settled(result!)])).toEqual({
+        toCreate: [],
+        toUpdate: [],
+        toDelete: [],
+      });
+    },
+  );
 });
 
 // ─── reconcileActivations ───

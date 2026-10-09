@@ -14,7 +14,7 @@ import { EncryptionService } from '../src/common/crypto/encryption.service';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
-import { SDK_POLLING_FETCH } from '../src/providers/sdk-polling.provider';
+import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH } from '../src/providers/sdk-webhook.provider';
 import { withActivationLock } from '../src/triggers/activation-lock';
 import { TriggerReconcilerJob } from '../src/triggers/canvas/trigger-reconciler.job';
@@ -1004,6 +1004,43 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await retired(wfId)).toEqual([]);
   });
 
+  it('a Typeform slot swap whose old credential is rejected never names the webhook the new account took over for deletion', async () => {
+    const { org, production } = await workspace('Typeform revoked');
+    const revoked = await tokenConnection('typeform', 'tfp_revoked', org);
+    const fresh = await tokenConnection('typeform', 'tfp_fresh', org);
+    await assignSlot(org, production, 'typeform', revoked);
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'FR' }, 'typeform revoked', 'token'),
+      org,
+    );
+    const { id } = await activation(wfId);
+    const hook = await typeformHookOf(id);
+    const tag = hook.split('/')[1]!;
+
+    typeformRefuses = { method: 'DELETE', status: 401 };
+    const mark = warnSpy.mock.calls.length;
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    try {
+      await assignSlot(org, production, 'typeform', fresh);
+    } finally {
+      held.mockRestore();
+    }
+    await reconcile(wfId);
+    await reconcile(wfId);
+
+    expect(warnings(mark).filter((w) => w.includes(tag) && w.includes('delete it there'))).toEqual([]);
+    expect(typeformHooks.get(hook)).toBe('Bearer tfp_fresh');
+    expect(await typeformHookOf(id)).toBe(hook);
+    expect(await retired(wfId)).toEqual([]);
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { kind: 'registered_webhook', connection: { connectionId: fresh } },
+    });
+    typeformRefuses = null;
+    const run = await fireTypeform(wfId, id, 'tok_fresh');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_fresh');
+  });
+
   it('a removed Typeform trigger whose delete fails, added back on the same form, ends live and fires', async () => {
     const wfId = await deploy(
       triggerDoc('typeform.new_response', { formId: 'F2' }, 'typeform back', 'token'),
@@ -1450,6 +1487,46 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await triggerRuns(wfId)).toEqual([]);
     await reconcile(wfId);
     expect(await activations(wfId)).toEqual([]);
+  });
+
+  it.each([
+    ['no parameters', undefined],
+    ['null parameters', null],
+  ])(
+    'a polled trigger saved with %s is stood up once, stays live across reconciles and fires',
+    async (shape, parameters) => {
+      contacts.length = 0;
+      const doc = triggerDoc('hubspot.new_contact', {}, `saved with ${shape}`, 'id');
+      const [node] = doc.nodes as Array<Record<string, unknown>>;
+      if (parameters === undefined) delete node!.parameters;
+      else node!.parameters = parameters;
+      const wfId = await deploy(doc);
+      const seeds = jest.spyOn(app.get(SdkPollingProvider), 'enable');
+      try {
+        await reconcile(wfId);
+        await reconcile(wfId);
+        contacts.push({ id: `contact_${wfId}`, createdAt: new Date().toISOString() });
+        await poll();
+
+        const runs = await triggerRuns(wfId);
+        expect(runs).toHaveLength(1);
+        expect(await announced(runs[0]!.run_id)).toBe(`fired: contact_${wfId}`);
+        expect(seeds).not.toHaveBeenCalled();
+      } finally {
+        seeds.mockRestore();
+      }
+      expect(await activation(wfId)).toMatchObject({ last_error: null, materialized: { props: {} } });
+    },
+  );
+
+  it('a schedule saved without parameters shows why it cannot run', async () => {
+    const doc = triggerDoc('orchestr:schedule', {}, 'schedule without parameters', 'scheduled_at');
+    delete (doc.nodes as Array<Record<string, unknown>>)[0]!.parameters;
+    const wfId = await deploy(doc);
+
+    await poll();
+
+    expect((await activation(wfId)).last_error).toMatch(/Set exactly one of cron or interval_minutes/);
   });
 
   it('a trigger with nothing recorded as live is passed over by the poll and reconciled when the service starts', async () => {

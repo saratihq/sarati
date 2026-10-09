@@ -24,7 +24,7 @@ import { activationError } from './activation-error';
 import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf } from './canvas/activation-row';
-import { applyFinished } from './canvas/trigger-activation';
+import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
 import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -305,7 +305,7 @@ export class TriggersService {
       events = await this.sdkWebhooks.handleRequest({
         externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
         type: node.node_type,
-        props: node.parameters,
+        props: triggerPropsOf(node),
         auth: row.connectionId ? { connectionId: row.connectionId } : null,
         store,
         // Only read by enable/disable (registration), never by verify/transform.
@@ -609,7 +609,7 @@ export class TriggersService {
       return null;
     });
     if (!polled) return 0;
-    // Outside the lock: a run can wait for days, and a reconcile of this activation must not wait with it.
+    // Only awaiting a run happens outside the lock (a run can wait for days); every write to the activation's store stays inside it.
     await this.fireEvents(polled);
     return polled.events.length;
   }
@@ -862,7 +862,7 @@ async function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): P
 
 function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {
   const node = ir.nodes.find((n) => n.id === row.triggerNodeId);
-  return node?.node_type === row.triggerType && deepEqual(node.parameters, row.props ?? {});
+  return node?.node_type === row.triggerType && deepEqual(triggerPropsOf(node), row.props ?? {});
 }
 
 function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {

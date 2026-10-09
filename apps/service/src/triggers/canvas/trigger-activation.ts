@@ -1,4 +1,5 @@
-import { deepEqual } from '../../ir/models';
+import { isRecord } from '../../common/json-util';
+import { deepEqual, type IRNode } from '../../ir/models';
 
 /**
  * Canvas triggers: the desired/actual activation descriptors and the
@@ -57,6 +58,11 @@ export type MaterializedActivation = Pick<
 export interface ActualActivation extends DesiredActivation {
   /** What was last stood up; `null` when nothing is known to be (a row from before this was recorded). */
   materialized: MaterializedActivation | null;
+}
+
+/** A trigger node's props as an activation records them: a node saved without parameters has none. */
+export function triggerPropsOf(node: Pick<IRNode, 'parameters'>): Record<string, unknown> {
+  return isRecord(node.parameters) ? node.parameters : {};
 }
 
 /** Canonical string form of a key — the map/dedup key across desired and actual. */

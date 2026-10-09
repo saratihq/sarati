@@ -467,19 +467,17 @@ export class TriggerReconcilerService {
     });
   }
 
-  // The activation carries on as if the delete had succeeded; one that still can is retried by later reconciles.
+  // The activation carries on as if the delete had succeeded; only a retry after its stand-up, which may take the webhook over, gives it up.
   private async retire(
     row: RuntimeTriggerActivationEntity,
     webhook: RegisteredWebhook,
     err: unknown,
   ): Promise<void> {
-    if (err instanceof WebhookCredentialError) {
-      this.abandon(webhook, row.workflowId, err);
-      return;
+    if (!(err instanceof WebhookCredentialError)) {
+      this.logger.warn(
+        `activation ${row.id}: ${webhookLabel(webhook)} delete failed, retried by later reconciles: ${errorMessage(err)}`,
+      );
     }
-    this.logger.warn(
-      `activation ${row.id}: ${webhookLabel(webhook)} delete failed, retried by later reconciles: ${errorMessage(err)}`,
-    );
     const em = this.dataSource.manager;
     const ts = now();
     const entry = em.create(TriggerRetiredWebhookEntity, {
@@ -843,7 +841,8 @@ function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
 function webhookLabel(webhook: RegisteredWebhook): string {
   const where = Object.entries(webhook.props)
     .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
-    .map(([key, value]) => `${key} ${String(value)}`);
+    .map(([key, value]) => `${key} ${String(value)}`)
+    .sort((a, b) => a.localeCompare(b));
   const label = `${webhook.triggerType} webhook ${webhook.registration.subscriptionId}`;
   return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }

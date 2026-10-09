@@ -118,10 +118,13 @@ a polled trigger carries on from where it was.
 If the app can't delete the old webhook, the new trigger goes live anyway, and the delete is tried
 again every fifteen minutes — even after you remove the trigger, its workflow or its environment.
 A webhook that a live trigger has registered again is never deleted: Typeform keeps one webhook per
-form for each workflow environment, and a new trigger on that form takes it over. The delete is
-given up when the account that created the webhook has been removed, or when the app rejects its
-credential (a rate limit is not a rejection): the service log then names the webhook and the
-repository or form it is on (at warn level), and you delete it in the app yourself.
+form for each workflow environment, and a new trigger on that form takes it over. A webhook that no
+live trigger holds is given up when the account that created it has been removed, or when the app
+rejects its credential (a rate limit is not a rejection): the service log then names the webhook
+and the repository or form it is on (at warn level), and you delete it in the app yourself.
+
+Linear is the exception: the Linear trigger does not report a failed delete, so a webhook it could
+not delete stays in Linear, and nothing retries it or names it in the log.
 
 A registration that failed to start shows its error on the workflow overview and is retried every
 fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
