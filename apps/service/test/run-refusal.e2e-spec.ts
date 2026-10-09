@@ -7,6 +7,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { DbosRuntime } from '../src/dbos/dbos-runtime';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -41,6 +42,26 @@ const askPlan = (id: string) => ({
   id,
   nodes: [{ kind: 'waitForEvent', id: 'ask', topic: 'go', timeoutMs: 60_000 }],
 });
+
+const ASK_IR = {
+  version: '1.0',
+  name: 'ask',
+  description: '',
+  nodes: [
+    {
+      id: 'ask',
+      name: 'Ask',
+      node_type: 'orchestr:wait_for_event',
+      type_version: 1,
+      parameters: { topic: 'go', timeout_ms: 60_000 },
+      position: { x: 0, y: 0 },
+      metadata: {},
+    },
+  ],
+  edges: [],
+  settings: { execution_order: 'v1', extra: {} },
+  metadata: {},
+};
 
 function deployableIr(name: string): Record<string, unknown> {
   return {
@@ -88,6 +109,11 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
       [runId],
     );
     return res.rows[0] as Record<string, unknown> | undefined;
+  }
+
+  async function scopedIdOf(runId: string): Promise<string> {
+    const res = await db.query(`SELECT id FROM runtime_runs WHERE run_id = $1`, [runId]);
+    return (res.rows[0] as { id: string }).id;
   }
 
   async function inboxRunIds(): Promise<string[]> {
@@ -177,6 +203,87 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
       .expect(200);
     const answered = await until('parked', 'completed');
     expect(answered.outputs).toMatchObject({ ask: { decision: 'approved' } });
+  });
+
+  it('lets a retry take an id only a refusal holds: it parks, reaches the inbox, and can be answered or cancelled, on every route', async () => {
+    const routes = [
+      ['/api/runs', { plan: UNCOMPILABLE_PLAN }, { plan: askPlan('plan-retry') }, 'sync'],
+      ['/api/runs/async', { plan: UNCOMPILABLE_PLAN }, { plan: askPlan('plan-retry') }, 'async'],
+      ['/api/runs/from-ir', { workflow_ir: UNCOMPILABLE_IR }, { workflow_ir: ASK_IR }, 'sync'],
+      ['/api/runs/async', { workflow_ir: UNCOMPILABLE_IR }, { workflow_ir: ASK_IR }, 'async'],
+    ] as const;
+
+    for (const [i, [route, refusedBody, retryBody, mode]] of routes.entries()) {
+      for (const ending of ['answered', 'cancelled'] as const) {
+        const runId = `retry-${i}-${ending}`;
+        const refused = await http()
+          .post(route)
+          .send({ ...refusedBody, run_id: runId });
+        expect(refused.status).toBe(400);
+        expect(refused.body.code).toBe('compile_failed');
+        expect(await row(runId)).toMatchObject({ status: 'error' });
+
+        const started = http()
+          .post(route)
+          .send({ ...retryBody, run_id: runId })
+          .then((res) => res);
+        const parked = await until(runId, 'waiting');
+        expect(parked.error).toBeUndefined();
+        expect(parked.waiting).toMatchObject({ kind: 'event' });
+        expect(await row(runId)).toMatchObject({
+          status: 'waiting',
+          error: null,
+          finished_at: null,
+          waiting_node_id: 'ask',
+          waiting_topic: 'go',
+        });
+        expect(await inboxRunIds()).toContain(runId);
+
+        if (ending === 'answered') {
+          await http()
+            .post(`/api/runs/${runId}/events`)
+            .send({ topic: 'go', payload: { decision: 'approved' } })
+            .expect(200);
+          const answered = await until(runId, 'completed');
+          expect(answered.outputs).toMatchObject({ ask: { decision: 'approved' } });
+          expect(answered.error).toBeUndefined();
+        } else {
+          const cancel = await http().post(`/api/runs/${runId}/cancel`).expect(200);
+          expect(cancel.body.status).toBe('cancelled');
+          await until(runId, 'cancelled');
+          expect(await app.get(DbosRuntime).getRunStatus(await scopedIdOf(runId))).toMatchObject({
+            status: 'cancelled',
+          });
+        }
+
+        const reply = await started;
+        if (mode === 'async') {
+          expect(reply.status).toBe(201);
+          expect(reply.body).toEqual({ run_id: runId, status: 'running' });
+        } else if (ending === 'answered') {
+          expect(reply.status).toBe(201);
+          expect(reply.body.outputs.ask).toEqual({ decision: 'approved' });
+        } else {
+          expect(reply.status).toBe(409);
+          expect(reply.body.code).toBe('run_cancelled');
+        }
+        expect(await inboxRunIds()).not.toContain(runId);
+      }
+    }
+  }, 120_000);
+
+  it('records the latest refusal when an id that only a refusal holds is refused again', async () => {
+    const first = await http().post('/api/runs').send({ plan: UNCOMPILABLE_PLAN, run_id: 'twice' });
+    expect(first.status).toBe(400);
+    const second = await http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: UNCOMPILABLE_IR, run_id: 'twice', dry_run: true });
+    expect(second.status).toBe(400);
+    expect(second.body.detail).not.toBe(first.body.detail);
+
+    expect(await row('twice')).toMatchObject({ status: 'error', error: second.body.detail, dry_run: true });
+    const detail = await until('twice', 'error');
+    expect(detail.error).toBe(second.body.detail);
   });
 
   it('records a refused dry run as the dry run it was', async () => {

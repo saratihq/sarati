@@ -361,7 +361,7 @@ export class RunsService {
     };
   }
 
-  /** Compile what a run start was given; one that can't compile is recorded as refused and answered 400 before any step runs. */
+  /** Compile what a run start was given; one that can't compile is answered 400 before any step runs, and recorded as refused unless its id already holds a run. */
   private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
@@ -369,8 +369,6 @@ export class RunsService {
         ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)
         : this.compiler.fromRunPlan(source.plan);
     } catch (err) {
-      // A document that can't compile is the CALLER's problem → 400, recorded as a failed
-      // run first (there is no plan yet, so the interpreter never writes one).
       const message = `Workflow can't run: ${errorMessage(err)}`;
       // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review / env.
       await this.recorder?.runRefused(
