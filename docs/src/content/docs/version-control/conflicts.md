@@ -68,5 +68,6 @@ The comparison is three-way — ancestor, target, source — on **fields inside 
 ## Adds on both sides
 
 If both branches add a step with the same id but different content, that is a **whole-node**
-conflict rather than a field one — you pick one side's node entire, because there is no sensible way
-to interleave two different definitions.
+conflict rather than a field one, because there is no sensible way to interleave two different
+definitions. Pick one side's step entire, with that side's connections, or edit your own version of
+it, which keeps the connections either branch gave the step.

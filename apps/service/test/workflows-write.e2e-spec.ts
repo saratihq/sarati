@@ -329,6 +329,73 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
     expect(refused.body.code).toBe('branch_protected');
   });
 
+  it('a step both branches added, resolved by hand, keeps the connections either branch gave it', async () => {
+    const http = () => request(app.getHttpServer());
+    const withExtra = (text: string, from: string): Record<string, unknown> => {
+      const doc = wfJson('Added twice', 'base');
+      const extra = { ...(doc.nodes as Array<Record<string, unknown>>)[1], id: 'extra', name: 'Extra' };
+      return {
+        ...doc,
+        nodes: [
+          ...(doc.nodes as unknown[]),
+          { ...extra, parameters: { subject: text }, position: { x: 600, y: 0 } },
+        ],
+        edges: [
+          ...(doc.edges as unknown[]),
+          {
+            id: `e-${from}`,
+            source_node_id: from,
+            source_port: 0,
+            target_node_id: 'extra',
+            target_port: 0,
+            port_type: 'main',
+          },
+        ],
+      };
+    };
+    const wf = (
+      await http()
+        .post('/api/deploy')
+        .send({ workflow_json: wfJson('Added twice', 'base') })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: withExtra('from lane', 'send'), branch: 'lane' })
+      .expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: withExtra('from main', 'trigger'), branch: 'main' })
+      .expect(201);
+    const merge = (value: unknown) =>
+      http()
+        .post(`/api/workflows/${wf}/branches/lane/merge`)
+        .send({
+          target_branch: 'main',
+          resolutions: [{ node_id: 'extra', field_path: null, choice: 'custom', value }],
+        });
+
+    const refused = await merge({}).expect(400);
+    expect(refused.body.detail).toBe(
+      "A custom resolution of node 'extra' must be the whole node, with its name and node_type",
+    );
+    const custom = { id: 'extra', name: 'Extra', node_type: 'text.concat', parameters: { subject: 'both' } };
+    expect((await merge(custom).expect(201)).body.status).toBe('merged');
+
+    const head = (await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200)).body.head as {
+      nodes: Array<{ id: string; parameters: Record<string, unknown> }>;
+      edges: Array<{ source_node_id: string; target_node_id: string }>;
+    };
+    expect(head.nodes.find((n) => n.id === 'extra')?.parameters).toEqual({ subject: 'both' });
+    expect(
+      head.edges
+        .filter((e) => e.target_node_id === 'extra')
+        .map((e) => e.source_node_id)
+        .sort(),
+    ).toEqual(['send', 'trigger']);
+  });
+
   it('non-conflicting merge succeeds, floats latest to the merge commit, deletes the source branch', async () => {
     await request(app.getHttpServer())
       .post(`/api/workflows/${wfId}/branches`)

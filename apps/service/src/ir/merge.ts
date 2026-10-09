@@ -2,6 +2,7 @@ import { DomainError } from '../common/domain-error';
 import {
   applyDiff,
   computeDiff,
+  edgeKey,
   irNodeFromDump,
   nodeDump,
   setNested,
@@ -190,7 +191,7 @@ export function threeWayMerge(
   for (const r of resolutions) byKey.set(resolutionKey(r.node_id, r.field_path ?? null), r);
 
   const unresolved: ConflictEntry[] = [];
-  const applied: Array<{ conflict: ConflictEntry; resolution: MergeResolution }> = [];
+  const applied: AppliedResolution[] = [];
   for (const c of conflicts) {
     const r = byKey.get(resolutionKey(c.node_id, c.field_path));
     if (!r) {
@@ -231,16 +232,7 @@ export function threeWayMerge(
   let base = applyDiff(ancestor, targetBaseDiff);
   base = applyDiff(base, sourceBaseDiff);
 
-  // Apply the resolved choices on top of the base.
-  for (const { conflict, resolution } of applied) {
-    if (conflict.kind === 'edit_delete') {
-      applyEditDeleteResolution(base, conflict, resolution, source, target);
-    } else if (conflict.field_path == null) {
-      applyWholeNodeResolution(base, conflict, resolution, source, target);
-    } else {
-      applyFieldResolution(base, conflict, resolution);
-    }
-  }
+  applyResolutions(base, applied, source, target);
 
   return { success: true, merged: base, conflicts: [], source_diff: sourceDiff, target_diff: targetDiff };
 }
@@ -317,34 +309,28 @@ function applyFieldResolution(base: WorkflowIR, conflict: ConflictEntry, resolut
   setNested(node as unknown as Record<string, unknown>, conflict.field_path, value);
 }
 
-/**
- * Resolve an add/add WHOLE-NODE conflict: the base carries neither version, so rebuild the node AND
- * its incident edges from the chosen side (or an operator-authored dump) — never lose the wiring.
- */
-function applyWholeNodeResolution(
+type AppliedResolution = { conflict: ConflictEntry; resolution: MergeResolution };
+
+function applyResolutions(
   base: WorkflowIR,
-  conflict: ConflictEntry,
-  resolution: MergeResolution,
+  applied: AppliedResolution[],
   source: WorkflowIR,
   target: WorkflowIR,
 ): void {
-  const nodeId = conflict.node_id;
-  // Strip any partial remnant (defensive — the base build excluded it already).
-  base.nodes = base.nodes.filter((n) => n.id !== nodeId);
-  base.edges = base.edges.filter((e) => e.source_node_id !== nodeId && e.target_node_id !== nodeId);
-
-  if (resolution.choice === 'custom') {
-    if (isRecord(resolution.value)) base.nodes.push(irNodeFromDump(resolution.value));
-    return;
+  const nodeLevel = applied.filter(({ conflict }) => conflict.field_path == null);
+  // Every resolved node is in place before any wiring is restored, so the result never depends on conflict order.
+  for (const { conflict, resolution } of nodeLevel)
+    placeResolvedNode(base, conflict, resolution, source, target);
+  for (const { conflict, resolution } of nodeLevel) {
+    addIncidentEdges(base, conflict.node_id, wiringOf(conflict, resolution, source, target));
   }
-  const chosenIr = resolution.choice === 'source' ? source : target;
-  const chosenNode = nodeById(chosenIr, nodeId);
-  if (chosenNode) base.nodes.push(cloneIr<IRNode>(chosenNode));
-  const incident = chosenIr.edges.filter((e) => e.source_node_id === nodeId || e.target_node_id === nodeId);
-  for (const edge of incident) base.edges.push(cloneIr<IREdge>(edge));
+  for (const { conflict, resolution } of applied) {
+    if (conflict.field_path != null) applyFieldResolution(base, conflict, resolution);
+  }
 }
 
-function applyEditDeleteResolution(
+// The base holds the ancestor's version of an edit_delete node and neither version of an add/add one.
+function placeResolvedNode(
   base: WorkflowIR,
   conflict: ConflictEntry,
   resolution: MergeResolution,
@@ -352,15 +338,72 @@ function applyEditDeleteResolution(
   target: WorkflowIR,
 ): void {
   const nodeId = conflict.node_id;
-  // The base carries the ANCESTOR node + its edges (every change to this node was excluded), so
-  // strip both, then either restore from the editing side (`keep`) or leave it gone (`delete`).
   base.nodes = base.nodes.filter((n) => n.id !== nodeId);
   base.edges = base.edges.filter((e) => e.source_node_id !== nodeId && e.target_node_id !== nodeId);
-  if (resolution.choice === 'delete') return;
+  const placed = resolvedNode(conflict, resolution, source, target);
+  if (placed) base.nodes.push(placed);
+}
 
-  const editingIr = conflict.deleted_on === 'source' ? target : source;
-  const editedNode = nodeById(editingIr, nodeId);
-  if (editedNode) base.nodes.push(cloneIr<IRNode>(editedNode));
-  const incident = editingIr.edges.filter((e) => e.source_node_id === nodeId || e.target_node_id === nodeId);
-  for (const edge of incident) base.edges.push(cloneIr<IREdge>(edge));
+function resolvedNode(
+  conflict: ConflictEntry,
+  resolution: MergeResolution,
+  source: WorkflowIR,
+  target: WorkflowIR,
+): IRNode | null {
+  if (resolution.choice === 'delete') return null;
+  if (resolution.choice === 'custom') {
+    if (!isWholeNode(resolution.value)) {
+      throw new DomainError(
+        `A custom resolution of node '${conflict.node_id}' must be the whole node, with its name and node_type`,
+      );
+    }
+    return { ...irNodeFromDump(resolution.value), id: conflict.node_id };
+  }
+  const node = nodeById(chosenSide(conflict, resolution, source, target), conflict.node_id);
+  return node ? cloneIr<IRNode>(node) : null;
+}
+
+// An authored node keeps the wiring either side gave it, as a clean merge keeps edges added on either side.
+function wiringOf(
+  conflict: ConflictEntry,
+  resolution: MergeResolution,
+  source: WorkflowIR,
+  target: WorkflowIR,
+): WorkflowIR[] {
+  if (resolution.choice === 'delete') return [];
+  if (resolution.choice === 'custom') return [source, target];
+  return [chosenSide(conflict, resolution, source, target)];
+}
+
+function chosenSide(
+  conflict: ConflictEntry,
+  resolution: MergeResolution,
+  source: WorkflowIR,
+  target: WorkflowIR,
+): WorkflowIR {
+  if (conflict.kind === 'edit_delete') return conflict.deleted_on === 'source' ? target : source;
+  return resolution.choice === 'source' ? source : target;
+}
+
+function isWholeNode(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    value.name.trim() !== '' &&
+    typeof value.node_type === 'string' &&
+    value.node_type.trim() !== ''
+  );
+}
+
+function addIncidentEdges(base: WorkflowIR, nodeId: string, sides: WorkflowIR[]): void {
+  const present = new Set(base.nodes.map((n) => n.id));
+  const seen = new Set(base.edges.map((e) => JSON.stringify(edgeKey(e))));
+  for (const e of sides.flatMap((side) => side.edges)) {
+    const key = JSON.stringify(edgeKey(e));
+    const incident = e.source_node_id === nodeId || e.target_node_id === nodeId;
+    if (!incident || seen.has(key) || !present.has(e.source_node_id) || !present.has(e.target_node_id))
+      continue;
+    seen.add(key);
+    base.edges.push(cloneIr<IREdge>(e));
+  }
 }
