@@ -361,7 +361,7 @@ export class RunsService {
     };
   }
 
-  /** The ONE compile seam every entry point takes: a plan or document that can't compile is refused before any step runs. */
+  /** Compile what a run start was given; one that can't compile is recorded as refused and answered 400 before any step runs. */
   private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
@@ -372,18 +372,23 @@ export class RunsService {
       // A document that can't compile is the CALLER's problem → 400, recorded as a failed
       // run first (there is no plan yet, so the interpreter never writes one).
       const message = `Workflow can't run: ${errorMessage(err)}`;
-      const scoped = this.scopedRunId(opts.externalUserId, runId);
       // Carry the SAME provenance the happy path records — a compile-failed run must still link to its review / env.
-      await this.recorder?.runStarted(scoped, runId, opts.externalUserId, null, {
-        workflowId: opts.workflowId ?? null,
-        source: opts.source ?? 'api',
-        environment: opts.environment ?? null,
-        environmentId: opts.environmentId ?? null,
-        workflowVersionId: opts.workflowVersionId ?? null,
-        reviewId: opts.reviewId ?? null,
-        orgId: opts.orgId ?? opts.activeOrgId ?? null,
-      });
-      await this.recorder?.runFinished(scoped, null, message);
+      await this.recorder?.runRefused(
+        this.scopedRunId(opts.externalUserId, runId),
+        runId,
+        opts.externalUserId,
+        message,
+        {
+          workflowId: opts.workflowId ?? null,
+          source: opts.source ?? 'api',
+          environment: opts.environment ?? null,
+          environmentId: opts.environmentId ?? null,
+          workflowVersionId: opts.workflowVersionId ?? null,
+          reviewId: opts.reviewId ?? null,
+          dryRun: opts.dryRun ?? false,
+          orgId: opts.orgId ?? opts.activeOrgId ?? null,
+        },
+      );
       throw new DomainError(message, 400, {
         code: 'compile_failed',
         run_id: runId,
@@ -535,9 +540,7 @@ export class RunsService {
     this.requireDbos();
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
-    if ('ir' in source && opts.workflowId) {
-      await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
-    }
+    if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
     const dag = await this.compile(source, opts, runId);
     await this.recorder?.runStarted(scoped, runId, opts.externalUserId, dag, {
       workflowId: opts.workflowId ?? null,

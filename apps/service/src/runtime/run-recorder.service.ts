@@ -116,9 +116,35 @@ export class RunRecorderService implements RunRecorder {
     plan: unknown,
     meta?: RunStartMeta,
   ): Promise<void> {
-    await this.write('runStarted', scopedRunId, [
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, started_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
-       VALUES ($1, $2, $3, $4, CAST($5 AS json), 'running', now(), $6, $7, $8, $9, $10, $11, $12, $13, $14,
+    await this.insertRun('runStarted', scopedRunId, runId, userId, plan, meta, null);
+  }
+
+  /** Record a run refused before any step ran, as already failed; a run already holding the id is left untouched. */
+  async runRefused(
+    scopedRunId: string,
+    runId: string,
+    userId: string,
+    error: string,
+    meta?: RunStartMeta,
+  ): Promise<void> {
+    await this.insertRun('runRefused', scopedRunId, runId, userId, null, meta, error);
+  }
+
+  private async insertRun(
+    op: string,
+    scopedRunId: string,
+    runId: string,
+    userId: string,
+    plan: unknown,
+    meta: RunStartMeta | undefined,
+    error: string | null,
+  ): Promise<void> {
+    await this.write(op, scopedRunId, [
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
+       VALUES ($1, $2, $3, $4, CAST($5 AS json),
+               CASE WHEN $16::text IS NULL THEN 'running' ELSE 'error' END, $16, now(),
+               CASE WHEN $16::text IS NULL THEN NULL ELSE now() END,
+               $6, $7, $8, $9, $10, $11, $12, $13, $14,
                COALESCE((SELECT org_id FROM workflows WHERE id = $6), $15))
        ON CONFLICT (id) DO NOTHING`,
       [
@@ -137,6 +163,7 @@ export class RunRecorderService implements RunRecorder {
         meta?.parentRunId ?? null,
         meta?.parentStepKey ?? null,
         meta?.orgId ?? null,
+        error,
       ],
     ]);
   }
