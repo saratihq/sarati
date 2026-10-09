@@ -26,10 +26,20 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 // An allowlisted host, so the SDK's SSRF guard skips its DNS lookup; the fetch itself is stubbed.
 const FEED_URL = 'http://localhost/retype-feed';
 
-function respond(status: number, contentType: string, text: string): FetchLikeResponse {
+function respond(
+  status: number,
+  contentType: string,
+  text: string,
+  headers: Record<string, string> = {},
+): FetchLikeResponse {
   return {
     status,
-    headers: { forEach: (cb) => cb(contentType, 'content-type') },
+    headers: {
+      forEach: (cb) => {
+        cb(contentType, 'content-type');
+        for (const [name, value] of Object.entries(headers)) cb(value, name);
+      },
+    },
     text: () => Promise.resolve(text),
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
   };
@@ -53,6 +63,16 @@ let stripeRefuses: { method: string; status: number } | null = null;
 // Live GitHub hooks, by their `/repos/<owner>/<repo>/hooks/<id>` path.
 const githubHooks = new Set<string>();
 let hookSeq = 100;
+let githubRefuses: {
+  method: string;
+  status: number;
+  message: string;
+  headers?: Record<string, string>;
+} | null = null;
+
+// Live Typeform webhooks, `<formId>/<tag>` → the key that last wrote them; a PUT is an upsert, as the real one is.
+const typeformHooks = new Map<string, string>();
+let typeformRefuses: { method: string; status: number } | null = null;
 
 function stripe(method: string, path: string, authorization: string): FetchLikeResponse {
   if (stripeRefuses?.method === method) {
@@ -73,6 +93,10 @@ function stripe(method: string, path: string, authorization: string): FetchLikeR
 }
 
 function github(method: string, path: string): FetchLikeResponse {
+  if (githubRefuses?.method === method) {
+    const { status, message, headers } = githubRefuses;
+    return respond(status, 'application/json', JSON.stringify({ message }), headers);
+  }
   if (method === 'POST' && path.endsWith('/hooks')) {
     hookSeq += 1;
     githubHooks.add(`${path}/${hookSeq}`);
@@ -80,6 +104,18 @@ function github(method: string, path: string): FetchLikeResponse {
   }
   if (method === 'DELETE' && githubHooks.delete(path)) return respond(204, 'application/json', '');
   return json(404, { message: 'Not Found' });
+}
+
+function typeform(method: string, path: string, authorization: string): FetchLikeResponse {
+  if (typeformRefuses?.method === method) return json(typeformRefuses.status, { code: 'REFUSED' });
+  const hook = /^\/forms\/([^/]+)\/webhooks\/([^/]+)$/.exec(path);
+  const key = hook ? `${decodeURIComponent(hook[1]!)}/${decodeURIComponent(hook[2]!)}` : '';
+  if (method === 'PUT' && hook) {
+    typeformHooks.set(key, authorization);
+    return json(200, { tag: decodeURIComponent(hook[2]!), enabled: true });
+  }
+  if (method === 'DELETE' && typeformHooks.delete(key)) return respond(204, 'application/json', '');
+  return json(404, { code: 'NOT_FOUND' });
 }
 
 const webhookFetch: FetchLike = (input, init) => {
@@ -94,6 +130,7 @@ const webhookFetch: FetchLike = (input, init) => {
   });
   if (url.host === 'api.stripe.com') return Promise.resolve(stripe(method, url.pathname, authorization));
   if (url.host === 'api.github.com') return Promise.resolve(github(method, url.pathname));
+  if (url.host === 'api.typeform.com') return Promise.resolve(typeform(method, url.pathname, authorization));
   return Promise.resolve(json(404, {}));
 };
 
@@ -150,6 +187,7 @@ function triggerDoc(
   parameters: Record<string, unknown>,
   name: string,
   echo = 'title',
+  triggerId = 'trigger',
 ): Record<string, unknown> {
   return {
     version: '1.0',
@@ -157,7 +195,7 @@ function triggerDoc(
     description: '',
     nodes: [
       {
-        id: 'trigger',
+        id: triggerId,
         name: 'When it happens',
         node_type: nodeType,
         type_version: 1,
@@ -178,7 +216,7 @@ function triggerDoc(
     edges: [
       {
         id: 'e-trigger-announce',
-        source_node_id: 'trigger',
+        source_node_id: triggerId,
         source_port: 0,
         target_node_id: 'announce',
         target_port: 0,
@@ -187,6 +225,42 @@ function triggerDoc(
     ],
     settings: { execution_order: 'v1', extra: {} },
     metadata: {},
+  };
+}
+
+// A schedule whose run sits in a six-second wait before it announces.
+function waitingScheduleDoc(intervalMinutes: number): Record<string, unknown> {
+  const doc = triggerDoc(
+    'orchestr:schedule',
+    { interval_minutes: intervalMinutes },
+    'waiting run',
+    'scheduled_at',
+  );
+  const [trigger, announce] = doc.nodes as Array<Record<string, unknown>>;
+  const edge = (from: string, to: string): Record<string, unknown> => ({
+    id: `e-${from}-${to}`,
+    source_node_id: from,
+    source_port: 0,
+    target_node_id: to,
+    target_port: 0,
+    port_type: 'main',
+  });
+  return {
+    ...doc,
+    nodes: [
+      trigger,
+      {
+        id: 'pause',
+        name: 'Pause',
+        node_type: 'orchestr:wait_for_duration',
+        type_version: 1,
+        parameters: { amount: 0.1, unit: 'minutes' },
+        position: { x: 150, y: 0 },
+        metadata: {},
+      },
+      announce,
+    ],
+    edges: [edge('trigger', 'pause'), edge('pause', 'announce')],
   };
 }
 
@@ -275,6 +349,17 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   const endpointOf = async (activationId: string): Promise<string> =>
     String((await registration(activationId))?.subscriptionId);
 
+  const typeformHookOf = async (activationId: string): Promise<string> => {
+    const handle = await registration(activationId);
+    return `${String(handle?.formId)}/${String(handle?.subscriptionId)}`;
+  };
+
+  const typeformDeletes = (since = 0): string[] =>
+    providerCalls
+      .slice(since)
+      .filter((c) => c.method === 'DELETE' && c.url.includes('api.typeform.com'))
+      .map((c) => c.url);
+
   const subscribedEvents = (since = 0): string[] =>
     providerCalls
       .slice(since)
@@ -305,6 +390,28 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       .set('Content-Type', 'application/json')
       .set('stripe-signature', `t=${t},v1=${sig}`)
       .send(raw);
+  };
+
+  // A signed Typeform submission to the workflow's production intake, answered with the run it started.
+  const fireTypeform = async (
+    wfId: string,
+    activationId: string,
+    token: string,
+  ): Promise<Record<string, unknown>> => {
+    const record = await stored<{ secret: string }>(activationId, 'webhook.registration');
+    const raw = JSON.stringify({
+      event_id: `evt_${token}`,
+      event_type: 'form_response',
+      form_response: { form_id: 'form', token, answers: [] },
+    });
+    const sig = `sha256=${createHmac('sha256', String(record?.secret)).update(raw).digest('base64')}`;
+    const fired = await http()
+      .post(`/api/hooks/${wfId}/production`)
+      .set('Content-Type', 'application/json')
+      .set('typeform-signature', sig)
+      .send(raw)
+      .expect(202);
+    return awaitRun(fired.body.run_id as string);
   };
 
   // Resolves once a two-key advisory lock in this database has a waiter: a reconcile queued behind a poll.
@@ -438,6 +545,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       ['github', 'ghp_e2e'],
       ['hubspot', 'pat-e2e'],
       ['intercom', 'ic_e2e'],
+      ['typeform', 'tfp_e2e'],
     ]) {
       const conn = await tokenConnection(appSlug!, token!, orgId);
       await db.query(
@@ -466,6 +574,8 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
 
   afterEach(() => {
     stripeRefuses = null;
+    githubRefuses = null;
+    typeformRefuses = null;
   });
 
   it('registered webhook: the old endpoint is deleted and the new event type is registered', async () => {
@@ -762,6 +872,158 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await retired(wfId)).toEqual([]);
   });
 
+  it('a GitHub hook delete refused by a rate limit is retried, never given up', async () => {
+    const wfId = await deploy(
+      triggerDoc('github.new_push', { owner: 'acme', repo: 'limited' }, 'rate limited'),
+    );
+    const hookId = await endpointOf((await activation(wfId)).id);
+    const hook = `/repos/acme/limited/hooks/${hookId}`;
+
+    githubRefuses = {
+      method: 'DELETE',
+      status: 403,
+      message: 'API rate limit exceeded',
+      headers: { 'x-ratelimit-remaining': '0' },
+    };
+    await commitAndPublish(
+      wfId,
+      triggerDoc('github.new_issue', { owner: 'acme', repo: 'limited' }, 'rate limited'),
+    );
+    githubRefuses = null;
+    expect(githubHooks.has(hook)).toBe(true);
+    expect(await retired(wfId)).toEqual([{ hook: hookId, last_error: expect.stringMatching(/HTTP 403/) }]);
+
+    await reconcile(wfId);
+
+    expect(githubHooks.has(hook)).toBe(false);
+    expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('a GitHub hook that can never be deleted is named in the log with its repository', async () => {
+    const wfId = await deploy(
+      triggerDoc('github.new_push', { owner: 'acme', repo: 'revoked' }, 'revoked github'),
+    );
+    const hookId = await endpointOf((await activation(wfId)).id);
+
+    githubRefuses = { method: 'DELETE', status: 401, message: 'Bad credentials' };
+    const mark = warnSpy.mock.calls.length;
+    await commitAndPublish(
+      wfId,
+      triggerDoc('github.new_issue', { owner: 'acme', repo: 'revoked' }, 'revoked github'),
+    );
+
+    expect(warnings(mark)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          new RegExp(`github.new_push webhook ${hookId} .*acme.*revoked.*can never be deleted`),
+        ),
+      ]),
+    );
+    expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('a Typeform slot swap whose delete fails keeps the webhook the new account upserted under the same tag', async () => {
+    const { org, production } = await workspace('Typeform swap');
+    const first = await tokenConnection('typeform', 'tfp_first', org);
+    const second = await tokenConnection('typeform', 'tfp_second', org);
+    await assignSlot(org, production, 'typeform', first);
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'F1' }, 'typeform swap', 'token'),
+      org,
+    );
+    const { id } = await activation(wfId);
+    const hook = await typeformHookOf(id);
+    expect(typeformHooks.get(hook)).toBe('Bearer tfp_first');
+
+    typeformRefuses = { method: 'DELETE', status: 500 };
+    // One reconcile: the old delete fails, and the new account upserts the same tag.
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    try {
+      await assignSlot(org, production, 'typeform', second);
+    } finally {
+      held.mockRestore();
+    }
+    await reconcile(wfId);
+    typeformRefuses = null;
+
+    expect(await typeformHookOf(id)).toBe(hook);
+    expect(typeformHooks.get(hook)).toBe('Bearer tfp_second');
+    expect(await retired(wfId)).toEqual([]);
+
+    await reconcile(wfId);
+
+    expect(typeformHooks.get(hook)).toBe('Bearer tfp_second');
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { kind: 'registered_webhook', connection: { connectionId: second } },
+    });
+
+    // What a crash between the stand-up and dropping the old delete leaves: a pending delete of the live webhook.
+    await db.query(
+      `INSERT INTO trigger_retired_webhooks
+              (id, workflow_id, environment_id, trigger_node_id, webhook, last_error, created_at, updated_at)
+       SELECT gen_random_uuid(), a.workflow_id, a.environment_id, a.trigger_node_id,
+              jsonb_set(s.value::jsonb, '{connection,connectionId}', to_jsonb($2::text)), 'HTTP 500', now(), now()
+         FROM runtime_activation_store s JOIN runtime_trigger_activations a ON a.id = s.activation_id
+        WHERE s.activation_id = $1 AND s.key = 'webhook.registration'`,
+      [id, first],
+    );
+    expect(await retired(wfId)).toHaveLength(1);
+    const mark = providerCalls.length;
+
+    await reconcile(wfId);
+
+    expect(typeformDeletes(mark)).toEqual([]);
+    expect(typeformHooks.get(hook)).toBe('Bearer tfp_second');
+    expect(await retired(wfId)).toEqual([]);
+  });
+
+  it('a removed Typeform trigger whose delete fails, added back on the same form, ends live and fires', async () => {
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'F2' }, 'typeform back', 'token'),
+    );
+    const hook = await typeformHookOf((await activation(wfId)).id);
+
+    typeformRefuses = { method: 'DELETE', status: 500 };
+    await commitAndPublish(wfId, triggerDoc('orchestr:trigger', {}, 'typeform back'));
+    expect(await retired(wfId)).toEqual([
+      { hook: hook.split('/')[1], last_error: expect.stringMatching(/HTTP 500/) },
+    ]);
+    await commitAndPublish(
+      wfId,
+      triggerDoc('typeform.new_response', { formId: 'F2' }, 'typeform back', 'token'),
+    );
+    typeformRefuses = null;
+    await reconcile(wfId);
+
+    const back = await activation(wfId);
+    expect(await typeformHookOf(back.id)).toBe(hook);
+    expect(typeformHooks.has(hook)).toBe(true);
+    expect(await retired(wfId)).toEqual([]);
+    expect(back).toMatchObject({ last_error: null, materialized: { kind: 'registered_webhook' } });
+    const run = await fireTypeform(wfId, back.id, 'tok_back');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_back');
+  });
+
+  it('a Typeform trigger replaced by a new node on the same form keeps the webhook the new node registered', async () => {
+    const wfId = await deploy(
+      triggerDoc('typeform.new_response', { formId: 'F3' }, 'typeform replaced', 'token'),
+    );
+    const hook = await typeformHookOf((await activation(wfId)).id);
+
+    await commitAndPublish(
+      wfId,
+      triggerDoc('typeform.new_response', { formId: 'F3' }, 'typeform replaced', 'token', 'trigger2'),
+    );
+
+    const replaced = await activation(wfId);
+    expect(await typeformHookOf(replaced.id)).toBe(hook);
+    expect(typeformHooks.has(hook)).toBe(true);
+    expect(replaced.last_error).toBeNull();
+    const run = await fireTypeform(wfId, replaced.id, 'tok_replaced');
+    expect((run.outputs as Record<string, unknown>).announce).toBe('fired: tok_replaced');
+  });
+
   it('Composio subscription: the old instance is deleted and the new trigger is subscribed', async () => {
     const props = { pipeline: 'default' };
     const wfId = await deploy(triggerDoc('acmecrm.new_deal', props, 'retype composio'));
@@ -901,6 +1163,45 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await triggerRuns(wfId)).toHaveLength(1);
   });
 
+  it('a run a poll fired that sits in a wait never holds up a publish of its workflow', async () => {
+    const wfId = await deploy(waitingScheduleDoc(5));
+    const { id } = await activation(wfId);
+    await db.query(
+      `UPDATE runtime_trigger_activations SET created_at = now() - interval '1 day' WHERE id = $1`,
+      [id],
+    );
+    await db.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [id]);
+
+    const cycle = app.get(TriggersService).runActivationPollCycle();
+    let runs = await triggerRuns(wfId);
+    for (let i = 0; i < 400 && runs.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      runs = await triggerRuns(wfId);
+    }
+    expect(runs).toHaveLength(1);
+    const runStatus = async (): Promise<string> =>
+      (
+        await db.query<{ status: string }>(`SELECT status FROM runtime_runs WHERE run_id = $1`, [
+          runs[0]!.run_id,
+        ])
+      ).rows[0]!.status;
+    const heldActivationLocks = await db.query(
+      `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+        WHERE l.locktype = 'advisory' AND l.objsubid = 2 AND l.granted AND d.datname = current_database()`,
+    );
+    expect(heldActivationLocks.rows).toEqual([]);
+
+    await commitAndPublish(wfId, waitingScheduleDoc(10));
+
+    expect(await runStatus()).toBe('running');
+    expect(await activation(wfId)).toMatchObject({
+      last_error: null,
+      materialized: { props: { interval_minutes: 10 } },
+    });
+    await cycle;
+    expect(await runStatus()).toBe('completed');
+  });
+
   it("a poll of a row loaded before its trigger was retyped is skipped, never run on the new trigger's store", async () => {
     conversations.length = 0;
     contacts.length = 0;
@@ -991,6 +1292,47 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     );
     expect(await registration(id)).toBeNull();
     expect(await activation(wfId)).toMatchObject({ kind: 'schedule', last_error: null });
+  });
+
+  it('a webhook an earlier release left on a trigger whose slot it emptied is named in the log once, never retried', async () => {
+    const { org, production } = await workspace('Emptied by an earlier release');
+    await assignSlot(org, production, 'stripe', await tokenConnection('stripe', 'sk_test_emptied', org));
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'emptied earlier'), org);
+    const { id } = await activation(wfId);
+    const endpoint = await endpointOf(id);
+
+    // What v0.2.22 left after the slot was emptied: the row's account cleared, the bare handle still stored.
+    const held = jest.spyOn(app.get(TriggerReconcilerService), 'reconcile').mockResolvedValue();
+    try {
+      await asA(http().delete(`/api/environments/${production}/slots/stripe`).set('X-Org-Id', org)).expect(
+        200,
+      );
+    } finally {
+      held.mockRestore();
+    }
+    await db.query(
+      `UPDATE runtime_trigger_activations
+          SET connection_id = NULL, connection_owner_user_id = NULL, materialized = NULL
+        WHERE id = $1`,
+      [id],
+    );
+    await db.query(
+      `UPDATE runtime_activation_store SET value = (value::jsonb -> 'registration')::json
+        WHERE activation_id = $1 AND key = 'webhook.registration'`,
+      [id],
+    );
+    const mark = warnSpy.mock.calls.length;
+
+    await reconcile(wfId);
+    await reconcile(wfId);
+    await reconcile(wfId);
+
+    expect(await retired(wfId)).toEqual([]);
+    expect(stripeEndpoints.has(endpoint)).toBe(true);
+    expect(warnings(mark).filter((w) => w.includes(endpoint))).toEqual([
+      expect.stringMatching(/can never be deleted.*delete it there/),
+    ]);
+    expect((await activation(wfId)).last_error).toMatch(/No connection in this environment's slot/);
   });
 
   it('a pending delete outlives its workflow and is retried by the sweep', async () => {

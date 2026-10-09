@@ -9,6 +9,7 @@ import {
   type FetchLike,
   HttpClient,
   type ManifestEntry,
+  type NormalizedResponse,
   resolveOptions,
   type TriggerStore,
 } from '@sarati/actions-sdk';
@@ -83,19 +84,19 @@ export function buildDirectAuth(
     : createDirectAuth(scheme, credential);
 }
 
-/** {@link buildDirectAuth}, reporting the status of every response it receives to `onStatus`. */
+/** {@link buildDirectAuth}, reporting every response it receives to `onResponse`. */
 export function buildObservedDirectAuth(
   scheme: AuthScheme,
   credential: DirectCredential,
   fetchImpl: FetchLike | undefined,
-  onStatus: (status: number) => void,
+  onResponse: (response: NormalizedResponse) => void,
 ): AuthHandle {
   const direct = new DirectTransport({ scheme, credential, ...(fetchImpl ? { fetchImpl } : {}) });
   return createAuth(scheme, {
     kind: direct.kind,
     send: async (request) => {
       const response = await direct.send(request);
-      onStatus(response.status);
+      onResponse(response);
       return response;
     },
   });

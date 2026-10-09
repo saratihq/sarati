@@ -3,11 +3,7 @@ import type { DataSource } from 'typeorm';
 import { rawQuery } from '../database/raw-query';
 import type { ProviderStore } from '../providers/provider-store';
 
-/**
- * The persistent KV (ProviderStore) for ONE trigger activation — cursors, webhook
- * secret, subscription handle. The reconciler and the poll sweep write it only while holding the
- * activation's lock (`activation-lock.ts`), so per-key upsert atomicity suffices.
- */
+/** One trigger activation's persistent KV; its lock serialises the reconciler against a poll, while the webhook intake writes its dedupe key unlocked. */
 export class DbActivationStore implements ProviderStore {
   constructor(
     private readonly dataSource: DataSource,
@@ -40,7 +36,6 @@ export class DbActivationStore implements ProviderStore {
     );
   }
 
-  /** Delete every key. */
   async clear(): Promise<void> {
     await this.dataSource.query(`DELETE FROM runtime_activation_store WHERE activation_id = $1`, [
       this.activationId,

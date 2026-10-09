@@ -4,6 +4,7 @@ import {
   type AuthHandle,
   type DropdownResult,
   type FetchLike,
+  type NormalizedResponse,
   type WebhookRegistration,
   type WebhookRequest,
   type WebhookTrigger,
@@ -30,7 +31,7 @@ export const WEBHOOK_SECRET_KEY = 'webhook.secret';
 /** The record of what `onEnable` registered; its {@link WebhookRegistration} handle carries any PROVIDER-minted signing secret. */
 export const WEBHOOK_REGISTRATION_KEY = 'webhook.registration';
 
-/** A webhook delete its credential can never perform: the connection is gone, or the app rejects it (401/403). */
+/** A webhook delete no retry can perform: no account is recorded, its connection is gone, or the app rejects the credential. */
 export class WebhookCredentialError extends Error {}
 
 /** Common shape the three lifecycle entrypoints share (one trigger row's context). */
@@ -152,7 +153,10 @@ export class SdkWebhookProvider {
   /** Delete the subscription named by `registration`; throws {@link WebhookCredentialError} when retrying cannot help. */
   async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<void> {
     const trigger = this.require(ctx.type);
-    let status = 0;
+    if (ctx.auth === null && trigger.auth.type !== 'none') {
+      throw new WebhookCredentialError('no account is recorded for it');
+    }
+    let last: NormalizedResponse | null = null;
     try {
       const credential = await resolveTriggerCredential(
         this.connections,
@@ -161,7 +165,7 @@ export class SdkWebhookProvider {
         trigger.auth,
       );
       await trigger.disable({
-        auth: buildObservedDirectAuth(trigger.auth, credential, this.fetchImpl, (s) => (status = s)),
+        auth: buildObservedDirectAuth(trigger.auth, credential, this.fetchImpl, (r) => (last = r)),
         props: ctx.props,
         store: sdkStore(ctx.store),
         webhookUrl: ctx.webhookUrl,
@@ -174,7 +178,7 @@ export class SdkWebhookProvider {
           cause: err,
         });
       }
-      if (status === 401 || status === 403) {
+      if (rejectsCredential(last)) {
         throw new WebhookCredentialError(`the app rejected its credential: ${errorMessage(err)}`, {
           cause: err,
         });
@@ -198,4 +202,13 @@ export class SdkWebhookProvider {
     const credential = await resolveTriggerCredential(this.connections, externalUserId, auth, trigger.auth);
     return buildDirectAuth(trigger.auth, credential, this.fetchImpl);
   }
+}
+
+// A 403 that is a rate limit (GitHub answers both with it) passes, so a later retry can still succeed.
+function rejectsCredential(response: NormalizedResponse | null): boolean {
+  if (response?.status === 401) return true;
+  if (response?.status !== 403) return false;
+  const { headers, data } = response;
+  const body = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  return !(headers['x-ratelimit-remaining'] === '0' || 'retry-after' in headers || /rate limit/i.test(body));
 }

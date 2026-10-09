@@ -4,7 +4,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { Pool } from 'pg';
-import { Not } from 'typeorm';
+import { In, Not } from 'typeorm';
 import type { DataSource } from 'typeorm';
 
 import { runBounded } from '../../common/bounded';
@@ -36,7 +36,13 @@ import {
 import { activationError } from '../activation-error';
 import { withActivationLock } from '../activation-lock';
 import { DbActivationStore } from '../activation-store';
-import { legacyRegistrationOf, type RegisteredWebhook, registeredWebhookOf } from '../registered-webhook';
+import {
+  legacyRegistrationOf,
+  type RegisteredWebhook,
+  registeredWebhookOf,
+  sameRegistration,
+  webhookRegistrationOf,
+} from '../registered-webhook';
 import {
   AGENT_TOOL_PUBLIC,
   INCOMING_CHAT_PUBLIC,
@@ -214,10 +220,7 @@ export class TriggerReconcilerService {
     this.logger.warn(`activation ${op} ${activationKeyString(key)} failed: ${errorMessage(err)}`);
   }
 
-  /**
-   * Reconcile every workflow with an env pointer, a materialized activation or a pending webhook
-   * delete (so an unpromoted or deleted workflow still gets torn down). The periodic full-sweep safety net.
-   */
+  /** The periodic safety net: reconcile every workflow with an env pointer, an activation or a pending webhook delete. */
   async sweepAll(): Promise<void> {
     const em = this.dataSource.manager;
     const rows = await rawQuery<{ workflow_id: string }>(
@@ -412,7 +415,7 @@ export class TriggerReconcilerService {
     if (stored === null) return;
     const webhook =
       registeredWebhookOf(stored) ?? (await this.legacyWebhook(row, live, stored, store, envName));
-    if (!webhook) return;
+    if (!webhook || (await this.registrationHeld(webhook, row.id))) return;
     await this.disableWebhook(webhook, store).catch((err: unknown) => this.retire(row, webhook, err));
   }
 
@@ -487,23 +490,60 @@ export class TriggerReconcilerService {
   private async retryRetiredWebhooks(workflowId: string): Promise<void> {
     const em = this.dataSource.manager;
     for (const entry of await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } })) {
-      try {
-        // The activation's own store now belongs to whatever replaced this registration.
-        await this.disableWebhook(entry.webhook, new InMemoryStore());
-      } catch (err) {
-        if (!(err instanceof WebhookCredentialError)) {
-          this.logger.warn(`retried ${webhookLabel(entry.webhook)} delete failed: ${errorMessage(err)}`);
-          await em.update(
-            TriggerRetiredWebhookEntity,
-            { id: entry.id },
-            { lastError: errorMessage(err), updatedAt: now() },
-          );
-          continue;
-        }
-        this.abandon(entry.webhook, entry.workflowId, err);
+      if ((await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry))) {
+        await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
       }
-      await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
     }
+  }
+
+  // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
+  private async retriedDelete(entry: TriggerRetiredWebhookEntity): Promise<boolean> {
+    try {
+      await this.disableWebhook(entry.webhook, new InMemoryStore());
+      return true;
+    } catch (err) {
+      if (err instanceof WebhookCredentialError) {
+        this.abandon(entry.webhook, entry.workflowId, err);
+        return true;
+      }
+      this.logger.warn(`retried ${webhookLabel(entry.webhook)} delete failed: ${errorMessage(err)}`);
+      await this.dataSource.manager.update(
+        TriggerRetiredWebhookEntity,
+        { id: entry.id },
+        { lastError: errorMessage(err), updatedAt: now() },
+      );
+      return false;
+    }
+  }
+
+  // An app that upserts (Typeform's per-URL tag) hands a new registration an old one's handle; deleting it would take the new one down.
+  private async registrationHeld(webhook: RegisteredWebhook, exceptActivationId?: string): Promise<boolean> {
+    const rows = await rawQuery<{ trigger_type: string; value: unknown }>(
+      this.dataSource.manager,
+      `SELECT a.trigger_type, s.value
+         FROM runtime_activation_store s
+         JOIN runtime_trigger_activations a ON a.id = s.activation_id
+        WHERE s.key = $1
+          AND COALESCE(s.value -> 'registration' ->> 'subscriptionId', s.value ->> 'subscriptionId') = $2
+          AND ($3::uuid IS NULL OR s.activation_id <> $3::uuid)`,
+      [WEBHOOK_REGISTRATION_KEY, webhook.registration.subscriptionId, exceptActivationId ?? null],
+    );
+    return rows.some(({ trigger_type, value }) => {
+      const registration = webhookRegistrationOf(value);
+      const triggerType = registeredWebhookOf(value)?.triggerType ?? trigger_type;
+      return registration !== null && sameRegistration(webhook, { triggerType, registration });
+    });
+  }
+
+  private async forgetRetiredHeldBy(webhook: RegisteredWebhook): Promise<void> {
+    const em = this.dataSource.manager;
+    const entries = await rawQuery<{ id: string; webhook: RegisteredWebhook }>(
+      em,
+      `SELECT id, webhook FROM trigger_retired_webhooks WHERE webhook -> 'registration' ->> 'subscriptionId' = $1`,
+      [webhook.registration.subscriptionId],
+    );
+    const held = entries.filter((entry) => sameRegistration(entry.webhook, webhook)).map((entry) => entry.id);
+    if (held.length > 0) await em.delete(TriggerRetiredWebhookEntity, { id: In(held) });
   }
 
   private abandon(webhook: RegisteredWebhook, workflowId: string, err: WebhookCredentialError): void {
@@ -542,6 +582,7 @@ export class TriggerReconcilerService {
       registration,
     };
     await store.put(WEBHOOK_REGISTRATION_KEY, webhook);
+    await this.forgetRetiredHeldBy(webhook);
   }
 
   /**
@@ -813,8 +854,13 @@ function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
   return row.materialized ?? materializedOf(toActual(row));
 }
 
+// The props locate the hook in the app (a GitHub hook id exists only under its repository).
 function webhookLabel(webhook: RegisteredWebhook): string {
-  return `${webhook.triggerType} webhook ${webhook.registration.subscriptionId}`;
+  const where = Object.entries(webhook.props)
+    .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+    .map(([key, value]) => `${key} ${String(value)}`);
+  const label = `${webhook.triggerType} webhook ${webhook.registration.subscriptionId}`;
+  return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }
 
 function slotKey(environmentId: string, node: IRNode): string {

@@ -6,12 +6,15 @@ import type { ConnectionsService } from '../connections/connections.service';
 import { InMemoryStore } from './provider-store';
 import { SdkWebhookProvider, WebhookCredentialError } from './sdk-webhook.provider';
 
-function res(status: number, body: unknown): FetchLikeResponse {
+function res(status: number, body: unknown, headers: Record<string, string> = {}): FetchLikeResponse {
   const text = body === undefined ? '' : JSON.stringify(body);
   return {
     status,
     headers: {
-      forEach: (cb) => cb('application/json', 'content-type'),
+      forEach: (cb) => {
+        cb('application/json', 'content-type');
+        for (const [name, value] of Object.entries(headers)) cb(value, name);
+      },
     },
     text: () => Promise.resolve(text),
     arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
@@ -211,7 +214,7 @@ describe('SdkWebhookProvider', () => {
   });
 
   describe('disable — whether a failed delete is worth retrying', () => {
-    const disable = (provider: SdkWebhookProvider, auth: Record<string, unknown>): Promise<void> =>
+    const disable = (provider: SdkWebhookProvider, auth: Record<string, unknown> | null): Promise<void> =>
       provider.disable({
         externalUserId: 'u1',
         auth,
@@ -220,15 +223,33 @@ describe('SdkWebhookProvider', () => {
         ...BASE,
       });
     const answering =
-      (status: number): FetchLike =>
+      (status: number, message = 'refused', headers: Record<string, string> = {}): FetchLike =>
       () =>
-        Promise.resolve(res(status, { message: 'refused' }));
+        Promise.resolve(res(status, { message }, headers));
 
     it.each([401, 403])('a %i from the app can never succeed', async (status) => {
       const provider = new SdkWebhookProvider(undefined, answering(status));
       await expect(disable(provider, { token: 'ghp_revoked' })).rejects.toBeInstanceOf(
         WebhookCredentialError,
       );
+    });
+
+    it.each([
+      ['its rate limit is spent', 'API rate limit exceeded', { 'x-ratelimit-remaining': '0' }],
+      ['it asks to be retried later', 'refused', { 'retry-after': '60' }],
+      ['it names a secondary rate limit', 'You have exceeded a secondary rate limit', {}],
+    ])('a 403 that says %s may succeed later', async (_case, message, headers) => {
+      const provider = new SdkWebhookProvider(undefined, answering(403, message, headers));
+      const failure = disable(provider, { token: 'ghp_limited' });
+      await expect(failure).rejects.toThrow(/HTTP 403/);
+      await expect(failure).rejects.not.toBeInstanceOf(WebhookCredentialError);
+    });
+
+    it('a webhook with no account recorded can never be deleted, and the app is never called', async () => {
+      const fetch = stubFetch();
+      const provider = new SdkWebhookProvider(undefined, fetch);
+      await expect(disable(provider, null)).rejects.toBeInstanceOf(WebhookCredentialError);
+      expect(fetch.calls).toEqual([]);
     });
 
     it('a 500 from the app may succeed later', async () => {

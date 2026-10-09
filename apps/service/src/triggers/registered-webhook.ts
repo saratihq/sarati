@@ -1,6 +1,8 @@
 import type { WebhookRegistration } from '@sarati/actions-sdk';
 
 import { isRecord } from '../common/json-util';
+import { deepEqual } from '../ir/models';
+import { validatedAppSlug } from '../providers/sdk-actions.registry';
 import type { ConnectionRef } from './canvas/trigger-activation';
 
 /** An app webhook as it was registered: everything its delete needs, recorded when it was created. */
@@ -36,4 +38,19 @@ export function legacyRegistrationOf(stored: unknown): WebhookRegistration | nul
 /** The app's handle in whatever the registration key holds. */
 export function webhookRegistrationOf(stored: unknown): WebhookRegistration | null {
   return registeredWebhookOf(stored)?.registration ?? legacyRegistrationOf(stored);
+}
+
+/** Whether two handles name one registration in one app: an upsert (Typeform's tag) can hand a new trigger an old one's. */
+export function sameRegistration(
+  a: Pick<RegisteredWebhook, 'triggerType' | 'registration'>,
+  b: Pick<RegisteredWebhook, 'triggerType' | 'registration'>,
+): boolean {
+  return (
+    validatedAppSlug(a.triggerType) === validatedAppSlug(b.triggerType) &&
+    deepEqual(locator(a.registration), locator(b.registration))
+  );
+}
+
+function locator({ signingSecret: _minted, ...where }: WebhookRegistration): Record<string, unknown> {
+  return where;
 }
