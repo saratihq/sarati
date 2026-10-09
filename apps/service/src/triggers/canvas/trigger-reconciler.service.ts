@@ -3,8 +3,8 @@ import { randomBytes } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { WebhookRegistration } from '@sarati/actions-sdk';
-import { Not } from 'typeorm';
+import type { Pool } from 'pg';
+import { In, Not } from 'typeorm';
 import type { DataSource } from 'typeorm';
 
 import { runBounded } from '../../common/bounded';
@@ -13,24 +13,36 @@ import { isTriggerNode } from '../../compiler/compile-ir';
 import { ConnectionsService } from '../../connections/connections.service';
 import type { EnvConfig } from '../../config/env.config';
 import { newId, now } from '../../database/ids';
-import { rawQuery } from '../../database/raw-query';
+import { rawMutate, rawQuery } from '../../database/raw-query';
 import { RuntimeTriggerActivationEntity } from '../../database/entities/runtime-trigger-activation.entity';
-import { deepEqual, type IRNode, type WorkflowIR } from '../../ir/models';
+import { TriggerRetiredWebhookEntity } from '../../database/entities/trigger-retired-webhook.entity';
+import { PG_POOL } from '../../database/tokens';
+import type { IRNode, WorkflowIR } from '../../ir/models';
 import { composioTriggerSpec } from '../../providers/composio-trigger.registry';
 import { ComposioTriggerProvider } from '../../providers/composio-trigger.provider';
 import {
   MANAGED_INTEGRATION_PROVIDER,
   type ManagedIntegrationProvider,
 } from '../../providers/managed-integration-provider';
+import { InMemoryStore, type ProviderStore } from '../../providers/provider-store';
 import { validatedAppSlug } from '../../providers/sdk-actions.registry';
 import { SdkPollingProvider } from '../../providers/sdk-polling.provider';
 import {
   SdkWebhookProvider,
   WEBHOOK_REGISTRATION_KEY,
   WEBHOOK_SECRET_KEY,
+  WebhookCredentialError,
 } from '../../providers/sdk-webhook.provider';
 import { activationError } from '../activation-error';
+import { withActivationLock } from '../activation-lock';
 import { DbActivationStore } from '../activation-store';
+import {
+  legacyRegistrationOf,
+  type RegisteredWebhook,
+  registeredWebhookOf,
+  sameRegistration,
+  webhookRegistrationOf,
+} from '../registered-webhook';
 import {
   AGENT_TOOL_PUBLIC,
   INCOMING_CHAT_PUBLIC,
@@ -39,20 +51,23 @@ import {
 } from '../trigger-catalog.service';
 import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
+import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
+import { activationKeyOf, actualOf } from './activation-row';
 import {
+  type ActivationKey,
   activationKeyString,
   type ActivationKind,
-  type ActualActivation,
-  connectionEqual,
+  applyFinished,
   type ConnectionRef,
   type DesiredActivation,
+  type MaterializedActivation,
 } from './trigger-activation';
-import { triggerConfigChangedAcrossVersions } from './trigger-config-diff';
 import { PlatformKeysService, type PlatformKeyScope } from '../../platform/platform-keys.service';
 import {
   deriveDesiredActivations,
   reconcileActivations,
+  type ActivationUpdate,
   type EnvPointerInput,
   type ReconcilePlan,
 } from './reconcile';
@@ -87,10 +102,19 @@ export class TriggerReconcilerService {
     private readonly signals: TriggerSignalsService,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
     private readonly platformKeys: PlatformKeysService,
+    @Inject(PG_POOL) private readonly pool: Pool,
   ) {}
 
   /** The last queued reconcile per workflow; absent when none is in flight. In-process only. */
   private readonly tails = new Map<string, Promise<void>>();
+
+  /** Pending deletes queued for a retry or being retried, by id. In-process only. */
+  private readonly retrying = new Set<string>();
+
+  /** The queued retries of pending deletes, which run one at a time, apart from every reconcile. */
+  private retries: Promise<void> = Promise.resolve();
+
+  private readonly deleteFence = new WebhookDeleteFence();
 
   /** Wire the inline reconcile path so pointer/slot moves converge even when pg-boss is off. */
   registerInline(): void {
@@ -98,26 +122,33 @@ export class TriggerReconcilerService {
     this.signals.registerInline((workflowId) => this.reconcile(workflowId));
   }
 
-  /**
-   * Converge ONE workflow's activations to its desired set — total + idempotent. Reads
-   * COMMITTED pointers, so callers must enqueue after their move's transaction commits.
-   * `selfHeal` is sweep-only: it costs a Composio round trip per subscription row.
-   * Reconciles of one workflow run one at a time, so a caller that awaits this sees converged state.
-   */
+  /** Converge one workflow to its desired set from COMMITTED pointers, one reconcile at a time; its pending deletes are then queued for a retry it never waits for. */
   async reconcile(workflowId: string, opts: { selfHeal?: boolean } = {}): Promise<void> {
     const previous = this.tails.get(workflowId) ?? Promise.resolve();
     const run = previous.then(() => this.reconcileOnce(workflowId, opts));
-    const tail = run.catch(() => undefined);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
     this.tails.set(workflowId, tail);
     try {
-      await run;
+      this.queueRetries(await run);
     } finally {
       if (this.tails.get(workflowId) === tail) this.tails.delete(workflowId);
     }
   }
 
-  private async reconcileOnce(workflowId: string, opts: { selfHeal?: boolean }): Promise<void> {
+  /** Resolves once every pending delete queued for a retry so far has been retried. */
+  async retriesSettled(): Promise<void> {
+    await this.retries;
+  }
+
+  private async reconcileOnce(
+    workflowId: string,
+    opts: { selfHeal?: boolean },
+  ): Promise<TriggerRetiredWebhookEntity[]> {
     const em = this.dataSource.manager;
+    const pendingDeletes = await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } });
     const pointers = await rawQuery<PointerRow>(
       em,
       `SELECT environment_id, environment, version_id
@@ -144,8 +175,8 @@ export class TriggerReconcilerService {
     });
 
     const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
-    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(keyOf(r)), r]));
-    const actual: ActualActivation[] = actualRows.map((r) => toDesired(r));
+    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
+    const actual = actualRows.map((r) => actualOf(r));
 
     const plan = reconcileActivations(desired, actual);
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
@@ -156,15 +187,17 @@ export class TriggerReconcilerService {
     for (const u of plan.toUpdate) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
       if (row)
-        await this.applyUpdate(row, u.desired, envNameById, irByVersion).catch((err) =>
+        await this.applyUpdate(row, u, envNameById).catch((err) =>
           this.logApplyError('update', u.desired.key, err),
         );
     }
     for (const d of plan.toDelete) {
       const row = rowByKey.get(activationKeyString(d.key));
-      if (row) await this.applyDelete(row).catch((err) => this.logApplyError('delete', d.key, err));
+      if (row)
+        await this.applyDelete(row, envNameById).catch((err) => this.logApplyError('delete', d.key, err));
     }
     if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
+    return pendingDeletes;
   }
 
   /**
@@ -194,7 +227,9 @@ export class TriggerReconcilerService {
       targets.push({ id: row.id, desired: d });
     }
     await runBounded(targets, SELFHEAL_CONCURRENCY, ({ id, desired: d }) =>
-      this.materialize(id, d, new Map(), 'keep').catch((err) => this.logApplyError('selfheal', d.key, err)),
+      withActivationLock(this.pool, id, () => this.standUp(id, d, new Map())).catch((err) =>
+        this.logApplyError('selfheal', d.key, err),
+      ),
     );
   }
 
@@ -202,17 +237,16 @@ export class TriggerReconcilerService {
     this.logger.warn(`activation ${op} ${activationKeyString(key)} failed: ${errorMessage(err)}`);
   }
 
-  /**
-   * Reconcile every workflow with an env pointer OR a materialized activation (the latter so
-   * a fully-unpromoted workflow still gets torn down). The periodic full-sweep safety net.
-   */
+  /** The periodic safety net: reconcile every workflow with an env pointer, an activation or a pending webhook delete. */
   async sweepAll(): Promise<void> {
     const em = this.dataSource.manager;
     const rows = await rawQuery<{ workflow_id: string }>(
       em,
       `SELECT DISTINCT workflow_id FROM workflow_env_pointers WHERE environment_id IS NOT NULL
        UNION
-       SELECT DISTINCT workflow_id FROM runtime_trigger_activations`,
+       SELECT DISTINCT workflow_id FROM runtime_trigger_activations
+       UNION
+       SELECT DISTINCT workflow_id FROM trigger_retired_webhooks`,
     );
     for (const { workflow_id } of rows) {
       try {
@@ -225,12 +259,20 @@ export class TriggerReconcilerService {
     if (rows.length > 0) this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
   }
 
+  /** Queue a reconcile of every workflow with an activation whose last apply did not finish, which a poll passes over. */
+  async reconcileUnfinished(): Promise<void> {
+    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity);
+    const workflowIds = new Set(rows.filter((r) => !applyFinished(actualOf(r))).map((r) => r.workflowId));
+    for (const workflowId of workflowIds) await this.signals.enqueue(workflowId);
+  }
+
   // ─── apply ───
 
   private async applyCreate(desired: DesiredActivation, envName: Map<string, string>): Promise<void> {
     const id = newId();
     const ts = now();
     const missingSlot = this.needsConnection(desired) && desired.connection === null;
+    const standsUp = !missingSlot && !desired.paused;
     const row = this.dataSource.manager.create(RuntimeTriggerActivationEntity, {
       id,
       workflowId: desired.key.workflowId,
@@ -247,19 +289,22 @@ export class TriggerReconcilerService {
       lastError: missingSlot ? this.slotError(desired) : null,
       createdAt: ts,
       updatedAt: ts,
+      // Paused or unslotted stands nothing up, so that much is already in effect.
+      materialized: standsUp ? null : materializedOf(desired),
     });
-    await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-    if (missingSlot || desired.paused) return; // materialize later, once the slot is filled / unpaused
-    await this.materialize(id, desired, envName, 'reset');
+    await withActivationLock(this.pool, id, async () => {
+      await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
+      if (standsUp) await this.standUp(id, desired, envName);
+    });
   }
 
   private async applyUpdate(
     row: RuntimeTriggerActivationEntity,
-    desired: DesiredActivation,
+    update: ActivationUpdate,
     envName: Map<string, string>,
-    irByVersion: Map<string, WorkflowIR>,
   ): Promise<void> {
-    const cursorAction = this.cursorActionFor(row, desired, irByVersion);
+    const { desired } = update;
+    const live = liveOf(row);
     const missingSlot = this.needsConnection(desired) && desired.connection === null;
     row.kind = desired.kind;
     row.triggerType = desired.triggerType;
@@ -270,165 +315,320 @@ export class TriggerReconcilerService {
     row.paused = desired.paused;
     row.lastError = missingSlot ? this.slotError(desired) : null;
     row.updatedAt = now();
-    await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-    if (desired.paused) {
-      // A pause tears down the live side-effect (subscription/poller) but keeps the row.
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
-      return;
-    }
-    if (missingSlot) {
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
-      return;
-    }
-    // A 'keep' leaves the cursor/subscription untouched; a 'reset' re-materializes from now.
-    if (cursorAction === 'reset') {
-      await this.teardown(row.id, row.kind as ActivationKind, desired, envName);
-      await this.materialize(row.id, desired, envName, 'reset');
-    }
+    await withActivationLock(this.pool, row.id, async () => {
+      await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
+      // A 'keep' leaves the cursor/subscription untouched; a 'reset' tears down what is live and starts from now.
+      if (update.cursorAction === 'keep') return;
+      await this.teardown(row, live, envName);
+      if (desired.paused || missingSlot) {
+        await this.recordMaterialized(row.id, desired);
+        return;
+      }
+      await this.standUp(row.id, desired, envName);
+    });
   }
 
-  private async applyDelete(row: RuntimeTriggerActivationEntity): Promise<void> {
-    await this.teardown(row.id, row.kind as ActivationKind, toDesired(row), new Map());
-    await this.dataSource.manager.delete(RuntimeTriggerActivationEntity, { id: row.id }); // store cascades
-  }
-
-  /**
-   * Keep the dedup/schedule cursor IFF the trigger is unchanged across the promote, else
-   * reset it from now. "Did the config change?" is answered by the vault authority
-   * `triggerConfigChangedAcrossVersions` → `computeDiff` (invariant #4), never a byte compare.
-   */
-  private cursorActionFor(
+  private async applyDelete(
     row: RuntimeTriggerActivationEntity,
+    envName: Map<string, string>,
+  ): Promise<void> {
+    await withActivationLock(this.pool, row.id, async () => {
+      await this.teardown(row, liveOf(row), envName);
+      await this.dataSource.manager.delete(RuntimeTriggerActivationEntity, { id: row.id }); // store cascades
+    });
+  }
+
+  private async standUp(
+    activationId: string,
     desired: DesiredActivation,
-    irByVersion: Map<string, WorkflowIR>,
-  ): 'keep' | 'reset' {
-    if (!connectionEqual(desired.connection, connOf(row))) return 'reset';
-    if (desired.paused !== row.paused) return 'reset';
-    if (!row.versionId || row.versionId === desired.versionId) return 'keep'; // nothing moved
-    const oldIr = irByVersion.get(row.versionId);
-    const newIr = irByVersion.get(desired.versionId);
-    if (!oldIr || !newIr) return deepEqual(desired.props, row.props ?? {}) ? 'keep' : 'reset';
-    if (!triggerConfigChangedAcrossVersions(oldIr, newIr, desired.key.triggerNodeId)) return 'keep';
-    // That check is a coarse upper bound (a position nudge flags too) — narrow it on props.
-    return deepEqual(desired.props, row.props ?? {}) ? 'keep' : 'reset';
+    envName: Map<string, string>,
+  ): Promise<void> {
+    try {
+      await this.materialize(activationId, desired, envName);
+    } catch (err) {
+      await this.recordError(activationId, err);
+      return;
+    }
+    await this.recordMaterialized(activationId, desired);
+  }
+
+  private async recordMaterialized(activationId: string, desired: DesiredActivation): Promise<void> {
+    await rawMutate(
+      this.dataSource.manager,
+      `UPDATE runtime_trigger_activations SET materialized = CAST($2 AS jsonb) WHERE id = $1`,
+      [activationId, JSON.stringify(materializedOf(desired))],
+    );
   }
 
   // ─── provider materialization / teardown (per kind) ───
 
-  /** Stand up the live side-effect for an activation. `cursorAction` seeds a fresh cursor on reset. */
+  /** Stand up the live side-effect for an activation; throws so the caller records the failure. */
   private async materialize(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-    cursorAction: 'keep' | 'reset',
-  ): Promise<void> {
-    try {
-      const store = new DbActivationStore(this.dataSource, activationId);
-      switch (desired.kind) {
-        case 'schedule':
-          if (cursorAction === 'reset') await store.put(SCHEDULE_CURSOR_KEY, now().toISOString());
-          return;
-        case 'registered_webhook':
-          await this.registerWebhook(activationId, desired, envName);
-          return;
-        case 'polling':
-          // A discarded seed poll primes the dedup watermark, so only items appearing
-          // AFTER activation fire. (Each SDK trigger also self-baselines if this seed fails.)
-          if (this.sdkPolling.isPollingTrigger(desired.triggerType)) {
-            await this.sdkPolling.enable(desired.triggerType, {
-              externalUserId: desired.connection?.ownerUserId ?? '',
-              props: desired.props,
-              auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
-              store,
-            });
-            return;
-          }
-          await this.lifecycle.enableTrigger({
-            externalUserId: desired.connection?.ownerUserId ?? '',
-            triggerId: desired.triggerType,
-            props: desired.props,
-            auth: desired.connection ? { connectionId: desired.connection.connectionId } : undefined,
-            store,
-          });
-          return;
-        case 'composio_subscription':
-          await this.subscribeComposio(activationId, desired);
-          return;
-        case 'webhook':
-          return; // the per-(workflow,env) URL IS the deployment — nothing to stand up
-        case 'chat':
-          return; // ditto
-      }
-    } catch (err) {
-      await this.recordError(activationId, err);
-    }
-  }
-
-  /** Tear the live side-effect down (best-effort — teardown failures must not wedge the sweep). */
-  private async teardown(
-    activationId: string,
-    kind: ActivationKind,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
-    try {
-      const store = new DbActivationStore(this.dataSource, activationId);
-      if (kind === 'registered_webhook') {
-        const registration = (await store.get<WebhookRegistration>(WEBHOOK_REGISTRATION_KEY)) ?? undefined;
-        const secret = (await store.get<string>(WEBHOOK_SECRET_KEY)) ?? '';
-        await this.sdkWebhooks.disable({
-          externalUserId: desired.connection?.ownerUserId ?? '',
-          type: desired.triggerType,
-          props: desired.props,
-          auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
-          store,
-          webhookUrl: this.webhookUrl(desired, envName),
-          secret,
-          registration,
-        });
-        await store.delete(WEBHOOK_REGISTRATION_KEY);
-        await store.delete(WEBHOOK_SECRET_KEY);
-      } else if (kind === 'polling') {
-        // SDK polling holds no remote subscription (its cursor cascade-deletes with the
-        // row); only the hand-polled Composio-poll rail has a disable.
-        if (!this.sdkPolling.isPollingTrigger(desired.triggerType)) {
-          await this.lifecycle.disableTrigger({
-            externalUserId: desired.connection?.ownerUserId ?? '',
-            triggerId: desired.triggerType,
-            props: desired.props,
-            auth: desired.connection ? { connectionId: desired.connection.connectionId } : undefined,
-            store,
-          });
-        }
-      } else if (kind === 'composio_subscription') {
-        await this.unsubscribeComposio(activationId, desired.key.workflowId);
-      } else if (kind === 'schedule') {
-        await store.delete(SCHEDULE_CURSOR_KEY);
-      }
-    } catch (err) {
-      this.logger.warn(`activation ${activationId} teardown (${kind}) failed: ${errorMessage(err)}`);
-    }
-  }
-
-  /** Register a fresh provider subscription pointing at the per-(workflow,env) intake URL. */
-  private async registerWebhook(
     activationId: string,
     desired: DesiredActivation,
     envName: Map<string, string>,
   ): Promise<void> {
     const store = new DbActivationStore(this.dataSource, activationId);
+    switch (desired.kind) {
+      case 'schedule':
+        await store.put(SCHEDULE_CURSOR_KEY, now().toISOString());
+        return;
+      case 'registered_webhook':
+        await this.registerWebhook(activationId, desired, envName);
+        return;
+      case 'polling':
+        // A discarded seed primes the dedup watermark; until one succeeds the poll cycle passes the activation over.
+        if (this.sdkPolling.isPollingTrigger(desired.triggerType)) {
+          await this.sdkPolling.enable(desired.triggerType, {
+            externalUserId: desired.connection?.ownerUserId ?? '',
+            props: desired.props,
+            auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
+            store,
+          });
+          return;
+        }
+        await this.lifecycle.enableTrigger({
+          externalUserId: desired.connection?.ownerUserId ?? '',
+          triggerId: desired.triggerType,
+          props: desired.props,
+          auth: desired.connection ? { connectionId: desired.connection.connectionId } : undefined,
+          store,
+        });
+        return;
+      case 'composio_subscription':
+        await this.subscribeComposio(activationId, desired);
+        return;
+      case 'webhook':
+        return; // the per-(workflow,env) URL IS the deployment — nothing to stand up
+      case 'chat':
+        return; // ditto
+    }
+  }
+
+  // Tears down what `live` stood up, and any webhook the store records whatever `live` says, then empties the store.
+  private async teardown(
+    row: RuntimeTriggerActivationEntity,
+    live: MaterializedActivation,
+    envName: Map<string, string>,
+  ): Promise<void> {
+    const store = new DbActivationStore(this.dataSource, row.id);
+    await this.unregisterWebhook(row, live, store, envName);
+    if (live.kind === 'polling' && !this.sdkPolling.isPollingTrigger(live.triggerType)) {
+      // SDK polling holds no remote subscription; only the hand-polled Composio-poll rail has a disable.
+      await this.lifecycle.disableTrigger({
+        externalUserId: live.connection?.ownerUserId ?? '',
+        triggerId: live.triggerType,
+        props: live.props,
+        auth: live.connection ? { connectionId: live.connection.connectionId } : undefined,
+        store,
+      });
+    } else if (live.kind === 'composio_subscription') {
+      await this.unsubscribeComposio(row.id, row.workflowId);
+    }
+    await store.clear();
+  }
+
+  private async unregisterWebhook(
+    row: RuntimeTriggerActivationEntity,
+    live: MaterializedActivation,
+    store: DbActivationStore,
+    envName: Map<string, string>,
+  ): Promise<void> {
+    const stored = await store.get<unknown>(WEBHOOK_REGISTRATION_KEY);
+    if (stored === null) return;
+    const webhook =
+      registeredWebhookOf(stored) ?? (await this.legacyWebhook(row, live, stored, store, envName));
+    if (!webhook || (await this.registrationHeld(webhook, row.id))) return;
+    await this.disableWebhook(webhook, store).catch((err: unknown) => this.retire(row, webhook, err));
+  }
+
+  // A bare handle an earlier release stored names no trigger type; only a row still live as a registered webhook supplies one.
+  private async legacyWebhook(
+    row: RuntimeTriggerActivationEntity,
+    live: MaterializedActivation,
+    stored: unknown,
+    store: DbActivationStore,
+    envName: Map<string, string>,
+  ): Promise<RegisteredWebhook | null> {
+    const registration = legacyRegistrationOf(stored);
+    if (!registration || live.kind !== 'registered_webhook') {
+      const hook = registration ? `webhook ${registration.subscriptionId}` : 'a webhook';
+      this.logger.warn(
+        `activation ${row.id} (workflow ${row.workflowId}): ${hook} registered by an earlier release does not ` +
+          `record its trigger, so it cannot be deleted from here — delete it in the app`,
+      );
+      return null;
+    }
+    return {
+      triggerType: live.triggerType,
+      props: live.props,
+      connection: live.connection,
+      webhookUrl: this.webhookUrl(activationKeyOf(row), envName),
+      secret: (await store.get<string>(WEBHOOK_SECRET_KEY)) ?? '',
+      registration,
+    };
+  }
+
+  private disableWebhook(webhook: RegisteredWebhook, store: ProviderStore): Promise<void> {
+    return this.sdkWebhooks.disable({
+      externalUserId: webhook.connection?.ownerUserId ?? '',
+      type: webhook.triggerType,
+      props: webhook.props,
+      auth: webhook.connection ? { connectionId: webhook.connection.connectionId } : null,
+      store,
+      webhookUrl: webhook.webhookUrl,
+      secret: webhook.secret,
+      registration: webhook.registration,
+    });
+  }
+
+  // The activation carries on as if the delete had succeeded; only a retry after its stand-up, which may take the webhook over, gives it up.
+  private async retire(
+    row: RuntimeTriggerActivationEntity,
+    webhook: RegisteredWebhook,
+    err: unknown,
+  ): Promise<void> {
+    if (!(err instanceof WebhookCredentialError)) {
+      this.logger.warn(
+        `activation ${row.id}: ${webhookLabel(webhook)} delete failed, retried by later reconciles: ${errorMessage(err)}`,
+      );
+    }
+    const em = this.dataSource.manager;
+    const ts = now();
+    const entry = em.create(TriggerRetiredWebhookEntity, {
+      id: newId(),
+      workflowId: row.workflowId,
+      environmentId: row.environmentId,
+      triggerNodeId: row.triggerNodeId,
+      webhook,
+      lastError: errorMessage(err),
+      createdAt: ts,
+      updatedAt: ts,
+    });
+    await em.save(TriggerRetiredWebhookEntity, entry);
+  }
+
+  private queueRetries(entries: TriggerRetiredWebhookEntity[]): void {
+    const queued = entries.filter((entry) => !this.retrying.has(entry.id));
+    if (queued.length === 0) return;
+    for (const entry of queued) this.retrying.add(entry.id);
+    this.retries = this.retries.then(() => this.retryRetiredWebhooks(queued));
+  }
+
+  private async retryRetiredWebhooks(entries: TriggerRetiredWebhookEntity[]): Promise<void> {
+    for (const entry of entries) {
+      await this.retryRetiredWebhook(entry)
+        .catch((err: unknown) =>
+          this.logger.warn(`pending webhook delete ${entry.id} was not retried: ${errorMessage(err)}`),
+        )
+        .finally(() => this.retrying.delete(entry.id));
+    }
+  }
+
+  private async retryRetiredWebhook(entry: TriggerRetiredWebhookEntity): Promise<void> {
+    const done = await this.deleteFence.deleting(
+      entry.webhook,
+      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry)),
+    );
+    if (done) await this.dataSource.manager.delete(TriggerRetiredWebhookEntity, { id: entry.id });
+  }
+
+  // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
+  private async retriedDelete(entry: TriggerRetiredWebhookEntity): Promise<boolean> {
+    try {
+      await this.disableWebhook(entry.webhook, new InMemoryStore());
+      return true;
+    } catch (err) {
+      if (err instanceof WebhookCredentialError) {
+        this.abandon(entry.webhook, entry.workflowId, err);
+        return true;
+      }
+      this.logger.warn(`retried ${webhookLabel(entry.webhook)} delete failed: ${errorMessage(err)}`);
+      await this.dataSource.manager.update(
+        TriggerRetiredWebhookEntity,
+        { id: entry.id },
+        { lastError: errorMessage(err), updatedAt: now() },
+      );
+      return false;
+    }
+  }
+
+  // An app that upserts (Typeform's per-URL tag) hands a new registration an old one's handle; deleting it would take the new one down.
+  private async registrationHeld(webhook: RegisteredWebhook, exceptActivationId?: string): Promise<boolean> {
+    const rows = await rawQuery<{ trigger_type: string; value: unknown }>(
+      this.dataSource.manager,
+      `SELECT a.trigger_type, s.value
+         FROM runtime_activation_store s
+         JOIN runtime_trigger_activations a ON a.id = s.activation_id
+        WHERE s.key = $1
+          AND COALESCE(s.value -> 'registration' ->> 'subscriptionId', s.value ->> 'subscriptionId') = $2
+          AND ($3::uuid IS NULL OR s.activation_id <> $3::uuid)`,
+      [WEBHOOK_REGISTRATION_KEY, webhook.registration.subscriptionId, exceptActivationId ?? null],
+    );
+    return rows.some(({ trigger_type, value }) => {
+      const registration = webhookRegistrationOf(value);
+      const triggerType = registeredWebhookOf(value)?.triggerType ?? trigger_type;
+      return registration !== null && sameRegistration(webhook, { triggerType, registration });
+    });
+  }
+
+  private async forgetRetiredHeldBy(webhook: RegisteredWebhook): Promise<void> {
+    const em = this.dataSource.manager;
+    const entries = await rawQuery<{ id: string; webhook: RegisteredWebhook }>(
+      em,
+      `SELECT id, webhook FROM trigger_retired_webhooks WHERE webhook -> 'registration' ->> 'subscriptionId' = $1`,
+      [webhook.registration.subscriptionId],
+    );
+    const held = entries.filter((entry) => sameRegistration(entry.webhook, webhook)).map((entry) => entry.id);
+    if (held.length > 0) await em.delete(TriggerRetiredWebhookEntity, { id: In(held) });
+  }
+
+  private abandon(webhook: RegisteredWebhook, workflowId: string, err: WebhookCredentialError): void {
+    this.logger.warn(
+      `${webhookLabel(webhook)} of workflow ${workflowId} can never be deleted with the account that registered it ` +
+        `(${err.message}), so it is left in the app — delete it there`,
+    );
+  }
+
+  /** Register a fresh provider subscription pointing at the per-(workflow,env) intake URL. */
+  private registerWebhook(
+    activationId: string,
+    desired: DesiredActivation,
+    envName: Map<string, string>,
+  ): Promise<void> {
+    return this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired, envName));
+  }
+
+  private async registerWebhookOnce(
+    activationId: string,
+    desired: DesiredActivation,
+    envName: Map<string, string>,
+  ): Promise<RegisteredWebhook | null> {
+    const store = new DbActivationStore(this.dataSource, activationId);
     const secret = randomBytes(32).toString('hex');
     await store.put(WEBHOOK_SECRET_KEY, secret);
+    const webhookUrl = this.webhookUrl(desired.key, envName);
     const registration = await this.sdkWebhooks.enable({
       externalUserId: desired.connection?.ownerUserId ?? '',
       type: desired.triggerType,
       props: desired.props,
       store,
-      webhookUrl: this.webhookUrl(desired, envName),
+      webhookUrl,
       secret,
       auth: desired.connection ? { connectionId: desired.connection.connectionId } : null,
     });
-    if (registration) await store.put(WEBHOOK_REGISTRATION_KEY, registration);
+    if (!registration) return null;
+    const webhook: RegisteredWebhook = {
+      triggerType: desired.triggerType,
+      props: desired.props,
+      connection: desired.connection,
+      webhookUrl,
+      secret,
+      registration,
+    };
+    await store.put(WEBHOOK_REGISTRATION_KEY, webhook);
+    await this.forgetRetiredHeldBy(webhook);
+    return webhook;
   }
 
   /**
@@ -542,7 +742,13 @@ export class TriggerReconcilerService {
     // Without the owning scope's key we cannot delete it, and we do not try — the reaper
     // reports it instead. Dropping our reference above already stopped it firing here.
     if (scope && (await this.composioTriggers.isConfigured(scope))) {
-      await this.composioTriggers.deleteTriggerInstance(scope, instanceToDelete);
+      await this.composioTriggers
+        .deleteTriggerInstance(scope, instanceToDelete)
+        .catch((err) =>
+          this.logger.warn(
+            `delete of ${instanceToDelete} failed, left to the orphan reaper: ${errorMessage(err)}`,
+          ),
+        );
     }
   }
 
@@ -620,9 +826,9 @@ export class TriggerReconcilerService {
     return `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
   }
 
-  private webhookUrl(desired: DesiredActivation, envName: Map<string, string>): string {
-    const name = envName.get(desired.key.environmentId) ?? desired.key.environmentId;
-    return webhookUrlFor(this.publicBaseUrl(), desired.key.workflowId, name);
+  private webhookUrl(key: ActivationKey, envName: Map<string, string>): string {
+    const name = envName.get(key.environmentId) ?? key.environmentId;
+    return webhookUrlFor(this.publicBaseUrl(), key.workflowId, name);
   }
 
   private async loadIrs(versionIds: string[]): Promise<Map<string, WorkflowIR>> {
@@ -641,9 +847,11 @@ export class TriggerReconcilerService {
   private async recordError(activationId: string, err: unknown): Promise<void> {
     // The operator gets the error as thrown; the row carries the copy the user reads.
     this.logger.warn(`activation ${activationId}: ${errorMessage(err)}`);
-    await this.dataSource.manager
-      .update(RuntimeTriggerActivationEntity, { id: activationId }, { lastError: activationError(err) })
-      .catch(() => undefined);
+    await this.dataSource.manager.update(
+      RuntimeTriggerActivationEntity,
+      { id: activationId },
+      { lastError: activationError(err) },
+    );
   }
 
   private publicBaseUrl(): string {
@@ -654,27 +862,29 @@ export class TriggerReconcilerService {
 
 // ─── row ⇄ descriptor mapping + small pure helpers ───
 
-function keyOf(row: RuntimeTriggerActivationEntity): DesiredActivation['key'] {
-  return { workflowId: row.workflowId, environmentId: row.environmentId, triggerNodeId: row.triggerNodeId };
-}
-
-function connOf(row: RuntimeTriggerActivationEntity): ConnectionRef | null {
-  return row.connectionId && row.connectionOwnerUserId
-    ? { connectionId: row.connectionId, ownerUserId: row.connectionOwnerUserId }
-    : null;
-}
-
-/** A materialized row as a descriptor (mirrors `runtime_trigger_activations`). */
-function toDesired(row: RuntimeTriggerActivationEntity): ActualActivation {
+function materializedOf(a: MaterializedActivation): MaterializedActivation {
   return {
-    key: keyOf(row),
-    kind: row.kind as ActivationKind,
-    triggerType: row.triggerType,
-    versionId: row.versionId ?? '',
-    props: row.props ?? {},
-    connection: connOf(row),
-    paused: row.paused,
+    kind: a.kind,
+    triggerType: a.triggerType,
+    props: a.props,
+    connection: a.connection,
+    paused: a.paused,
   };
+}
+
+// Read before the row is overwritten; a row with nothing recorded is best guessed by its own columns.
+function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
+  return row.materialized ?? materializedOf(actualOf(row));
+}
+
+// The props locate the hook in the app (a GitHub hook id exists only under its repository).
+function webhookLabel(webhook: RegisteredWebhook): string {
+  const where = Object.entries(webhook.props)
+    .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+    .map(([key, value]) => `${key} ${String(value)}`)
+    .sort((a, b) => a.localeCompare(b));
+  const label = `${webhook.triggerType} webhook ${webhook.registration.subscriptionId}`;
+  return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }
 
 function slotKey(environmentId: string, node: IRNode): string {

@@ -1,6 +1,11 @@
 import { emptySettings, type IRNode, type WorkflowIR } from '../../ir/models';
 import { deriveDesiredActivations, reconcileActivations, type EnvPointerInput } from './reconcile';
-import { type ActivationKind, type DesiredActivation } from './trigger-activation';
+import {
+  type ActivationKind,
+  type ActualActivation,
+  type DesiredActivation,
+  type MaterializedActivation,
+} from './trigger-activation';
 
 // ─── fixtures ───
 
@@ -61,6 +66,21 @@ function desired(over: Partial<DesiredActivation> & Pick<DesiredActivation, 'key
   };
 }
 
+function live(d: DesiredActivation): MaterializedActivation {
+  return {
+    kind: d.kind,
+    triggerType: d.triggerType,
+    props: d.props,
+    connection: d.connection,
+    paused: d.paused,
+  };
+}
+
+// A row whose last apply finished: what is live is what the row says.
+function settled(d: DesiredActivation): ActualActivation {
+  return { ...d, materialized: live(d) };
+}
+
 // ─── deriveDesiredActivations ───
 
 describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigger nodes)', () => {
@@ -98,6 +118,26 @@ describe('deriveDesiredActivations (DESIRED = env pointers × version-doc trigge
     const result = deriveDesiredActivations({ workflowId: WF, pointers, kindOf, connectionOf: () => null });
     expect(result.map((r) => r.key.environmentId).sort()).toEqual([PROD, STAGING].sort());
   });
+
+  it.each([undefined, null, ['x']])(
+    'a trigger node saved with %p parameters has empty props, so it is live once stood up',
+    (parameters) => {
+      const bare = { ...POLLER, parameters } as unknown as IRNode;
+      const pointers: EnvPointerInput[] = [{ environmentId: PROD, versionId: 'v5', ir: ir([bare]) }];
+      const [result] = deriveDesiredActivations({
+        workflowId: WF,
+        pointers,
+        kindOf,
+        connectionOf: () => null,
+      });
+      expect(result!.props).toEqual({});
+      expect(reconcileActivations([result!], [settled(result!)])).toEqual({
+        toCreate: [],
+        toUpdate: [],
+        toDelete: [],
+      });
+    },
+  );
 });
 
 // ─── reconcileActivations ───
@@ -118,7 +158,7 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
   });
 
   it('an actual key no longer desired → toDelete (e.g. after unpromote)', () => {
-    const a = desired({ key });
+    const a = settled(desired({ key }));
     const plan = reconcileActivations([], [a]);
     expect(plan.toDelete).toEqual([a]);
     expect(plan.toCreate).toHaveLength(0);
@@ -126,7 +166,7 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
 
   it('fully converged (same version, same descriptor) → no-op, and is idempotent', () => {
     const d = desired({ key, versionId: 'v5', props: { url: 'x' } });
-    const plan = reconcileActivations([d], [d]);
+    const plan = reconcileActivations([d], [settled(d)]);
     expect(plan).toEqual({ toCreate: [], toUpdate: [], toDelete: [] });
   });
 
@@ -137,12 +177,14 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
       props: { url: 'x' },
       connection: { connectionId: 'c1', ownerUserId: 'u1' },
     });
-    const a = desired({
-      key,
-      versionId: 'v5',
-      props: { url: 'x' },
-      connection: { connectionId: 'c1', ownerUserId: 'u1' },
-    });
+    const a = settled(
+      desired({
+        key,
+        versionId: 'v5',
+        props: { url: 'x' },
+        connection: { connectionId: 'c1', ownerUserId: 'u1' },
+      }),
+    );
     const plan = reconcileActivations([d], [a]);
     expect(plan.toUpdate).toHaveLength(1);
     expect(plan.toUpdate[0]!.cursorAction).toBe('keep');
@@ -151,7 +193,15 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
 
   it('trigger props changed across the promote → update, cursor RESET', () => {
     const d = desired({ key, versionId: 'v6', props: { url: 'y' } });
-    const a = desired({ key, versionId: 'v5', props: { url: 'x' } });
+    const a = settled(desired({ key, versionId: 'v5', props: { url: 'x' } }));
+    expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
+  });
+
+  it('trigger RETYPED across the promote with identical props → update, cursor RESET', () => {
+    const d = desired({ key, versionId: 'v6', triggerType: 'gmail.poll_new_label', props: { url: 'x' } });
+    const a = settled(
+      desired({ key, versionId: 'v5', triggerType: 'gmail.poll_new_email', props: { url: 'x' } }),
+    );
     expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
   });
 
@@ -162,12 +212,14 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
       props: { url: 'x' },
       connection: { connectionId: 'c2', ownerUserId: 'u2' },
     });
-    const a = desired({
-      key,
-      versionId: 'v5',
-      props: { url: 'x' },
-      connection: { connectionId: 'c1', ownerUserId: 'u1' },
-    });
+    const a = settled(
+      desired({
+        key,
+        versionId: 'v5',
+        props: { url: 'x' },
+        connection: { connectionId: 'c1', ownerUserId: 'u1' },
+      }),
+    );
     const plan = reconcileActivations([d], [a]);
     expect(plan.toUpdate).toHaveLength(1);
     expect(plan.toUpdate[0]!.cursorAction).toBe('reset');
@@ -175,8 +227,33 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
 
   it('pausing an activation is a descriptor change → update, cursor RESET', () => {
     const d = desired({ key, versionId: 'v5', props: { url: 'x' }, paused: true });
-    const a = desired({ key, versionId: 'v5', props: { url: 'x' }, paused: false });
+    const a = settled(desired({ key, versionId: 'v5', props: { url: 'x' }, paused: false }));
     expect(reconcileActivations([d], [a]).toUpdate[0]!.cursorAction).toBe('reset');
+  });
+
+  it('nothing recorded as live (a row from before it was) → update, cursor RESET, even when the row matches', () => {
+    const d = desired({ key, versionId: 'v5', props: { url: 'x' } });
+    const plan = reconcileActivations([d], [{ ...d, materialized: null }]);
+    expect(plan.toUpdate.map((u) => u.cursorAction)).toEqual(['reset']);
+  });
+
+  it('a row written for an apply that never finished → update, cursor RESET, even when the row matches', () => {
+    const d = desired({ key, versionId: 'v6', triggerType: 'gmail.poll_new_label', props: { url: 'x' } });
+    const stoodUp = desired({
+      key,
+      versionId: 'v5',
+      triggerType: 'gmail.poll_new_email',
+      props: { url: 'x' },
+    });
+    const plan = reconcileActivations([d], [{ ...d, materialized: live(stoodUp) }]);
+    expect(plan.toUpdate.map((u) => u.cursorAction)).toEqual(['reset']);
+  });
+
+  it('desired back to what is live, while the row still records an unfinished apply → update, cursor RESET', () => {
+    const stoodUp = desired({ key, versionId: 'v5', props: { url: 'x' } });
+    const unfinished = desired({ key, versionId: 'v6', props: { url: 'y' } });
+    const plan = reconcileActivations([stoodUp], [{ ...unfinished, materialized: live(stoodUp) }]);
+    expect(plan.toUpdate.map((u) => u.cursorAction)).toEqual(['reset']);
   });
 
   it('mixed sweep: create + keep-update + delete in one pass', () => {
@@ -189,8 +266,8 @@ describe('reconcileActivations (idempotent desired-vs-actual sweep)', () => {
       desired({ key: fresh, kind: 'webhook', versionId: 'v6' }),
     ];
     const actualSet = [
-      desired({ key: keep, versionId: 'v5', props: { url: 'x' } }),
-      desired({ key: gone, versionId: 'v5' }),
+      settled(desired({ key: keep, versionId: 'v5', props: { url: 'x' } })),
+      settled(desired({ key: gone, versionId: 'v5' })),
     ];
     const plan = reconcileActivations(desiredSet, actualSet);
     expect(plan.toCreate.map((c) => c.key.environmentId)).toEqual(['env-uat']);

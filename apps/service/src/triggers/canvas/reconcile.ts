@@ -3,6 +3,8 @@ import type { IRNode, WorkflowIR } from '../../ir/models';
 import {
   activationDescriptorEqual,
   activationKeyString,
+  applyFinished,
+  triggerPropsOf,
   type ActivationKind,
   type ActualActivation,
   type ConnectionRef,
@@ -62,7 +64,7 @@ export function deriveDesiredActivations(input: DeriveInput): DesiredActivation[
         kind,
         triggerType: node.node_type,
         versionId: pointer.versionId,
-        props: node.parameters,
+        props: triggerPropsOf(node),
         connection: input.connectionOf(pointer.environmentId, node),
         paused: pausedOf(pointer.environmentId, node),
       });
@@ -86,10 +88,7 @@ export interface ReconcilePlan {
   toDelete: ActualActivation[];
 }
 
-/**
- * The idempotent desired-vs-actual sweep. Cursor handoff: an UNCHANGED descriptor keeps its cursor
- * across a version move (a promote must not replay dedup); a changed one resets it from now.
- */
+/** The idempotent desired-vs-LIVE plan: a desired descriptor equal to what is live keeps its cursor, anything else resets. */
 export function reconcileActivations(
   desired: DesiredActivation[],
   actual: ActualActivation[],
@@ -106,7 +105,7 @@ export function reconcileActivations(
       toCreate.push(d);
       continue;
     }
-    if (!activationDescriptorEqual(d, match)) {
+    if (!isLive(d, match)) {
       toUpdate.push({ desired: d, actual: match, cursorAction: 'reset' });
     } else if (d.versionId !== match.versionId) {
       // Same config, new version answering: keep the cursor, but record the version.
@@ -116,4 +115,8 @@ export function reconcileActivations(
 
   const toDelete = actual.filter((a) => !desiredKeys.has(activationKeyString(a.key)));
   return { toCreate, toUpdate, toDelete };
+}
+
+function isLive(desired: DesiredActivation, actual: ActualActivation): boolean {
+  return applyFinished(actual) && activationDescriptorEqual(desired, actual.materialized);
 }

@@ -4,15 +4,19 @@ import {
   type AuthHandle,
   type DropdownResult,
   type FetchLike,
+  type NormalizedResponse,
   type WebhookRegistration,
   type WebhookRequest,
   type WebhookTrigger,
 } from '@sarati/actions-sdk';
 
+import { errorMessage } from '../common/error-message';
 import { ConnectionsService } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
 import {
   buildDirectAuth,
+  buildObservedDirectAuth,
+  ConnectionGoneError,
   loadTriggerOptions,
   resolveTriggerCredential,
   sdkStore,
@@ -24,8 +28,11 @@ export const SDK_WEBHOOK_FETCH = Symbol('SDK_WEBHOOK_FETCH');
 
 /** The per-trigger secret WE generated — SINGLE definition site (reconciler writes, intake reads). */
 export const WEBHOOK_SECRET_KEY = 'webhook.secret';
-/** The durable {@link WebhookRegistration} handle `onEnable` returned — carries any PROVIDER-minted signing secret. */
+/** The record of what `onEnable` registered; its {@link WebhookRegistration} handle carries any PROVIDER-minted signing secret. */
 export const WEBHOOK_REGISTRATION_KEY = 'webhook.registration';
+
+/** A webhook delete no retry can perform: no account is recorded, its connection is gone, or the app rejects the credential. */
+export class WebhookCredentialError extends Error {}
 
 /** Common shape the three lifecycle entrypoints share (one trigger row's context). */
 interface SdkWebhookContext {
@@ -143,18 +150,41 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** Delete the subscription named by `registration`. Best-effort teardown — see callers. */
+  /** Delete the subscription named by `registration`; throws {@link WebhookCredentialError} when retrying cannot help. */
   async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<void> {
     const trigger = this.require(ctx.type);
-    const auth = await this.authFor(ctx.externalUserId, ctx.auth, trigger);
-    await trigger.disable({
-      auth,
-      props: ctx.props,
-      store: sdkStore(ctx.store),
-      webhookUrl: ctx.webhookUrl,
-      secret: ctx.secret,
-      ...(ctx.registration ? { registration: ctx.registration } : {}),
-    });
+    if (ctx.auth === null && trigger.auth.type !== 'none') {
+      throw new WebhookCredentialError('no account is recorded for it');
+    }
+    let last: NormalizedResponse | null = null;
+    try {
+      const credential = await resolveTriggerCredential(
+        this.connections,
+        ctx.externalUserId,
+        ctx.auth,
+        trigger.auth,
+      );
+      await trigger.disable({
+        auth: buildObservedDirectAuth(trigger.auth, credential, this.fetchImpl, (r) => (last = r)),
+        props: ctx.props,
+        store: sdkStore(ctx.store),
+        webhookUrl: ctx.webhookUrl,
+        secret: ctx.secret,
+        ...(ctx.registration ? { registration: ctx.registration } : {}),
+      });
+    } catch (err) {
+      if (err instanceof ConnectionGoneError) {
+        throw new WebhookCredentialError('the connection it was registered with no longer exists', {
+          cause: err,
+        });
+      }
+      if (rejectsCredential(last)) {
+        throw new WebhookCredentialError(`the app rejected its credential: ${errorMessage(err)}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
   }
 
   private require(type: string): WebhookTrigger<never, unknown> {
@@ -172,4 +202,13 @@ export class SdkWebhookProvider {
     const credential = await resolveTriggerCredential(this.connections, externalUserId, auth, trigger.auth);
     return buildDirectAuth(trigger.auth, credential, this.fetchImpl);
   }
+}
+
+// A 403 that is a rate limit (GitHub answers both with it) passes, so a later retry can still succeed.
+function rejectsCredential(response: NormalizedResponse | null): boolean {
+  if (response?.status === 401) return true;
+  if (response?.status !== 403) return false;
+  const { headers, data } = response;
+  const body = typeof data === 'string' ? data : JSON.stringify(data ?? '');
+  return !(headers['x-ratelimit-remaining'] === '0' || 'retry-after' in headers || /rate limit/i.test(body));
 }

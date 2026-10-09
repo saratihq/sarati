@@ -411,7 +411,8 @@ CREATE TABLE public.runtime_trigger_activations (
     last_polled_at timestamp with time zone,
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    materialized jsonb
 );
 
 
@@ -1649,6 +1650,24 @@ CREATE TABLE public.review_test_results (
 CREATE INDEX ix_review_test_results_versions ON public.review_test_results USING btree (workflow_id, source_version_id, target_version_id, tested_at DESC);
 
 CREATE INDEX ix_review_test_results_review ON public.review_test_results USING btree (review_id);
+
+--
+-- Name: trigger_retired_webhooks; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.trigger_retired_webhooks (
+    id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    environment_id uuid NOT NULL,
+    trigger_node_id character varying(64) NOT NULL,
+    webhook jsonb NOT NULL,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT trigger_retired_webhooks_pkey PRIMARY KEY (id)
+);
+
+CREATE INDEX ix_trigger_retired_webhooks_workflow ON public.trigger_retired_webhooks USING btree (workflow_id);
 
 
 --

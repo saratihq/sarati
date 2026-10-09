@@ -216,8 +216,8 @@ describe('SDK registered-webhook fire path (e2e, stubbed provider fetch)', () =>
       [wfId],
     );
     expect(store.rows[0].value).toMatchObject({
-      subscriptionId: 'we_e2e',
-      signingSecret: STRIPE_MINTED_SECRET,
+      triggerType: 'stripe.new_customer',
+      registration: { subscriptionId: 'we_e2e', signingSecret: STRIPE_MINTED_SECRET },
     });
   });
 

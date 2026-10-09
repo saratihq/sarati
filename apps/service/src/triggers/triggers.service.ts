@@ -1,9 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
+import type { Pool } from 'pg';
 import { In } from 'typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
-
-import type { WebhookRegistration } from '@sarati/actions-sdk';
 
 import type { Principal } from '../auth/principal';
 import { runBounded } from '../common/bounded';
@@ -17,11 +16,16 @@ import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { RuntimeTriggerActivationEntity } from '../database/entities/runtime-trigger-activation.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
+import { PG_POOL } from '../database/tokens';
 import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
-import type { IRNode, WorkflowIR } from '../ir/models';
+import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
+import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
+import { actualOf } from './canvas/activation-row';
+import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
+import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
 import {
@@ -36,6 +40,7 @@ import {
   WEBHOOK_SECRET_KEY,
 } from '../providers/sdk-webhook.provider';
 import { AgentStepBus, channelKey } from '../runtime/agent-step-bus';
+import type { DagPlan } from '../runtime/dag-plan';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import { RunsService } from '../runs/runs.service';
 import { extractChatReply } from '../runtime/terminal-output';
@@ -83,6 +88,21 @@ const CHAT_RUN_TIMEOUT_MS = 30_000;
 /** Canvas-trigger ACTIVATION kinds the poll cycle drives. */
 const ORCHESTR_SCHEDULE_KIND = 'schedule';
 const POLLING_KIND = 'polling';
+
+interface ActivationTarget {
+  wf: WorkflowEntity;
+  env: EnvironmentEntity;
+  versionId: string;
+  ir: WorkflowIR;
+}
+
+// What one locked poll yields: its events, to fire on the version live when they were polled, which holds the trigger.
+interface PolledEvents {
+  row: RuntimeTriggerActivationEntity;
+  target: ActivationTarget;
+  plan: DagPlan;
+  events: TriggerEvent[];
+}
 
 /** Composio orphan reaper (backstop): run at the sweep cadence, not every poll tick. */
 const COMPOSIO_REAP_INTERVAL_MS = 15 * 60_000;
@@ -141,6 +161,7 @@ export class TriggersService {
     private readonly agentStepBus: AgentStepBus,
     private readonly triggerCatalog: TriggerCatalogService,
     private readonly platformKeys: PlatformKeysService,
+    @Inject(PG_POOL) private readonly pool: Pool,
   ) {}
 
   /** The trigger palette for the client's canvas picker — served verbatim from the one trigger source. */
@@ -276,7 +297,7 @@ export class TriggersService {
     const store = new DbActivationStore(this.dataSource, row.id);
     const [secret, registration] = await Promise.all([
       store.get<string>(WEBHOOK_SECRET_KEY),
-      store.get<WebhookRegistration>(WEBHOOK_REGISTRATION_KEY),
+      store.get<unknown>(WEBHOOK_REGISTRATION_KEY).then(webhookRegistrationOf),
     ]);
 
     let events: unknown[];
@@ -284,7 +305,7 @@ export class TriggersService {
       events = await this.sdkWebhooks.handleRequest({
         externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
         type: node.node_type,
-        props: node.parameters,
+        props: triggerPropsOf(node),
         auth: row.connectionId ? { connectionId: row.connectionId } : null,
         store,
         // Only read by enable/disable (registration), never by verify/transform.
@@ -574,43 +595,66 @@ export class TriggersService {
   }
 
   /** Fire one due activation (schedule/polling). Compile/resolve failures land on its `last_error`. */
-  private async pollActivation(row: RuntimeTriggerActivationEntity): Promise<number> {
+  private async pollActivation(loaded: RuntimeTriggerActivationEntity): Promise<number> {
+    // A reconcile holding the lock is changing this activation; the next cycle polls what it leaves.
+    const polled = await ifActivationUnlocked(this.pool, loaded.id, async () => {
+      const row = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
+        where: { id: loaded.id },
+      });
+      // Removed or changed since the cycle loaded it, or not stood up as it reads: its store is not this row's.
+      if (!row || !sameLiveTrigger(row, loaded) || !applyFinished(actualOf(row))) return null;
+      return this.pollLockedActivation(row);
+    }).catch((err: unknown) => {
+      this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);
+      return null;
+    });
+    if (!polled) return 0;
+    // Only awaiting a run happens outside the lock (a run can wait for days); every write to the activation's store stays inside it.
+    await this.fireEvents(polled);
+    return polled.events.length;
+  }
+
+  private async pollLockedActivation(row: RuntimeTriggerActivationEntity): Promise<PolledEvents | null> {
     const em = this.dataSource.manager;
     try {
-      const { wf, env, versionId, ir } = await this.resolveActivationTarget(row);
-      const plan = this.compiler.compile(ir, wf.id);
-
+      const target = await this.resolveActivationTarget(row);
+      // A pointer moved and its reconcile has yet to run: the live version does not hold this trigger.
+      if (!holdsTrigger(target.ir, row)) return null;
+      const plan = this.compiler.compile(target.ir, target.wf.id);
       const store = new DbActivationStore(this.dataSource, row.id);
-      const events = await this.pollableEvents(row, store, wf);
-      const externalUserId = row.connectionOwnerUserId ?? wf.userId ?? '';
-      for (const event of events) {
-        await this.runs
-          .runExecutable(plan, {
-            externalUserId,
-            runId: newId(),
-            initialScope: { trigger: event.payload },
-            workflowId: wf.id,
-            workflowVersionId: versionId,
-            source: 'trigger',
-            environment: env.name,
-            environmentId: env.id,
-            orgId: wf.orgId,
-          })
-          .catch((err) => this.logger.warn(`activation ${row.id}: fired run failed: ${String(err)}`));
-      }
+      const events = await this.pollableEvents(row, store, target.wf);
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
         { lastPolledAt: now(), lastError: null },
       );
-      return events.length;
+      return { row, target, plan, events };
     } catch (err) {
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
         { lastPolledAt: now(), lastError: activationError(err) },
       );
-      return 0;
+      return null;
+    }
+  }
+
+  private async fireEvents({ row, target, plan, events }: PolledEvents): Promise<void> {
+    const { wf, env, versionId } = target;
+    for (const event of events) {
+      await this.runs
+        .runExecutable(plan, {
+          externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
+          runId: newId(),
+          initialScope: { trigger: event.payload },
+          workflowId: wf.id,
+          workflowVersionId: versionId,
+          source: 'trigger',
+          environment: env.name,
+          environmentId: env.id,
+          orgId: wf.orgId,
+        })
+        .catch((err) => this.logger.warn(`activation ${row.id}: fired run failed: ${String(err)}`));
     }
   }
 
@@ -661,9 +705,7 @@ export class TriggersService {
    * Resolve an activation row to its live fire target: workflow → env → PINNED version → IR.
    * Re-resolved on every fire (so a promote takes effect next tick); throws land on `last_error`.
    */
-  private async resolveActivationTarget(
-    row: RuntimeTriggerActivationEntity,
-  ): Promise<{ wf: WorkflowEntity; env: EnvironmentEntity; versionId: string; ir: WorkflowIR }> {
+  private async resolveActivationTarget(row: RuntimeTriggerActivationEntity): Promise<ActivationTarget> {
     const em = this.dataSource.manager;
     const wf = await em.findOne(WorkflowEntity, { where: { id: row.workflowId } });
     if (!wf) throw new Error(`Bound workflow ${row.workflowId} no longer exists`);
@@ -816,6 +858,19 @@ async function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): P
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {
+  const node = ir.nodes.find((n) => n.id === row.triggerNodeId);
+  return node?.node_type === row.triggerType && deepEqual(triggerPropsOf(node), row.props ?? {});
+}
+
+function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {
+  return (
+    a.triggerType === b.triggerType &&
+    deepEqual(a.props, b.props) &&
+    deepEqual(a.materialized, b.materialized)
+  );
 }
 
 /** Roll an activation row up to a single health status (paused → error → ok → idle). */

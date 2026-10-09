@@ -99,6 +99,38 @@ event instead.
 
 Catching a sample does not run the workflow.
 
+## Changing a live app trigger
+
+An app trigger that is live in an environment is registered with the app — a webhook in GitHub or
+Stripe, a subscription, or a place in a polled feed. Promoting a version that changes the trigger's
+type or its settings, or giving the environment's slot a different account, replaces that
+registration:
+
+1. The old one is deleted, with the account and settings that created it.
+2. The new one starts fresh from that moment; it never picks up where the old one was.
+
+Until the new one is in place, an old polled trigger is not checked, so nothing it finds starts the
+version you promoted.
+
+A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
+a polled trigger carries on from where it was.
+
+If the app can't delete the old webhook, the new trigger goes live anyway, and the delete is tried
+again every fifteen minutes — even after you remove the trigger, its workflow or its environment.
+A webhook that a live trigger has registered again is never deleted: Typeform keeps one webhook per
+form for each workflow environment, and a new trigger on that form takes it over. A webhook that no
+live trigger holds is given up when the account that created it has been removed, or when the app
+rejects its credential (a rate limit is not a rejection): the service log then names the webhook
+and the repository or form it is on (at warn level), and you delete it in the app yourself.
+
+Linear is the exception: the Linear trigger does not report a failed delete, so a webhook it could
+not delete stays in Linear, and nothing retries it or names it in the log.
+
+A registration that failed to start shows its error on the workflow overview and is retried every
+fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
+polled trigger whose feed could not be read when it started is not checked, so it never fires the
+items that were already in its feed.
+
 ## Localhost and inbound triggers
 
 A webhook is a push. A service on the internet cannot reach `http://localhost`.

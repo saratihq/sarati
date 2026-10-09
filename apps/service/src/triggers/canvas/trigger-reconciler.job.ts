@@ -46,5 +46,10 @@ export class TriggerReconcilerJob implements OnModuleInit {
       // The reconciler must never take the API down — log and continue serving.
       this.logger.error(`trigger reconciler setup failed: ${errorMessage(err)}`);
     }
+    await this.reconciler
+      .reconcileUnfinished()
+      .catch((err: unknown) =>
+        this.logger.error(`reconcile of unfinished trigger activations failed: ${errorMessage(err)}`),
+      );
   }
 }

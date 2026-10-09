@@ -37,6 +37,19 @@ credentials. Removing a container removes nothing you care about. An upgrade kee
 count and leaves connected accounts `active`, because the `FERNET_KEY` it already had still decrypts
 them.
 
+**Upgrading from v0.2.22 or earlier** starts every live trigger over once, as the upgraded service
+starts: webhooks registered with an app are deleted and registered again, subscriptions are renewed,
+polled triggers start from that moment, and schedules restart their interval. An item that arrives
+between a polled trigger's last check and that moment may not start a run. Earlier releases did not
+record what each trigger had registered, so this is the one time it is rebuilt from scratch. If an
+earlier release changed an app-webhook trigger into a different kind of trigger, or emptied the
+environment slot one ran on, the webhook it left registered can't be deleted for you: the service
+log names it at warn level after that first rebuild, at the latest on the fifteen-minute sweep that
+follows it, so you can delete it in the app. A webhook that an earlier release replaced after the
+slot moved to another account, or after a GitHub trigger's repository changed, was never recorded,
+so it is neither deleted nor named in the log: look in the old account or repository for webhooks
+that point at this install, and delete them there.
+
 ## Back up
 
 Your install is one container or five — `docker compose ps` in the `sarati` directory tells you

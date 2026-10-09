@@ -24,6 +24,7 @@ import {
   RuntimeActivationStoreEntity,
   RuntimeTriggerActivationEntity,
 } from './entities/runtime-trigger-activation.entity';
+import { TriggerRetiredWebhookEntity } from './entities/trigger-retired-webhook.entity';
 import { UserSettingsEntity } from './entities/user-settings.entity';
 import { UserEntity } from './entities/user.entity';
 import { WorkflowBranchEntity } from './entities/workflow-branch.entity';
@@ -68,6 +69,7 @@ export const ENTITIES = [
   RuntimeBlobEntity,
   RuntimeTriggerActivationEntity,
   RuntimeActivationStoreEntity,
+  TriggerRetiredWebhookEntity,
 ];
 
 @Injectable()

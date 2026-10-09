@@ -1,12 +1,15 @@
 import {
   type AuthHandle,
   type AuthScheme,
+  createAuth,
   createDirectAuth,
   type DirectCredential,
+  DirectTransport,
   type DropdownResult,
   type FetchLike,
   HttpClient,
   type ManifestEntry,
+  type NormalizedResponse,
   resolveOptions,
   type TriggerStore,
 } from '@sarati/actions-sdk';
@@ -31,6 +34,15 @@ export function extractToken(credential: unknown): string | null {
   return null;
 }
 
+const NEEDS_CONNECTION = 'This trigger needs a connected account to run — connect the app first';
+
+/** The connection a trigger references no longer exists for its owner. */
+export class ConnectionGoneError extends Error {
+  constructor() {
+    super(NEEDS_CONNECTION);
+  }
+}
+
 /**
  * Resolve a trigger's credential into an SDK {@link DirectCredential} — a `none` scheme needs no token, a
  * `{connectionId}` is decrypted, an inline credential passes through. A MANAGED connection is rejected: its
@@ -49,11 +61,10 @@ export async function resolveTriggerCredential(
       throw new Error('Trigger references a connection, but the connections store is unavailable');
     }
     resolved = await connections.getCredential(externalUserId, auth.connectionId);
+    if (resolved === null) throw new ConnectionGoneError();
   }
   const token = extractToken(resolved);
-  if (!token) {
-    throw new Error('This trigger needs a connected account to run — connect the app first');
-  }
+  if (!token) throw new Error(NEEDS_CONNECTION);
   if (token.startsWith(MANAGED_TOKEN_PREFIX)) {
     throw new Error(
       'This trigger needs a directly-authenticated connection — a managed (Composio) connection cannot be used on the direct rail. Reconnect the app with your own credentials.',
@@ -71,6 +82,24 @@ export function buildDirectAuth(
   return fetchImpl
     ? createDirectAuth(scheme, credential, { fetchImpl })
     : createDirectAuth(scheme, credential);
+}
+
+/** {@link buildDirectAuth}, reporting every response it receives to `onResponse`. */
+export function buildObservedDirectAuth(
+  scheme: AuthScheme,
+  credential: DirectCredential,
+  fetchImpl: FetchLike | undefined,
+  onResponse: (response: NormalizedResponse) => void,
+): AuthHandle {
+  const direct = new DirectTransport({ scheme, credential, ...(fetchImpl ? { fetchImpl } : {}) });
+  return createAuth(scheme, {
+    kind: direct.kind,
+    send: async (request) => {
+      const response = await direct.send(request);
+      onResponse(response);
+      return response;
+    },
+  });
 }
 
 /** Adapt the runtime {@link ProviderStore} (get/put/delete) to the SDK {@link TriggerStore} (get/set). */
