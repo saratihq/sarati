@@ -14,10 +14,7 @@ export interface ReapResult {
   orphanSteps: number;
 }
 
-/**
- * Moves runs a dead worker left non-terminal to a terminal `error`. Purely time-based, which is what
- * makes it replica-safe: anything in flight past `RUN_MAX_DURATION_SECONDS` cannot be a live run. Idempotent.
- */
+/** Moves runs a dead worker left non-terminal to `error`; replica-safe because a run in flight past the max since it started or resumed cannot be live. */
 @Injectable()
 export class RunReaperService implements OnApplicationBootstrap {
   private readonly logger = new Logger(RunReaperService.name);
@@ -54,13 +51,13 @@ export class RunReaperService implements OnApplicationBootstrap {
     const em = this.dataSource.manager;
     const cutoff = `now() - ($1 || ' seconds')::interval`;
 
-    // (A) `running` runs older than the max — the worker died without writing an ending.
+    // (A) `running` past the max since it started or last resumed: the worker died without writing an ending.
     const crashedRuns = await rawMutate(
       em,
       `UPDATE runtime_runs
           SET status = 'error', finished_at = now(),
               error = COALESCE(error, 'Run did not complete within the maximum duration — the worker likely crashed, was killed, or was interrupted by a deploy.')
-        WHERE status = 'running' AND started_at < ${cutoff}`,
+        WHERE status = 'running' AND COALESCE(resumed_at, started_at) < ${cutoff}`,
       [seconds],
     );
 
@@ -81,9 +78,7 @@ export class RunReaperService implements OnApplicationBootstrap {
       [seconds, TIMER_TOPIC_SQL_PREFIX],
     );
 
-    // (C) orphan steps left `running` past the window. A step whose run is PARKED is not stale —
-    //     the wait step stays `running` for as long as the run is deliberately asleep, and reaping
-    //     it would mark a healthy run's step failed while the run itself waits on.
+    // (C) a step outlives only a run that has ended; a live run's step can span its park.
     const orphanSteps = await rawMutate(
       em,
       `UPDATE runtime_run_steps s
@@ -91,7 +86,7 @@ export class RunReaperService implements OnApplicationBootstrap {
               error = COALESCE(s.error, 'Step did not complete — the run was reaped.')
         WHERE s.status = 'running' AND s.started_at < ${cutoff}
           AND NOT EXISTS (
-            SELECT 1 FROM runtime_runs r WHERE r.id = s.run_id AND r.status = 'waiting'
+            SELECT 1 FROM runtime_runs r WHERE r.id = s.run_id AND r.status IN ('running', 'waiting')
           )`,
       [seconds],
     );

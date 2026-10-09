@@ -3,11 +3,48 @@ import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
+import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { RunReaperService } from '../src/runs/run-reaper.service';
+import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
+
+const irNode = (id: string, node_type: string, parameters: Record<string, unknown>) => ({
+  id,
+  name: id,
+  node_type,
+  type_version: 1,
+  parameters,
+  position: { x: 0, y: 0 },
+  metadata: {},
+});
+const irEdge = (from: string, to: string) => ({
+  id: `${from}->${to}`,
+  source_node_id: from,
+  source_port: 0,
+  target_node_id: to,
+  target_port: 0,
+  port_type: 'main',
+});
+// Three seconds sleeps in place: the run stays in flight through it.
+const inPlaceWait = (id: string) =>
+  irNode(id, 'orchestr:wait_for_duration', { amount: 0.05, unit: 'minutes' });
+
+const approvalIr = {
+  version: '1.0',
+  name: 'resumed run',
+  description: '',
+  nodes: [
+    irNode('approval', 'orchestr:wait_for_event', { topic: 'approve', timeout_ms: 600_000 }),
+    inPlaceWait('after'),
+    inPlaceWait('spanning'),
+  ],
+  edges: [irEdge('approval', 'after')],
+  settings: { execution_order: 'v1', extra: {} },
+  metadata: {},
+};
 
 /** The reaper errors out crashed non-terminal runs; RUN_MAX_DURATION_SECONDS defaults to 3600. */
 describe('run durability reaper (B8, e2e, isolated DB)', () => {
@@ -19,16 +56,25 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
   const insertRun = async (over: {
     status: string;
     startedAgo: string; // interval, e.g. '2 hours'
+    resumedAgo?: string;
     waitingTimeoutAt?: string | null; // SQL expr or null
     /** What the run is parked on — a timer wakes itself; anything else waits on a person. */
     waitingTopic?: string;
   }): Promise<string> => {
     const id = randomUUID();
     await db.query(
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_timeout_at, waiting_node_id, waiting_topic)
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_timeout_at, waiting_node_id, waiting_topic, resumed_at)
        VALUES ($1, $2, $3, 'plan-x', $4, now() - ($5)::interval, ${over.waitingTimeoutAt ?? 'NULL'},
-               ${over.status === 'waiting' ? `'n1'` : 'NULL'}, $6)`,
-      [id, `rid-${id.slice(0, 8)}`, userId, over.status, over.startedAgo, over.waitingTopic ?? null],
+               ${over.status === 'waiting' ? `'n1'` : 'NULL'}, $6, now() - ($7)::interval)`,
+      [
+        id,
+        `rid-${id.slice(0, 8)}`,
+        userId,
+        over.status,
+        over.startedAgo,
+        over.waitingTopic ?? null,
+        over.resumedAgo ?? null,
+      ],
     );
     return id;
   };
@@ -43,6 +89,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
+    process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
@@ -54,6 +101,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
+    await listenOnLoopback(app);
     reaper = app.get(RunReaperService);
   }, 30_000);
 
@@ -154,6 +202,69 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const row = await statusOf(overdue);
     expect(row.status).toBe('error');
     expect(row.error).toMatch(/never woke/i);
+  });
+
+  it('counts only the time in flight since a run resumed: one approved after a long wait finishes, never reaped', async () => {
+    const http = (): ReturnType<typeof request> => request(app.getHttpServer());
+    const finished = http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: approvalIr, run_id: 'resumed-1' })
+      .then((r) => r);
+    const runRow = async (): Promise<{ id: string; status: string; error: string | null }> =>
+      (await db.query(`SELECT id, status, error FROM runtime_runs WHERE run_id = 'resumed-1'`)).rows[0] ?? {};
+    const stepStatuses = async (): Promise<Record<string, string>> => {
+      const rows = await db.query(
+        `SELECT s.node_id, s.status FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+          WHERE r.run_id = 'resumed-1'`,
+      );
+      return Object.fromEntries(
+        rows.rows.map((r: { node_id: string; status: string }) => [r.node_id, r.status]),
+      );
+    };
+    const until = async (done: () => Promise<boolean>): Promise<void> => {
+      for (let i = 0; i < 200 && !(await done()); i++) await new Promise((r) => setTimeout(r, 10));
+      if (!(await done())) throw new Error('condition never held');
+    };
+
+    // Parked for longer than the max: the run and both steps began two hours ago.
+    await until(async () => (await runRow()).status === 'waiting');
+    const { id } = await runRow();
+    await db.query(`UPDATE runtime_runs SET started_at = now() - interval '2 hours' WHERE id = $1`, [id]);
+    await db.query(`UPDATE runtime_run_steps SET started_at = now() - interval '2 hours' WHERE run_id = $1`, [
+      id,
+    ]);
+
+    await http().post('/api/runs/resumed-1/events').send({ topic: 'approve', payload: {} }).expect(200);
+    await until(async () => (await stepStatuses()).after === 'running');
+
+    await reaper.reapStale();
+    expect(await runRow()).toMatchObject({ status: 'running', error: null });
+    expect(await stepStatuses()).toMatchObject({
+      approval: 'completed',
+      after: 'running',
+      spanning: 'running',
+    });
+
+    expect((await finished).status).toBe(201);
+    expect(await runRow()).toMatchObject({ status: 'completed', error: null });
+    expect(await stepStatuses()).toEqual({
+      approval: 'completed',
+      after: 'completed',
+      spanning: 'completed',
+    });
+  });
+
+  it('still reaps a run in flight past the max since it resumed — the worker died after the wait', async () => {
+    const run = await insertRun({ status: 'running', startedAgo: '5 hours', resumedAgo: '2 hours' });
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
+       VALUES (gen_random_uuid(), $1, 'k1', 'n1', 'action', 'running', now() - interval '2 hours')`,
+      [run],
+    );
+    await reaper.reapStale();
+    expect(await statusOf(run)).toMatchObject({ status: 'error', finished: true });
+    const step = await db.query(`SELECT status FROM runtime_run_steps WHERE run_id = $1`, [run]);
+    expect(step.rows[0].status).toBe('error');
   });
 
   it('is idempotent — a second sweep reaps nothing new', async () => {

@@ -207,11 +207,11 @@ export class RunRecorderService implements RunRecorder {
     ]);
   }
 
-  /** The wait resolved (event or timeout) — back to running, waiting state cleared. */
+  /** The wait resolved (event or timeout) — back to running from now, waiting state cleared. */
   async runResumed(scopedRunId: string): Promise<void> {
     await this.write('runResumed', scopedRunId, [
       `UPDATE runtime_runs
-          SET status = 'running', waiting_node_id = NULL, waiting_topic = NULL,
+          SET status = 'running', resumed_at = now(), waiting_node_id = NULL, waiting_topic = NULL,
               waiting_since = NULL, waiting_timeout_at = NULL
         WHERE id = $1 AND status = 'waiting'`,
       [scopedRunId],
