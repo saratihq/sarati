@@ -14,9 +14,12 @@ import { SaratiLoader } from "./SaratiLogo";
 export default function ComposerBar({
   workflowId,
   panel = false,
+  saveBlocked = null,
 }: {
   workflowId?: string;
   panel?: boolean;
+  /** Why this canvas can't be saved right now (e.g. a protected branch); the save chip follows it, as the editor's Save does. */
+  saveBlocked?: string | null;
 }) {
   const thread = useComposer((s) => s.thread);
   const questions = useComposer((s) => s.questions);
@@ -213,7 +216,13 @@ export default function ComposerBar({
       {offerPending && !streaming && (
         <div className="flex items-center gap-2" data-testid="composer-offer">
           {/* The composer commits versions but never moves a live pointer. */}
-          <Button size="sm" disabled={accepting} onClick={() => void acceptOffer("live", workflowId)} data-testid="offer-save-live">
+          <Button
+            size="sm"
+            disabled={accepting || saveBlocked !== null}
+            title={saveBlocked ?? undefined}
+            onClick={() => void acceptOffer("live", workflowId)}
+            data-testid="offer-save-live"
+          >
             {accepting ? <SaratiLoader size={13} /> : null} {workflowId || !canTurnOn ? "Save" : "Save and turn on"}
           </Button>
           <Button
@@ -228,6 +237,11 @@ export default function ComposerBar({
           >
             Keep tweaking
           </Button>
+          {saveBlocked && (
+            <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              {saveBlocked}
+            </span>
+          )}
         </div>
       )}
       {panel && hasThread && !streaming && (

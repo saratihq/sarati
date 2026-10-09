@@ -344,7 +344,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
   ): Promise<boolean> => {
     try {
       for await (const evt of agent.composerStream(
-        { message, sessionId: get().sessionId, workflowId, ir: canvas },
+        { message, sessionId: get().sessionId, workflowId, ir: canvas, branch: useWorkflow.getState().editBranch },
         mine.signal,
       )) {
         // A dead session is recoverable, not a user error — drop the stale id and signal a retry.
@@ -448,7 +448,13 @@ export const useComposer = create<ComposerStore>((set, get) => {
           set({ failure: "Couldn't save — try Save in the header." });
           return;
         }
-        await get().send("Saved a new version. It won't go live until you publish it from the overview.", workflowId);
+        const { editBranch } = useWorkflow.getState();
+        await get().send(
+          editBranch === "main"
+            ? "Saved a new version. It won't go live until you publish it from the overview."
+            : `Saved a new version on ${editBranch}. It reaches what runs only after a merge into main and a publish, or a promotion.`,
+          workflowId,
+        );
       } catch (e) {
         set({ failure: e instanceof Error ? e.message : "Couldn't save." });
       } finally {

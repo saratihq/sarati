@@ -158,6 +158,7 @@ function makeCtx(
     callerOrgId: null,
     persist: null,
     draftIr: { nodes: draftNodes, edges: [] },
+    canvasBranch: null,
     busy: true,
     lastUsedAt: Date.now(),
     seq: 0,
@@ -414,6 +415,35 @@ describe('ComposerService.stream', () => {
     const edited = { nodes: [{ id: 'n1' }], edges: [] };
     await collect(service.stream({ message: 'b', session_id: id, ir: edited }, never, null, null));
     expect(sessions.get(id)!.draftIr).toEqual(edited);
+  });
+});
+
+describe('ComposerService on any canvas', () => {
+  const promptOf = (query: jest.Mock): string => (query.mock.calls.at(-1)![0] as { prompt: string }).prompt;
+
+  it("tells the agent a branch canvas's saves change nothing that runs, and says nothing of the kind on main", async () => {
+    const query = jest.fn(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+    const { service } = await makeService(query);
+    const ir = { nodes: [{ id: 'trigger' }], edges: [] };
+
+    await collect(service.stream({ message: 'tweak it', ir, branch: 'lane' }, never, null, null));
+    expect(promptOf(query)).toContain(
+      '<canvas_branch>lane — not main: its versions reach what runs only through a merge into main and a publish, or a promotion.</canvas_branch>',
+    );
+
+    await collect(service.stream({ message: 'tweak it', ir, branch: 'main' }, never, null, null));
+    expect(promptOf(query)).not.toContain('<canvas_branch>');
+  });
+
+  it("works from the canvas it is sent, and never reads main's version in its place", async () => {
+    const readWorkflow = jest.fn();
+    const query = jest.fn(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+    const { service } = await makeService(query, { readWorkflow });
+
+    await collect(service.stream({ message: 'hello', workflow_id: 'wf-1' }, never, null, null));
+
+    expect(readWorkflow).not.toHaveBeenCalled();
+    expect(promptOf(query)).toContain('<canvas_state>empty — no steps yet</canvas_state>');
   });
 });
 

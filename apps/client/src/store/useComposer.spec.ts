@@ -6,10 +6,12 @@ import { UNTITLED_WORKFLOW, useWorkflow } from "@/store/useWorkflow";
 vi.mock("@/api/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof agent>()),
   composerAttach: vi.fn(),
+  composerStream: vi.fn(),
   refreshSessionToken: vi.fn(),
 }));
 
 const composerAttach = vi.mocked(agent.composerAttach);
+const composerStream = vi.mocked(agent.composerStream);
 
 /** Replay a scripted event stream through the store's one reducer. */
 function scripted(events: agent.SequencedComposerEvent[]) {
@@ -30,6 +32,8 @@ const brief = (over: Partial<agent.BriefData> = {}): agent.BriefData => ({
 beforeEach(() => {
   useComposer.getState().reset();
   composerAttach.mockReset();
+  composerStream.mockReset();
+  composerStream.mockImplementation(scripted([]));
 });
 
 describe("useComposer suggestedName", () => {
@@ -109,5 +113,29 @@ describe("useComposer suggestedName", () => {
     await useComposer.getState().attach();
     useComposer.getState().reset();
     expect(useComposer.getState().suggestedName).toBeNull();
+  });
+});
+
+describe("useComposer on any canvas", () => {
+  it("sends the canvas's branch with each message, so the composer knows what a save there changes", async () => {
+    useWorkflow.setState({ workflowJson: { name: "Digest", nodes: [], edges: [] }, editBranch: "lane" });
+
+    await useComposer.getState().send("tighten the summary", "wf-1");
+
+    expect(composerStream.mock.calls[0]![0]).toMatchObject({ workflowId: "wf-1", branch: "lane" });
+  });
+
+  it("after saving a branch canvas, tells the composer the save changes nothing that runs", async () => {
+    const saveDeployedEdits = vi.fn(async () => {
+      useWorkflow.setState({ dirty: false });
+    });
+    useWorkflow.setState({ workflowJson: { name: "Digest", nodes: [], edges: [] }, editBranch: "lane", saveDeployedEdits });
+
+    await useComposer.getState().acceptOffer("live", "wf-1");
+
+    expect(saveDeployedEdits).toHaveBeenCalled();
+    expect(composerStream.mock.calls.at(-1)![0].message).toBe(
+      "Saved a new version on lane. It reaches what runs only after a merge into main and a publish, or a promotion.",
+    );
   });
 });

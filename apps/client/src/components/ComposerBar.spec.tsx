@@ -59,3 +59,15 @@ describe("ComposerBar save offer", () => {
     expect(await offerFor("member")).toBe("Save");
   });
 });
+
+describe("ComposerBar on a canvas that can't be saved", () => {
+  it("holds the save chip and says why, as the editor's own Save does", async () => {
+    composerStatus.mockResolvedValue({ available: true });
+    useComposer.setState({ offerPending: true });
+    render(<ComposerBar workflowId="wf-1" saveBlocked="main is protected — changes come in through a review" />);
+
+    expect(await screen.findByTestId("offer-save-live")).toBeDisabled();
+    expect(screen.getByText("main is protected — changes come in through a review")).toBeInTheDocument();
+    expect(screen.getByTestId("offer-tweak")).toBeEnabled();
+  });
+});

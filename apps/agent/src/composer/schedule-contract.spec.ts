@@ -16,3 +16,14 @@ describe('what the composer is told about orchestr:schedule', () => {
     expect(prompt).toMatch(/\d+ \d+ \* \* /);
   });
 });
+
+/** Live triggers come only from environment pointers (triggers/canvas/reconcile.ts), and Default is production. */
+describe('what the composer is told about what a save changes', () => {
+  const prompt = composerSystemPrompt(true);
+
+  it('says a save never changes what a trigger runs, and never that Default follows saves', () => {
+    expect(prompt).toContain('a save never changes what a trigger runs');
+    expect(prompt).toContain('Default means production');
+    expect(prompt).not.toMatch(/latest saved version on main/i);
+  });
+});

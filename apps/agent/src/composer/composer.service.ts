@@ -34,6 +34,8 @@ export interface StreamRequest {
   workflow_id?: string;
   /** The editor's CURRENT canvas document — refreshed every message so user edits between turns are honored. */
   ir?: WorkflowIr | null;
+  /** The branch that canvas belongs to, so the composer never claims a save changes what runs when it doesn't. */
+  branch?: string;
 }
 
 /**
@@ -129,7 +131,7 @@ export class ComposerService {
       // The editor's canvas is the source of truth for the draft: refresh it
       // on every message so manual edits between turns are never clobbered.
       if (request.ir !== undefined && request.ir !== null) session.draftIr = request.ir;
-      if (!session.draftIr && session.workflowId) await this.seedFromWorkflow(session);
+      session.canvasBranch = request.branch ?? null;
 
       // Bookkeeping, not history: the session id is not buffered for replay.
       yield { event: 'session', data: { session_id: session.id }, seq: session.seq };
@@ -565,6 +567,11 @@ export class ComposerService {
   /** The user message plus the current canvas so the agent never edits blind. */
   private buildPrompt(session: ComposerSession, message: string): string {
     const parts: string[] = [];
+    if (session.canvasBranch && session.canvasBranch !== 'main') {
+      parts.push(
+        `<canvas_branch>${session.canvasBranch} — not main: its versions reach what runs only through a merge into main and a publish, or a promotion.</canvas_branch>`,
+      );
+    }
     if (session.draftIr && Array.isArray(session.draftIr.nodes) && session.draftIr.nodes.length > 0) {
       const json = JSON.stringify(session.draftIr);
       parts.push(
@@ -575,17 +582,6 @@ export class ComposerService {
     }
     parts.push(message);
     return parts.join('\n\n');
-  }
-
-  /** Best effort: opening a session on a committed workflow seeds the draft from its head. */
-  private async seedFromWorkflow(session: ComposerSession): Promise<void> {
-    if (!session.workflowId) return;
-    try {
-      const wf = await this.workflowService.readWorkflow(session.workflowId, session.callerToken);
-      session.draftIr = wf.ir;
-    } catch (err) {
-      this.logger.warn(`could not seed draft from workflow ${session.workflowId}: ${messageOf(err)}`);
-    }
   }
 }
 
