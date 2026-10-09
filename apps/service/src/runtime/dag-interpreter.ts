@@ -17,6 +17,7 @@ import { BLOB_STORE, type BlobStore } from './blob-store';
 import { CodeRunner } from './code-runner';
 import { evaluateCondition } from './conditions';
 import type { DagIfNode, DagNode, DagPlan, DagSwitchNode, Guard } from './dag-plan';
+import { waitsRoutedByStep } from './event-wait';
 import type { RunResult } from './run-plan';
 
 /** Default bound on how many READY-and-live nodes run at once (slice 5); no user-facing knob. */
@@ -55,7 +56,12 @@ export class DagInterpreter extends BasePlanInterpreter {
   }
 
   run(plan: DagPlan, opts: RunOptions): Promise<RunResult> {
-    return this.runProgram(plan, opts, (nodes, scope, path, ctx) => this.schedule(nodes, scope, path, ctx));
+    return this.runProgram(
+      plan,
+      opts,
+      (nodes, scope, path, ctx) => this.schedule(nodes, scope, path, ctx),
+      waitsRoutedByStep(plan),
+    );
   }
 
   /**

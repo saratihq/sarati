@@ -68,19 +68,6 @@ export class RuntimeRunEntity {
   @Column({ name: 'dry_run', type: 'boolean', default: false })
   dryRun!: boolean;
 
-  // ── Approval state, set while status = 'waiting' and cleared on resume ──
-  @Column({ name: 'waiting_node_id', type: 'varchar', length: 200, nullable: true })
-  waitingNodeId!: string | null;
-
-  @Column({ name: 'waiting_topic', type: 'varchar', length: 200, nullable: true })
-  waitingTopic!: string | null;
-
-  @Column({ name: 'waiting_since', type: 'timestamptz', nullable: true })
-  waitingSince!: Date | null;
-
-  @Column({ name: 'waiting_timeout_at', type: 'timestamptz', nullable: true })
-  waitingTimeoutAt!: Date | null;
-
   // Who resolved the wait — org-wide approvals mean this may differ from `user_id`.
   @Column({ name: 'decided_by', type: 'uuid', nullable: true })
   decidedBy!: string | null;
@@ -148,6 +135,38 @@ export class RuntimeRunStepEntity {
   /** Non-fatal `{{ref}}`s that resolved to nothing at run time; null when none. */
   @Column({ type: 'json', nullable: true })
   warnings!: string[] | null;
+
+  /** The topic this step is parked on — set only while it waits; a timer's is reserved (`isTimerWait`). */
+  @Column({ name: 'waiting_topic', type: 'varchar', length: 200, nullable: true })
+  waitingTopic!: string | null;
+
+  /** When this step parked. */
+  @Column({ name: 'waiting_since', type: 'timestamptz', nullable: true })
+  waitingSince!: Date | null;
+
+  /** When this step's wait times out — for a timer, when it wakes. */
+  @Column({ name: 'waiting_timeout_at', type: 'timestamptz', nullable: true })
+  waitingTimeoutAt!: Date | null;
+
+  /** The DBOS topic this wait receives on when it isn't `waitingTopic` itself; null means the topic itself. */
+  @Column({ name: 'delivery_topic', type: 'varchar', length: 500, nullable: true })
+  deliveryTopic!: string | null;
+
+  /** When a decision claimed this wait; it stays parked until the run takes it. */
+  @Column({ name: 'claimed_at', type: 'timestamptz', nullable: true })
+  claimedAt!: Date | null;
+
+  /** Who made the claimed decision — credited on the run once the run takes it. */
+  @Column({ name: 'claimed_by', type: 'uuid', nullable: true })
+  claimedBy!: string | null;
+
+  /** The claimed decision itself, kept so it can be sent again until the run takes it. */
+  @Column({ name: 'claimed_payload', type: 'json', nullable: true })
+  claimedPayload!: unknown;
+
+  /** When this step's wait ended; a replay never parks it again. */
+  @Column({ name: 'resumed_at', type: 'timestamptz', nullable: true })
+  resumedAt!: Date | null;
 
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt!: Date;

@@ -27,6 +27,8 @@ interface PlanWorkflowArgs {
   environmentId?: string | null;
   orgId?: string | null;
   chatChannelKey?: string | null;
+  /** Set on every run started since waits on a shared topic receive on their own step's; absent on one recovered from before. */
+  sharedTopicsByStep?: boolean;
 }
 
 /** Whether a durable run's rejection is the cancel someone asked for, not a failure. */
@@ -36,6 +38,8 @@ export function isDurableCancellation(err: unknown): boolean {
     err instanceof DbosErrors.DBOSAwaitedWorkflowCancelledError
   );
 }
+
+const RUN_PLAN_WORKFLOW = 'orchestr.runPlan';
 
 const runPlanWorkflow = DBOS.registerWorkflow(
   async (args: PlanWorkflowArgs): Promise<RunResult> => {
@@ -55,6 +59,7 @@ const runPlanWorkflow = DBOS.registerWorkflow(
         orgId: args.orgId,
         // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
         chatChannelKey: args.chatChannelKey,
+        sharedTopicsByStep: args.sharedTopicsByStep === true,
       });
     } catch (err) {
       // The interpreter records any unwinding as the run's failure; a cancel is not one.
@@ -64,7 +69,7 @@ const runPlanWorkflow = DBOS.registerWorkflow(
       throw err;
     }
   },
-  { name: 'orchestr.runPlan' },
+  { name: RUN_PLAN_WORKFLOW },
 );
 
 @Injectable()
@@ -88,12 +93,14 @@ export class DbosRuntime {
       chatChannelKey?: string | null;
     },
   ): Promise<RunResult> {
-    return DBOS.withNextWorkflowID(opts.runId, () => runPlanWorkflow({ plan, ...opts }));
+    return DBOS.withNextWorkflowID(opts.runId, () =>
+      runPlanWorkflow({ plan, ...opts, sharedTopicsByStep: true }),
+    );
   }
 
-  /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. */
-  sendEvent(runId: string, topic: string, payload: unknown): Promise<void> {
-    return DBOS.send(runId, payload, topic);
+  /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. A repeat of `key` is dropped. */
+  sendEvent(runId: string, topic: string, payload: unknown, key?: string): Promise<void> {
+    return DBOS.send(runId, payload, topic, key);
   }
 
   /** Cancel a durable run at its next step boundary; throws `DBOSNonExistentWorkflowError` if unknown. */
@@ -113,8 +120,23 @@ export class DbosRuntime {
       orgId?: string | null;
     },
   ): Promise<string> {
-    await DBOS.startWorkflow(runPlanWorkflow, { workflowID: opts.runId })({ plan, ...opts });
+    await DBOS.startWorkflow(runPlanWorkflow, { workflowID: opts.runId })({
+      plan,
+      ...opts,
+      sharedTopicsByStep: true,
+    });
     return opts.runId;
+  }
+
+  /** Whether this instance can still take a durable run on to its end: pending, a workflow it knows, and its own to recover. */
+  async canResume(runId: string): Promise<boolean> {
+    const status = await DBOS.getWorkflowStatus(runId);
+    return (
+      status?.status === 'PENDING' &&
+      status.workflowName === RUN_PLAN_WORKFLOW &&
+      status.executorId === DBOS.executorID &&
+      status.applicationVersion === DBOS.applicationVersion
+    );
   }
 
   /** Poll a durable run's status (and its outputs once it has completed). */

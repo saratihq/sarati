@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource } from 'typeorm';
+import { IsNull, Not, type DataSource, type EntityManager } from 'typeorm';
 
 import { errorMessage } from '../common/error-message';
 import { newId } from '../database/ids';
+import { TIMER_TOPIC_SQL_PREFIX } from './timer-wait';
 import type { RunSource, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
 /** Per-VALUE storage cap: a value whose JSON is longer is stored as a {@link TruncatedValue}. */
@@ -13,6 +14,26 @@ const MAX_STORED_JSON_CHARS = 16_000;
 const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
+/** SET clause that ends a step's wait and any claim on it. */
+export const CLEAR_WAIT =
+  'waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL, delivery_topic = NULL, ' +
+  'claimed_at = NULL, claimed_by = NULL, claimed_payload = NULL';
+/** SET clause that empties the run's slot. */
+export const CLEAR_SLOT =
+  'waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL';
+
+/** SQL test that `alias` (a runtime_run_steps row) holds an open wait — parked, and the step not finished. */
+export function parkedStep(alias: string): string {
+  return `${alias}.waiting_topic IS NOT NULL AND ${alias}.finished_at IS NULL`;
+}
+
+/** {@link parkedStep} as a TypeORM `where`. */
+export const PARKED_STEP = { waitingTopic: Not(IsNull()), finishedAt: IsNull() };
+
+/** {@link parkedStep} for a step already loaded. */
+export function isParkedStep(step: { waitingTopic: string | null; finishedAt: Date | null }): boolean {
+  return step.waitingTopic !== null && step.finishedAt === null;
+}
 
 /** How every refused run's error begins; a run that executes records its own outcome over it. */
 export const REFUSED_RUN_ERROR_PREFIX = "Workflow can't run: ";
@@ -65,11 +86,7 @@ export interface RunStartMeta {
   orgId?: string | null;
 }
 
-/**
- * The interpreter's run-history recording seam — an interface so the interpreter stays free of
- * Nest/TypeORM. `runWaiting`/`runResumed` bracket a `waitForEvent` pause, and that persisted state
- * is what the waiting list and event-delivery validation read.
- */
+/** The interpreter's run-history seam, free of Nest/TypeORM; `stepWaiting`/`stepResumed` bracket each parked wait. */
 export interface RunRecorder {
   runStarted(
     scopedRunId: string,
@@ -92,11 +109,17 @@ export interface RunRecorder {
   stepAttempts(scopedRunId: string, stepKey: string, attempts: number): Promise<void>;
   /** Record a step's non-fatal honesty warnings (e.g. a `{{ref}}` that resolved to nothing); never fails it. */
   stepWarnings(scopedRunId: string, stepKey: string, warnings: string[]): Promise<void>;
-  runWaiting(scopedRunId: string, nodeId: string, topic: string, timeoutAt: Date): Promise<void>;
-  runResumed(scopedRunId: string): Promise<void>;
+  /** Park a step on `topic` for `durationMs` from its start, keeping any park it already has; resolves to its deadline. */
+  stepWaiting(
+    scopedRunId: string,
+    stepKey: string,
+    topic: string,
+    durationMs: number,
+    deliveryTopic?: string | null,
+  ): Promise<Date | null>;
+  /** The step's wait ended; `answered` when the run took an event, which credits the decider who claimed it. */
+  stepResumed(scopedRunId: string, stepKey: string, answered?: boolean): Promise<void>;
   runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void>;
-  /** Mark a non-terminal run `cancelled` (user cancel, B7). No-op if already terminal. */
-  runCancelled(scopedRunId: string): Promise<void>;
   /** A cancel unwinds the run as a failure `runFinished` has just recorded; restore what actually ended it. */
   runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void>;
 }
@@ -208,12 +231,26 @@ export class RunRecorderService implements RunRecorder {
     output: unknown,
     error: string | null,
   ): Promise<void> {
-    await this.write('stepFinished', scopedRunId, [
-      `UPDATE runtime_run_steps
+    const finished = await this.write<[Array<{ waiting_topic: string | null }>, number]>(
+      'stepFinished',
+      scopedRunId,
+      [
+        `UPDATE runtime_run_steps
           SET status = $3, output = CAST($4 AS json), error = $5, finished_at = now()
-        WHERE run_id = $1 AND step_key = $2`,
-      [scopedRunId, stepKey, error === null ? 'completed' : 'error', cappedJson(output), error],
-    ]);
+        WHERE run_id = $1 AND step_key = $2
+        RETURNING waiting_topic`,
+        [scopedRunId, stepKey, error === null ? 'completed' : 'error', cappedJson(output), error],
+      ],
+    );
+    // A wait still set here lost its unpark write; clearing it now keeps the run from reading `waiting`.
+    if (finished?.[0][0]?.waiting_topic) {
+      await this.writeWait('stepFinished', scopedRunId, (em) =>
+        em.query(`UPDATE runtime_run_steps SET ${CLEAR_WAIT} WHERE run_id = $1 AND step_key = $2`, [
+          scopedRunId,
+          stepKey,
+        ]),
+      );
+    }
   }
 
   async stepContinued(scopedRunId: string, stepKey: string): Promise<void> {
@@ -239,57 +276,73 @@ export class RunRecorderService implements RunRecorder {
     ]);
   }
 
-  /** Park the record on a waitForEvent: the waiting list + event validation read this state. */
-  async runWaiting(scopedRunId: string, nodeId: string, topic: string, timeoutAt: Date): Promise<void> {
-    await this.write('runWaiting', scopedRunId, [
-      `UPDATE runtime_runs
-          SET status = 'waiting', waiting_node_id = $2, waiting_topic = $3,
-              waiting_since = now(), waiting_timeout_at = $4
-        WHERE id = $1 AND status = 'running'`,
-      [scopedRunId, nodeId, topic, timeoutAt],
-    ]);
+  async stepWaiting(
+    scopedRunId: string,
+    stepKey: string,
+    topic: string,
+    durationMs: number,
+    deliveryTopic: string | null = null,
+  ): Promise<Date | null> {
+    // Anchored on the step's own start, so a replay or an upgrade reports the deadline the engine keeps.
+    const rows = await this.writeWait<Array<{ due: Date | null }>>('stepWaiting', scopedRunId, (em) =>
+      em.query(
+        `WITH parked AS (
+           UPDATE runtime_run_steps
+              SET waiting_since = CASE WHEN waiting_topic = $3 THEN waiting_since ELSE started_at END,
+                  waiting_timeout_at = CASE WHEN waiting_topic = $3 THEN waiting_timeout_at
+                                            ELSE started_at + make_interval(secs => $4::double precision / 1000) END,
+                  delivery_topic = $5,
+                  waiting_topic = $3
+            WHERE run_id = $1 AND step_key = $2 AND finished_at IS NULL AND resumed_at IS NULL
+            RETURNING waiting_timeout_at
+         )
+         SELECT COALESCE(
+                  (SELECT waiting_timeout_at FROM parked),
+                  (SELECT started_at + make_interval(secs => $4::double precision / 1000)
+                     FROM runtime_run_steps WHERE run_id = $1 AND step_key = $2)
+                ) AS due`,
+        [scopedRunId, stepKey, topic, durationMs, deliveryTopic],
+      ),
+    );
+    return rows?.[0]?.due ?? null;
   }
 
-  /** The wait resolved (event or timeout) — back to running, waiting state cleared. */
-  async runResumed(scopedRunId: string): Promise<void> {
-    await this.write('runResumed', scopedRunId, [
-      `UPDATE runtime_runs
-          SET status = 'running', waiting_node_id = NULL, waiting_topic = NULL,
-              waiting_since = NULL, waiting_timeout_at = NULL
-        WHERE id = $1 AND status = 'waiting'`,
-      [scopedRunId],
-    ]);
+  async stepResumed(scopedRunId: string, stepKey: string, answered = false): Promise<void> {
+    // Credited before the claim is cleared; a replay credits the same claim again or finds it gone.
+    if (answered) {
+      await this.write('stepResumed', scopedRunId, [
+        `UPDATE runtime_runs r SET decided_by = s.claimed_by, decided_at = s.claimed_at
+           FROM runtime_run_steps s
+          WHERE r.id = $1 AND s.run_id = r.id AND s.step_key = $2 AND s.claimed_by IS NOT NULL`,
+        [scopedRunId, stepKey],
+      ]);
+    }
+    await this.writeWait('stepResumed', scopedRunId, (em) =>
+      em.query(
+        `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = now() WHERE run_id = $1 AND step_key = $2`,
+        [scopedRunId, stepKey],
+      ),
+    );
   }
 
   async runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void> {
     await this.write('runFinished', scopedRunId, [
       `UPDATE runtime_runs
-          SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(),
-              waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
+          SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(), ${CLEAR_SLOT}
         WHERE id = $1`,
       [scopedRunId, error === null ? 'completed' : 'error', cappedOutputsJson(outputs), error],
     ]);
-  }
-
-  async runCancelled(scopedRunId: string): Promise<void> {
-    // The WHERE guard is what stops a cancel racing a natural finish from rewriting the outcome.
-    await this.write('runCancelled', scopedRunId, [
-      `UPDATE runtime_runs
-          SET status = 'cancelled', finished_at = now(),
-              waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
-        WHERE id = $1 AND status IN ('running', 'waiting')`,
-      [scopedRunId],
-    ]);
+    await this.clearWaits('runFinished', scopedRunId);
   }
 
   async runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void> {
     await this.write('runUnwoundByCancel', scopedRunId, [
       `UPDATE runtime_runs
-          SET status = 'cancelled', error = NULL, finished_at = COALESCE(finished_at, now()),
-              waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
+          SET status = 'cancelled', error = NULL, finished_at = COALESCE(finished_at, now()), ${CLEAR_SLOT}
         WHERE id = $1 AND status <> 'completed'`,
       [scopedRunId],
     ]);
+    await this.clearWaits('runUnwoundByCancel', scopedRunId);
     // Only the step that carried this very error: the one the cancel interrupted.
     await this.write('runUnwoundByCancel', scopedRunId, [
       `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
@@ -297,13 +350,104 @@ export class RunRecorderService implements RunRecorder {
     ]);
   }
 
-  private async write(op: string, scopedRunId: string, [sql, params]: [string, unknown[]]): Promise<void> {
+  private async clearWaits(op: string, scopedRunId: string): Promise<void> {
     try {
-      await this.dataSource.query(sql, params);
+      await clearStepWaits(this.dataSource.manager, scopedRunId);
     } catch (err) {
       this.logger.warn(`run history ${op} failed for ${scopedRunId}: ${errorMessage(err)}`);
     }
   }
+
+  private async writeWait<T = unknown>(
+    op: string,
+    scopedRunId: string,
+    write: (em: EntityManager) => Promise<T>,
+  ): Promise<T | null> {
+    try {
+      return await withWaitLock(this.dataSource.manager, scopedRunId, write);
+    } catch (err) {
+      this.logger.warn(`run history ${op} failed for ${scopedRunId}: ${errorMessage(err)}`);
+      return null;
+    }
+  }
+
+  private async write<T = unknown>(
+    op: string,
+    scopedRunId: string,
+    [sql, params]: [string, unknown[]],
+  ): Promise<T | null> {
+    try {
+      return await this.dataSource.query<T>(sql, params);
+    } catch (err) {
+      this.logger.warn(`run history ${op} failed for ${scopedRunId}: ${errorMessage(err)}`);
+      return null;
+    }
+  }
+}
+
+/** Take a run's own row lock, which every change to its waits holds; run it first in its transaction. */
+export async function lockRunRow(em: EntityManager, scopedRunId: string): Promise<void> {
+  await em.query(`SELECT 1 FROM runtime_runs WHERE id = $1 FOR NO KEY UPDATE`, [scopedRunId]);
+}
+
+/** Run `write` holding the run's lock, deriving nothing — for a change that parks or unparks no step. */
+export function withRunLock<T>(
+  manager: EntityManager,
+  scopedRunId: string,
+  write: (em: EntityManager) => Promise<T>,
+): Promise<T> {
+  return manager.transaction(async (em) => {
+    await lockRunRow(em, scopedRunId);
+    return write(em);
+  });
+}
+
+/** Change a run's step waits under its lock, then re-derive its status (`waiting` while any step is parked) and slot. */
+export function withWaitLock<T>(
+  manager: EntityManager,
+  scopedRunId: string,
+  write: (em: EntityManager) => Promise<T>,
+): Promise<T> {
+  return manager.transaction(async (em) => {
+    await lockRunRow(em, scopedRunId);
+    const result = await write(em);
+    // The slot mirrors the headline wait an older image can answer: never one received on its own topic.
+    await em.query(
+      `UPDATE runtime_runs r
+          SET status = CASE WHEN EXISTS (
+                SELECT 1 FROM runtime_run_steps s WHERE s.run_id = r.id AND ${parkedStep('s')}
+              ) THEN 'waiting' ELSE 'running' END,
+              (waiting_node_id, waiting_topic, waiting_since, waiting_timeout_at) = (
+                SELECT s.node_id, s.waiting_topic, s.waiting_since, s.waiting_timeout_at
+                  FROM runtime_run_steps s
+                 WHERE s.run_id = r.id AND ${parkedStep('s')} AND s.delivery_topic IS NULL
+                 ORDER BY s.waiting_topic LIKE $2 || '%', s.waiting_timeout_at NULLS LAST, s.step_key
+                 LIMIT 1
+              )
+        WHERE r.id = $1 AND r.status IN ('running', 'waiting')`,
+      [scopedRunId, TIMER_TOPIC_SQL_PREFIX],
+    );
+    return result;
+  });
+}
+
+/** Mark a non-terminal run `cancelled` and unpark its steps; run it holding {@link lockRunRow}. */
+export async function recordCancel(em: EntityManager, scopedRunId: string): Promise<void> {
+  // The WHERE guard is what stops a cancel racing a natural finish from rewriting the outcome.
+  await em.query(
+    `UPDATE runtime_runs SET status = 'cancelled', finished_at = now(), ${CLEAR_SLOT}
+      WHERE id = $1 AND status IN ('running', 'waiting')`,
+    [scopedRunId],
+  );
+  await clearStepWaits(em, scopedRunId);
+}
+
+/** End every wait still set on a run's steps, and any claim on them. */
+export async function clearStepWaits(em: EntityManager, scopedRunId: string): Promise<void> {
+  await em.query(
+    `UPDATE runtime_run_steps SET ${CLEAR_WAIT} WHERE run_id = $1 AND waiting_topic IS NOT NULL`,
+    [scopedRunId],
+  );
 }
 
 function planIdOf(plan: unknown): string {

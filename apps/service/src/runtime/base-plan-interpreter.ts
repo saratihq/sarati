@@ -24,6 +24,7 @@ import type { BlobStore } from './blob-store';
 import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
+import { eventTopicFor } from './event-wait';
 import { assertAnswerableTopic, PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
@@ -58,6 +59,8 @@ export interface RunOptions {
   subWorkflowDepth?: number;
   /** The ONE tree-wide sub-workflow invocation budget; absent at a top level → a fresh one. */
   subWorkflowBudget?: { remaining: number };
+  /** Waits another wait on their topic can be parked beside receive on their own step's topic; off only for a run from before that existed. Default true. */
+  sharedTopicsByStep?: boolean;
 }
 
 /** Threaded through the recursion so nested action ids stay durable-key-unique. */
@@ -86,6 +89,8 @@ export interface RunContext {
   /** ONE mutable invocation counter shared by reference across the whole run tree —
    *  bounds total sub-workflow WORK, which the per-branch depth cap cannot. */
   subWorkflowBudget: { remaining: number };
+  /** Wait nodes that receive on their own step's topic, because another wait on theirs can be parked beside them. */
+  routedWaits: ReadonlySet<object>;
 }
 
 /** Run-time recursion bound on sub-workflow-as-tool nesting depth; exceeding it is a tool error. */
@@ -238,6 +243,7 @@ export abstract class BasePlanInterpreter {
     plan: { id: string; nodes: N[] },
     opts: RunOptions,
     schedule: (nodes: N[], scope: Record<string, unknown>, path: string, ctx: RunContext) => Promise<void>,
+    routedWaits: ReadonlySet<object> = new Set(),
   ): Promise<RunResult> {
     const ctx: RunContext = {
       durable: opts.durable ?? new PassThroughDurableStep(),
@@ -257,6 +263,7 @@ export abstract class BasePlanInterpreter {
       subWorkflowDepth: opts.subWorkflowDepth ?? 0,
       // A nested run inherits the root's counter by reference; a top-level run mints a fresh one.
       subWorkflowBudget: opts.subWorkflowBudget ?? { remaining: MAX_SUB_WORKFLOW_INVOCATIONS },
+      routedWaits: opts.sharedTopicsByStep === false ? new Set() : routedWaits,
     };
     const scope: Record<string, unknown> = { ...(opts.initialScope ?? {}) };
     this.logger.log(`run plan ${plan.id}: ${plan.nodes.length} node(s)`);
@@ -464,15 +471,18 @@ export abstract class BasePlanInterpreter {
       // never applies to one that is deliberately asleep. Nobody can send to a timer topic — its
       // own timeout is the wake.
       const topic = timerTopicFor(stepKey);
-      const wake = new Date(Date.now() + node.ms);
       const sleeping = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, topic, node.ms);
-      await record?.recorder.runWaiting(record.runId, node.id, topic, wake);
+      // Handled at once: a cancel can reject it while the park below is still being written.
+      sleeping.catch(() => undefined);
+      const due =
+        (await record?.recorder.stepWaiting(record.runId, stepKey, topic, node.ms)) ??
+        new Date(Date.now() + node.ms);
       try {
         await sleeping;
       } finally {
-        await record?.recorder.runResumed(record.runId);
+        await record?.recorder.stepResumed(record.runId, stepKey);
       }
-      return { slept_until: wake.toISOString() };
+      return { slept_until: due.toISOString() };
     });
     // Still no scope output, but a dry run's trace accounts for every step it did not carry out.
     if (ctx.dryRun) ctx.trace.push({ nodeId: stepKey, output: waited });
@@ -494,19 +504,22 @@ export abstract class BasePlanInterpreter {
       assertAnswerableTopic(node.id, node.topic);
       // Dry run: don't park the preview waiting for a human — return a stub.
       if (ctx.dryRun) return withheldWait();
-      // Register the receiver BEFORE persisting the pause, so anyone who observes the
-      // waiting row is guaranteed a receiver already exists to deliver to.
-      const wait = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, node.topic, node.timeoutMs);
-      await record?.recorder.runWaiting(
-        record.runId,
-        node.id,
-        node.topic,
-        new Date(Date.now() + node.timeoutMs),
+      // Registered before the park is written; with no run history there is no step to route an event by.
+      const deliveryTopic = record && ctx.routedWaits.has(node) ? eventTopicFor(stepKey) : null;
+      const wait = ctx.durable.waitForEvent(
+        `${ctx.planId}:${stepKey}`,
+        deliveryTopic ?? node.topic,
+        node.timeoutMs,
       );
+      wait.catch(() => undefined);
+      await record?.recorder.stepWaiting(record.runId, stepKey, node.topic, node.timeoutMs, deliveryTopic);
+      let answered = false;
       try {
-        return await wait;
+        const payload = await wait;
+        answered = payload !== null;
+        return payload ?? null;
       } finally {
-        await record?.recorder.runResumed(record.runId);
+        await record?.recorder.stepResumed(record.runId, stepKey, answered);
       }
     });
     scope[node.id] = payload;

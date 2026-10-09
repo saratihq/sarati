@@ -22,6 +22,8 @@ const ENV_POINTERS =
   "an environment's pointers: it locks the env row or only the pointer rows, never a workflow row, and a workflow delete is refused while any pointer is left";
 const RUN_HISTORY =
   "one statement on a run's history row; a workflow delete only clears its workflow_id, and it holds no lock before its foreign-key check";
+const RUN_LOCK =
+  "a run's own rows under that run's row lock, taken first; nothing in it reaches the workflow row, so a workflow delete waiting on the run's row only waits for it to commit, never a cycle";
 const THREAD =
   'one autocommit statement on a thread row: it holds no other lock while it waits, so it finishes before a workflow delete or waits for it, never a cycle';
 
@@ -105,16 +107,21 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
     why: ACTIVATION,
   },
   'service:runtime/run-recorder.service.ts#insertRun#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
-  'service:runtime/run-recorder.service.ts#runWaiting#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
-  'service:runtime/run-recorder.service.ts#runResumed#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#stepResumed#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
   'service:runtime/run-recorder.service.ts#runFinished#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
-  'service:runtime/run-recorder.service.ts#runCancelled#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#withRunLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runtime/run-recorder.service.ts#withWaitLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#runUnwoundByCancel#runtime_runs': {
     in: 'autocommit',
     why: RUN_HISTORY,
   },
-  'service:runs/run-reaper.service.ts#reapStale#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
-  'service:runs/runs.service.ts#sendEvent#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runs/run-reaper.service.ts#reapCrashedRuns#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runs/run-reaper.service.ts#reapLapsedWaits#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runs/run-reaper.service.ts#reapStrandedDecisions#runtime_runs': {
+    in: 'transaction',
+    why: RUN_LOCK,
+  },
+  'service:runs/runs.service.ts#cancelRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'agent:composer/thread-store.ts#resolve#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#deleteThread#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#append#composer_thread_events': { in: 'autocommit', why: THREAD },

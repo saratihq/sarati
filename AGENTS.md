@@ -55,10 +55,24 @@ These strings are written into saved data, issued tokens, live cookies or the da
 - The `--orchestr-*` CSS custom properties — the client's token names.
 - The `{{$account.*}}` reference and its field names (`email`, `handle`, `id`, `name`) — in every
   saved workflow that uses them.
-- The `orchestr:timer:` waiting-topic prefix — in `runtime_runs.waiting_topic` and the DBOS recv
-  topic of every in-flight timed wait.
+- The `orchestr:timer:` waiting-topic prefix — in `runtime_run_steps.waiting_topic`, the run's kept
+  `runtime_runs.waiting_topic` slot, and the DBOS recv topic of every in-flight timed wait.
+- The delivery topic `orchestr:wait:<step key>` — in `runtime_run_steps.delivery_topic` and the DBOS
+  recv topic of an in-flight wait another wait on its topic can be parked beside; the whole format, not
+  just the prefix, since a decision already sent to the old spelling is never received under a new one.
+- The `sharedTopicsByStep` field of the durable workflow's checkpointed args, and what
+  `waitsRoutedByStep` answers for a plan that carries it — the field is absent on every run started
+  before it existed, which keeps those runs receiving on each wait's authored topic, and changing the
+  answer for a given plan moves in-flight receives, so it needs a new field.
+- The claim key `<scoped run id>|<step key>|<waiting_since ISO>` — in `dbos.notifications.message_uuid`
+  of every claimed decision, and sent again until its run takes it; a different key lands a second copy.
+- The DBOS workflow name `orchestr.runPlan` and the default DBOS application version `orchestr-1` — in
+  `dbos.workflow_status` of every in-flight run; renaming either leaves those runs unrecoverable, and
+  the reaper ends any of them holding a decision.
 
-The user-visible product name is Sarati and is free to change; none of the above is user-visible.
+The user-visible product name is Sarati and is free to change. None of the above is user-visible except
+the reserved topic prefixes `orchestr:timer:` and `orchestr:wait:`, which the docs name as reserved and
+which must not be renamed either.
 
 ## Working on the UI
 
