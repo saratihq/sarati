@@ -12,9 +12,10 @@ import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
-import { DbosRuntime, isDurableCancellation } from '../dbos/dbos-runtime';
+import { isDurableCancellation } from '../dbos/dbos-durable-step';
+import { DbosRuntime } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
-import { PassThroughDurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, RunCancelledError } from '../providers/durable-step';
 import type { AgentWorkflowCatalog } from '../runtime/agent';
 import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
@@ -121,7 +122,7 @@ export type RunDetail = RunStatus & {
 export class RunsService {
   private readonly logger = new Logger(RunsService.name);
   private readonly dbosEnabled: boolean;
-  /** Direct-path runs in flight: scoped run id → the step substrate `sendEvent` delivers to. */
+  /** Direct-path runs in flight: scoped run id → the step substrate `sendEvent` and `cancelRun` act on. */
   private readonly waiters = new Map<string, PassThroughDurableStep>();
 
   constructor(
@@ -194,7 +195,7 @@ export class RunsService {
     const durable = new PassThroughDurableStep();
     this.waiters.set(scoped, durable);
     try {
-      return await this.interpreter.run(plan, {
+      const result = await this.interpreter.run(plan, {
         externalUserId: opts.externalUserId,
         runId: scoped,
         durable,
@@ -207,8 +208,26 @@ export class RunsService {
         dryRun: opts.dryRun,
         chatChannelKey: opts.chatChannelKey,
       });
+      // The run's end is a step boundary too, as on DBOS; the row settles whether the cancel or the finish won.
+      if (await this.endedCancelled(scoped)) throw new RunCancelledError();
+      return result;
     } finally {
       this.waiters.delete(scoped);
+    }
+  }
+
+  /** Whether a finished run's row reads cancelled: its guarded writes let only one of a cancel and a finish land. */
+  private async endedCancelled(scoped: string): Promise<boolean> {
+    try {
+      return (
+        (await this.dataSource?.manager.exists(RuntimeRunEntity, {
+          where: { id: scoped, status: 'cancelled' },
+        })) ?? false
+      );
+    } catch (err) {
+      // A history read must never turn a run that finished into a failure.
+      this.logger.warn(`Run ${scoped}: reading whether it was cancelled failed: ${errorMessage(err)}`);
+      return false;
     }
   }
 
@@ -800,9 +819,7 @@ export class RunsService {
     const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     const scoped = row.id;
-    if (row.status !== 'waiting' || !row.waitingTopic) {
-      throw new DomainError(`Run ${runId} is not waiting for an event`, 409);
-    }
+    if (row.status !== 'waiting' || !row.waitingTopic) throw notWaiting(runId);
     if (row.waitingTopic !== topic) {
       throw new DomainError(`Run ${runId} is waiting on topic "${row.waitingTopic}", not "${topic}"`, 409);
     }
@@ -816,6 +833,9 @@ export class RunsService {
     }
     const delivered = this.waiters.get(scoped)?.deliver(topic, payload) ?? false;
     if (!delivered) {
+      // A cancel is recorded before it reaches the run, so one that landed since the read shows here.
+      const fresh = await em.findOne(RuntimeRunEntity, { where: { id: scoped } });
+      if (fresh?.status !== 'waiting') throw notWaiting(runId);
       // Stale waiting row (direct-path run lost to a restart) — nothing to resume.
       throw new DomainError(
         `Run ${runId} is no longer waiting (the run did not survive a restart; re-run the workflow)`,
@@ -826,8 +846,8 @@ export class RunsService {
   }
 
   /**
-   * Cancel a run: DBOS interrupts at the next step boundary; the direct path can only drop a
-   * HITL waiter (best-effort). Idempotent — an already-terminal run returns its status unchanged.
+   * Cancel a run at its next step boundary, on either rail; a step already in flight finishes.
+   * Idempotent — an already-terminal run returns its status unchanged.
    */
   async cancelRun(runId: string, access: RunAccess): Promise<RunStatus> {
     const em = this.dataSource?.manager;
@@ -854,12 +874,13 @@ export class RunsService {
         if (!terminal) throw err;
         return { runId, status: fresh.status };
       }
-    } else {
-      // Direct path: forget any HITL waiter (the in-process run can't be interrupted).
-      this.waiters.delete(row.id);
     }
     await this.recorder?.runCancelled(row.id);
-    return { runId, status: 'cancelled' };
+    // Recorded first, so an in-process run (a dry run is one even with DBOS on) unwinds onto a cancelled row.
+    this.waiters.get(row.id)?.cancel();
+    // A run that finished first keeps its outcome, and the caller is told that one.
+    const settled = await em.findOne(RuntimeRunEntity, { where: { id: row.id } });
+    return { runId, status: settled?.status ?? 'cancelled' };
   }
 
   /** Record who resolved a waiting run — separate columns from status/outputs, so it never races the run's completion write. */
@@ -930,6 +951,10 @@ export class RunsService {
       throw new DomainError('Asynchronous runs require DBOS (set DBOS_ENABLED=true)', 409);
     }
   }
+}
+
+function notWaiting(runId: string): DomainError {
+  return new DomainError(`Run ${runId} is not waiting for an event`, 409);
 }
 
 function durationMs(started: Date | null, finished: Date | null): number | null {

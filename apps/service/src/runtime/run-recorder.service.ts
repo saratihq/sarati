@@ -219,11 +219,12 @@ export class RunRecorderService implements RunRecorder {
   }
 
   async runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void> {
+    // A cancel is final: nothing the run does after it may rewrite it as completed or failed.
     await this.write('runFinished', scopedRunId, [
       `UPDATE runtime_runs
           SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(),
               waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL
-        WHERE id = $1`,
+        WHERE id = $1 AND status <> 'cancelled'`,
       [scopedRunId, error === null ? 'completed' : 'error', cappedOutputsJson(outputs), error],
     ]);
   }
