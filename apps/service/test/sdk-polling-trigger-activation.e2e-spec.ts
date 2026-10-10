@@ -14,7 +14,8 @@ import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const FEED_URL = 'https://feed.e2e.local/items';
+// Loopback, so the SDK's SSRF guard skips its DNS lookup; `stubFetch` answers the request itself.
+const FEED_URL = 'http://127.0.0.1/items';
 
 /** A minimal JSON FetchLikeResponse. */
 function res(status: number, body: unknown): FetchLikeResponse {

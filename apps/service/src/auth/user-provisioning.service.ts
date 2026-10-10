@@ -34,7 +34,10 @@ export class UserProvisioningService {
     const env = this.config.get('env', { infer: true });
     let identity: { email: string; name: string };
     try {
-      identity = profileToIdentity(await fetchClerkUser(clerkUserId, env.clerkSecretKey), clerkUserId);
+      identity = profileToIdentity(
+        await fetchClerkUser(env.clerkApiUrl, clerkUserId, env.clerkSecretKey),
+        clerkUserId,
+      );
     } catch (err) {
       this.logger.warn(`Clerk profile fetch failed for ${clerkUserId}: ${errorMessage(err)}`);
       identity = placeholderIdentity(clerkUserId);

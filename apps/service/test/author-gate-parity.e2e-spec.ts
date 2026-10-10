@@ -1,3 +1,6 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
@@ -16,6 +19,8 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => {
   let app: INestApplication;
   let db: Client;
+  let feedServer: Server;
+  let feedUrl: string;
 
   const node = (id: string, nodeType: string, parameters: Record<string, unknown> = {}) => ({
     id,
@@ -50,6 +55,12 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
 
   beforeAll(async () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
+    feedServer = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/rss+xml' });
+      res.end('<rss version="2.0"><channel><title>parity</title></channel></rss>');
+    });
+    await new Promise<void>((resolve) => feedServer.listen(0, '127.0.0.1', resolve));
+    feedUrl = `http://127.0.0.1:${(feedServer.address() as AddressInfo).port}/feed.xml`;
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -72,6 +83,7 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
   afterAll(async () => {
     await app.close();
     await db.end();
+    await new Promise<void>((resolve, reject) => feedServer.close((e) => (e ? reject(e) : resolve())));
     process.env.DATABASE_URL = ADMIN_URL;
     process.env.MOCK_AUTH = 'false';
   });
@@ -152,7 +164,7 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
 
   it('a catalog trigger authored as a step is refused for its MISSING MARKER, not as an unknown type', async () => {
     const nodes = [
-      { ...node('trigger', 'rss.new_item', { url: 'https://example.com/feed.xml' }) },
+      { ...node('trigger', 'rss.new_item', { url: feedUrl }) },
       node('step', 'text.concat', { texts: ['hi'], separator: '' }),
     ];
     const unmarked = doc('marker diagnosis', nodes, [laneless('trigger', 'step')]);

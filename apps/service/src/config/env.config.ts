@@ -24,19 +24,23 @@ function isLocalDatabaseHost(databaseUrl: string): boolean {
   return LOCAL_DB_HOSTS.has(host);
 }
 
+function httpUrl(value: string): URL | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  return ['http:', 'https:'].includes(parsed.protocol) && parsed.hostname ? parsed : null;
+}
+
 /** Parse CORS_ORIGINS; each origin must be an http(s) URL with a hostname, else throws at startup. */
 export function parseCorsOrigins(raw: string): string[] {
   const origins: string[] = [];
   for (const part of raw.split(',')) {
     const origin = part.trim();
     if (!origin) continue;
-    let parsed: URL | null = null;
-    try {
-      parsed = new URL(origin);
-    } catch {
-      parsed = null;
-    }
-    if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) {
+    if (!httpUrl(origin)) {
       throw new Error(
         `Invalid CORS origin ${JSON.stringify(origin)} in CORS_ORIGINS — ` +
           'each origin must be an http(s) URL like https://app.example.com',
@@ -45,6 +49,18 @@ export function parseCorsOrigins(raw: string): string[] {
     origins.push(origin);
   }
   return origins;
+}
+
+/** Parse a provider API base URL: http(s), a hostname, no query; trailing slashes dropped, else throws at startup. */
+export function parseApiBaseUrl(name: string, raw: string): string {
+  const value = raw.trim();
+  const parsed = httpUrl(value);
+  if (!parsed || parsed.search || parsed.hash) {
+    throw new Error(
+      `Invalid ${name} ${JSON.stringify(raw)} — it must be an http(s) URL like https://api.example.com`,
+    );
+  }
+  return value.replace(/\/+$/, '');
 }
 
 export class EnvConfig {
@@ -117,6 +133,10 @@ export class EnvConfig {
 
   @IsString()
   clerkSecretKey = '';
+
+  /** Clerk Backend API base URL — overridable so tests can point at a stub. */
+  @IsString()
+  clerkApiUrl = 'https://api.clerk.com';
 
   /** Comma-separated azp allow-list; empty skips the azp check. */
   @IsString()
@@ -211,13 +231,16 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       publicBaseUrl: raw.PUBLIC_BASE_URL ?? '',
       clerkIssuer: raw.CLERK_ISSUER ?? '',
       clerkSecretKey: raw.CLERK_SECRET_KEY ?? '',
+      clerkApiUrl: raw.CLERK_API_URL ? parseApiBaseUrl('CLERK_API_URL', raw.CLERK_API_URL) : undefined,
       clerkAuthorizedParties: raw.CLERK_AUTHORIZED_PARTIES ?? undefined,
       localAuthEnabled: asBool(raw.LOCAL_AUTH_ENABLED, !raw.CLERK_ISSUER),
       oidcIssuer: raw.OIDC_ISSUER ?? '',
       oidcJwksUrl: raw.OIDC_JWKS_URL ?? '',
       oidcAudience: raw.OIDC_AUDIENCE ?? '',
       mockAuth: asBool(raw.MOCK_AUTH, false),
-      composioBaseUrl: raw.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
+      composioBaseUrl: raw.COMPOSIO_BASE_URL
+        ? parseApiBaseUrl('COMPOSIO_BASE_URL', raw.COMPOSIO_BASE_URL)
+        : undefined,
       composioFallbackApps: raw.COMPOSIO_FALLBACK_APPS ?? '',
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
@@ -252,6 +275,14 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
         'DBOS_ENABLED must be true in production — without it runs execute in-process, so a ' +
           'crashed or redeployed worker orphans every in-flight run (no durable crash-resume).',
       );
+    }
+    for (const [name, url] of [
+      ['CLERK_API_URL', cfg.clerkApiUrl],
+      ['COMPOSIO_BASE_URL', cfg.composioBaseUrl],
+    ] as const) {
+      if (new URL(url).protocol !== 'https:') {
+        throw new Error(`${name} must be https in production — every request to it carries an API secret.`);
+      }
     }
     if (!cfg.dbosAppVersion) {
       throw new Error(
