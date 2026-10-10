@@ -165,10 +165,12 @@ export async function assertSafeOAuthEndpoint(label: string, rawUrl: string): Pr
     throw new DomainError(`OAuth ${label} must use https (got ${url.protocol || 'no scheme'})`, 400);
   }
   try {
-    // The SDK's shared SSRF guard — blocks a private/loopback/link-local/cloud-metadata target.
     await guardUserUrl(rawUrl);
   } catch {
-    throw new DomainError(`OAuth ${label} must not point at a private or internal address`, 400);
+    throw new DomainError(
+      `OAuth ${label} must resolve to a public address, not a private or internal one`,
+      400,
+    );
   }
 }
 

@@ -450,7 +450,9 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
         },
       })
       .expect(400);
-    expect(res.body.detail).toMatch(/token_url must not point at a private or internal address/);
+    expect(res.body.detail).toMatch(
+      /token_url must resolve to a public address, not a private or internal one/,
+    );
     // The flow is rejected at authorize, before any state is minted or fetched.
     expect(providerHits).toBe(before);
   });

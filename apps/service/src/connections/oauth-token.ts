@@ -1,5 +1,4 @@
-import { guardUserUrl } from '@sarati/actions-sdk';
-import { request } from 'undici';
+import { guardedFetch } from '@sarati/actions-sdk';
 
 import { isRecord } from '../common/json-util';
 
@@ -25,26 +24,23 @@ export class OAuthExchangeError extends Error {}
  * or throwing `OAuthExchangeError` with the upstream detail.
  */
 async function postToken(tokenUrl: string, params: Record<string, string>): Promise<OAuthTokenSet> {
-  // The SSRF choke point for BOTH grants — `tokenUrl` may be a fully user-supplied BYO endpoint.
-  await guardUserUrl(tokenUrl);
-  const body = new URLSearchParams(params).toString();
-  const res = await request(tokenUrl, {
+  // `tokenUrl` may be a user-supplied BYO endpoint, so both grants ride the SDK's SSRF-guarded hop.
+  const res = await guardedFetch(tokenUrl, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-    headersTimeout: 15_000,
-    bodyTimeout: 15_000,
+    body: new URLSearchParams(params).toString(),
+    signal: AbortSignal.timeout(15_000),
   });
-  const text = await res.body.text().catch(() => '');
+  const text = await res.text().catch(() => '');
   let data: unknown = {};
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
     data = {};
   }
-  if (res.statusCode >= 400) {
+  if (res.status >= 400) {
     const detail = isRecord(data) ? JSON.stringify(data) : text;
-    throw new OAuthExchangeError(`Token endpoint returned ${res.statusCode}: ${detail}`);
+    throw new OAuthExchangeError(`Token endpoint returned ${res.status}: ${detail}`);
   }
   if (!isRecord(data) || typeof data.access_token !== 'string' || !data.access_token) {
     // e.g. Slack returns 200 with { ok: false, error: '...' }.

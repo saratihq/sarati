@@ -84,15 +84,33 @@ If you are upgrading and had them there, enter them once in Settings and delete 
 
 ## Integrations and auth
 
+Single sign-on (`OIDC_*`, `CLERK_*`) and bring-your-own OAuth (`OAUTH_<PROVIDER>_CLIENT_ID` /
+`_CLIENT_SECRET`) are set here too. With every auth variable empty, email and password is the way
+in.
+
+### Private addresses
+
 ```bash
-# Hosts the SSRF guard lets back in. It blocks private, loopback, link-local and
-# cloud-metadata targets by default.
+# Hostnames the SSRF guard lets back in, comma-separated, matched exactly.
 ORCHESTR_HTTP_ALLOWED_HOSTS=
 ```
 
-Single sign-on (`OIDC_*`, `CLERK_*`) and bring-your-own OAuth (`OAUTH_<PROVIDER>_CLIENT_ID` /
-`_CLIENT_SECRET`) are configured the same way. With every auth variable empty, email and password is
-the way in.
+A step or trigger that calls an address straight from this server refuses one that is not public:
+private, loopback, link-local (cloud metadata included), carrier-grade NAT and reserved ranges, in
+any spelling — `[::ffff:127.0.0.1]`, NAT64 and 6to4 addresses are judged by the IPv4 address they
+carry. The address checked is the one actually connected to, so a name that resolves to a private
+address is refused, every redirect is checked again, and a name that does not resolve is refused
+too. That covers the HTTP and GraphQL steps, the HTTP and RSS polling triggers, and app steps given
+an address, such as a Jira or Salesforce instance URL. Bring-your-own OAuth endpoints are checked
+when you save them, and the token endpoint again on every token exchange.
+
+To reach something on your own network — a self-hosted Jira, an internal API — add its hostname.
+The match is exact: `127.0.0.1` lets in that spelling only, not `localhost` or `[::ffff:127.0.0.1]`.
+It covers every port on that host.
+
+The guard judges addresses, not what answers at them: a service of yours on a public address — the
+server's own public IP, a cloud network's global IPv6 range — is not covered. Where that matters,
+restrict outbound traffic at the network too.
 
 ## Container defaults differ from the source template
 
