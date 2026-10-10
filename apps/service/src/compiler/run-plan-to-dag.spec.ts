@@ -324,6 +324,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      throwIfCancelled: () => undefined,
     };
     const plan: RunPlan = {
       id: 'd',
@@ -344,6 +345,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      throwIfCancelled: () => undefined,
     };
     const plan: RunPlan = {
       id: 'pin',
@@ -370,6 +372,7 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      throwIfCancelled: () => undefined,
     };
     const plan: RunPlan = {
       id: 'p',

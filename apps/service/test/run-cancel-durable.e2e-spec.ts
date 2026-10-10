@@ -9,6 +9,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { DbosRuntime } from '../src/dbos/dbos-runtime';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -490,6 +491,92 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
       blocked: null,
     });
   }, 60_000);
+
+  it('a cancel during a retry wait still records every attempt that went out', async () => {
+    const answer = start('counted', [post('flaky', '/flaky', { retry: { maxAttempts: 6, backoffMs: 400 } })]);
+    for (let i = 0; i < 200 && hitsOn('/flaky') < 3; i++) await pause(25);
+    await cancel('counted').expect(200);
+    await answer;
+    await pause(1_000);
+
+    const attempts = await db.query<{ attempts: number }>(
+      `SELECT s.attempts FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+        WHERE r.run_id = 'counted' AND s.node_id = 'flaky'`,
+    );
+    expect(attempts.rows[0]!.attempts).toBe(hitsOn('/flaky'));
+  }, 60_000);
+
+  it('a cancel stands, and stops the run, even when telling DBOS of it fails', async () => {
+    const engine = app.get(DbosRuntime);
+    const failing = jest
+      .spyOn(engine, 'cancelWorkflow')
+      .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+    try {
+      const answer = start('engine-down', [post('gate', '/gate'), post('after', '/after')]);
+      await untilHit('/gate');
+      const cancelled = await cancel('engine-down');
+      openGate();
+      const res = await answer;
+
+      const row = await db.query(`SELECT status FROM runtime_runs WHERE run_id = $1`, ['engine-down']);
+      expect({
+        cancel: [cancelled.status, cancelled.body.status],
+        engineCalls: failing.mock.calls.length,
+        answer: res.body.code,
+        afterCalls: hitsOn('/after'),
+        row: row.rows[0].status,
+      }).toEqual({
+        cancel: [200, 'cancelled'],
+        engineCalls: 1,
+        answer: 'run_cancelled',
+        afterCalls: 0,
+        row: 'cancelled',
+      });
+    } finally {
+      failing.mockRestore();
+    }
+  }, 60_000);
+
+  it.each([
+    ['a run the caller waits on', 'runDurably', 'window-sync'],
+    ['a run started without waiting', 'startDurably', 'window-async'],
+  ] as const)(
+    'a cancel that lands before DBOS knows %s still stops it before any step',
+    async (_what, method, runId) => {
+      const engine = app.get(DbosRuntime);
+      let entered = false;
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const real = engine[method].bind(engine) as (...args: unknown[]) => Promise<unknown>;
+      const holding = jest.spyOn(engine, method).mockImplementationOnce((async (...args: unknown[]) => {
+        entered = true;
+        await held;
+        return real(...args);
+      }) as never);
+      try {
+        const nodes = [post('first', '/first'), post('second', '/second')];
+        const answer = http()
+          .post(method === 'runDurably' ? '/api/runs' : '/api/runs/async')
+          .send({ plan: { id: `plan-${runId}`, nodes }, run_id: runId })
+          .then((res) => res);
+        for (let i = 0; i < 200 && !entered; i++) await pause(25);
+        const cancelled = await cancel(runId).expect(200);
+        release();
+        await answer;
+        await pause(1_000);
+
+        const row = await db.query(`SELECT status FROM runtime_runs WHERE run_id = $1`, [runId]);
+        expect({
+          cancel: cancelled.body.status,
+          calls: [hitsOn('/first'), hitsOn('/second')],
+          row: row.rows[0].status,
+        }).toEqual({ cancel: 'cancelled', calls: [0, 0], row: 'cancelled' });
+      } finally {
+        holding.mockRestore();
+      }
+    },
+    60_000,
+  );
 
   it('a run that fails on its own is still recorded as a failure', async () => {
     const plan = {

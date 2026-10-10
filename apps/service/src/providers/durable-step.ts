@@ -11,6 +11,8 @@ export interface DurableStep {
   waitForEvent<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null>;
   /** Wait `ms` inside a step's body, unrecorded; a cancel this substrate can see mid-step cuts it short. */
   waitInStep(ms: number): Promise<void>;
+  /** Throw this run's own cancel if the substrate already knows of one, mid-step and without a checkpoint. */
+  throwIfCancelled(): void;
   /** Whether `err` is this substrate unwinding its own run's cancel — never a step failure. */
   isCancellation(err: unknown): boolean;
 }
@@ -59,6 +61,10 @@ export class PassThroughDurableStep implements DurableStep {
 
   isCancellation(err: unknown): boolean {
     return this.cancelled && err instanceof RunCancelledError;
+  }
+
+  throwIfCancelled(): void {
+    if (this.cancelled) throw new RunCancelledError();
   }
 
   /** Deliver an event to a pending `waitForEvent` on `topic`. Returns false if none is waiting. */

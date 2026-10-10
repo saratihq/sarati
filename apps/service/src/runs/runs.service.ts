@@ -884,8 +884,17 @@ export class RunsService {
     if (settled?.status !== 'cancelled') return { runId, status: settled?.status ?? row.status };
     // A dry run executes in-process even with DBOS on.
     this.waiters.get(row.id)?.cancel();
-    if (this.dbosEnabled) await this.dbos.cancelWorkflow(row.id);
+    if (this.dbosEnabled) await this.cancelEngine(row.id);
     return { runId, status: 'cancelled' };
+  }
+
+  private async cancelEngine(scoped: string): Promise<void> {
+    try {
+      await this.dbos.cancelWorkflow(scoped);
+    } catch (err) {
+      // Fail-safe: the cancel stands, because a durable run's row gate stops it at its next step anyway.
+      this.logger.warn(`Run ${scoped}: telling DBOS of its cancel failed: ${errorMessage(err)}`);
+    }
   }
 
   /** Record who resolved a waiting run — separate columns from status/outputs, so it never races the run's completion write. */

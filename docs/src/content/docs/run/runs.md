@@ -90,9 +90,10 @@ Idempotent — cancelling an already-finished run is not an error, and answers w
 finished in.
 
 The run is listed as **Cancelled** at once and stops at its next step. A step already making its
-call finishes, because a request that has gone out can't be taken back, but it makes no further
-retry, and nothing after it starts. A caller still waiting on the run's answer gets `409` with the
-code `run_cancelled`.
+call finishes, because a request that has gone out can't be taken back, and that includes the HTTP
+client retrying that one request. The step's own retry setting makes no further attempt, and nothing
+after it starts. A caller still waiting on the run's answer gets `409` with the code
+`run_cancelled`.
 
 A wait or delay the run is parked on ends and says *Cancelled before it finished*. On a durable run
 (the default) that can take up to about ten seconds, and a delay of a minute or less runs out first.

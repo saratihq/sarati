@@ -548,6 +548,26 @@ describe('cancel an in-process run (e2e, isolated DB, DBOS off, mock auth)', () 
     });
   }, 30_000);
 
+  it('a cancel during a retry wait still records every attempt that went out', async () => {
+    const answer = start(
+      'counted',
+      ir([post('flaky', '/flaky', { retry: { maxAttempts: 6, backoffMs: 400 } })], []),
+    );
+    await until(() => hitsOn('/flaky') >= 3, 'three attempts');
+    await cancel('counted').expect(200);
+    await answer;
+    await pause(500);
+
+    const attempts = await db.query<{ attempts: number }>(
+      `SELECT s.attempts FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+        WHERE r.run_id = 'counted' AND s.node_id = 'flaky'`,
+    );
+    expect({ recorded: attempts.rows[0]!.attempts, sent: hitsOn('/flaky') }).toEqual({
+      recorded: hitsOn('/flaky'),
+      sent: hitsOn('/flaky'),
+    });
+  }, 30_000);
+
   it('a run id whose run was cancelled is not run again', async () => {
     const first = start('reused', ir([waitFor('approval', 30_000)], []));
     await untilStatus('reused', 'waiting');
@@ -963,5 +983,54 @@ describe('a cancel landing mid-decision (e2e, isolated DB, DBOS off, local sessi
       called: (await childRowOf('caller-gated'))?.status,
       calls: [hitsOn('/child-after'), hitsOn('/parent-after')],
     }).toEqual({ refused: [409, 'called_run'], answer: 201, called: 'completed', calls: [1, 1] });
+  }, 30_000);
+
+  it("a called run's retry with no wait between tries makes no attempt after its caller is cancelled", async () => {
+    const child = await callable('retrier', [
+      post('flaky', '/gate-retry', { retry: { maxAttempts: 3 } }),
+      post('child-after', '/child-after'),
+    ]);
+    const answer = callerRun('caller-retry', child);
+    await untilHitShared('/gate-retry');
+    await inOrg(http().post('/api/runs/caller-retry/cancel'), asOwner).expect(200);
+    const releasing = setInterval(() => openGate(500), 20);
+    const res = await answer.finally(() => clearInterval(releasing));
+
+    expect({
+      answer: res.body.code,
+      attempts: hitsOn('/gate-retry'),
+      called: (await childRowOf('caller-retry'))?.status,
+      calls: [hitsOn('/child-after'), hitsOn('/parent-after')],
+    }).toEqual({ answer: 'run_cancelled', attempts: 1, called: 'cancelled', calls: [0, 0] });
+  }, 30_000);
+
+  it("a called run's continue-on-fail does not apply to a failure after its caller's cancel", async () => {
+    const child = await callable('tolerant', [
+      post('tol', '/gate-tol', { onError: 'continue' }),
+      post('child-after', '/child-after'),
+    ]);
+    const answer = callerRun('caller-tolerant', child);
+    await untilHitShared('/gate-tol');
+    await inOrg(http().post('/api/runs/caller-tolerant/cancel'), asOwner).expect(200);
+    openGate(500);
+    const res = await answer;
+
+    const called = (await childRowOf('caller-tolerant'))!;
+    const steps = await db.query<{ node_id: string; status: string; continued: boolean }>(
+      `SELECT s.node_id, s.status, s.continued FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+        WHERE r.run_id = $1 AND s.node_id = 'tol'`,
+      [called.run_id],
+    );
+    expect({
+      answer: res.body.code,
+      tol: steps.rows[0],
+      called: called.status,
+      calls: [hitsOn('/child-after'), hitsOn('/parent-after')],
+    }).toEqual({
+      answer: 'run_cancelled',
+      tol: { node_id: 'tol', status: 'error', continued: false },
+      called: 'cancelled',
+      calls: [0, 0],
+    });
   }, 30_000);
 });

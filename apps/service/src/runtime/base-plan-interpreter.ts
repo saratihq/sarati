@@ -423,7 +423,9 @@ export abstract class BasePlanInterpreter {
       ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
       // A cancel unwinds the run: no error lane or continue-on-fail may absorb it, nor a failure after it.
-      if (ctx.durable.isCancellation(err) || (await this.isCancelled(ctx))) throw err;
+      if (ctx.durable.isCancellation(err)) throw err;
+      ctx.durable.throwIfCancelled();
+      if (await this.rowCancelled(ctx)) throw err;
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
       // read `{{node.text}}` (the partial answer is never discarded).
@@ -973,23 +975,24 @@ export abstract class BasePlanInterpreter {
           if (maxAttempts > 1) await this.recordAttempts(ctx, stepKey, tries);
           throw err;
         }
+        // Counted before the wait, so a cancel that ends the retries still leaves how many went out.
+        await this.recordAttempts(ctx, stepKey, tries);
         if (backoffMs > 0) await ctx.durable.waitInStep(backoffMs);
-        // No attempt starts after a cancel, on either rail.
-        if (await this.isCancelled(ctx)) {
-          await this.recordAttempts(ctx, stepKey, tries);
-          throw err;
-        }
+        // No attempt starts after a cancel, on either rail, its caller's included.
+        ctx.durable.throwIfCancelled();
+        if (await this.rowCancelled(ctx)) throw err;
       }
     }
   }
 
   private async replayPin(ctx: RunContext, nodeId: string): Promise<unknown> {
     // A replay fires nothing, but nothing replays after a cancel either: it would read as the run going on.
-    if (await this.isCancelled(ctx)) throw new RunCancelledError();
+    ctx.durable.throwIfCancelled();
+    if (await this.rowCancelled(ctx)) throw new RunCancelledError();
     return ctx.pins!.get(nodeId);
   }
 
-  private isCancelled(ctx: RunContext): Promise<boolean> {
+  private rowCancelled(ctx: RunContext): Promise<boolean> {
     return ctx.record ? ctx.record.recorder.isCancelled(ctx.record.runId) : Promise.resolve(false);
   }
 

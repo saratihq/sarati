@@ -5,7 +5,7 @@ import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import { RunRecorderService } from '../runtime/run-recorder.service';
 import type { RunResult, RunStatus } from '../runtime/run-plan';
-import { DbosDurableStep } from './dbos-durable-step';
+import { DbosDurableStep, RowGatedDurableStep } from './dbos-durable-step';
 
 /**
  * Runs the `DagInterpreter` as the one registered DBOS workflow; registration is at module load
@@ -31,9 +31,14 @@ interface PlanWorkflowArgs {
 const runPlanWorkflow = DBOS.registerWorkflow(
   async (args: PlanWorkflowArgs): Promise<RunResult> => {
     if (!activeInterpreter) throw new Error('DbosRuntime is not initialized (no interpreter bound)');
+    const { runId } = args;
+    const recorder = activeRecorder;
     return activeInterpreter.run(args.plan, {
       externalUserId: args.externalUserId,
-      durable: durableStep,
+      durable:
+        runId && recorder
+          ? new RowGatedDurableStep(durableStep, () => recorder.isCancelled(runId))
+          : durableStep,
       runId: args.runId,
       recorder: activeRecorder ?? undefined,
       initialScope: args.initialScope,
