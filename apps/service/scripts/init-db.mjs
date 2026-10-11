@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { connectOrExit } from './connect.mjs';
+import { SCHEMA_LOCK, connectOrExit } from './connect.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(here, '..', 'db', 'schema.sql');
@@ -34,23 +34,24 @@ if (!url) {
 
 const client = await connectOrExit(url);
 try {
+  await client.query('SELECT pg_advisory_lock($1)', [SCHEMA_LOCK]);
   const existing = await client.query(`SELECT to_regclass('public.users') IS NOT NULL AS present`);
   if (existing.rows[0]?.present) {
     // Already initialized — skip (idempotent) rather than clobber. `db:migrate`
     // (run next by `db:release`) evolves an older schema forward.
     console.log('Schema already present (a `users` table exists) — skipping db:init.');
-    process.exit(0);
+  } else {
+    // pg_dump emits psql meta-commands (lines starting with '\') that the wire
+    // protocol cannot execute — strip them; everything else is plain SQL.
+    const schema = readFileSync(SCHEMA_PATH, 'utf8')
+      .split('\n')
+      .filter((line) => !line.startsWith('\\'))
+      .join('\n');
+
+    await client.query(schema);
+    console.log('Schema applied. The database is ready.');
   }
-
-  // pg_dump emits psql meta-commands (lines starting with '\') that the wire
-  // protocol cannot execute — strip them; everything else is plain SQL.
-  const schema = readFileSync(SCHEMA_PATH, 'utf8')
-    .split('\n')
-    .filter((line) => !line.startsWith('\\'))
-    .join('\n');
-
-  await client.query(schema);
-  console.log('Schema applied. The database is ready.');
+  await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK]);
 } finally {
   await client.end();
 }

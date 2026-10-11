@@ -10,6 +10,7 @@ import { EventsService } from '../events/events.service';
 import { now } from '../database/ids';
 import type { ConflictEntry, MergeResolution } from '../ir/merge';
 import { BranchService } from './branch.service';
+import { lockWorkflowRow } from './workflow-row-lock';
 
 /** Machine code for a merge whose target already has every change on the source. */
 export const NOTHING_TO_MERGE = 'nothing_to_merge';
@@ -123,6 +124,7 @@ export class MergeOrchestrationService {
     actorId: string,
   ): Promise<string[]> {
     return this.dataSource.transaction(async (em) => {
+      if (!(await lockWorkflowRow(em, workflowId))) return [];
       const branches = await em.find(WorkflowBranchEntity, {
         where: { workflowId },
       });

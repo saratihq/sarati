@@ -11,9 +11,9 @@ import { UserSettingsEntity } from '../database/entities/user-settings.entity';
 import { EventsService } from '../events/events.service';
 import { OrgsService } from '../orgs/orgs.service';
 import { fetchClerkUser, placeholderIdentity, profileToIdentity } from './clerk-profile';
+import { isUniqueViolation } from '../database/pg-errors';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
-const PG_UNIQUE_VIOLATION = '23505';
 
 /** First-sight provisioning: a verified session always yields a user (placeholder identity if Clerk is down). */
 @Injectable()
@@ -104,7 +104,7 @@ export class UserProvisioningService {
         .then((u) => this.reload(u.id));
     } catch (err) {
       // First-load race: parallel misses all insert; one wins the unique constraint, losers re-read.
-      if (this.isUniqueViolation(err)) {
+      if (isUniqueViolation(err)) {
         const winner = await this.findByClerkId(clerkUserId);
         if (winner) return winner;
         throw new UnauthorizedException({ detail: 'User provisioning failed', code: 'provisioning_failed' });
@@ -136,7 +136,7 @@ export class UserProvisioningService {
       })
       .then((u) => this.reload(u.id))
       .catch(async (err: unknown) => {
-        if (this.isUniqueViolation(err)) {
+        if (isUniqueViolation(err)) {
           const winner = await this.findById(MOCK_USER_ID);
           if (winner) return winner;
         }
@@ -168,11 +168,6 @@ export class UserProvisioningService {
     if (!user)
       throw new UnauthorizedException({ detail: 'User provisioning failed', code: 'provisioning_failed' });
     return user;
-  }
-
-  private isUniqueViolation(err: unknown): boolean {
-    const driverErr = (err as { driverError?: { code?: string }; code?: string }) ?? {};
-    return driverErr.driverError?.code === PG_UNIQUE_VIOLATION || driverErr.code === PG_UNIQUE_VIOLATION;
   }
 }
 

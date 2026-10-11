@@ -154,12 +154,23 @@ export class ThreadStore implements OnApplicationShutdown {
    * workflow: move the thread with it. If a thread for (user, workflow)
    * already exists, the SCRATCH thread's events win — they ARE the history —
    * so the standing row is dropped and the scratch thread takes the key.
+   * A workflow deleted meanwhile takes the thread with it, as its delete would
+   * have had the rekey come first; false then.
    */
-  async rekey(threadId: string, workflowId: string): Promise<void> {
+  async rekey(threadId: string, workflowId: string): Promise<boolean> {
     const pool = this.mustPool();
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // The workflow row before its threads, as every write under a workflow takes it (constitution #11).
+      const workflow = await client.query(`SELECT 1 FROM workflows WHERE id = $1 FOR KEY SHARE`, [
+        workflowId,
+      ]);
+      if (workflow.rowCount === 0) {
+        await client.query(`DELETE FROM composer_threads WHERE id = $1 AND workflow_id IS NULL`, [threadId]);
+        await client.query('COMMIT');
+        return false;
+      }
       await client.query(
         `DELETE FROM composer_threads
           WHERE user_key = (SELECT user_key FROM composer_threads WHERE id = $1)
@@ -171,6 +182,7 @@ export class ThreadStore implements OnApplicationShutdown {
         workflowId,
       ]);
       await client.query('COMMIT');
+      return true;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => undefined);
       throw err;

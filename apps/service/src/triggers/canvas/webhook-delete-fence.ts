@@ -25,6 +25,11 @@ export class WebhookDeleteFence {
     }
   }
 
+  /** Resolves once every delete in flight now whose webhook `match`es has landed. */
+  async landed(match: (webhook: RegisteredWebhook) => boolean): Promise<void> {
+    await Promise.all([...this.deletes].filter((d) => match(d.webhook)).map((d) => d.landed));
+  }
+
   /** Runs `register` (the app call, then its record) until no delete of the handle it returns can land after it. */
   async standUp(register: () => Promise<RegisteredWebhook | null>): Promise<void> {
     const finished: RegisteredWebhook[] = [];

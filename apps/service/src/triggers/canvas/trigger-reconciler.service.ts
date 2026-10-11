@@ -8,6 +8,7 @@ import { In, Not } from 'typeorm';
 import type { DataSource } from 'typeorm';
 
 import { runBounded } from '../../common/bounded';
+import { withDeadline } from '../../common/deadline';
 import { errorMessage } from '../../common/error-message';
 import { isTriggerNode } from '../../compiler/compile-ir';
 import { ConnectionsService } from '../../connections/connections.service';
@@ -40,6 +41,7 @@ import {
   legacyRegistrationOf,
   type RegisteredWebhook,
   registeredWebhookOf,
+  sameAddress,
   sameRegistration,
   webhookRegistrationOf,
 } from '../registered-webhook';
@@ -71,6 +73,10 @@ import {
   type EnvPointerInput,
   type ReconcilePlan,
 } from './reconcile';
+import { lockWorkflowForWrite } from '../../workflows/workflow-row-lock';
+
+/** How long, in ms, a teardown waits on an app's webhook delete before leaving it to a retry. */
+export const WEBHOOK_DELETE_WAIT_MS = Symbol('WEBHOOK_DELETE_WAIT_MS');
 
 /** Cap the self-heal re-subscribe fan-out so one slow Composio upsert can't stall the whole sweep. */
 const SELFHEAL_CONCURRENCY = 5;
@@ -103,6 +109,7 @@ export class TriggerReconcilerService {
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
     private readonly platformKeys: PlatformKeysService,
     @Inject(PG_POOL) private readonly pool: Pool,
+    @Inject(WEBHOOK_DELETE_WAIT_MS) private readonly deleteWaitMs: number,
   ) {}
 
   /** The last queued reconcile per workflow; absent when none is in flight. In-process only. */
@@ -149,11 +156,13 @@ export class TriggerReconcilerService {
   ): Promise<TriggerRetiredWebhookEntity[]> {
     const em = this.dataSource.manager;
     const pendingDeletes = await em.find(TriggerRetiredWebhookEntity, { where: { workflowId } });
+    // The env's name comes from its row, as the intake resolves it, never from the pointer's copy of it.
     const pointers = await rawQuery<PointerRow>(
       em,
-      `SELECT environment_id, environment, version_id
-         FROM workflow_env_pointers
-        WHERE workflow_id = $1 AND environment_id IS NOT NULL`,
+      `SELECT p.environment_id, e.name AS environment, p.version_id
+         FROM workflow_env_pointers p
+         JOIN environments e ON e.id = p.environment_id
+        WHERE p.workflow_id = $1`,
       [workflowId],
     );
 
@@ -172,6 +181,10 @@ export class TriggerReconcilerService {
       pointers: pointerInputs,
       kindOf: (node) => this.kindOf(node),
       connectionOf: (envId, node) => connByEnvApp.get(slotKey(envId, node)) ?? null,
+      webhookUrlOf: (envId, kind) =>
+        kind === 'registered_webhook'
+          ? this.webhookUrl({ workflowId, environmentId: envId }, envNameById)
+          : null,
     });
 
     const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
@@ -182,19 +195,16 @@ export class TriggerReconcilerService {
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
     // rest of the sweep — the next reconcile re-converges.
     for (const d of plan.toCreate) {
-      await this.applyCreate(d, envNameById).catch((err) => this.logApplyError('create', d.key, err));
+      await this.applyCreate(d).catch((err) => this.logApplyError('create', d.key, err));
     }
     for (const u of plan.toUpdate) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
       if (row)
-        await this.applyUpdate(row, u, envNameById).catch((err) =>
-          this.logApplyError('update', u.desired.key, err),
-        );
+        await this.applyUpdate(row, u, envNameById).catch((err) => this.applyFailed('update', row, err));
     }
     for (const d of plan.toDelete) {
       const row = rowByKey.get(activationKeyString(d.key));
-      if (row)
-        await this.applyDelete(row, envNameById).catch((err) => this.logApplyError('delete', d.key, err));
+      if (row) await this.applyDelete(row, envNameById).catch((err) => this.applyFailed('delete', row, err));
     }
     if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
     return pendingDeletes;
@@ -227,10 +237,22 @@ export class TriggerReconcilerService {
       targets.push({ id: row.id, desired: d });
     }
     await runBounded(targets, SELFHEAL_CONCURRENCY, ({ id, desired: d }) =>
-      withActivationLock(this.pool, id, () => this.standUp(id, d, new Map())).catch((err) =>
+      withActivationLock(this.pool, id, () => this.standUp(id, d)).catch((err) =>
         this.logApplyError('selfheal', d.key, err),
       ),
     );
+  }
+
+  // A failed apply stays visible on its row; the row still disagrees with what is desired, so a later pass applies it again.
+  private async applyFailed(op: string, row: RuntimeTriggerActivationEntity, err: unknown): Promise<void> {
+    this.logApplyError(op, activationKeyOf(row), err);
+    await this.dataSource.manager
+      .update(RuntimeTriggerActivationEntity, { id: row.id }, { lastError: activationError(err) })
+      .catch((recordErr: unknown) =>
+        this.logger.warn(
+          `activation ${row.id}: could not record the failed ${op}: ${errorMessage(recordErr)}`,
+        ),
+      );
   }
 
   private logApplyError(op: string, key: DesiredActivation['key'], err: unknown): void {
@@ -259,16 +281,25 @@ export class TriggerReconcilerService {
     if (rows.length > 0) this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
   }
 
-  /** Queue a reconcile of every workflow with an activation whose last apply did not finish, which a poll passes over. */
-  async reconcileUnfinished(): Promise<void> {
-    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity);
-    const workflowIds = new Set(rows.filter((r) => !applyFinished(actualOf(r))).map((r) => r.workflowId));
-    for (const workflowId of workflowIds) await this.signals.enqueue(workflowId);
+  /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or whose webhook is registered at a URL no longer served (a new public base URL). */
+  async reconcileStale(): Promise<void> {
+    const em = this.dataSource.manager;
+    const rows = await em.find(RuntimeTriggerActivationEntity);
+    const envNames = new Map(
+      (await rawQuery<{ id: string; name: string }>(em, `SELECT id, name FROM environments`)).map((e) => [
+        e.id,
+        e.name,
+      ]),
+    );
+    const moved = (r: RuntimeTriggerActivationEntity): boolean =>
+      r.kind === 'registered_webhook' && r.webhookUrl !== this.webhookUrl(activationKeyOf(r), envNames);
+    const stale = rows.filter((r) => !applyFinished(actualOf(r)) || moved(r));
+    for (const workflowId of new Set(stale.map((r) => r.workflowId))) await this.signals.enqueue(workflowId);
   }
 
   // ─── apply ───
 
-  private async applyCreate(desired: DesiredActivation, envName: Map<string, string>): Promise<void> {
+  private async applyCreate(desired: DesiredActivation): Promise<void> {
     const id = newId();
     const ts = now();
     const missingSlot = this.needsConnection(desired) && desired.connection === null;
@@ -285,6 +316,7 @@ export class TriggerReconcilerService {
       connectionId: desired.connection?.connectionId ?? null,
       connectionOwnerUserId: desired.connection?.ownerUserId ?? null,
       paused: desired.paused,
+      webhookUrl: desired.webhookUrl,
       lastPolledAt: null,
       lastError: missingSlot ? this.slotError(desired) : null,
       createdAt: ts,
@@ -293,8 +325,11 @@ export class TriggerReconcilerService {
       materialized: standsUp ? null : materializedOf(desired),
     });
     await withActivationLock(this.pool, id, async () => {
-      await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-      if (standsUp) await this.standUp(id, desired, envName);
+      await this.dataSource.transaction(async (em) => {
+        await lockWorkflowForWrite(em, desired.key.workflowId);
+        await em.save(RuntimeTriggerActivationEntity, row);
+      });
+      if (standsUp) await this.standUp(id, desired);
     });
   }
 
@@ -313,6 +348,7 @@ export class TriggerReconcilerService {
     row.connectionId = desired.connection?.connectionId ?? null;
     row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
     row.paused = desired.paused;
+    row.webhookUrl = desired.webhookUrl;
     row.lastError = missingSlot ? this.slotError(desired) : null;
     row.updatedAt = now();
     await withActivationLock(this.pool, row.id, async () => {
@@ -324,7 +360,7 @@ export class TriggerReconcilerService {
         await this.recordMaterialized(row.id, desired);
         return;
       }
-      await this.standUp(row.id, desired, envName);
+      await this.standUp(row.id, desired);
     });
   }
 
@@ -338,13 +374,9 @@ export class TriggerReconcilerService {
     });
   }
 
-  private async standUp(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
+  private async standUp(activationId: string, desired: DesiredActivation): Promise<void> {
     try {
-      await this.materialize(activationId, desired, envName);
+      await this.materialize(activationId, desired);
     } catch (err) {
       await this.recordError(activationId, err);
       return;
@@ -363,18 +395,14 @@ export class TriggerReconcilerService {
   // ─── provider materialization / teardown (per kind) ───
 
   /** Stand up the live side-effect for an activation; throws so the caller records the failure. */
-  private async materialize(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
+  private async materialize(activationId: string, desired: DesiredActivation): Promise<void> {
     const store = new DbActivationStore(this.dataSource, activationId);
     switch (desired.kind) {
       case 'schedule':
         await store.put(SCHEDULE_CURSOR_KEY, now().toISOString());
         return;
       case 'registered_webhook':
-        await this.registerWebhook(activationId, desired, envName);
+        await this.registerWebhook(activationId, desired);
         return;
       case 'polling':
         // A discarded seed primes the dedup watermark; until one succeeds the poll cycle passes the activation over.
@@ -439,7 +467,31 @@ export class TriggerReconcilerService {
     const webhook =
       registeredWebhookOf(stored) ?? (await this.legacyWebhook(row, live, stored, store, envName));
     if (!webhook || (await this.registrationHeld(webhook, row.id))) return;
-    await this.disableWebhook(webhook, store).catch((err: unknown) => this.retire(row, webhook, err));
+    await this.boundedDelete(webhook).then(
+      () => this.noteUnreportedDelete(webhook, row.workflowId),
+      (err: unknown) => this.retire(row, webhook, err),
+    );
+  }
+
+  // A delete still running past the wait stays in the fence, so a stand-up handed its handle waits for it to land.
+  private boundedDelete(webhook: RegisteredWebhook): Promise<void> {
+    const attempt = this.deleteFence.deleting(webhook, () =>
+      this.disableWebhook(webhook, new InMemoryStore()),
+    );
+    return withDeadline(
+      attempt,
+      this.deleteWaitMs,
+      () => new Error(`the app did not answer the delete within ${this.deleteWaitMs}ms`),
+    );
+  }
+
+  // The log is the only record of a webhook whose app may have kept it without saying so.
+  private noteUnreportedDelete(webhook: RegisteredWebhook, workflowId: string): void {
+    if (this.sdkWebhooks.reportsFailedDelete(webhook.triggerType)) return;
+    this.logger.warn(
+      `${webhookLabel(webhook)} at ${webhook.webhookUrl} of workflow ${workflowId} was deleted, but its app does not ` +
+        `report a failed delete — if it is still there, delete it in the app`,
+    );
   }
 
   // A bare handle an earlier release stored names no trigger type; only a row still live as a registered webhook supplies one.
@@ -526,17 +578,20 @@ export class TriggerReconcilerService {
   }
 
   private async retryRetiredWebhook(entry: TriggerRetiredWebhookEntity): Promise<void> {
+    const em = this.dataSource.manager;
+    if ((await em.count(TriggerRetiredWebhookEntity, { where: { id: entry.id } })) === 0) return;
     const done = await this.deleteFence.deleting(
       entry.webhook,
       async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry)),
     );
-    if (done) await this.dataSource.manager.delete(TriggerRetiredWebhookEntity, { id: entry.id });
+    if (done) await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
   }
 
   // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
   private async retriedDelete(entry: TriggerRetiredWebhookEntity): Promise<boolean> {
     try {
       await this.disableWebhook(entry.webhook, new InMemoryStore());
+      this.noteUnreportedDelete(entry.webhook, entry.workflowId);
       return true;
     } catch (err) {
       if (err instanceof WebhookCredentialError) {
@@ -591,23 +646,55 @@ export class TriggerReconcilerService {
   }
 
   /** Register a fresh provider subscription pointing at the per-(workflow,env) intake URL. */
-  private registerWebhook(
-    activationId: string,
-    desired: DesiredActivation,
-    envName: Map<string, string>,
-  ): Promise<void> {
-    return this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired, envName));
+  private async registerWebhook(activationId: string, desired: DesiredActivation): Promise<void> {
+    const register = (): Promise<void> =>
+      this.deleteFence.standUp(() => this.registerWebhookOnce(activationId, desired));
+    try {
+      await register();
+    } catch (err) {
+      // An app that refuses a second webhook at one URL (GitHub, Calendly) refuses this one while a pending delete's is there.
+      if (!(await this.landPendingDeletesAt(desired))) throw err;
+      await register();
+    }
+  }
+
+  // Whether a pending delete of a webhook at the desired address was there and landed within the wait; other retries are never waited on.
+  private async landPendingDeletesAt(desired: DesiredActivation): Promise<boolean> {
+    const { webhookUrl } = desired;
+    if (!webhookUrl) return false;
+    const target = { triggerType: desired.triggerType, webhookUrl };
+    const atAddress = async (): Promise<TriggerRetiredWebhookEntity[]> =>
+      (
+        await this.dataSource.manager.find(TriggerRetiredWebhookEntity, {
+          where: { workflowId: desired.key.workflowId },
+        })
+      ).filter((entry) => sameAddress(entry.webhook, target));
+    if ((await atAddress()).length === 0) return false;
+    // One already being deleted lands through the fence; the rest are deleted now, so their queued copies find them gone.
+    const landing = (async (): Promise<void> => {
+      await this.deleteFence.landed((webhook) => sameAddress(webhook, target));
+      for (const entry of await atAddress()) await this.retryRetiredWebhook(entry);
+    })();
+    const inTime = await withDeadline(
+      landing,
+      this.deleteWaitMs,
+      () => new Error('a pending delete at this address is still running'),
+    ).then(
+      () => true,
+      () => false,
+    );
+    return inTime && (await atAddress()).length === 0;
   }
 
   private async registerWebhookOnce(
     activationId: string,
     desired: DesiredActivation,
-    envName: Map<string, string>,
   ): Promise<RegisteredWebhook | null> {
+    const { webhookUrl } = desired;
+    if (!webhookUrl) throw new Error(`No intake URL resolved for ${desired.triggerType}`);
     const store = new DbActivationStore(this.dataSource, activationId);
     const secret = randomBytes(32).toString('hex');
     await store.put(WEBHOOK_SECRET_KEY, secret);
-    const webhookUrl = this.webhookUrl(desired.key, envName);
     const registration = await this.sdkWebhooks.enable({
       externalUserId: desired.connection?.ownerUserId ?? '',
       type: desired.triggerType,
@@ -826,7 +913,10 @@ export class TriggerReconcilerService {
     return `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
   }
 
-  private webhookUrl(key: ActivationKey, envName: Map<string, string>): string {
+  private webhookUrl(
+    key: Pick<ActivationKey, 'workflowId' | 'environmentId'>,
+    envName: Map<string, string>,
+  ): string {
     const name = envName.get(key.environmentId) ?? key.environmentId;
     return webhookUrlFor(this.publicBaseUrl(), key.workflowId, name);
   }
@@ -869,12 +959,14 @@ function materializedOf(a: MaterializedActivation): MaterializedActivation {
     props: a.props,
     connection: a.connection,
     paused: a.paused,
+    webhookUrl: a.webhookUrl,
   };
 }
 
 // Read before the row is overwritten; a row with nothing recorded is best guessed by its own columns.
 function liveOf(row: RuntimeTriggerActivationEntity): MaterializedActivation {
-  return row.materialized ?? materializedOf(actualOf(row));
+  const actual = actualOf(row);
+  return actual.materialized ?? materializedOf(actual);
 }
 
 // The props locate the hook in the app (a GitHub hook id exists only under its repository).

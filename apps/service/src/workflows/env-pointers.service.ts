@@ -16,6 +16,7 @@ import { EnvironmentsService } from '../environments/environments.service';
 import { EventsService } from '../events/events.service';
 import { OrgsService } from '../orgs/orgs.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
+import { lockWorkflowForPointerMove } from './workflow-row-lock';
 
 // Re-exported so existing importers (triggers, controllers) keep one source.
 export { PROD_ENV };
@@ -113,14 +114,25 @@ export class EnvPointersService {
     const env = normalizeEnv(environment);
     const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
     const envRow = wf?.orgId ? await this.environments.ensureEnvironment(em, wf.orgId, env) : null;
-    await em.query(
-      `INSERT INTO workflow_env_pointers (workflow_id, environment, version_id, updated_at, environment_id)
-       VALUES ($1, $2, $3, now(), $4)
-       ON CONFLICT (workflow_id, environment)
-       DO UPDATE SET version_id = EXCLUDED.version_id, updated_at = now(),
-                     environment_id = EXCLUDED.environment_id`,
-      [workflowId, env, versionId, envRow?.id ?? null],
-    );
+    // The env row is locked, so its name is current: the pointer is found by its id and carries that name.
+    const moved = envRow
+      ? await rawMutate(
+          em,
+          `UPDATE workflow_env_pointers SET version_id = $3, environment = $4, updated_at = now()
+            WHERE workflow_id = $1 AND environment_id = $2`,
+          [workflowId, envRow.id, versionId, envRow.name],
+        )
+      : 0;
+    if (moved === 0) {
+      await em.query(
+        `INSERT INTO workflow_env_pointers (workflow_id, environment, version_id, updated_at, environment_id)
+         VALUES ($1, $2, $3, now(), $4)
+         ON CONFLICT (workflow_id, environment)
+         DO UPDATE SET version_id = EXCLUDED.version_id, updated_at = now(),
+                       environment_id = EXCLUDED.environment_id`,
+        [workflowId, envRow?.name ?? env, versionId, envRow?.id ?? null],
+      );
+    }
     if (env === PROD_ENV) {
       await em.query(`UPDATE workflows SET active_version_id = $2 WHERE id = $1`, [workflowId, versionId]);
     }
@@ -136,6 +148,7 @@ export class EnvPointersService {
     actorUserId: string,
   ): Promise<{ removed: true; environment: string }> {
     const result = await this.dataSource.transaction(async (em) => {
+      await lockWorkflowForPointerMove(em, workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
       if (!wf.orgId) throw new DomainError('Environment not found', 404); // org-less: no env rows
@@ -218,6 +231,7 @@ export class EnvPointersService {
     const environment = normalizeEnv(environmentRaw);
 
     const result = await this.dataSource.transaction(async (em) => {
+      await lockWorkflowForPointerMove(em, workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
 
@@ -235,13 +249,14 @@ export class EnvPointersService {
         );
       }
 
+      // Taken first and held until commit: a rename of this env waits, and one that committed is not followed.
+      const envRow = wf.orgId ? await this.environments.ensureEnvironment(em, wf.orgId, environment) : null;
       await this.assertPointerMoveAllowed(em, wf, environment, actorUserId);
       await this.assertEnvCanRun(em, wf, environment, version);
 
-      const current = await em.findOne(WorkflowEnvPointerEntity, {
-        where: { workflowId: wf.id, environment },
-      });
-      const currentVersionId = current?.versionId ?? (environment === PROD_ENV ? wf.activeVersionId : null);
+      const currentVersionId = envRow
+        ? await this.resolveVersionIdForEnv(em, wf, envRow)
+        : await this.resolveVersionId(em, wf, environment);
       const previous = currentVersionId
         ? await em.findOne(WorkflowVersionEntity, { where: { id: currentVersionId } })
         : null;

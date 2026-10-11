@@ -1,15 +1,10 @@
 import { Body, Controller, Delete, Get, Param, Put, Query, Req, UseGuards } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import type { Request } from 'express';
-import type { DataSource } from 'typeorm';
 
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
-import type { WorkflowEntity } from '../database/entities/workflow.entity';
-import { EnvironmentsService } from '../environments/environments.service';
-import type { PolicyAction } from '../policy/policy.service';
 import { WorkflowAccessService } from '../workflows/workflow-access.service';
 import { WebhookSecretsService } from './webhook-secrets.service';
 import { Scope } from '../auth/scope.decorator';
@@ -40,8 +35,6 @@ class SetSecretDto {
 @UseGuards(AuthGuard)
 export class WebhookSecretsController {
   constructor(
-    @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly environments: EnvironmentsService,
     private readonly secrets: WebhookSecretsService,
     private readonly access: WorkflowAccessService,
   ) {}
@@ -53,8 +46,8 @@ export class WebhookSecretsController {
     @Param('workflowId') workflowId: string,
     @Body() body: SetSecretDto,
   ): Promise<{ status: string }> {
-    const { wf, environmentId } = await this.resolve(req, workflowId, body.environment, 'write');
-    await this.secrets.setSecret(wf.id, environmentId, body.node_id, body.secret);
+    const wf = await this.access.require(requirePrincipal(req), workflowId, 'write');
+    await this.secrets.setSecret(wf, body.environment, body.node_id, body.secret);
     return { status: 'set' };
   }
 
@@ -71,8 +64,8 @@ export class WebhookSecretsController {
     @Query('environment') environment?: string,
   ): Promise<{ secret_present: boolean }> {
     if (!nodeId) throw new DomainError('node_id is required', 400);
-    const { wf, environmentId } = await this.resolve(req, workflowId, environment, 'read');
-    return { secret_present: await this.secrets.hasSecret(wf.id, environmentId, nodeId) };
+    const wf = await this.access.require(requirePrincipal(req), workflowId, 'read');
+    return { secret_present: await this.secrets.hasSecret(wf, environment, nodeId) };
   }
 
   @Scope('connection:write')
@@ -84,27 +77,8 @@ export class WebhookSecretsController {
     @Query('environment') environment?: string,
   ): Promise<{ status: string }> {
     if (!nodeId) throw new DomainError('node_id is required', 400);
-    const { wf, environmentId } = await this.resolve(req, workflowId, environment, 'write');
-    const removed = await this.secrets.clearSecret(wf.id, environmentId, nodeId);
+    const wf = await this.access.require(requirePrincipal(req), workflowId, 'write');
+    const removed = await this.secrets.clearSecret(wf, environment, nodeId);
     return { status: removed ? 'cleared' : 'absent' };
-  }
-
-  /** Authorize the caller against the workflow through the one access decision, and resolve the env name → id. */
-  private async resolve(
-    req: Request,
-    workflowId: string,
-    environment: string | undefined,
-    action: PolicyAction,
-  ): Promise<{ wf: WorkflowEntity; environmentId: string | null }> {
-    const wf = await this.access.require(requirePrincipal(req), workflowId, action);
-    const em = this.dataSource.manager;
-
-    let environmentId: string | null = null;
-    if (environment && wf.orgId) {
-      const env = await this.environments.findByNameForOrg(em, wf.orgId, environment);
-      if (!env) throw new DomainError('Environment not found', 404);
-      environmentId = env.id;
-    }
-    return { wf, environmentId };
   }
 }

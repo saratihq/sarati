@@ -122,10 +122,7 @@ export class WorkflowsWriteController {
     @Body() body: WorkflowUpdateDto,
   ): Promise<Record<string, unknown>> {
     await this.authorize(req, workflowId, 'write');
-    const wf = await this.reads.getWorkflowEntity(workflowId);
-    if (body.name !== undefined) wf.name = body.name;
-    if (body.description !== undefined) wf.description = body.description;
-    await this.lifecycle.saveWorkflowMeta(wf);
+    await this.lifecycle.saveWorkflowMeta(workflowId, { name: body.name, description: body.description });
     return this.reads.getWorkflow(workflowId);
   }
 

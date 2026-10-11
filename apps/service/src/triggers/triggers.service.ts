@@ -6,6 +6,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import type { Principal } from '../auth/principal';
 import { runBounded } from '../common/bounded';
+import { withDeadline } from '../common/deadline';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
@@ -728,10 +729,11 @@ export class TriggersService {
     environmentName: string,
   ): Promise<{ versionId: string; environmentId: string | null; environment: string } | null> {
     const canonical = canonicalEnvName(environmentName);
-    const env = wf.orgId ? await this.environments.findByNameForOrg(em, wf.orgId, canonical) : null;
-    if (env) {
-      const versionId = await this.envPointers.resolveVersionIdForEnv(em, wf, env);
-      return versionId ? { versionId, environmentId: env.id, environment: env.name } : null;
+    if (wf.orgId) {
+      // An org's env is its row: a name no env carries any more serves nothing, whatever a pointer still says.
+      const env = await this.environments.findByNameForOrg(em, wf.orgId, canonical);
+      const versionId = env ? await this.envPointers.resolveVersionIdForEnv(em, wf, env) : null;
+      return env && versionId ? { versionId, environmentId: env.id, environment: env.name } : null;
     }
     // Org-less workflow: only the prod alias can be promoted without an env row.
     const versionId = await this.envPointers.resolveVersionId(em, wf, canonical);
@@ -835,29 +837,16 @@ export function coerceWebhookBody(body: unknown): Record<string, unknown> {
     : { body };
 }
 
-/**
- * Await `work`, rejecting with a 504 if it doesn't settle within `ms`. On timeout `work`
- * keeps running (its rejection stays handled by the race) and lands in run history.
- */
-async function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new DomainError(
-            `Chat run ${runId} did not complete within ${ms}ms — chat is for fast flows; poll run history for the result`,
-            504,
-          ),
-        ),
-      ms,
-    );
-  });
-  try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): Promise<T> {
+  return withDeadline(
+    work,
+    ms,
+    () =>
+      new DomainError(
+        `Chat run ${runId} did not complete within ${ms}ms — chat is for fast flows; poll run history for the result`,
+        504,
+      ),
+  );
 }
 
 function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {

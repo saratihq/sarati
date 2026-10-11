@@ -125,7 +125,8 @@ The service's e2e suite talks to the Postgres database from step 2 — it has to
 nothing else: its test environment refuses every connection and DNS query the test process makes to
 anything but loopback and that database, and fails the test or suite that made it, so a suite serves
 its fixtures on `127.0.0.1` or injects a fake. Child processes and worker threads are outside that
-guard.
+guard. The agent's `test:pg`, which its `check` runs after the unit tests, needs the same database;
+its plain `test` does not.
 
 ## The vault
 

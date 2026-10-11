@@ -18,9 +18,13 @@ interface FakeState {
   org?: { id: string; isPersonal: boolean } | null;
 }
 
+const WORKFLOW_LOCK = /FROM workflows WHERE id = \$1 FOR (?:KEY SHARE|NO KEY UPDATE)/;
+
 /** In-memory EntityManager double: findOne dispatches on the entity class. */
 function fakeEm(state: FakeState): EntityManager & { findOne: jest.Mock; query: jest.Mock } {
-  const query = jest.fn().mockResolvedValue([]);
+  const query = jest.fn((sql: string) =>
+    Promise.resolve(WORKFLOW_LOCK.test(String(sql)) && state.wf ? [{}] : []),
+  );
   const findOne = jest.fn((entity: unknown, opts: { where: Record<string, unknown> }): Promise<unknown> => {
     const where = opts.where;
     if (entity === WorkflowEntity) return Promise.resolve(state.wf ?? null);
@@ -45,6 +49,10 @@ function fakeEm(state: FakeState): EntityManager & { findOne: jest.Mock; query: 
   });
   return { findOne, query } as unknown as EntityManager & { findOne: jest.Mock; query: jest.Mock };
 }
+
+/** The statements a call wrote, less the workflow-row lock every write takes first. */
+const writes = (em: { query: jest.Mock }): unknown[][] =>
+  em.query.mock.calls.filter(([sql]) => !WORKFLOW_LOCK.test(String(sql)));
 
 function build(state: FakeState, opts: { role?: 'owner' | 'admin' | 'member' | null } = {}) {
   const em = fakeEm(state);
@@ -142,11 +150,14 @@ describe('EnvPointersService.setPointer (the one alias-syncing write)', () => {
     expect(String(em.query.mock.calls[0][0])).toContain('INSERT INTO workflow_env_pointers');
   });
 
-  it('an ORG workflow dual-writes the env row id (find-or-created in its org)', async () => {
+  it("an ORG workflow's pointer is found by its env row's id and carries that row's name, inserted when there is none", async () => {
     const { svc, em, ensureEnvironment } = build({ wf: wf({ orgId: 'org-1' }) });
     await svc.setPointer(em, WF, 'staging', V2);
     expect(ensureEnvironment).toHaveBeenCalledWith(em, 'org-1', 'staging');
-    expect(em.query.mock.calls[0][1]).toEqual([WF, 'staging', V2, 'env-staging']);
+    expect(String(em.query.mock.calls[0][0])).toContain('WHERE workflow_id = $1 AND environment_id = $2');
+    expect(em.query.mock.calls[0][1]).toEqual([WF, 'env-staging', V2, 'staging']);
+    expect(String(em.query.mock.calls[1][0])).toContain('INSERT INTO workflow_env_pointers');
+    expect(em.query.mock.calls[1][1]).toEqual([WF, 'staging', V2, 'env-staging']);
   });
 });
 
@@ -170,7 +181,8 @@ describe('EnvPointersService.promote', () => {
       previous_version_number: null, // staging had nothing before
     });
     expect(emit).toHaveBeenCalledTimes(1);
-    expect(em.query).toHaveBeenCalledTimes(1); // pointer upsert only — no alias write for staging
+    expect(String(em.query.mock.calls[0]![0])).toContain('FROM workflows WHERE id = $1 FOR NO KEY UPDATE');
+    expect(writes(em)).toHaveLength(1); // pointer upsert only — no alias write for staging
   });
 
   it('is idempotent: re-promoting the pointed version writes and emits nothing', async () => {
@@ -182,14 +194,14 @@ describe('EnvPointersService.promote', () => {
     const res = await svc.promote(WF, 'staging', V2, USER);
     expect(res).toMatchObject({ status: 'promoted', version_number: 2, previous_version_number: 2 });
     expect(emit).not.toHaveBeenCalled();
-    expect(em.query).not.toHaveBeenCalled();
+    expect(writes(em)).toEqual([]);
   });
 
   it('prod promote via the endpoint == publish: pointer + alias move together', async () => {
     const { svc, em, emit } = build({ wf: wf({ activeVersionId: V1 }), versions, pointers: [] });
     const res = await svc.promote(WF, 'production', V2, USER);
     expect(res).toMatchObject({ environment: 'production', version_number: 2, previous_version_number: 1 });
-    expect(em.query).toHaveBeenCalledTimes(2); // upsert + alias sync
+    expect(writes(em)).toHaveLength(2); // upsert + alias sync
     expect(emit).toHaveBeenCalledTimes(1);
   });
 

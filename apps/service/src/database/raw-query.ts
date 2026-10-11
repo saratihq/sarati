@@ -11,6 +11,16 @@ export async function rawMutate(em: EntityManager, sql: string, params: unknown[
   return affected ?? 0;
 }
 
+/** Raw UPDATE/DELETE … RETURNING: the returned rows. */
+export async function rawMutateReturning<T>(
+  em: EntityManager,
+  sql: string,
+  params: unknown[] = [],
+): Promise<T[]> {
+  const [rows]: [T[], number | null] = await em.query(sql, params);
+  return rows;
+}
+
 /** JSON-serialize any value into a plain Record. */
 export function jsonRecord(value: unknown): Record<string, unknown> {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-return

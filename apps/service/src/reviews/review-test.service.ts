@@ -14,6 +14,7 @@ import { now } from '../database/ids';
 import type { WorkflowIR } from '../ir/models';
 import { RunsService } from '../runs/runs.service';
 import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
+import { lockWorkflowRow } from '../workflows/workflow-row-lock';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
 import type { ReviewTestSide, ReviewTestSummary, TestVerdict } from './review-test.types';
@@ -107,11 +108,7 @@ export class ReviewTestService {
   /** Keep a finished test by its versions — even once its review is gone — and show it there if newest. */
   async storeTest(workflowId: string, reviewId: string, summary: ReviewTestSummary): Promise<void> {
     await this.dataSource.transaction(async (em) => {
-      // Workflow before review — the order deleting the workflow cascades in — so the two cannot deadlock.
-      const workflow = await em.query<unknown[]>(`SELECT 1 FROM workflows WHERE id = $1 FOR KEY SHARE`, [
-        workflowId,
-      ]);
-      if (workflow.length === 0) return;
+      if (!(await lockWorkflowRow(em, workflowId))) return;
       const review = await em.findOne(WorkflowReviewEntity, {
         where: { id: reviewId },
         lock: { mode: 'pessimistic_write' },

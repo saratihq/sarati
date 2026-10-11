@@ -9,6 +9,9 @@ export const RECONCILE_QUEUE = 'trigger-reconcile';
 /** pg-boss queue that reconciles ALL workflows — the periodic safety-net full sweep. */
 export const RECONCILE_SWEEP_QUEUE = 'trigger-reconcile-sweep';
 
+/** At most this many queued inline reconciles run at once, so a burst cannot run the database pool dry. */
+const INLINE_CONCURRENCY = 5;
+
 /** The reconcile handler the signal seam drives inline when pg-boss is off. */
 export type InlineReconcile = (workflowId: string) => Promise<void>;
 
@@ -22,12 +25,15 @@ export type InlineReconcile = (workflowId: string) => Promise<void>;
 export class TriggerSignalsService {
   private readonly logger = new Logger(TriggerSignalsService.name);
   private inline: InlineReconcile | null = null;
+  private readonly waiting: string[] = [];
+  private running = 0;
 
   constructor(@Inject(PG_BOSS) private readonly boss: PgBoss | null) {}
 
   /** The trigger layer wires its reconciler here at boot (registered in every mode). */
   registerInline(handler: InlineReconcile): void {
     this.inline = handler;
+    this.drain();
   }
 
   /**
@@ -54,14 +60,27 @@ export class TriggerSignalsService {
         await this.boss.send(RECONCILE_QUEUE, { workflowId });
         return;
       }
-      if (this.inline) {
-        // Fire-and-forget: the caller must not block on provider registration.
-        void this.inline(workflowId).catch((err) =>
-          this.logger.warn(`inline reconcile of ${workflowId} failed: ${errorMessage(err)}`),
-        );
-      }
+      // Fire-and-forget: the caller must not block on provider registration.
+      if (!this.waiting.includes(workflowId)) this.waiting.push(workflowId);
+      this.drain();
     } catch (err) {
       this.logger.warn(`enqueue reconcile of ${workflowId} failed: ${errorMessage(err)}`);
+    }
+  }
+
+  private drain(): void {
+    const inline = this.inline;
+    while (inline && this.running < INLINE_CONCURRENCY && this.waiting.length > 0) {
+      const workflowId = this.waiting.shift()!;
+      this.running += 1;
+      void inline(workflowId)
+        .catch((err: unknown) =>
+          this.logger.warn(`inline reconcile of ${workflowId} failed: ${errorMessage(err)}`),
+        )
+        .finally(() => {
+          this.running -= 1;
+          this.drain();
+        });
     }
   }
 }

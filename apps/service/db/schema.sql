@@ -412,7 +412,8 @@ CREATE TABLE public.runtime_trigger_activations (
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    materialized jsonb
+    materialized jsonb,
+    webhook_url text
 );
 
 
@@ -1202,6 +1203,13 @@ CREATE UNIQUE INDEX uq_tag_per_workflow_exclusive ON public.workflow_version_tag
 --
 
 CREATE UNIQUE INDEX uq_webhook_secret_wf_env_node ON public.webhook_trigger_secrets USING btree (workflow_id, COALESCE(environment_id, '00000000-0000-0000-0000-000000000000'::uuid), node_id);
+
+
+--
+-- Name: uq_workflow_env_pointers_workflow_env; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE UNIQUE INDEX uq_workflow_env_pointers_workflow_env ON public.workflow_env_pointers USING btree (workflow_id, environment_id) WHERE (environment_id IS NOT NULL);
 
 
 --

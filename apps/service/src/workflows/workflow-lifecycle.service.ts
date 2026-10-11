@@ -6,7 +6,7 @@ import type { DataSource } from 'typeorm';
 import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { newId, now } from '../database/ids';
-import { rawQuery } from '../database/raw-query';
+import { rawMutateReturning, rawQuery } from '../database/raw-query';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
@@ -17,7 +17,9 @@ import { assertAuthoredIrValid } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
+import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
+import { lockWorkflowForPointerMove } from './workflow-row-lock';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
 export interface DraftCreateInput {
@@ -219,7 +221,12 @@ export class WorkflowLifecycleService {
     const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
     if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
 
+    await this.unpromoteEverywhere(wf, actorId);
+    // With the pointers gone the reconcile tears every activation down at its provider.
+    await this.triggerSignals.reconcileNow(wf.id);
+
     await this.dataSource.transaction(async (tx) => {
+      await lockDeletable(tx, { workflowId: wf.id }, `'${wf.name}'`);
       // The circular FKs must be broken before the cascade delete.
       await tx.query(
         `UPDATE workflows SET active_version_id = NULL, default_branch_id = NULL WHERE id = $1`,
@@ -240,10 +247,35 @@ export class WorkflowLifecycleService {
     return { status: 'deleted' };
   }
 
-  /** Metadata-only save (name/description). */
-  async saveWorkflowMeta(wf: WorkflowEntity): Promise<void> {
-    wf.updatedAt = now();
-    await this.dataSource.manager.save(WorkflowEntity, wf);
+  private unpromoteEverywhere(wf: WorkflowEntity, actorId: string | null): Promise<void> {
+    return this.dataSource.transaction(async (tx) => {
+      await lockWorkflowForPointerMove(tx, wf.id);
+      const removed = await rawMutateReturning<{ environment: string }>(
+        tx,
+        `DELETE FROM workflow_env_pointers WHERE workflow_id = $1 RETURNING environment`,
+        [wf.id],
+      );
+      await tx.query(`UPDATE workflows SET active_version_id = NULL WHERE id = $1`, [wf.id]);
+      for (const { environment } of removed) {
+        await this.events.emit(tx, {
+          orgId: wf.orgId,
+          actorUserId: actorId,
+          type: 'workflow.unpromoted',
+          subjectType: 'workflow',
+          subjectId: wf.id,
+          payload: { environment },
+        });
+      }
+    });
+  }
+
+  /** Write only the given name and description, so a publish that lands meanwhile is never written back. */
+  async saveWorkflowMeta(workflowId: string, meta: { name?: string; description?: string }): Promise<void> {
+    const changes: Partial<WorkflowEntity> = { updatedAt: now() };
+    if (meta.name !== undefined) changes.name = meta.name;
+    if (meta.description !== undefined) changes.description = meta.description;
+    const updated = await this.dataSource.manager.update(WorkflowEntity, { id: workflowId }, changes);
+    if (!updated.affected) throw new DomainError(`Workflow ${workflowId} not found`, 404);
   }
 
   /** The caller's personal-org id (tenancy attribution for new workflows). */

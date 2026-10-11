@@ -34,6 +34,9 @@ export const WEBHOOK_REGISTRATION_KEY = 'webhook.registration';
 /** A webhook delete no retry can perform: no account is recorded, its connection is gone, or the app rejects the credential. */
 export class WebhookCredentialError extends Error {}
 
+// Triggers whose delete swallows every failure, so a failed one reads as a success.
+const UNREPORTED_DELETE_FAILURES: ReadonlySet<string> = new Set([actions.linear.NEW_ISSUE_TYPE]);
+
 /** Common shape the three lifecycle entrypoints share (one trigger row's context). */
 interface SdkWebhookContext {
   externalUserId: string;
@@ -94,6 +97,11 @@ export class SdkWebhookProvider {
   /** Whether `type` is an SDK registered-webhook trigger (drives the triggers-service branch). */
   isRegisteredWebhook(type: string): boolean {
     return this.registry.has(type);
+  }
+
+  /** Whether a failed delete of this trigger's webhook reaches the caller; Linear's never does. */
+  reportsFailedDelete(type: string): boolean {
+    return !UNREPORTED_DELETE_FAILURES.has(type);
   }
 
   /** Catalog entries for the trigger picker — same wire shape the other trigger entries use, plus `sample`. */
