@@ -50,6 +50,11 @@ slot moved to another account, or after a GitHub trigger's repository changed, w
 so it is neither deleted nor named in the log: look in the old account or repository for webhooks
 that point at this install, and delete them there.
 
+**Upgrading from v0.2.22 or earlier** with `COMPOSIO_BASE_URL` set to a plain `http://` address on
+another host stops the service at boot: every request to it carries the Composio API key, so it has
+to be `https://`, or `http://` to the same machine. A value that isn't an http(s) URL, or that
+carries a `?` or `#`, now stops it at boot too — neither ever sent a request to the right path.
+
 ## Back up
 
 Your install is one container or five — `docker compose ps` in the `sarati` directory tells you

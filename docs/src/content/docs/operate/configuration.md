@@ -94,6 +94,11 @@ Single sign-on (`OIDC_*`, `CLERK_*`) and bring-your-own OAuth (`OAUTH_<PROVIDER>
 `_CLIENT_SECRET`) are configured the same way. With every auth variable empty, email and password is
 the way in.
 
+`COMPOSIO_BASE_URL` and `CLERK_API_URL` point the service at a proxy or a self-hosted API instead of
+the provider's own. Requests to them carry an API secret, so in production each has to be
+`https://`, or `http://` to the same machine (`localhost`, `127.0.0.1`, `::1`); anything else stops
+the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set.
+
 ## Container defaults differ from the source template
 
 Running the Docker stack, not from a clone:

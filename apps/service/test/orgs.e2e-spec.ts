@@ -3,13 +3,35 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
+import type { FetchLike } from '@sarati/actions-sdk';
 import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
+
+// Gmail answering the identity probe a new connection runs; any other SDK request is a test bug.
+const gmailFetch: FetchLike = (input) => {
+  const url = String(input);
+  if (!url.endsWith('/gmail/v1/users/me/profile')) {
+    return Promise.reject(new Error(`unexpected SDK request: ${url}`));
+  }
+  const body = JSON.stringify({
+    emailAddress: 'b-personal@e2e.local',
+    messagesTotal: 0,
+    threadsTotal: 0,
+    historyId: '1',
+  });
+  return Promise.resolve({
+    status: 200,
+    headers: { forEach: (cb) => cb('application/json', 'content-type') },
+    text: () => Promise.resolve(body),
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+  });
+};
 
 /** A workflow whose step references a connection — with no env cluster it hard-fails at fire. */
 function connIr(): Record<string, unknown> {
@@ -176,6 +198,8 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
 
     // Per-route throttles (/api/deploy: 10 a minute) are not what this suite tests.
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(SDK_ACTIONS_FETCH)
+      .useValue(gmailFetch)
       .overrideProvider(ThrottlerStorage)
       .useValue({
         increment: () =>

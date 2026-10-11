@@ -1,3 +1,5 @@
+import { BlockList, isIP } from 'node:net';
+
 import { Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsString, Min, validateSync } from 'class-validator';
@@ -10,18 +12,36 @@ export const DEFAULT_DATABASE_URL = 'postgresql://orchestr:orchestr@localhost:54
 /** Where the client runs in development — the one default behind CORS, azp and the OAuth redirect. */
 const DEFAULT_CLIENT_ORIGIN = 'http://localhost:3100';
 
-/** Hostnames treated as a LOCAL database (dev-mode is permitted against these). */
-const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '']);
+const LOOPBACK = new BlockList();
+LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
+LOOPBACK.addAddress('::1', 'ipv6');
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const family = isIP(host);
+  if (family === 0) return host === 'localhost';
+  return LOOPBACK.check(host, family === 4 ? 'ipv4' : 'ipv6');
+}
 
 /** True when DATABASE_URL targets a local host; an unparseable DSN counts as local. */
 function isLocalDatabaseHost(databaseUrl: string): boolean {
   let host: string;
   try {
-    host = new URL(databaseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    host = new URL(databaseUrl).hostname;
   } catch {
     return true; // can't parse a host → don't block boot on it
   }
-  return LOCAL_DB_HOSTS.has(host);
+  return host === '' || isLoopbackHost(host);
+}
+
+function httpUrl(value: string): URL | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  return ['http:', 'https:'].includes(parsed.protocol) && parsed.hostname ? parsed : null;
 }
 
 /** Parse CORS_ORIGINS; each origin must be an http(s) URL with a hostname, else throws at startup. */
@@ -30,13 +50,7 @@ export function parseCorsOrigins(raw: string): string[] {
   for (const part of raw.split(',')) {
     const origin = part.trim();
     if (!origin) continue;
-    let parsed: URL | null = null;
-    try {
-      parsed = new URL(origin);
-    } catch {
-      parsed = null;
-    }
-    if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) {
+    if (!httpUrl(origin)) {
       throw new Error(
         `Invalid CORS origin ${JSON.stringify(origin)} in CORS_ORIGINS — ` +
           'each origin must be an http(s) URL like https://app.example.com',
@@ -45,6 +59,31 @@ export function parseCorsOrigins(raw: string): string[] {
     origins.push(origin);
   }
   return origins;
+}
+
+/** Parse a provider API base URL: http(s), a hostname, no query or fragment; trailing slashes dropped, else throws at startup. */
+export function parseApiBaseUrl(name: string, raw: string): string {
+  const value = raw.trim();
+  const parsed = httpUrl(value);
+  if (!parsed) {
+    throw new Error(
+      `Invalid ${name} ${JSON.stringify(raw)} — it must be an http(s) URL with a hostname, like https://api.example.com`,
+    );
+  }
+  // Requests append their path, so even a bare `?` or `#` swallows it; the value may hold a key, so it is not echoed.
+  if (/[?#]/.test(value)) {
+    throw new Error(`${name} (${parsed.origin}${parsed.pathname}) must not carry a query string or fragment`);
+  }
+  return value.replace(/\/+$/, '');
+}
+
+function assertSecretStaysOffPlaintext(name: string, url: string): void {
+  const { protocol, hostname } = new URL(url);
+  if (protocol === 'http:' && !isLoopbackHost(hostname)) {
+    throw new Error(
+      `${name} must be https in production — every request to it carries an API secret; plain http only reaches this machine.`,
+    );
+  }
 }
 
 export class EnvConfig {
@@ -117,6 +156,10 @@ export class EnvConfig {
 
   @IsString()
   clerkSecretKey = '';
+
+  /** Clerk Backend API base URL — overridable so tests can point at a stub. */
+  @IsString()
+  clerkApiUrl = 'https://api.clerk.com';
 
   /** Comma-separated azp allow-list; empty skips the azp check. */
   @IsString()
@@ -211,13 +254,16 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       publicBaseUrl: raw.PUBLIC_BASE_URL ?? '',
       clerkIssuer: raw.CLERK_ISSUER ?? '',
       clerkSecretKey: raw.CLERK_SECRET_KEY ?? '',
+      clerkApiUrl: raw.CLERK_API_URL ? parseApiBaseUrl('CLERK_API_URL', raw.CLERK_API_URL) : undefined,
       clerkAuthorizedParties: raw.CLERK_AUTHORIZED_PARTIES ?? undefined,
       localAuthEnabled: asBool(raw.LOCAL_AUTH_ENABLED, !raw.CLERK_ISSUER),
       oidcIssuer: raw.OIDC_ISSUER ?? '',
       oidcJwksUrl: raw.OIDC_JWKS_URL ?? '',
       oidcAudience: raw.OIDC_AUDIENCE ?? '',
       mockAuth: asBool(raw.MOCK_AUTH, false),
-      composioBaseUrl: raw.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
+      composioBaseUrl: raw.COMPOSIO_BASE_URL
+        ? parseApiBaseUrl('COMPOSIO_BASE_URL', raw.COMPOSIO_BASE_URL)
+        : undefined,
       composioFallbackApps: raw.COMPOSIO_FALLBACK_APPS ?? '',
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
@@ -253,6 +299,8 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
           'crashed or redeployed worker orphans every in-flight run (no durable crash-resume).',
       );
     }
+    if (cfg.clerkSecretKey) assertSecretStaysOffPlaintext('CLERK_API_URL', cfg.clerkApiUrl);
+    assertSecretStaysOffPlaintext('COMPOSIO_BASE_URL', cfg.composioBaseUrl);
     if (!cfg.dbosAppVersion) {
       throw new Error(
         'DBOS_APP_VERSION must be set to a stable value in production (e.g. "orchestr-1") so a ' +
