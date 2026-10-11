@@ -23,7 +23,7 @@ import {
   triggerCatalogEntry,
 } from './sdk-trigger-auth';
 
-/** Optional token for the SDK triggers' outbound fetch; unset in production → the SDK's global fetch. */
+/** Test-only fetch for the SDK triggers; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const SDK_WEBHOOK_FETCH = Symbol('SDK_WEBHOOK_FETCH');
 
 /** The per-trigger secret WE generated — SINGLE definition site (reconciler writes, intake reads). */

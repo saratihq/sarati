@@ -31,7 +31,7 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
   /** Every request the fake provider receives — proves a blocked flow never fetches. */
   let providerHits = 0;
   /** What the fake provider answers to refresh grants (the health tests break it). */
-  let refreshReply: 'ok' | 'invalid_grant' = 'ok';
+  let refreshReply: 'ok' | 'invalid_grant' | '503' | '429' | 'redirect' | 'truncate' = 'ok';
   const savedOauthEnv = new Map<string, string | undefined>();
 
   beforeAll(async () => {
@@ -66,6 +66,21 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
           const grant = new URLSearchParams(lastTokenBody);
           if (grant.get('grant_type') === 'refresh_token') {
             refreshGrants += 1;
+            if (refreshReply === '503' || refreshReply === '429') {
+              res.writeHead(Number(refreshReply), { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'temporarily_unavailable' }));
+              return;
+            }
+            if (refreshReply === 'redirect') {
+              res.writeHead(308, { location: '/token2' });
+              res.end();
+              return;
+            }
+            if (refreshReply === 'truncate') {
+              res.writeHead(200, { 'content-type': 'application/json', 'content-length': '200' });
+              res.write('{"access_', () => setTimeout(() => res.socket?.destroy(), 50));
+              return;
+            }
             if (refreshReply === 'invalid_grant') {
               // The provider revoked the refresh token — the standard reply.
               res.writeHead(400, { 'content-type': 'application/json' });
@@ -80,6 +95,11 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
                 expires_in: 3600,
               }),
             );
+            return;
+          }
+          if (grant.get('code') === 'auth-code-truncate') {
+            res.writeHead(200, { 'content-type': 'application/json', 'content-length': '200' });
+            res.write('{"access_', () => setTimeout(() => res.socket?.destroy(), 50));
             return;
           }
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -306,6 +326,72 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
     expect(await listedRow(id)).toMatchObject({ status: 'active', status_reason: null });
   });
 
+  it.each([
+    ['503', 'The provider could not be reached — try again shortly.'],
+    ['429', 'The provider could not be reached — try again shortly.'],
+  ] as const)(
+    'a probe whose refresh meets a %s keeps the connection active, since nothing was refused',
+    async (reply, detail) => {
+      const id = await mintConnection('auth-code-expiring');
+      refreshReply = reply;
+      try {
+        const res = await request(app.getHttpServer()).post(`/api/connections/${id}/test`).expect(200);
+        expect(res.body).toMatchObject({ ok: false, status: 'active', detail });
+      } finally {
+        refreshReply = 'ok';
+      }
+      expect(await listedRow(id)).toMatchObject({ status: 'active', status_reason: null });
+    },
+  );
+
+  it('a probe whose token endpoint redirects says where to, and keeps the connection active', async () => {
+    const id = await mintConnection('auth-code-expiring');
+    refreshReply = 'redirect';
+    try {
+      const res = await request(app.getHttpServer()).post(`/api/connections/${id}/test`).expect(200);
+      expect(res.body).toMatchObject({ ok: false, status: 'active' });
+      expect(res.body.detail).toBe(
+        `the token endpoint ${providerUrl} redirected (308) to ${providerUrl}/token2; use that URL as the token URL, since a token endpoint must answer directly`,
+      );
+    } finally {
+      refreshReply = 'ok';
+    }
+    expect(await listedRow(id)).toMatchObject({ status: 'active' });
+  });
+
+  it.each(['truncate', '503'] as const)(
+    'a RUN-TIME refresh that meets a %s fails the step but does not call the connection declined',
+    async (reply) => {
+      const id = await mintConnection('auth-code-expired');
+      refreshReply = reply;
+      const me = await request(app.getHttpServer()).get('/api/auth/me').expect(200);
+      try {
+        await expect(app.get(ConnectionsService).getCredential(me.body.user.id, id)).rejects.toThrow(
+          /token refresh failed/,
+        );
+      } finally {
+        refreshReply = 'ok';
+      }
+      expect(await listedRow(id)).toMatchObject({ status: 'active', status_reason: null });
+    },
+  );
+
+  it('a callback whose token response breaks off answers 502 with the reason, not an opaque 500', async () => {
+    const auth = await request(app.getHttpServer())
+      .post('/api/connections/oauth/authorize')
+      .send({ provider: 'acme' })
+      .expect(201);
+    const res = await request(app.getHttpServer())
+      .post('/api/connections/oauth/callback')
+      .send({ code: 'auth-code-truncate', state: auth.body.state })
+      .expect(502);
+    expect(res.body.detail).toMatch(
+      new RegExp(
+        `^The token exchange failed: the connection to ${providerUrl.replace(/\./g, '\\.')} broke while reading the token response`,
+      ),
+    );
+  });
+
   it('a failed RUN-TIME refresh of an expired token persists the expired status (H4 failure path)', async () => {
     const id = await mintConnection('auth-code-expired'); // hard-expired at mint
     refreshReply = 'invalid_grant';
@@ -450,8 +536,39 @@ describe('oauth connection flow (e2e, isolated DB, mock auth)', () => {
         },
       })
       .expect(400);
-    expect(res.body.detail).toMatch(/token_url must not point at a private or internal address/);
+    expect(res.body.detail).toBe(
+      'OAuth token_url cannot be used: refusing to send a request to a private/internal address (169.254.169.254). An operator can allow it by adding 169.254.169.254 to ORCHESTR_HTTP_ALLOWED_HOSTS.',
+    );
     // The flow is rejected at authorize, before any state is minted or fetched.
+    expect(providerHits).toBe(before);
+  });
+
+  it('answers a callback whose token endpoint is refused at exchange with a 400 that says why, not a 500', async () => {
+    const auth = await request(app.getHttpServer())
+      .post('/api/connections/oauth/authorize')
+      .send({
+        provider: 'byoapp',
+        oauth_client: {
+          ...BYO_CLIENT,
+          auth_url: `${providerUrl}/authorize`,
+          token_url: providerUrl.replace('127.0.0.1', 'localhost') + '/token',
+        },
+      })
+      .expect(201);
+    const before = providerHits;
+    const saved = process.env.ORCHESTR_HTTP_ALLOWED_HOSTS;
+    process.env.ORCHESTR_HTTP_ALLOWED_HOSTS = '127.0.0.1';
+    try {
+      const res = await request(app.getHttpServer())
+        .post('/api/connections/oauth/callback')
+        .send({ code: 'auth-code-refused', state: auth.body.state })
+        .expect(400);
+      expect(res.body.detail).toBe(
+        'The token exchange failed: refusing to send a request to a private/internal address (localhost). An operator can allow it by adding localhost to ORCHESTR_HTTP_ALLOWED_HOSTS.',
+      );
+    } finally {
+      process.env.ORCHESTR_HTTP_ALLOWED_HOSTS = saved;
+    }
     expect(providerHits).toBe(before);
   });
 

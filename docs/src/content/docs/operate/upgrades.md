@@ -30,6 +30,28 @@ docker pull sarati/sarati && docker rm -f sarati
 docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 ```
 
+## Notes for specific versions
+
+### v0.2.23: outbound requests to private addresses
+
+Every step and trigger that calls an address from this server now refuses a private or internal one,
+in any spelling, on every redirect. Before, the HTTP and GraphQL steps, the HTTP and RSS triggers and
+the OAuth token exchange checked the address once before sending — not the address actually connected
+to, any redirect, or an IPv6 spelling of an IPv4 address, which let a private address through. Upgrade
+from any earlier version.
+
+What can newly refuse, and the fix for each, is in
+[Private addresses](/operate/configuration/#private-addresses):
+
+- app steps on your own credentials aimed at a host on your network
+- redirects into private space
+- an OAuth client entered in the Connect dialog whose host this server cannot resolve
+- a server whose DNS hands out synthetic private addresses
+
+Steps behind an egress proxy go through it when Node's `NODE_USE_ENV_PROXY=1` is set; keep the
+stack's own addresses in `NO_PROXY`, as
+[Private addresses](/operate/configuration/#private-addresses) lists.
+
 ## What survives
 
 Everything in the volumes: workflows, versions, branches, reviews, runs, users, and stored

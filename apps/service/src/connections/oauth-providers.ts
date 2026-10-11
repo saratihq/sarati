@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { guardUserUrl, ssrfAllowedHostsFromEnv } from '@sarati/actions-sdk';
+import { ActionError, guardUserUrl, ssrfAllowedHostsFromEnv } from '@sarati/actions-sdk';
 
 import { DomainError } from '../common/domain-error';
+import { errorMessage } from '../common/error-message';
 import { asBool } from '../config/env.config';
 
 /** A resolved OAuth2 app — catalog endpoint metadata + env client credentials. */
@@ -160,16 +161,41 @@ export async function assertSafeOAuthEndpoint(label: string, rawUrl: string): Pr
     throw new DomainError(`OAuth ${label} is not a valid URL`, 400);
   }
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, ''); // unbracket v6 literals
+  if (url.username || url.password) {
+    throw new DomainError(
+      `OAuth ${label} must not carry a username or password; the client id and secret are sent separately`,
+      400,
+    );
+  }
   const allowlisted = ssrfAllowedHostsFromEnv().includes(host);
-  if (url.protocol !== 'https:' && !allowlisted) {
-    throw new DomainError(`OAuth ${label} must use https (got ${url.protocol || 'no scheme'})`, 400);
+  if (url.protocol !== 'https:' && !(allowlisted && url.protocol === 'http:')) {
+    throw new DomainError(
+      `OAuth ${label} must use https (got ${url.protocol || 'no scheme'}), or an operator can add ${host} to ORCHESTR_HTTP_ALLOWED_HOSTS`,
+      400,
+    );
   }
   try {
-    // The SDK's shared SSRF guard — blocks a private/loopback/link-local/cloud-metadata target.
     await guardUserUrl(rawUrl);
-  } catch {
-    throw new DomainError(`OAuth ${label} must not point at a private or internal address`, 400);
+  } catch (err) {
+    throw endpointRefusal(label, host, err);
   }
+}
+
+function endpointRefusal(label: string, host: string, err: unknown): DomainError {
+  if (err instanceof ActionError && err.code === 'unresolvable_host' && err.retryable) {
+    return new DomainError(
+      `OAuth ${label} could not be checked: ${host} did not resolve just now; try again`,
+      503,
+    );
+  }
+  // The browser follows the authorization URL, not this server, so it is about where it points, not what is sent.
+  if (label === 'authorization_url' && err instanceof ActionError && err.code === 'ssrf_blocked') {
+    return new DomainError(
+      `OAuth authorization_url points at a private or internal address (${host}); an operator can allow it by adding ${host} to ORCHESTR_HTTP_ALLOWED_HOSTS`,
+      400,
+    );
+  }
+  return new DomainError(`OAuth ${label} cannot be used: ${errorMessage(err)}`, 400);
 }
 
 @Injectable()

@@ -28,8 +28,7 @@ import { AGENT_MODEL_CALL, AGENT_TOOL_CATALOG } from '../runtime/agent';
     SdkWebhookProvider,
     SdkPollingProvider,
     ComposioTriggerProvider,
-    // The three SDK fetch seams: undefined in prod (the SDK uses the global fetch);
-    // registered so tests can overrideProvider them with a stub.
+    // SDK fetch seams (AGENT_MODEL_FETCH below too): unset in prod, so steps use the SDK's SSRF-guarded hop; a stub skips that guard.
     { provide: SDK_WEBHOOK_FETCH, useValue: undefined },
     { provide: SDK_POLLING_FETCH, useValue: undefined },
     { provide: SDK_ACTIONS_FETCH, useValue: undefined },

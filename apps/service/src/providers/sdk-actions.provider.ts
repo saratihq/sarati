@@ -14,7 +14,7 @@ import { PlatformKeysService } from '../platform/platform-keys.service';
 import { resolveSdkAuthHandle } from './sdk-auth';
 import type { RunActionInput, RunActionResult } from './managed-integration-provider';
 
-/** Optional fetch override for the SDK transports; unset in production (the SDK uses the global fetch). */
+/** Test-only fetch for the SDK transports; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const SDK_ACTIONS_FETCH = Symbol('SDK_ACTIONS_FETCH');
 
 /**

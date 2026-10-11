@@ -177,7 +177,9 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
 
     expect(deployed.body.activated).toBe(false);
     // Whichever leg refuses it — the SSRF guard, or the connection itself — the caller is told.
-    expect(String(deployed.body.activation_error)).toMatch(/private\/internal address|Couldn't reach it/);
+    expect(String(deployed.body.activation_error)).toMatch(
+      /private\/internal address|the request to http:\/\/127\.0\.0\.1:9 could not be sent: fetch will not connect to port 9/,
+    );
     // …in words, never as a JS error class: this string is shown to the user verbatim.
     expect(String(deployed.body.activation_error)).not.toMatch(/^[A-Z]\w*Error:/);
   });

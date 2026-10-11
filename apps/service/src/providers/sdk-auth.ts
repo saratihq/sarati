@@ -24,7 +24,7 @@ export interface SdkAuthContext {
   connections?: ConnectionsService;
   composioApiKey: string;
   composioBaseUrl: string;
-  /** Test fetch override; unset in production (the SDK transport uses global fetch). */
+  /** Test-only fetch; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
   fetchImpl?: FetchLike;
 }
 
