@@ -7,6 +7,8 @@ import { Client } from 'pg';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { RunReaperService } from '../src/runs/run-reaper.service';
+import { listenOnLoopback } from './support/listen';
+import { expectResumedRunFinishes } from './support/resumed-run';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** The reaper errors out crashed non-terminal runs; RUN_MAX_DURATION_SECONDS defaults to 3600. */
@@ -19,16 +21,25 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
   const insertRun = async (over: {
     status: string;
     startedAgo: string; // interval, e.g. '2 hours'
+    resumedAgo?: string;
     waitingTimeoutAt?: string | null; // SQL expr or null
     /** What the run is parked on — a timer wakes itself; anything else waits on a person. */
     waitingTopic?: string;
   }): Promise<string> => {
     const id = randomUUID();
     await db.query(
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_timeout_at, waiting_node_id, waiting_topic)
+      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, waiting_timeout_at, waiting_node_id, waiting_topic, resumed_at)
        VALUES ($1, $2, $3, 'plan-x', $4, now() - ($5)::interval, ${over.waitingTimeoutAt ?? 'NULL'},
-               ${over.status === 'waiting' ? `'n1'` : 'NULL'}, $6)`,
-      [id, `rid-${id.slice(0, 8)}`, userId, over.status, over.startedAgo, over.waitingTopic ?? null],
+               ${over.status === 'waiting' ? `'n1'` : 'NULL'}, $6, now() - ($7)::interval)`,
+      [
+        id,
+        `rid-${id.slice(0, 8)}`,
+        userId,
+        over.status,
+        over.startedAgo,
+        over.waitingTopic ?? null,
+        over.resumedAgo ?? null,
+      ],
     );
     return id;
   };
@@ -43,6 +54,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
+    process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
@@ -54,6 +66,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
+    await listenOnLoopback(app);
     reaper = app.get(RunReaperService);
   }, 30_000);
 
@@ -154,6 +167,22 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const row = await statusOf(overdue);
     expect(row.status).toBe('error');
     expect(row.error).toMatch(/never woke/i);
+  });
+
+  it('counts only the time in flight since a run resumed: one approved after a long wait finishes, never reaped', () =>
+    expectResumedRunFinishes(app, db, reaper, 'resumed-1'));
+
+  it('still reaps a run in flight past the max since it resumed — the worker died after the wait', async () => {
+    const run = await insertRun({ status: 'running', startedAgo: '5 hours', resumedAgo: '2 hours' });
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at)
+       VALUES (gen_random_uuid(), $1, 'k1', 'n1', 'action', 'running', now() - interval '2 hours')`,
+      [run],
+    );
+    await reaper.reapStale();
+    expect(await statusOf(run)).toMatchObject({ status: 'error', finished: true });
+    const step = await db.query(`SELECT status FROM runtime_run_steps WHERE run_id = $1`, [run]);
+    expect(step.rows[0].status).toBe('error');
   });
 
   it('is idempotent — a second sweep reaps nothing new', async () => {

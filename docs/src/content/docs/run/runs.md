@@ -94,11 +94,13 @@ caller still waiting on the run's answer gets `409` with the code `run_cancelled
 ## When a worker dies
 
 Durable resume covers a worker that comes back. A worker that does not come back would otherwise
-leave runs stuck `running` forever, so a reaper sweeps every five minutes and moves anything past
-`RUN_MAX_DURATION_SECONDS` to a terminal `error`.
+leave runs stuck `running` forever, so a reaper sweeps every five minutes and moves a run that has
+been in flight longer than `RUN_MAX_DURATION_SECONDS` to a terminal `error`. The clock starts when the
+run starts and again each time it resumes from a wait, so time a run spends parked — on an approval,
+or on a Wait longer than a minute — never counts. A shorter Wait sleeps in flight, and counts.
 
 It is purely time-based, which is what makes it safe with several replicas: nothing still alive can
-be older than the maximum duration. Set `RUN_MAX_DURATION_SECONDS=0` to turn it off.
+have been in flight longer than the maximum duration. Set `RUN_MAX_DURATION_SECONDS=0` to turn it off.
 
 ## Nothing here yet
 
