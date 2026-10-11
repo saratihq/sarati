@@ -109,6 +109,33 @@ message again.
 Anything else reads **"The composer hit a problem — please try again."**, and the reason is in
 [the logs](#reading-the-logs).
 
+## A step refuses a private/internal address
+
+```
+refusing to send a request to a private/internal address (jira.internal). An operator can allow it by adding jira.internal to ORCHESTR_HTTP_ALLOWED_HOSTS.
+```
+
+The address resolves to somewhere that is not public, so the step was stopped before anything was
+sent. If it is a host you mean to reach, add the name in the parentheses to
+[`ORCHESTR_HTTP_ALLOWED_HOSTS`](/operate/configuration/#private-addresses) — the hostname alone, no
+scheme or port — then run `docker compose up -d`; restarting the container is not enough. When the
+parentheses also say `redirected from https://…`, the address you gave was reached and answered with
+a redirect into private space, which was not followed; the host named first needs its own entry.
+
+```
+the egress proxy refused the tunnel to https://api.example.com (403)
+```
+
+The step went through your egress proxy, which would not open a tunnel to the address this server
+resolved. A proxy that filters by domain name refuses tunnels to addresses; allowlist the domains it
+should see so they reach it by name, as
+[Private addresses](/operate/configuration/#private-addresses) describes.
+
+If every app step is refused, including ones aimed at public services, this server's DNS is probably
+handing out synthetic private addresses (a fake-IP proxy or ZPA). The
+[Private addresses](/operate/configuration/#private-addresses) section covers that, egress proxies,
+and what an entry exposes.
+
 ## A step says it needs a connection
 
 ```json

@@ -18,7 +18,7 @@ import {
   triggerCatalogEntry,
 } from './sdk-trigger-auth';
 
-/** Optional token for the polling triggers' outbound fetch; unset in production → the SDK's global fetch. */
+/** Test-only fetch for the polling triggers; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const SDK_POLLING_FETCH = Symbol('SDK_POLLING_FETCH');
 
 /** Common shape the poll/enable entrypoints share (one activation's context). */

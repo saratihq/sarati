@@ -84,15 +84,57 @@ If you are upgrading and had them there, enter them once in Settings and delete 
 
 ## Integrations and auth
 
+Single sign-on (`OIDC_*`, `CLERK_*`) and operator OAuth apps (`OAUTH_<PROVIDER>_CLIENT_ID` /
+`_CLIENT_SECRET`) are set here too. With every auth variable empty, email and password is the way
+in.
+
+### Private addresses
+
 ```bash
-# Hosts the SSRF guard lets back in. It blocks private, loopback, link-local and
-# cloud-metadata targets by default.
+# Hosts the SSRF guard lets back in: comma-separated hostnames or IP addresses, each covering every port.
 ORCHESTR_HTTP_ALLOWED_HOSTS=
 ```
 
-Single sign-on (`OIDC_*`, `CLERK_*`) and bring-your-own OAuth (`OAUTH_<PROVIDER>_CLIENT_ID` /
-`_CLIENT_SECRET`) are configured the same way. With every auth variable empty, email and password is
-the way in.
+A step or trigger that calls an address straight from this server refuses one that is not public:
+private, loopback, link-local (cloud metadata included), carrier-grade NAT and reserved ranges, in
+any spelling. `[::ffff:127.0.0.1]`, 6to4 and NAT64 addresses (`64:ff9b::/96` and the local-use
+`64:ff9b:1::/96`) are judged by the IPv4 address they carry; the rest of `64:ff9b:1::/48` is
+refused, so on a DNS64 network with another local-use prefix, allowlist the hostnames you call. The
+address checked is the one actually connected to, with or without a proxy, so a name that resolves
+to a private address is refused, and every redirect is checked again.
+
+- **What it covers:** the HTTP and GraphQL steps, the HTTP and RSS polling triggers, and app steps
+  on your own credentials that call an address you give them. A step on a managed connection is
+  sent by Composio, not from this server.
+- **Your own OAuth clients:** an OAuth client entered in the Connect dialog has its endpoints checked
+  when you connect, where a host this server cannot resolve is refused too. Its token endpoint is
+  checked again on every token exchange, and a token exchange never follows a redirect.
+- **Letting a host in:** add its bare hostname or address. Entries are matched after URL
+  normalisation: `127.0.0.1` also covers `127.1`, but not `localhost` or any IPv6 spelling, which
+  need entries of their own. An entry covers every port and scheme on its host, so one written with a
+  port or scheme (`localhost:11434`, `https://jira.internal`) is ignored rather than widened, as is
+  one that is not a host (a range, a wildcard, a path). Each is reported once in the log. A redirect
+  target needs its own entry.
+- **Who an entry is for:** everyone. Allowlisting a host lets every user on this server send any
+  request to any port on it through the HTTP step and read the reply, so list only hosts you would
+  expose to all members.
+- **Behind an egress proxy:** set Node's `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY` / `HTTPS_PROXY`
+  (and `NO_PROXY`) pointing at an `http://` or `https://` proxy, and steps go through it; a SOCKS
+  proxy is not supported. The target is resolved and judged on this server, and the proxy is asked
+  for a tunnel to that address (`CONNECT 93.184.215.14:443`), with TLS still verified against the
+  name. A proxy that filters destinations by domain name will refuse those tunnels, so list the
+  domains it should see in `ORCHESTR_HTTP_ALLOWED_HOSTS`: they go to the proxy by name, unjudged,
+  leaving the proxy as the only control for them. The same applies to a name this server cannot
+  resolve, which is otherwise refused. `.env` reaches every process in the container, so the
+  composer's calls to the service and the container's own health check would go to the proxy too:
+  list the stack's own addresses in `NO_PROXY` — `localhost,127.0.0.1,::1`, plus `service` on the
+  five-container stack — and any internal host you allowlisted, so it is reached directly.
+- **What it cannot see:** it judges addresses, not what answers at them. A service of yours on a
+  public address — the server's own public IP, a cloud network's global IPv6 range — is not covered,
+  so restrict outbound traffic at the network where that matters.
+- **Synthetic DNS:** if this server's DNS answers public names with private addresses — a fake-IP
+  proxy such as Clash or Surge (`198.18.0.0/15`), or ZPA (`100.64.0.0/10`) — every app step is
+  refused. Turn that mode off for this server, or allowlist the hostnames you call.
 
 `COMPOSIO_BASE_URL` and `CLERK_API_URL` point the service at a proxy or a self-hosted API instead of
 the provider's own. Requests to them carry an API secret, so in production each has to be

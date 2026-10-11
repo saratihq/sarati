@@ -15,7 +15,7 @@ import {
 } from '../runtime/agent';
 import { resolveSdkAuthHandle } from './sdk-auth';
 
-/** Optional fetch override for the agent model call's SDK transport; unset in production. */
+/** Test-only fetch for the agent model call; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const AGENT_MODEL_FETCH = Symbol('AGENT_MODEL_FETCH');
 
 /**

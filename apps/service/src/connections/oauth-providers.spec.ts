@@ -1,3 +1,5 @@
+import dns from 'node:dns';
+
 import { DomainError } from '../common/domain-error';
 import {
   assertSafeOAuthEndpoint,
@@ -177,8 +179,56 @@ describe('assertSafeOAuthEndpoint (store-time BYO endpoint guard)', () => {
       { status: 400 },
     );
     await expect(assertSafeOAuthEndpoint('token_url', 'https://169.254.169.254/token')).rejects.toThrow(
-      /private or internal/,
+      'OAuth token_url cannot be used: refusing to send a request to a private/internal address (169.254.169.254). An operator can allow it by adding 169.254.169.254 to ORCHESTR_HTTP_ALLOWED_HOSTS.',
     );
+  });
+
+  it('rejects an IPv4-mapped IPv6 spelling of a private address', async () => {
+    await expect(
+      assertSafeOAuthEndpoint('token_url', 'https://[::ffff:169.254.169.254]/token'),
+    ).rejects.toThrow('private/internal address (::ffff:a9fe:a9fe)');
+  });
+
+  it('rejects a host that does not resolve, and says that rather than calling it private', async () => {
+    await expect(
+      assertSafeOAuthEndpoint('token_url', 'https://does-not-exist.invalid/token'),
+    ).rejects.toThrow(
+      'OAuth token_url cannot be used: does-not-exist.invalid does not resolve from this server, so it cannot be confirmed as a public address',
+    );
+  });
+
+  it('refuses an endpoint carrying a username or password before consent, since the exchange would refuse it', async () => {
+    await expect(assertSafeOAuthEndpoint('token_url', 'https://u:p@8.8.8.8/token')).rejects.toThrow(
+      'OAuth token_url must not carry a username or password; the client id and secret are sent separately',
+    );
+  });
+
+  it('says how an operator lifts the https rule', async () => {
+    await expect(assertSafeOAuthEndpoint('token_url', 'http://example.com/token')).rejects.toThrow(
+      'OAuth token_url must use https (got http:), or an operator can add example.com to ORCHESTR_HTTP_ALLOWED_HOSTS',
+    );
+  });
+
+  it('says a private authorization_url points there, since the browser goes there and not this server', async () => {
+    await expect(assertSafeOAuthEndpoint('authorization_url', 'https://10.1.2.3/authorize')).rejects.toThrow(
+      'OAuth authorization_url points at a private or internal address (10.1.2.3); an operator can allow it by adding 10.1.2.3 to ORCHESTR_HTTP_ALLOWED_HOSTS',
+    );
+  });
+
+  it('answers a passing DNS failure with 503 "try again", not as a bad configuration', async () => {
+    const lookup = jest
+      .spyOn(dns.promises, 'lookup')
+      .mockRejectedValue(
+        Object.assign(new Error('getaddrinfo EAI_AGAIN idp.example'), { code: 'EAI_AGAIN' }),
+      );
+    try {
+      await expect(assertSafeOAuthEndpoint('token_url', 'https://idp.example/token')).rejects.toMatchObject({
+        status: 503,
+        message: 'OAuth token_url could not be checked: idp.example did not resolve just now; try again',
+      });
+    } finally {
+      lookup.mockRestore();
+    }
   });
 
   it('rejects a malformed URL', async () => {

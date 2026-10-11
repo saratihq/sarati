@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpException, Post, Req, UseGuards } from '@nestjs/common';
+import { ActionError } from '@sarati/actions-sdk';
 import { Throttle } from '@nestjs/throttler';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsNotEmpty, IsOptional, IsString, ValidateNested } from 'class-validator';
@@ -134,6 +135,10 @@ export class OAuthController {
       if (err instanceof OAuthProviderNotConfiguredError)
         throw new HttpException({ detail: err.message }, 400);
       if (err instanceof OAuthExchangeError) throw new HttpException({ detail: err.message }, 502);
+      if (err instanceof ActionError) {
+        const status = err.code === 'ssrf_blocked' ? 400 : 502;
+        throw new HttpException({ detail: `The token exchange failed: ${err.message}` }, status);
+      }
       throw err;
     }
   }

@@ -1,5 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
+import { ActionError } from '@sarati/actions-sdk';
 import { ILike, IsNull } from 'typeorm';
 import type { DataSource } from 'typeorm';
 
@@ -627,7 +628,9 @@ export class ConnectionsService {
     } catch (err) {
       const message = errorMessage(err);
       if (expired) {
-        await this.setStatus(row.id, 'expired', REASON_REFRESH_DECLINED);
+        // Only a refused grant means the refresh token is dead; an outage or a broken connection says nothing about it.
+        if (err instanceof OAuthExchangeError)
+          await this.setStatus(row.id, 'expired', REASON_REFRESH_DECLINED);
         throw new Error(`Connection ${row.id} (${row.provider}): token refresh failed: ${message}`);
       }
       this.logger.warn(
@@ -756,11 +759,14 @@ export class ConnectionsService {
           await this.setStatus(row.id, 'expired', REASON_REFRESH_DECLINED);
           return { ok: false, status: 'expired', detail: REASON_REFRESH_DECLINED };
         }
-        // Network problem — indeterminate, keep the current status.
+        // Indeterminate: keep the current status, and say why when trying again cannot help.
         return {
           ok: false,
           status: row.status,
-          detail: 'The provider could not be reached — try again shortly.',
+          detail:
+            err instanceof ActionError && !err.retryable
+              ? err.message
+              : 'The provider could not be reached — try again shortly.',
         };
       }
     }
