@@ -13,6 +13,9 @@ const MAX_STORED_JSON_CHARS = 16_000;
 const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
+/** What a cancelled run reads as while DBOS has not taken its cancel; it clears once DBOS does, or the run unwinds. */
+const CANCEL_PENDING_NOTE =
+  'Cancelled, but the engine has not confirmed it yet: the run stops before its next step, and the cancel is retried automatically';
 
 /** An oversized stored value: the head of its JSON, plus the size it actually had. */
 export interface TruncatedValue {
@@ -255,6 +258,31 @@ export class RunRecorderService implements RunRecorder {
       `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
       [scopedRunId, unwindError, CANCELLED_STEP_ERROR],
     ]);
+  }
+
+  /** Mark a cancelled run whose cancel DBOS did not take, so it shows until DBOS does. */
+  async runCancelPending(scopedRunId: string): Promise<void> {
+    await this.write('runCancelPending', scopedRunId, [
+      `UPDATE runtime_runs SET error = $2 WHERE id = $1 AND status = 'cancelled'`,
+      [scopedRunId, CANCEL_PENDING_NOTE],
+    ]);
+  }
+
+  /** DBOS has taken the cancel of a run {@link runCancelPending} marked. */
+  async runCancelConfirmed(scopedRunId: string): Promise<void> {
+    await this.write('runCancelConfirmed', scopedRunId, [
+      `UPDATE runtime_runs SET error = NULL WHERE id = $1 AND status = 'cancelled' AND error = $2`,
+      [scopedRunId, CANCEL_PENDING_NOTE],
+    ]);
+  }
+
+  /** Cancelled runs whose cancel DBOS has not taken yet. */
+  async pendingCancels(): Promise<string[]> {
+    const rows: Array<{ id: string }> = await this.dataSource.query(
+      `SELECT id FROM runtime_runs WHERE status = 'cancelled' AND error = $1`,
+      [CANCEL_PENDING_NOTE],
+    );
+    return rows.map((r) => r.id);
   }
 
   async isCancelled(scopedRunId: string): Promise<boolean> {

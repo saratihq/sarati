@@ -35,6 +35,7 @@ export class RunReaperJob implements OnModuleInit {
               `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ${r.orphanSteps} orphan step(s)`,
             );
           }
+          if (r.retriedCancels > 0) this.logger.warn(`DBOS took ${r.retriedCancels} cancel(s) it had missed`);
         });
         await boss.schedule(QUEUE, '*/5 * * * *');
       });

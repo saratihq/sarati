@@ -6,12 +6,16 @@ import type { DataSource } from 'typeorm';
 import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import { rawMutate } from '../database/raw-query';
+import { DbosRuntime } from '../dbos/dbos-runtime';
+import { RunRecorderService } from '../runtime/run-recorder.service';
 import { TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
 
 export interface ReapResult {
   crashedRuns: number;
   timedOutWaits: number;
   orphanSteps: number;
+  /** Cancels DBOS had not taken, which it took this sweep. */
+  retriedCancels: number;
 }
 
 /**
@@ -25,6 +29,8 @@ export class RunReaperService implements OnApplicationBootstrap {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
+    private readonly recorder: RunRecorderService,
+    private readonly dbos: DbosRuntime,
   ) {}
 
   private get maxSeconds(): number {
@@ -41,6 +47,8 @@ export class RunReaperService implements OnApplicationBootstrap {
             `${r.orphanSteps} orphan step(s) → error (a prior instance likely died mid-run)`,
         );
       }
+      if (r.retriedCancels > 0)
+        this.logger.warn(`boot reap: DBOS took ${r.retriedCancels} cancel(s) it had missed`);
     } catch (err) {
       // Never take the app down over the reaper — log and serve.
       this.logger.error(`boot reap failed: ${errorMessage(err)}`);
@@ -50,7 +58,7 @@ export class RunReaperService implements OnApplicationBootstrap {
   /** One sweep, returning how many rows were reaped; both callers tolerate a throw (never on a request path). */
   async reapStale(): Promise<ReapResult> {
     const seconds = this.maxSeconds;
-    if (seconds <= 0) return { crashedRuns: 0, timedOutWaits: 0, orphanSteps: 0 };
+    if (seconds <= 0) return { crashedRuns: 0, timedOutWaits: 0, orphanSteps: 0, retriedCancels: 0 };
     const em = this.dataSource.manager;
     const cutoff = `now() - ($1 || ' seconds')::interval`;
 
@@ -96,6 +104,24 @@ export class RunReaperService implements OnApplicationBootstrap {
       [seconds],
     );
 
-    return { crashedRuns, timedOutWaits, orphanSteps };
+    // (D) cancels DBOS did not take when they were made: offer them again, so a parked run does not sit out its deadline.
+    const retriedCancels = await this.retryPendingCancels();
+
+    return { crashedRuns, timedOutWaits, orphanSteps, retriedCancels };
+  }
+
+  private async retryPendingCancels(): Promise<number> {
+    if (!this.config.get('env', { infer: true }).dbosEnabled) return 0;
+    let taken = 0;
+    for (const id of await this.recorder.pendingCancels()) {
+      try {
+        await this.dbos.cancelWorkflow(id);
+        await this.recorder.runCancelConfirmed(id);
+        taken += 1;
+      } catch (err) {
+        this.logger.warn(`run ${id}: DBOS still did not take its cancel: ${errorMessage(err)}`);
+      }
+    }
+    return taken;
   }
 }

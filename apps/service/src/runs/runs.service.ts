@@ -892,8 +892,9 @@ export class RunsService {
     try {
       await this.dbos.cancelWorkflow(scoped);
     } catch (err) {
-      // Fail-safe: the cancel stands, because a durable run's row gate stops it at its next step anyway.
+      // Fail-safe: the cancel stands — the row gate stops the run at its next step, and the reaper offers it to DBOS again.
       this.logger.warn(`Run ${scoped}: telling DBOS of its cancel failed: ${errorMessage(err)}`);
+      await this.recorder?.runCancelPending(scoped);
     }
   }
 

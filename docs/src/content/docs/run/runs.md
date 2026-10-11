@@ -100,6 +100,10 @@ A wait or delay the run is parked on ends and says *Cancelled before it finished
 On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
 workflow the run is calling; a durable run's called workflow finishes first.
 
+If the engine can't be told of a durable run's cancel at once, the run still stops before its next
+step, and reads *Cancelled, but the engine has not confirmed it yet* until a later sweep has retried
+it.
+
 A run that another run's step started can't be cancelled on its own (`409`, code `called_run`).
 Cancel the run that called it.
 

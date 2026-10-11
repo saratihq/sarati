@@ -10,6 +10,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
+import { RunReaperService } from '../src/runs/run-reaper.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -531,6 +532,43 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
         answer: 'run_cancelled',
         afterCalls: 0,
         row: 'cancelled',
+      });
+    } finally {
+      failing.mockRestore();
+    }
+  }, 60_000);
+
+  it('a parked run whose engine cancel failed says so, and the next sweep gets DBOS to stop it', async () => {
+    const engine = app.get(DbosRuntime);
+    const failing = jest
+      .spyOn(engine, 'cancelWorkflow')
+      .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+    try {
+      let answeredAt = 0;
+      const answer = start('parked-engine-down', approvalPlan('plan-parked-down').nodes).then((res) => {
+        answeredAt = Date.now();
+        return res;
+      });
+      await until('parked-engine-down', 'waiting');
+      await cancel('parked-engine-down').expect(200);
+      const pending = await until('parked-engine-down', 'cancelled');
+      const swept = await app.get(RunReaperService).reapStale();
+      const sweptAt = Date.now();
+      const res = await answer;
+      const settled = await until('parked-engine-down', 'cancelled');
+
+      expect({
+        pending: pending.error,
+        retried: swept.retriedCancels >= 1,
+        answer: res.body.code,
+        promptly: answeredAt - sweptAt < 15_000,
+        cleared: settled.error ?? null,
+      }).toEqual({
+        pending: expect.stringMatching(/engine has not confirmed it yet/),
+        retried: true,
+        answer: 'run_cancelled',
+        promptly: true,
+        cleared: null,
       });
     } finally {
       failing.mockRestore();

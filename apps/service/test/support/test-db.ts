@@ -9,6 +9,8 @@ import { DEFAULT_DATABASE_URL } from '../../src/config/env.config';
 /** Canonical baseline schema — the same file the OSS `db:init` bootstrap applies. */
 const SCHEMA_PATH = join(__dirname, '..', '..', 'db', 'schema.sql');
 const E2E_DB_PREFIX = 'orchestr_e2e';
+// No suite runs this long, and a younger database may belong to a suite that hasn't connected to it yet.
+const REAP_AFTER_MS = 2 * 60 * 60 * 1000;
 
 /** The database every suite creates its throwaway copy from — the app's own default, never a second one. */
 export const ADMIN_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
@@ -20,19 +22,18 @@ export const ADMIN_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
  *   docker exec orchestr-postgres-1 pg_dump -U orchestr -d orchestr --schema-only > db/schema.sql
  */
 export async function createE2eDatabase(adminUrl: string): Promise<string> {
-  const dbName = `${E2E_DB_PREFIX}_${randomBytes(4).toString('hex')}`;
+  const dbName = e2eDatabaseName();
 
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
   try {
-    // Reap only leftovers with NO live backend: dropping every match WITH (FORCE) killed the pool of
-    // a suite still shutting down (57P01), which made the whole gate intermittently red.
-    const stale = await admin.query<{ datname: string }>(
+    // Reap only old leftovers with no live backend: a fresh, not-yet-connected database belongs to a suite still starting.
+    const idle = await admin.query<{ datname: string }>(
       `SELECT d.datname FROM pg_database d
         WHERE d.datname LIKE '${E2E_DB_PREFIX}%'
           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)`,
     );
-    for (const { datname } of stale.rows) {
+    for (const { datname } of idle.rows.filter((row) => isReapable(row.datname))) {
       // A leftover database is harmless and gets reaped next run — never fail a suite over cleanup.
       await admin.query(`DROP DATABASE IF EXISTS ${datname} WITH (FORCE)`).catch(() => undefined);
     }
@@ -55,6 +56,17 @@ export async function createE2eDatabase(adminUrl: string): Promise<string> {
     await db.end();
   }
   return e2eUrl;
+}
+
+/** A throwaway e2e database name stamped with its creation time, so cleanup only ever reaps old leftovers. */
+export function e2eDatabaseName(): string {
+  return `${E2E_DB_PREFIX}_${Date.now()}_${randomBytes(4).toString('hex')}`;
+}
+
+// An unstamped name predates the stamp, so nothing still creates it.
+function isReapable(datname: string): boolean {
+  const stamp = new RegExp(`^${E2E_DB_PREFIX}_(\\d{13})_`).exec(datname);
+  return stamp === null || Date.now() - Number(stamp[1]) > REAP_AFTER_MS;
 }
 
 export function withDatabase(url: string, database: string): string {
