@@ -62,6 +62,10 @@ describe('trigger catalog (e2e, isolated DB, mock auth)', () => {
         ?.type;
     expect(scheme('stripe.new_customer')).toBe('apiKey');
     expect(scheme('rss.new_item')).toBe('none');
+    expect(triggers.find((t) => t.type === 'zendesk.new_ticket')?.authScheme).toMatchObject({
+      type: 'basic',
+      usernameHint: expect.stringMatching(/^\{email\}\/token/),
+    });
     // Composio rows are brokered, so they carry no scheme of ours to declare.
     expect(scheme('github.github_commit_event')).toBeUndefined();
     // SDK rows project the FULL authoring surface: label, inlined static options, default, sample.

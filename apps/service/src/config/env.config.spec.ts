@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { parseCorsOrigins, validateEnv } from './env.config';
+import { Logger } from '@nestjs/common';
+
+import { parseCorsOrigins, validateEnv, warnRetiredEnv } from './env.config';
 
 const PROD = {
   ENVIRONMENT: 'production',
@@ -103,6 +105,25 @@ describe('env config', () => {
     const example = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
     const listed = new Set([...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]));
     expect([...read].filter((key) => !listed.has(key))).toEqual([]);
+  });
+
+  it('warns once that COMPOSIO_FALLBACK_APPS does nothing when it is set, and is silent when it is not', () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      warnRetiredEnv({ COMPOSIO_FALLBACK_APPS: 'zoom,jira' });
+      expect(warn.mock.calls).toEqual([
+        [
+          'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect: a managed step runs on its built-in ' +
+            'action when one exists, and on Composio only when none does. Remove it from .env.',
+        ],
+      ]);
+      warn.mockClear();
+      warnRetiredEnv({});
+      warnRetiredEnv({ COMPOSIO_FALLBACK_APPS: ' ' });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('refuses to run dev-mode against a non-local database (prod DB, insecure defaults)', () => {

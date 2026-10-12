@@ -14,12 +14,12 @@ import {
   type TriggerStore,
 } from '@sarati/actions-sdk';
 
-import { serializeAuthScheme } from './sdk-actions.registry';
+import { appSlugOf, serializeAuthScheme } from './sdk-actions.registry';
 
 import { DomainError } from '../common/domain-error';
 import { ConnectionsService, MANAGED_TOKEN_PREFIX } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
-import { extractToken, toDirectCredential } from './sdk-auth';
+import { extractToken, toDirectCredential, unusableCredential } from './sdk-auth';
 
 /** Shared glue for the two IN-PROCESS SDK trigger rails — credential resolution, the store adapter, the catalog row. */
 
@@ -32,11 +32,7 @@ export class ConnectionGoneError extends Error {
   }
 }
 
-/**
- * Resolve a trigger's credential into an SDK {@link DirectCredential} shaped for its scheme, exactly as the action
- * rail does — a `{connectionId}` is decrypted, an inline credential passes through. A MANAGED connection is
- * rejected: its sentinel is not a usable token and must never reach a provider.
- */
+/** A trigger's credential shaped for its scheme; a managed connection is refused. */
 export async function resolveTriggerCredential(
   connections: ConnectionsService | undefined,
   externalUserId: string,
@@ -45,11 +41,12 @@ export async function resolveTriggerCredential(
 ): Promise<DirectCredential> {
   if (scheme.type === 'none') return { type: 'none' };
   let resolved: unknown = auth;
-  if (auth && typeof auth.connectionId === 'string') {
+  const connectionId = typeof auth?.connectionId === 'string' ? auth.connectionId : null;
+  if (connectionId !== null) {
     if (!connections) {
       throw new Error('Trigger references a connection, but the connections store is unavailable');
     }
-    resolved = await connections.getCredential(externalUserId, auth.connectionId);
+    resolved = await connections.getCredential(externalUserId, connectionId);
     if (resolved === null) throw new ConnectionGoneError();
   }
   if (extractToken(resolved)?.startsWith(MANAGED_TOKEN_PREFIX)) {
@@ -58,8 +55,10 @@ export async function resolveTriggerCredential(
     );
   }
   const credential = toDirectCredential(scheme, resolved);
-  if (!credential) throw new Error(NEEDS_CONNECTION);
-  return credential;
+  if (credential) return credential;
+  throw new Error(
+    connectionId === null ? NEEDS_CONNECTION : `This trigger's connection ${unusableCredential(scheme)}`,
+  );
 }
 
 /** Build the opaque auth handle a direct-rail trigger runs on (test-injectable fetch when set). */
@@ -131,7 +130,7 @@ export function triggerCatalogEntry(
     parameters,
     auth: manifest.authType === 'none' ? 'none' : 'connection',
     // Without this every SDK trigger reads as Composio-managed, sending a caller to the wrong credential.
-    ...(scheme ? { authScheme: serializeAuthScheme(scheme) } : {}),
+    ...(scheme ? { authScheme: serializeAuthScheme(scheme, appSlugOf(manifest.type)) } : {}),
     ...(sample !== undefined ? { sample } : {}),
   };
 }

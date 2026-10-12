@@ -103,16 +103,18 @@ refused, so on a DNS64 network with another local-use prefix, allowlist the host
 address checked is the one actually connected to, with or without a proxy, so a name that resolves
 to a private address is refused, and every redirect is checked again.
 
-- **What it covers:** the HTTP and GraphQL steps, the HTTP and RSS polling triggers, and app steps
-  on your own credentials that call an address you give them. A step on a managed connection is
-  sent by Composio, not from this server.
+- **What it covers:** the HTTP and GraphQL steps and the HTTP and RSS polling triggers, which carry
+  no connection. A connection's credential only ever goes to its own app's domains, so an app step
+  pointed anywhere else is refused before this list is read, and no entry here changes that — see
+  [the refusal and what to set](/operate/troubleshooting/#a-step-wont-send-its-connections-credential).
+  A step on a managed connection is sent by Composio, not from this server.
 - **Your own OAuth clients:** an OAuth client entered in the Connect dialog has its endpoints checked
   when you connect, where a host this server cannot resolve is refused too. Its token endpoint is
   checked again on every token exchange, and a token exchange never follows a redirect.
 - **Letting a host in:** add its bare hostname or address. Entries are matched after URL
   normalisation: `127.0.0.1` also covers `127.1`, but not `localhost` or any IPv6 spelling, which
   need entries of their own. An entry covers every port and scheme on its host, so one written with a
-  port or scheme (`localhost:11434`, `https://jira.internal`) is ignored rather than widened, as is
+  port or scheme (`localhost:11434`, `https://wiki.internal`) is ignored rather than widened, as is
   one that is not a host (a range, a wildcard, a path). Each is reported once in the log. A redirect
   target needs its own entry.
 - **Who an entry is for:** everyone. Allowlisting a host lets every user on this server send any

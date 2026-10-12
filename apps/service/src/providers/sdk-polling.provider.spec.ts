@@ -180,6 +180,39 @@ describe('SdkPollingProvider', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
+  it.each(['jira.new_issue', 'mailchimp.new_subscriber', 'zendesk.new_ticket'])(
+    'a %s connection holding only a token is told what to reconnect with, not to connect the app',
+    async (type) => {
+      const fetch = queuedFetch([{}]);
+      const getCredential = jest.fn().mockResolvedValue({ value: 'just-a-token' });
+      const provider = new SdkPollingProvider({ getCredential } as unknown as ConnectionsService, fetch);
+
+      await expect(
+        provider.pollOne(type, {
+          externalUserId: 'user-9',
+          props: {},
+          auth: { connectionId: 'conn-tok' },
+          store: new InMemoryStore(),
+        }),
+      ).rejects.toThrow(
+        "This trigger's connection has no username and password — reconnect it with an email or username plus an API token or password",
+      );
+      expect(fetch.calls).toHaveLength(0);
+    },
+  );
+
+  it('a trigger with no credential at all still says to connect the app', async () => {
+    const provider = new SdkPollingProvider(undefined, queuedFetch([{}]));
+    await expect(
+      provider.pollOne('jira.new_issue', {
+        externalUserId: 'user-9',
+        props: {},
+        auth: {},
+        store: new InMemoryStore(),
+      }),
+    ).rejects.toThrow('This trigger needs a connected account to run — connect the app first');
+  });
+
   it('fails loudly for an unknown polling trigger type', async () => {
     const provider = new SdkPollingProvider();
     await expect(

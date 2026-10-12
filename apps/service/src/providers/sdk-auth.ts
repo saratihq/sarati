@@ -83,7 +83,14 @@ export async function resolveSdkAuthHandle(
     // BYO/direct connection: decrypt and shape into an SDK DirectCredential.
     const credential = await ctx.connections.getCredential(ctx.externalUserId, connectionId);
     const direct = toDirectCredential(scheme, credential);
-    if (!direct) throw new DomainError(needsConnectionMessage, 422);
+    if (!direct) {
+      throw new DomainError(
+        credential === null
+          ? needsConnectionMessage
+          : `Connection ${connectionId} ${unusableCredential(scheme)}`,
+        422,
+      );
+    }
     return createDirectAuth(scheme, direct, fetchOptions);
   }
 
@@ -114,6 +121,13 @@ export function toDirectCredential(scheme: AuthScheme, credential: unknown): Dir
   const token = extractToken(credential);
   if (!token) return null;
   return scheme.type === 'apiKey' ? { type: 'apiKey', value: token } : { type: 'bearer', token };
+}
+
+/** Why a connected credential can't sign in on this scheme, and what to reconnect it with. */
+export function unusableCredential(scheme: AuthScheme): string {
+  return scheme.type === 'basic'
+    ? 'has no username and password — reconnect it with an email or username plus an API token or password'
+    : 'has no API key or token — reconnect it with one';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

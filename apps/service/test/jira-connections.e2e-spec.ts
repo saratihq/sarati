@@ -342,7 +342,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       expect((run.outputs as Record<string, unknown>).announce).toBe('new: ENG-2');
     });
 
-    it('refuses a token-shaped credential instead of polling Jira unauthenticated', async () => {
+    it('refuses a token-shaped credential, naming the credential it needs, instead of polling Jira', async () => {
       const { org, production } = await workspace('Jira Token');
       await assignSlot(org, production, await byoConnection({ value: 'just-a-token' }));
       jiraIssues = [issue('3', 'TOK-1')];
@@ -351,8 +351,32 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       await app.get(TriggersService).runActivationPollCycle();
 
       expect(jiraHits.filter((h) => h.jql?.includes('project = "TOK"'))).toEqual([]);
-      expect(await activationError(wfId)).toMatch(/needs a connected account/);
+      expect(await activationError(wfId)).toBe(
+        "This trigger's connection has no username and password — reconnect it with an email or username plus an API token or password",
+      );
       expect(await triggerRuns(wfId)).toEqual([]);
+    });
+
+    it('a step on a token-shaped connection names the credential it needs', async () => {
+      const connectionId = await byoConnection({ value: 'just-a-token' });
+      const plan = {
+        id: 'jira-token-step',
+        nodes: [
+          {
+            kind: 'action',
+            id: 'issue',
+            actionId: 'jira.get_issue',
+            props: { instanceUrl: SITE, issueIdOrKey: 'ENG-1' },
+            auth: { connectionId },
+          },
+        ],
+      };
+      const run = await asA(http().post('/api/runs').send({ plan }));
+
+      expect(run.status).toBe(422);
+      expect(run.body.detail).toBe(
+        `Connection ${connectionId} has no username and password — reconnect it with an email or username plus an API token or password`,
+      );
     });
   });
 

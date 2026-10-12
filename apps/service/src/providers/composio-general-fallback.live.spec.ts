@@ -38,7 +38,6 @@ const ACTION_ID = 'asana.get_current_user';
     get: () =>
       ({
         composioBaseUrl: process.env.COMPOSIO_BASE_URL || 'https://backend.composio.dev',
-        composioFallbackApps: '',
       }) as Partial<EnvConfig>,
   } as unknown as ConfigService<{ env: EnvConfig }, true>;
   // The key is stored, not env-supplied — a manual live run hands it over the same seam.
@@ -62,10 +61,10 @@ const ACTION_ID = 'asana.get_current_user';
     has: (type: string) => isSdkActionType(type),
   } as unknown as SdkActionsProvider;
 
-  const router = new ActionRouterProvider(orchestrActions, composio, connections, config, platformKeysStub());
+  const router = new ActionRouterProvider(orchestrActions, composio, connections, platformKeysStub());
 
   it('routes a Composio-only action through the router and returns real data', async () => {
-    // Precondition that makes this rail (c) and not (a)/(b).
+    // Precondition that makes this the universal fallback (b), not our own action (a).
     expect(isSdkActionType(ACTION_ID)).toBe(false);
 
     const result = await router.runAction({
