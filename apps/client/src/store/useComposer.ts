@@ -486,9 +486,9 @@ export const useComposer = create<ComposerStore>((set, get) => {
           }
           if (evt.event === "replayed") {
             replaying = false;
-            // A joined turn merges onto the canvas as it stands: a step only the replay held is the composer's addition, never the person's removal.
-            const canvas = useWorkflow.getState().workflowJson;
-            turnBaseIr = canvas ? clone(canvas) : null;
+            // A joined turn merges from the canvas it started on, so only the composer's own changes land on this one.
+            const base = evt.data.turn_base ?? useWorkflow.getState().workflowJson;
+            turnBaseIr = base ? clone(base) : null;
             continue;
           }
           await handleEvent(evt, workflowId, replaying);

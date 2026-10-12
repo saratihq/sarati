@@ -154,12 +154,22 @@ const buildLog = (): agent.SequencedComposerEvent[] => [
   { event: "done", data: { session_id: "s-1", duration_ms: 1 }, seq: 10 },
 ];
 
+interface Reattach {
+  /** The durable log the agent replays. */
+  log?: agent.SequencedComposerEvent[];
+  /** A running turn's batches after the replay. */
+  live?: agent.SequencedComposerEvent[];
+  /** The canvas a running turn started from, as the agent's replayed marker carries it. */
+  turnBase?: Doc;
+  /** The person's edits between the replay and the turn's next batch. */
+  meanwhile?: () => void;
+  branch?: string;
+}
+
 // Open the editor on a saved head, as a navigation or reload does: both stores start over, the head loads, the composer reattaches.
 async function openEditor(
   head: Doc,
-  live: agent.SequencedComposerEvent[] = [],
-  log = buildLog(),
-  meanwhile: () => void = () => undefined,
+  { log = buildLog(), live = [], turnBase, meanwhile = () => undefined, branch = "main" }: Reattach = {},
 ): Promise<void> {
   useComposer.getState().reset();
   useWorkflow.getState().reset();
@@ -168,13 +178,12 @@ async function openEditor(
     workflow_id: "wf-1",
     versions: [{ id: "v1", version_number: 1, workflow_json: head }],
   } as Awaited<ReturnType<typeof api.listVersions>>);
-  expect(await useWorkflow.getState().loadForEdit("wf-1")).toBe(true);
+  expect(await useWorkflow.getState().loadForEdit("wf-1", branch)).toBe(true);
   const lastSeq = log.at(-1)?.seq ?? 0;
   composerAttach.mockImplementationOnce(async function* () {
     yield { event: "session", data: { session_id: "s-1" }, seq: lastSeq } as agent.SequencedComposerEvent;
     yield* log;
-    yield { event: "replayed", data: {}, seq: lastSeq } as agent.SequencedComposerEvent;
-    // The person's edits between the replay and the turn's next batch.
+    yield { event: "replayed", data: turnBase ? { turn_base: turnBase } : {}, seq: lastSeq } as agent.SequencedComposerEvent;
     meanwhile();
     yield* live;
   });
@@ -233,19 +242,21 @@ describe("the owner's sequence: compose, remove the Gmail step on the canvas, Sa
 
 describe("a reattach restores the conversation, never the canvas", () => {
   it("a turn that finished while the editor was closed never lands on it", async () => {
-    await openEditor(withDigest, [], [
-      { event: "user_message", data: { text: "Email me the report" }, seq: 1 },
-      { event: "op_applied", data: { ops: [], ir: withReport }, seq: 2 },
-      { event: "offer", data: { offer_id: "o1" }, seq: 3 },
-      { event: "done", data: { session_id: "s-1", duration_ms: 1 }, seq: 4 },
-    ]);
+    await openEditor(withDigest, {
+      log: [
+        { event: "user_message", data: { text: "Email me the report" }, seq: 1 },
+        { event: "op_applied", data: { ops: [], ir: withReport }, seq: 2 },
+        { event: "offer", data: { offer_id: "o1" }, seq: 3 },
+        { event: "done", data: { session_id: "s-1", duration_ms: 1 }, seq: 4 },
+      ],
+    });
     expect(irContentKey(canvas())).toBe(irContentKey(withDigest));
     expect(useWorkflow.getState().dirty).toBe(false);
     expect(useComposer.getState().offerPending).toBe(true);
   });
 
   it("a memory-only snapshot restores the conversation and leaves the canvas alone", async () => {
-    await openEditor(withDigest, [], []);
+    await openEditor(withDigest, { log: [] });
     useComposer.getState().reset();
     composerAttach.mockImplementationOnce(
       scripted([
@@ -286,7 +297,11 @@ describe("a reattach restores the conversation, never the canvas", () => {
       [trigger, digest, { ...report, parameters: { ...report.parameters, subject: "Weekly digest" } }],
       withReport.edges as unknown[],
     );
-    await openEditor(withDigest, [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }], joinedTurn);
+    await openEditor(withDigest, {
+      log: joinedTurn,
+      turnBase: withDigest,
+      live: [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }],
+    });
 
     expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "send_report"]);
     expect(paramsOf(canvas(), "send_report")?.subject).toBe("Weekly digest");
@@ -298,7 +313,12 @@ describe("a reattach restores the conversation, never the canvas", () => {
       [trigger, digest, report, summarize],
       [edge("trigger", "build_digest"), edge("build_digest", "send_report"), edge("send_report", "summarize")],
     );
-    await openEditor(withDigest, [{ event: "op_applied", data: { ops: [], ir: live }, seq: 3 }], joinedTurn, editTheDigest);
+    await openEditor(withDigest, {
+      log: joinedTurn,
+      turnBase: withDigest,
+      meanwhile: editTheDigest,
+      live: [{ event: "op_applied", data: { ops: [], ir: live }, seq: 3 }],
+    });
 
     expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "send_report", "summarize"]);
     expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 42;");
@@ -314,12 +334,12 @@ describe("a reattach restores the conversation, never the canvas", () => {
       [trigger, digest, { ...report, parameters: { ...report.parameters, subject: "Weekly digest" } }],
       withReport.edges as unknown[],
     );
-    await openEditor(
-      withReport,
-      [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }],
-      joinedTurn,
-      () => useWorkflow.getState().deleteWorkflowNode("send_report"),
-    );
+    await openEditor(withReport, {
+      log: joinedTurn,
+      turnBase: withReport,
+      meanwhile: () => useWorkflow.getState().deleteWorkflowNode("send_report"),
+      live: [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }],
+    });
 
     expect(paramsOf(canvas(), "send_report")?.subject).toBe("Weekly digest");
     expect(lastSent().message).toBe(
@@ -327,18 +347,49 @@ describe("a reattach restores the conversation, never the canvas", () => {
     );
   });
 
-  it("joined before its first batch, the live batch merges from the canvas at the reattach, keeping an edit made since", async () => {
-    const live = docOf([trigger, digest, summarize], [edge("trigger", "build_digest"), edge("build_digest", "summarize")]);
-    await openEditor(
-      withDigest,
-      [{ event: "op_applied", data: { ops: [], ir: live }, seq: 2 }],
-      [{ event: "user_message", data: { text: "Add a summary" }, seq: 1 }],
-      editTheDigest,
-    );
+  const addSummary = docOf([trigger, digest, summarize], [edge("trigger", "build_digest"), edge("build_digest", "summarize")]);
+
+  it("joined before its first batch, the live batch merges from the canvas the turn started on, keeping an edit made since", async () => {
+    await openEditor(withDigest, {
+      log: [{ event: "user_message", data: { text: "Add a summary" }, seq: 1 }],
+      turnBase: withDigest,
+      meanwhile: editTheDigest,
+      live: [{ event: "op_applied", data: { ops: [], ir: addSummary }, seq: 2 }],
+    });
 
     expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "summarize"]);
     expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 42;");
     expect(irContentKey(composeMerge.mock.calls[0]![0])).toBe(irContentKey(withDigest));
+  });
+
+  it("a turn begun on main and joined from a branch's editor lands only the composer's changes on that branch", async () => {
+    const laneDigest = { ...digest, parameters: { language: "js", code: "return 'lane digest';" } };
+    const laneOnly = node("lane_only", "Lane only step", "text.concat", { texts: ["b"] }, 960);
+    const laneHead = docOf([trigger, laneDigest, laneOnly], [edge("trigger", "build_digest"), edge("build_digest", "lane_only")]);
+    await openEditor(laneHead, {
+      branch: "lane",
+      log: [
+        { event: "user_message", data: { text: "Add a summary" }, seq: 1 },
+        { event: "op_applied", data: { ops: [], ir: withDigest }, seq: 2 },
+      ],
+      turnBase: withDigest,
+      live: [{ event: "op_applied", data: { ops: [], ir: addSummary }, seq: 3 }],
+    });
+
+    expect(useWorkflow.getState().editBranch).toBe("lane");
+    expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "lane_only", "summarize"]);
+    expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 'lane digest';");
+  });
+
+  it("a joined turn that started with no canvas merges from the canvas at the reattach", async () => {
+    await openEditor(withDigest, {
+      log: [{ event: "user_message", data: { text: "Add a summary" }, seq: 1 }],
+      meanwhile: editTheDigest,
+      live: [{ event: "op_applied", data: { ops: [], ir: addSummary }, seq: 2 }],
+    });
+
+    expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "summarize"]);
+    expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 42;");
   });
 });
 
@@ -361,7 +412,7 @@ describe("a new workflow after a branch editor", () => {
 
 describe("unsaved changes are decided by content", () => {
   beforeEach(async () => {
-    await openEditor(withDigest, [], []);
+    await openEditor(withDigest, { log: [] });
   });
 
   it("an edit that returns the canvas to the saved version shows no unsaved changes", () => {
@@ -383,7 +434,7 @@ describe("unsaved changes are decided by content", () => {
 
   it("a step parameter named position is content: changing it arms Save and the save commits it", async () => {
     const card = node("move_card", "Move the card", "github.move_a_project_card", { card_id: 9, position: 3 }, 660);
-    await openEditor(docOf([trigger, card], [edge("trigger", "move_card")]), [], []);
+    await openEditor(docOf([trigger, card], [edge("trigger", "move_card")]), { log: [] });
 
     useWorkflow.getState().updateIrNode("move_card", { parameters: { card_id: 9, position: 7 } });
     expect(useWorkflow.getState().dirty).toBe(true);
@@ -397,7 +448,7 @@ describe("unsaved changes are decided by content", () => {
 
 describe("what a save reports", () => {
   beforeEach(async () => {
-    await openEditor(withDigest, [], []);
+    await openEditor(withDigest, { log: [] });
   });
 
   it("a save the service finds unchanged says so — no version, no toast, no 'Saved, but…' warning", async () => {
@@ -461,7 +512,7 @@ describe("the Connect chip", () => {
   ];
 
   it("on a protected branch writes nothing to the canvas, and still has the composer re-test", async () => {
-    await openEditor(withReport, [], needsGmail);
+    await openEditor(withReport, { log: needsGmail });
     useWorkflow.setState({ editBranchProtected: true });
 
     await useComposer.getState().notifyConnected("gmail", "Gmail");
@@ -475,7 +526,7 @@ describe("the Connect chip", () => {
   });
 
   it("elsewhere still attaches the account it connected to the waiting step", async () => {
-    await openEditor(withReport, [], needsGmail);
+    await openEditor(withReport, { log: needsGmail });
     listConnections.mockResolvedValue({
       connections: [{ id: "conn-gmail", provider: "gmail", status: "active", created_at: "2026-10-12T00:00:00Z" }],
     } as unknown as Awaited<ReturnType<typeof api.listConnections>>);

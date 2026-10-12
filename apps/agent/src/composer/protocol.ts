@@ -97,5 +97,5 @@ export interface CanvasStep {
 export type AttachEvent =
   | SequencedComposerEvent
   | ({ event: 'snapshot'; data: SessionSnapshot } & { seq: number })
-  // Attach only: every event before it is history, every event after it is live.
-  | ({ event: 'replayed'; data: Record<string, never> } & { seq: number });
+  // Attach only: every event before it is history, every event after it is live; `turn_base` is a running turn's starting canvas.
+  | ({ event: 'replayed'; data: { turn_base?: WorkflowIr } } & { seq: number });

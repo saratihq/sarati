@@ -32,6 +32,8 @@ export interface ComposerSession {
   /** Write-through hook (armed when a thread is bound): every emitted event is persisted. */
   persist: ((event: SequencedComposerEvent) => void) | null;
   draftIr: WorkflowIr | null;
+  /** The canvas the running turn started from; memory only, as a live turn never outlives the process. */
+  turnBaseIr: WorkflowIr | null;
   /** The branch the editor's canvas belongs to, as of the latest message; null when unknown. */
   canvasBranch: string | null;
   /** The steps of the composer's last draft — its latest batch, or the canvas the latest message carried; null when unknown. */
@@ -218,6 +220,7 @@ export class SessionStore implements OnApplicationShutdown {
       userKey: null,
       persist: null,
       draftIr,
+      turnBaseIr: null,
       canvasBranch: null,
       draftSteps: null,
       busy: false,

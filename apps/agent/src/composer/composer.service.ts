@@ -102,9 +102,11 @@ export class ComposerService {
     callerOrgId: string | null,
     userKey: string | null = null,
   ): AsyncGenerator<SequencedComposerEvent> {
+    const workflowId = request.workflow_id ?? null;
     const session = request.session_id
       ? this.sessions.get(request.session_id)
-      : this.sessions.create(request.workflow_id ?? null, request.ir ?? null);
+      : ((await this.threadSession(userKey, workflowId)) ??
+        this.sessions.create(workflowId, request.ir ?? null));
     if (!session) {
       yield { event: 'error', data: { message: 'Unknown or expired session — start a new one.' }, seq: 0 };
       return;
@@ -115,6 +117,7 @@ export class ComposerService {
     }
 
     session.busy = true;
+    session.turnBaseIr = request.ir ?? null;
     try {
       // Freshest caller credentials win — tool calls run AS the user.
       if (callerToken) session.callerToken = callerToken;
@@ -165,6 +168,7 @@ export class ComposerService {
       }
     } finally {
       session.busy = false;
+      session.turnBaseIr = null;
       session.lastUsedAt = Date.now();
     }
   }
@@ -240,7 +244,8 @@ export class ComposerService {
         yield { event: 'snapshot', data: snapshotOf(session), seq: session.seq };
       }
     }
-    yield { event: 'replayed', data: {}, seq: delivered };
+    const turnBase = session.busy ? session.turnBaseIr : null;
+    yield { event: 'replayed', data: turnBase ? { turn_base: turnBase } : {}, seq: delivered };
     if (!session.busy || clientGone.aborted) {
       clientGone.removeEventListener('abort', onGone);
       if (session.subscriber === channel) session.subscriber = null;
@@ -260,11 +265,7 @@ export class ComposerService {
     }
   }
 
-  /**
-   * Attach session resolution: in-memory session id first; else the caller's
-   * durable thread (find-or-create), served by the live session bound to it
-   * or a session rehydrated from the persisted event log.
-   */
+  /** Attach session resolution: in-memory session id first; else the caller's durable thread. */
   private async locateForAttach(
     request: AttachRequest,
     userKey: string | null,
@@ -275,17 +276,24 @@ export class ComposerService {
       return byId;
     }
     const keyed = request.scratch === true || typeof request.workflowId === 'string';
-    if (!this.threads.enabled || !userKey || !keyed) return null;
-    const workflowId = request.workflowId ?? null;
+    return keyed ? this.threadSession(userKey, request.workflowId ?? null) : null;
+  }
+
+  /**
+   * The caller's durable thread (find-or-create), served by the live session
+   * bound to it or a session rehydrated from the persisted event log; null
+   * when persistence is off or the thread can't be resolved.
+   */
+  private async threadSession(
+    userKey: string | null,
+    workflowId: string | null,
+  ): Promise<ComposerSession | null> {
+    if (!this.threads.enabled || !userKey) return null;
     try {
       const thread = await this.threads.resolve(userKey, workflowId);
-      const live = this.sessions.findByThread(thread.id);
-      if (live) return live;
-      return await this.rehydrate(thread, userKey, workflowId);
+      return this.sessions.findByThread(thread.id) ?? (await this.rehydrate(thread, userKey, workflowId));
     } catch (err) {
-      this.logger.warn(
-        `thread attach failed (${workflowId ?? 'scratch'}) — nothing to replay: ${messageOf(err)}`,
-      );
+      this.logger.warn(`thread lookup failed (${workflowId ?? 'scratch'}): ${messageOf(err)}`);
       return null;
     }
   }

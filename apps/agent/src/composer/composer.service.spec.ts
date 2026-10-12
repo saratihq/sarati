@@ -158,6 +158,7 @@ function makeCtx(
     callerOrgId: null,
     persist: null,
     draftIr: { nodes: draftNodes, edges: [] },
+    turnBaseIr: null,
     canvasBranch: null,
     draftSteps: null,
     busy: true,
@@ -525,6 +526,14 @@ describe('the canvas note: steps of the last draft that are not on the canvas no
     expect(promptOf(query)).toContain(REPORT_GONE);
   });
 
+  it('a message with no session id takes the session already live on its thread', async () => {
+    const { query, service, id } = await built(fakeThreads());
+
+    const events = await say(service, 'Add a filter', canvas(trigger, digest), 'main');
+    expect(sessionIdOf(events)).toBe(id);
+    expect(promptOf(query)).toContain(REPORT_GONE);
+  });
+
   it('says nothing when the canvas holds every step of its last draft', async () => {
     const { query, service, id } = await built();
     await say(service, 'Looks good', canvas(trigger, digest, report), 'main', { session_id: id });
@@ -705,6 +714,37 @@ describe('ComposerService.attach (refresh replay)', () => {
     const snap = received[1]!.data as { questions: Array<{ question_id: string; answer?: string }> };
     expect(snap.questions[0]).toMatchObject({ question_id: 'q1' });
     expect(snap.questions[0]!.answer).toBeUndefined();
+  });
+
+  it('joining a running turn names the canvas that turn started from; a finished turn names none', async () => {
+    let finish = (): void => undefined;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    const query = (() => {
+      const gen = (async function* () {
+        await held;
+        yield { type: 'result', subtype: 'success' };
+      })() as AsyncGenerator<Record<string, unknown>> & { close: () => void };
+      gen.close = () => undefined;
+      return gen;
+    }) as unknown as QueryFn;
+    const { service } = await makeService(query);
+    const started = { nodes: [{ id: 'trigger', name: 'Trigger' }], edges: [] };
+    const turn = service.stream({ message: 'Add a summary', ir: started, branch: 'main' }, never, null, null);
+    const id = ((await turn.next()).value as { data: { session_id: string } }).data.session_id;
+    const rest = collect(turn);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const joined: AttachEvent[] = [];
+    for await (const e of service.attach({ sessionId: id, lastSeq: 0 }, never)) {
+      joined.push(e);
+      if (e.event === 'replayed') finish();
+    }
+    await rest;
+    expect(joined.find((e) => e.event === 'replayed')!.data).toEqual({ turn_base: started });
+    expect(joined.at(-1)!.event).toBe('done');
+
+    const after = await collect(service.attach({ sessionId: id, lastSeq: 0 }, never));
+    expect(after.at(-1)).toMatchObject({ event: 'replayed', data: {} });
   });
 
   it('an attach REPLACES the previous consumer (refreshed tab wins) and unknown sessions error', async () => {

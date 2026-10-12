@@ -101,8 +101,8 @@ export type ComposerStreamEvent =
     }
   | { event: "offer"; data: { offer_id: string } }
   | { event: "snapshot"; data: SessionSnapshot }
-  // Attach only: every event before it is history, every event after it is live.
-  | { event: "replayed"; data: Record<string, never> }
+  // Attach only: every event before it is history, every event after it is live; `turn_base` is a running turn's starting canvas.
+  | { event: "replayed"; data: { turn_base?: Record<string, unknown> } }
   | {
       event: "step_result";
       data: { node_id: string; status: "passed" | "failed"; summary?: string };
