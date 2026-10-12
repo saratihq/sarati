@@ -24,10 +24,16 @@ describe("irContentKey: content identity", () => {
     expect(irContentKey(before)).toBe(irContentKey(after));
   });
 
-  it("ignores a nested position too", () => {
+  it("sees a step parameter named position — only a node's own coordinates are layout", () => {
+    const before = doc([{ id: "n1", node_type: "github.move_a_project_card", parameters: { position: "top" } }]);
+    const after = doc([{ id: "n1", node_type: "github.move_a_project_card", parameters: { position: "bottom" } }]);
+    expect(irContentKey(before)).not.toBe(irContentKey(after));
+  });
+
+  it("sees a position nested in metadata, as the service's diff does", () => {
     const before = doc([{ id: "n1", metadata: { hint: { position: { x: 1, y: 1 } } } }]);
     const after = doc([{ id: "n1", metadata: { hint: { position: { x: 2, y: 2 } } } }]);
-    expect(irContentKey(before)).toBe(irContentKey(after));
+    expect(irContentKey(before)).not.toBe(irContentKey(after));
   });
 
   it.each([
