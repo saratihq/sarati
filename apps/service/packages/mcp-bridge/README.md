@@ -16,7 +16,7 @@ Use it with any MCP client that speaks stdio. Clients that speak Streamable HTTP
       "command": "npx",
       "args": ["-y", "sarati-mcp"],
       "env": {
-        "SARATI_BASE_URL": "http://localhost:8001",
+        "SARATI_BASE_URL": "http://localhost:8080",
         "SARATI_API_KEY": "ork_…"
       }
     }
@@ -24,7 +24,9 @@ Use it with any MCP client that speaks stdio. Clients that speak Streamable HTTP
 }
 ```
 
-`SARATI_BASE_URL` may include the `/mcp` path or omit it. Both variables are required.
+`SARATI_BASE_URL` is the address you open Sarati at — `http://localhost:8080` for a local install, the
+same port as the web app, never the service's own. It may include the `/mcp` path or omit it. Both
+variables are required.
 
 ## The key decides what the agent can do
 

@@ -97,14 +97,16 @@ though.
 { "status": "disabled", "reason": "anthropic_api_key_missing", "message": "…", "docs": "…" }
 ```
 
-`reason` is `anthropic_api_key_missing` or `caller_auth_unconfigured` (no caller-auth path at all —
+`reason` is `anthropic_api_key_missing`, `caller_auth_unconfigured` (no caller-auth path at all —
 no `SECRET_KEY`, no `CLERK_ISSUER`, no `MOCK_AUTH`; unconfigured caller auth turns the feature OFF,
-it never leaves it open). An install missing both is told about the Anthropic key first: it is the
-documented opt-in.
+it never leaves it open) or `rate_limited` (the service turned this visitor's key read away for asking
+too often — it passes in a minute, and is never reported as a missing key). An install missing both
+of the first two is told about the Anthropic key first: it is the documented opt-in.
 
 While disabled, every functional endpoint (`/stream`, `/attach`, `/token`, `/answer`, `/clear`)
-answers **503** with the same `reason` and `message`, *ahead of* authentication — an unconfigured
-instance must not answer 401 and send operators hunting for the wrong problem.
+answers **503** with the same `reason` and `message` — **429** for `rate_limited` — *ahead of*
+authentication: an unconfigured instance must not answer 401 and send operators hunting for the wrong
+problem.
 
 Two deliberate choices worth keeping:
 
@@ -152,7 +154,9 @@ to the configured `ork_` key for tool calls.
 
 Draft state is **session-scoped and in-memory**: the editor sends its current canvas `ir` with every
 message (so manual edits between turns win), the session carries it across tool calls, and the
-editor's own draft autosave persists whatever the user keeps. No version commits.
+editor's own draft autosave persists whatever the user keeps. No version commits. A session belongs to
+the user who started it: a `/stream`, `/token`, `/answer` or `/attach` naming its id with another
+user's token is answered as an unknown session, and changes nothing on it.
 
 **Conversations are durable** when `DATABASE_URL` is set: every emitted event write-throughs async to
 `composer_thread_events` (per-thread ordering chain; a failed insert logs and never breaks the
@@ -213,6 +217,8 @@ Required environment (**never commit secrets**; `apps/agent/.env.example` is the
 | `CORS_ORIGINS`             | yes                 | Comma-separated browser origins allowed to open composer streams. Defaults to `http://localhost:3100`. |
 | `DATABASE_URL`             | optional            | Postgres for durable composer threads (the service's database). Unset = memory-only sessions.     |
 | `PARAM_MODEL`              | optional            | Model for the focused param-filling sub-chain. Unset drops the `fill_params` tool entirely.       |
+| `TRUST_PROXY_HOPS`         | behind a proxy      | Proxies in front whose `X-Forwarded-For` entry names the visitor. The address read is sent on to the service with every call, so set it to the same count as the service's. Default `0` (the connecting peer); Sarati's stack files set `1`. Too high a count lets a visitor write their own address. |
+| `LISTEN_HOST`              | behind a proxy      | Interface to listen on. Unset = every interface; set `127.0.0.1` when the proxy runs on the same machine, so only it can reach the hop this trusts. The one-container image sets it. |
 
 ## Checks
 

@@ -230,6 +230,21 @@ your branch but not on the target. If the review that ran it was on a branch sin
 message says so instead of naming it. Commit a fix, or re-test once the cause is resolved — see
 [Reviews](/version-control/reviews/#merge).
 
+## Everyone is refused with "Rate limit exceeded"
+
+```json
+{"detail":"Rate limit exceeded. Please try again later."}
+```
+
+for every visitor at once, or one person's failed sign-ins lock everyone else out: every visitor is
+arriving from one address and sharing one limit.
+
+- **A five-container install upgraded with `docker compose pull`:** its stack file predates
+  per-visitor limits. Re-run the installer, as [the v0.2.24 note](/operate/upgrades/) says.
+- **Another proxy in front — Cloudflare, a load balancer, a Cloudflare Tunnel:** list it in
+  `SARATI_TRUSTED_PROXIES`, as [Behind another proxy](/operate/configuration/#behind-another-proxy)
+  shows.
+
 ## A setting is not taking effect
 
 ```bash

@@ -17,7 +17,7 @@ function endpoint(baseUrl: string): URL {
 const baseUrl = process.env.SARATI_BASE_URL;
 const apiKey = process.env.SARATI_API_KEY;
 
-if (!baseUrl) fail('set SARATI_BASE_URL to your Sarati instance, e.g. http://localhost:8001');
+if (!baseUrl) fail('set SARATI_BASE_URL to your Sarati instance, e.g. http://localhost:8080');
 if (!apiKey) fail('set SARATI_API_KEY to a Sarati API key (ork_…) scoped for this agent');
 
 const remote = new StreamableHTTPClientTransport(endpoint(baseUrl), {

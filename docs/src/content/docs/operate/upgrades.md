@@ -12,7 +12,8 @@ restarts in place — no need to stop anything first.
 curl -fsSL https://get.sarati.io | sh
 ```
 
-Already have the current stack file and only want new images:
+Already have the current stack file and only want new images — not when a note below says the stack
+file changed:
 
 ```bash
 cd sarati && docker compose pull && docker compose up -d
@@ -33,6 +34,10 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 ## Notes for specific versions
 
 ### v0.2.24: moving to this version
+
+**Five containers: re-run the installer.** The stack file changed — part of the rate-limit fix below
+is in `docker-compose.yaml` and `docker/Caddyfile`, which only the installer refreshes — so
+`docker compose pull` alone is not enough this time. One container needs only the new image.
 
 A few saved steps that ran before now stop with an error before sending anything, because they
 could act on the wrong Jira site or send a credential somewhere it does not belong. Check the
@@ -55,6 +60,19 @@ workflows that use them before you upgrade; each fix is one field on the step.
 The messages and what to set are in Troubleshooting:
 [a Jira step](/operate/troubleshooting/#a-jira-step-refuses-its-instance-url) and
 [a Salesforce step](/operate/troubleshooting/#a-step-wont-send-its-connections-credential).
+
+Rate limits now count per visitor — an IPv6 visitor per `/64` — and the AI composer's calls count
+against the visitor who made them. Before, the service saw Sarati's own proxy as every visitor, so
+they all shared one limit: one person's failed sign-ins locked everyone out, and anyone could switch
+the composer off for everybody.
+
+- **Behind another proxy** — Cloudflare, a load balancer, a Cloudflare Tunnel — list it in
+  `SARATI_TRUSTED_PROXIES`; [Behind another proxy](/operate/configuration/#behind-another-proxy) says
+  how.
+- **`TRUST_PROXY_HEADERS` is replaced:** remove it from `.env`. With Sarati's own proxy it is ignored,
+  and the boot log says so. `TRUST_PROXY_HOPS` is only for the images run without that proxy.
+- **One container answers on 8080 only:** its service (8001) and composer (8010) now listen inside the
+  container alone, so reach everything — the MCP endpoint included — through port 8080.
 
 `COMPOSIO_FALLBACK_APPS` is removed. In v0.2.23 and earlier it only changed where a listed app's
 step went when its type was neither a built-in action nor in the Composio catalog, and saving a

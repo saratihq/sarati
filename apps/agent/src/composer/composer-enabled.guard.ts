@@ -23,6 +23,9 @@ export class ComposerEnabledGuard implements CanActivate {
     // rather than reporting "no key" at someone who has not identified themselves.
     const reason = await this.availability.disabledReason(caller, { keyless: caller.token === null });
     if (reason === null) return true;
-    throw new HttpException({ message: DISABLED_MESSAGE[reason], reason }, 503);
+    throw new HttpException(
+      { message: DISABLED_MESSAGE[reason], reason },
+      reason === 'rate_limited' ? 429 : 503,
+    );
   }
 }

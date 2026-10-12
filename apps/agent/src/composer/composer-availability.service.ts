@@ -10,6 +10,7 @@ export const DISABLED_MESSAGE = {
     "The AI composer needs an Anthropic API key. Add one under Settings → Platform keys — your own, or your organization's if you are working in one; it takes effect immediately.",
   caller_auth_unconfigured:
     'The AI composer is not configured on this instance. Set SECRET_KEY to the same value the workflow service uses — it both authenticates composer callers and is how the composer reads the Anthropic key stored in Settings — and CLERK_ISSUER as well for a Clerk deployment. Then restart to enable it.',
+  rate_limited: 'Too many requests from your address — try again in a minute.',
 } as const;
 
 /**
@@ -45,7 +46,9 @@ export class ComposerAvailability {
       return 'caller_auth_unconfigured';
     }
     if (opts.keyless) return null;
-    if (!(await this.platformKeys.anthropicApiKey(caller))) return 'anthropic_api_key_missing';
+    const read = await this.platformKeys.readAnthropicKey(caller);
+    if (read.rateLimited) return 'rate_limited';
+    if (!read.key) return 'anthropic_api_key_missing';
     return null;
   }
 }

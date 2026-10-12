@@ -4,6 +4,7 @@ import { query, type SDKAssistantMessageError } from '@anthropic-ai/claude-agent
 
 import type { EnvConfig } from '../config/env.config';
 import { buildComposerServer, COMPOSER_TOOL_NAMES, summarizeDraft } from './agent-tools';
+import { DISABLED_MESSAGE } from './composer-availability.service';
 import { EventChannel } from './event-channel';
 import { anthropicParamCompleter, type ParamCompleteFn } from './param-filler';
 import { PendingAnswers } from './pending-answers';
@@ -12,7 +13,10 @@ import type { AttachEvent, CanvasStep, ComposerEvent, SequencedComposerEvent, Wo
 import {
   emitToSession,
   recordUserMessage,
+  ownedBy,
+  refreshCaller,
   rehydrateIntoSession,
+  sessionCaller,
   SessionStore,
   snapshotOf,
   stepsOf,
@@ -21,7 +25,7 @@ import {
 import { composerSystemPrompt } from './system-prompt';
 import { ThreadStore, type ThreadRecord } from './thread-store';
 import { WorkflowServiceClient } from './workflow-client';
-import { PlatformKeysClient } from '../config/platform-keys.client';
+import { type CallerContext, PlatformKeysClient } from '../config/platform-keys.client';
 
 /**
  * One composer turn: user message in, protocol events out. The SDK loop and
@@ -98,8 +102,7 @@ export class ComposerService {
   async *stream(
     request: StreamRequest,
     clientGone: AbortSignal,
-    callerToken: string | null,
-    callerOrgId: string | null,
+    caller: CallerContext,
     userKey: string | null = null,
   ): AsyncGenerator<SequencedComposerEvent> {
     const workflowId = request.workflow_id ?? null;
@@ -107,10 +110,11 @@ export class ComposerService {
       ? this.sessions.get(request.session_id)
       : ((await this.threadSession(userKey, workflowId)) ??
         this.sessions.create(workflowId, request.ir ?? null));
-    if (!session) {
+    if (!session || (request.session_id && !ownedBy(session, userKey))) {
       yield { event: 'error', data: { message: 'Unknown or expired session — start a new one.' }, seq: 0 };
       return;
     }
+    session.ownerSub ??= userKey;
     if (session.busy) {
       yield { event: 'error', data: { message: 'This session is already handling a message.' }, seq: 0 };
       return;
@@ -120,8 +124,8 @@ export class ComposerService {
     session.turnBaseIr = request.ir ?? null;
     try {
       // Freshest caller credentials win — tool calls run AS the user.
-      if (callerToken) session.callerToken = callerToken;
-      session.callerOrgId = callerOrgId;
+      refreshCaller(session, caller);
+      session.callerOrgId = caller.orgId ?? null;
       // A session that started before its workflow existed (composer-first new
       // build) binds to it on the first message carrying the id — never
       // rebinds. Its durable thread moves with it (scratch → the created
@@ -271,6 +275,7 @@ export class ComposerService {
   ): Promise<ComposerSession | null> {
     const byId = request.sessionId ? this.sessions.get(request.sessionId) : undefined;
     if (byId) {
+      if (!ownedBy(byId, userKey)) return null;
       await this.bindThread(byId, userKey); // no-op when already bound (or persistence is off)
       return byId;
     }
@@ -328,6 +333,7 @@ export class ComposerService {
   /** Wire a resolved thread onto the session: write-through, seq continuity, SDK resume. */
   private adoptThread(session: ComposerSession, userKey: string, thread: ThreadRecord): void {
     session.userKey = userKey;
+    session.ownerSub ??= userKey;
     session.threadId = thread.id;
     session.persist = (event) => this.threads.append(thread.id, event);
     // New events continue the durable sequence, never collide with it.
@@ -400,10 +406,9 @@ export class ComposerService {
     // ComposerEnabledGuard already 503s every route into here without a key; reaching this
     // without one means it was cleared mid-turn, and a keyless subprocess would surface that
     // as an opaque SDK failure instead.
-    const anthropicApiKey = await this.platformKeys.anthropicApiKey({
-      token: session.callerToken,
-      orgId: session.callerOrgId,
-    });
+    const keyRead = await this.platformKeys.readAnthropicKey(sessionCaller(session));
+    if (keyRead.rateLimited) throw new Error(DISABLED_MESSAGE.rate_limited);
+    const anthropicApiKey = keyRead.key;
     if (!anthropicApiKey) throw new Error('No Anthropic API key is configured — the composer is disabled.');
     const paramCompleter = this.paramCompleterFor(anthropicApiKey);
     const server = buildComposerServer({
@@ -540,21 +545,28 @@ export class ComposerService {
   }
 
   /** Long-turn token refresh (A3): the client calls this when Clerk rotates the token mid-stream. */
-  refreshToken(sessionId: string, callerToken: string | null): boolean {
+  refreshToken(sessionId: string, caller: CallerContext, sub: string | null = null): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
-    if (callerToken) session.callerToken = callerToken;
+    if (!session || !ownedBy(session, sub)) return false;
+    refreshCaller(session, caller);
     return true;
   }
 
   /** Answer a pending clarifying question (thread chip or canvas chip — first answer wins). */
-  answerQuestion(sessionId: string, questionId: string, answer: string, callerToken: string | null): boolean {
+  answerQuestion(
+    sessionId: string,
+    questionId: string,
+    answer: string,
+    caller: CallerContext,
+    sub: string | null = null,
+  ): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
+    if (!session || !ownedBy(session, sub)) return false;
+    if (!this.answers.answer(sessionId, questionId, answer)) return false;
     // An answer often arrives after a long pause — its fresh token unblocks
     // the tool calls that follow (Clerk session JWTs are short-lived).
-    if (callerToken) session.callerToken = callerToken;
-    return this.answers.answer(sessionId, questionId, answer);
+    refreshCaller(session, caller);
+    return true;
   }
 
   /** The user message plus the current canvas so the agent never edits blind. */

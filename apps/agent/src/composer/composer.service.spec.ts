@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { UnauthorizedException, type ExecutionContext } from '@nestjs/common';
@@ -92,7 +95,10 @@ async function makeService(
       { provide: ThreadStore, useValue: threads },
       { provide: QUERY_FN, useValue: queryFn },
       // The key comes from workflow-service's store now, not this process's env.
-      { provide: PlatformKeysClient, useValue: { anthropicApiKey: () => Promise.resolve('sk-test') } },
+      {
+        provide: PlatformKeysClient,
+        useValue: { readAnthropicKey: () => Promise.resolve({ key: 'sk-test', rateLimited: false }) },
+      },
     ],
   }).compile();
   return {
@@ -138,6 +144,9 @@ function fakeThreads(thread: Partial<ThreadRecord> = {}): ThreadStore & {
 }
 
 const never = new AbortController().signal;
+const NO_CALLER = { token: null };
+/** The caller `makeCtx`'s session runs its tool calls as. */
+const SESSION_CALLER = { token: 'caller-jwt', orgId: null, address: null };
 
 /** A full session + emit-capturing ToolContext for direct handler tests. */
 function makeCtx(
@@ -167,6 +176,8 @@ function makeCtx(
     buffer: [],
     subscriber: null,
     callerToken: 'caller-jwt',
+    callerAddress: null,
+    ownerSub: null,
     turnAbort: null,
     orphanTimer: null,
     snapshot: {
@@ -212,7 +223,7 @@ describe('ComposerService.stream', () => {
       ]),
     );
 
-    const events = await collect(service.stream({ message: 'build it' }, never, 'jwt-1', null));
+    const events = await collect(service.stream({ message: 'build it' }, never, { token: 'jwt-1' }));
     expect(events[0]!.event).toBe('session');
     expect(events.slice(1, 3).map((e) => ({ event: e.event, data: e.data }))).toEqual([
       { event: 'assistant_text', data: { text: 'Hello ' } },
@@ -250,7 +261,7 @@ describe('ComposerService.stream', () => {
         { type: 'result', subtype: 'success' },
       ]),
     );
-    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    const events = await collect(service.stream({ message: 'x' }, never, NO_CALLER));
     const texts = events.filter((e) => e.event === 'assistant_text').map((e) => e.data.text);
     expect(texts).toEqual(['First.', '\n\n', 'Second.']);
   });
@@ -267,9 +278,9 @@ describe('ComposerService.stream', () => {
     }) as unknown as QueryFn;
 
     const { service } = await makeService(spying);
-    const first = await collect(service.stream({ message: 'one' }, never, null, null));
+    const first = await collect(service.stream({ message: 'one' }, never, NO_CALLER));
     const sessionId = (first[0]!.data as { session_id: string }).session_id;
-    await collect(service.stream({ message: 'two', session_id: sessionId }, never, null, null));
+    await collect(service.stream({ message: 'two', session_id: sessionId }, never, NO_CALLER));
 
     expect(seenOptions[0]!.resume).toBeUndefined();
     expect(seenOptions[1]!.resume).toBe('sdk-abc');
@@ -315,23 +326,27 @@ describe('ComposerService.stream', () => {
     }) as unknown as QueryFn;
 
     const { service } = await makeService(spying);
-    await collect(service.stream({ message: 'one' }, never, null, null));
+    await collect(service.stream({ message: 'one' }, never, NO_CALLER));
 
     const subprocessEnv = seenOptions[0]!.env as Record<string, string | undefined>;
     expect(subprocessEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('1');
   });
 
   it('stores the freshest caller token on the session (tool calls run AS the user)', async () => {
-    const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
-    const first = await collect(service.stream({ message: 'a' }, never, 'jwt-old', null));
+    const { service, sessions, answers } = await makeService(
+      scriptedQuery([{ type: 'result', subtype: 'success' }]),
+    );
+    const first = await collect(service.stream({ message: 'a' }, never, { token: 'jwt-old' }));
     const id = (first[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(id)!.callerToken).toBe('jwt-old');
-    await collect(service.stream({ message: 'b', session_id: id }, never, 'jwt-new', null));
+    await collect(service.stream({ message: 'b', session_id: id }, never, { token: 'jwt-new' }));
     expect(sessions.get(id)!.callerToken).toBe('jwt-new');
-    // answerQuestion refreshes it too (long pauses outlive Clerk tokens).
-    const { questionId } = (await makeService(scriptedQuery([]))).answers.create(id, 1000);
-    void questionId;
-    service.answerQuestion(id, crypto.randomUUID(), 'x', 'jwt-answer');
+    // An accepted answer refreshes it too (long pauses outlive Clerk tokens); one nobody asked for does not.
+    expect(service.answerQuestion(id, crypto.randomUUID(), 'x', { token: 'jwt-stray' })).toBe(false);
+    expect(sessions.get(id)!.callerToken).toBe('jwt-new');
+    const { questionId, outcome } = answers.create(id, 1000);
+    expect(service.answerQuestion(id, questionId, 'x', { token: 'jwt-answer' })).toBe(true);
+    await outcome;
     expect(sessions.get(id)!.callerToken).toBe('jwt-answer');
   });
 
@@ -347,7 +362,7 @@ describe('ComposerService.stream', () => {
     }) as unknown as QueryFn;
 
     const { service, sessions } = await makeService(failing);
-    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    const events = await collect(service.stream({ message: 'x' }, never, NO_CALLER));
     expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
     const sessionId = (events[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(sessionId)!.busy).toBe(false);
@@ -371,7 +386,7 @@ describe('ComposerService.stream', () => {
       ),
     );
 
-    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    const events = await collect(service.stream({ message: 'x' }, never, NO_CALLER));
     expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
     expect((events[1]!.data as { message: string }).message).toMatch(
       /Anthropic rejected the API key.*Settings → Platform keys/,
@@ -389,7 +404,7 @@ describe('ComposerService.stream', () => {
       ),
     );
 
-    const events = await collect(service.stream({ message: 'x' }, never, null, null));
+    const events = await collect(service.stream({ message: 'x' }, never, NO_CALLER));
     expect(events.map((e) => e.event)).toEqual(['session', 'error', 'done']);
     expect((events[1]!.data as { message: string }).message).toMatch(/rate-limiting/);
   });
@@ -397,24 +412,24 @@ describe('ComposerService.stream', () => {
   it('rejects an unknown session and a busy session with error events', async () => {
     const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
     const unknown = await collect(
-      service.stream({ message: 'x', session_id: crypto.randomUUID() }, never, null, null),
+      service.stream({ message: 'x', session_id: crypto.randomUUID() }, never, NO_CALLER),
     );
     expect(unknown[0]!.event).toBe('error');
 
     const s = sessions.create(null, null);
     s.busy = true;
-    const busy = await collect(service.stream({ message: 'x', session_id: s.id }, never, null, null));
+    const busy = await collect(service.stream({ message: 'x', session_id: s.id }, never, NO_CALLER));
     expect(busy[0]!.event).toBe('error');
   });
 
   it('refreshes the session draft from the message ir (user edits between turns win)', async () => {
     const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
     const first = await collect(
-      service.stream({ message: 'a', ir: { nodes: [], edges: [] } }, never, null, null),
+      service.stream({ message: 'a', ir: { nodes: [], edges: [] } }, never, NO_CALLER),
     );
     const id = (first[0]!.data as { session_id: string }).session_id;
     const edited = { nodes: [{ id: 'n1' }], edges: [] };
-    await collect(service.stream({ message: 'b', session_id: id, ir: edited }, never, null, null));
+    await collect(service.stream({ message: 'b', session_id: id, ir: edited }, never, NO_CALLER));
     expect(sessions.get(id)!.draftIr).toEqual(edited);
   });
 });
@@ -427,12 +442,12 @@ describe('ComposerService on any canvas', () => {
     const { service } = await makeService(query);
     const ir = { nodes: [{ id: 'trigger' }], edges: [] };
 
-    await collect(service.stream({ message: 'tweak it', ir, branch: 'lane' }, never, null, null));
+    await collect(service.stream({ message: 'tweak it', ir, branch: 'lane' }, never, NO_CALLER));
     expect(promptOf(query)).toContain(
       '<canvas_branch>lane — not main: its versions reach what runs only through a merge into main and a publish, or a promotion.</canvas_branch>',
     );
 
-    await collect(service.stream({ message: 'tweak it', ir, branch: 'main' }, never, null, null));
+    await collect(service.stream({ message: 'tweak it', ir, branch: 'main' }, never, NO_CALLER));
     expect(promptOf(query)).not.toContain('<canvas_branch>');
   });
 
@@ -441,7 +456,7 @@ describe('ComposerService on any canvas', () => {
     const query = jest.fn(scriptedQuery([{ type: 'result', subtype: 'success' }]));
     const { service } = await makeService(query, { readWorkflow });
 
-    await collect(service.stream({ message: 'hello', workflow_id: 'wf-1' }, never, null, null));
+    await collect(service.stream({ message: 'hello', workflow_id: 'wf-1' }, never, NO_CALLER));
 
     expect(readWorkflow).not.toHaveBeenCalled();
     expect(promptOf(query)).toContain('<canvas_state>empty — no steps yet</canvas_state>');
@@ -480,8 +495,7 @@ describe('the canvas note: steps of the last draft that are not on the canvas no
       service.stream(
         { message: 'Email me a daily digest', ir: canvas(trigger), branch: 'main' },
         never,
-        null,
-        null,
+        NO_CALLER,
         'user_1',
       ),
     );
@@ -500,7 +514,7 @@ describe('the canvas note: steps of the last draft that are not on the canvas no
     branch: string,
     extra: { session_id?: string; workflow_id?: string } = {},
   ): Promise<AttachEvent[]> =>
-    collect(service.stream({ message, ir, branch, ...extra }, never, null, null, 'user_1'));
+    collect(service.stream({ message, ir, branch, ...extra }, never, NO_CALLER, 'user_1'));
 
   it('names a step of its last draft the canvas lacks, on the same branch, and only once', async () => {
     const { query, service, id } = await built();
@@ -729,7 +743,7 @@ describe('ComposerService.attach (refresh replay)', () => {
     }) as unknown as QueryFn;
     const { service } = await makeService(query);
     const started = { nodes: [{ id: 'trigger', name: 'Trigger' }], edges: [] };
-    const turn = service.stream({ message: 'Add a summary', ir: started, branch: 'main' }, never, null, null);
+    const turn = service.stream({ message: 'Add a summary', ir: started, branch: 'main' }, never, NO_CALLER);
     const id = ((await turn.next()).value as { data: { session_id: string } }).data.session_id;
     const rest = collect(turn);
     await new Promise((r) => setTimeout(r, 10));
@@ -795,7 +809,7 @@ describe('ComposerService orphan grace (disconnect ≠ abort)', () => {
     const gone = new AbortController();
     const received: string[] = [];
     const streamDone = (async () => {
-      for await (const e of service.stream({ message: 'x' }, gone.signal, null, null)) {
+      for await (const e of service.stream({ message: 'x' }, gone.signal, NO_CALLER)) {
         received.push(e.event);
       }
     })();
@@ -833,7 +847,7 @@ describe('tool handlers (workflow-service wrappers)', () => {
     expect(result.isError).toBeUndefined();
     expect(session.draftIr).toBe(ir);
     expect(emitted).toEqual([{ event: 'op_applied', data: { ops, ir } }]);
-    expect(applyOps).toHaveBeenCalledWith(expect.anything(), ops, 'caller-jwt');
+    expect(applyOps).toHaveBeenCalledWith(expect.anything(), ops, SESSION_CALLER);
   });
 
   /**
@@ -878,7 +892,7 @@ describe('tool handlers (workflow-service wrappers)', () => {
       'slack.send_channel_message',
       'channel',
       'conn-1',
-      'caller-jwt',
+      SESSION_CALLER,
     );
   });
 
@@ -910,7 +924,7 @@ describe('tool handlers (workflow-service wrappers)', () => {
     expect(testStep).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'fetch', node_type: 'http.send_request' }),
       { trigger: { amount: 1 } },
-      'caller-jwt',
+      SESSION_CALLER,
     );
 
     const fail = await runTestStep(context, 'fetch', {});
@@ -938,7 +952,7 @@ describe('tool handlers (workflow-service wrappers)', () => {
     expect((run.data as { status: string }).status).toBe('passed');
     expect(runFromIr).toHaveBeenCalledWith(
       expect.objectContaining({ triggerPayload: { amount: 700 } }),
-      'caller-jwt',
+      SESSION_CALLER,
     );
   });
 
@@ -1253,19 +1267,18 @@ describe('workflow binding adoption (composer-first new build)', () => {
       readWorkflow: () => Promise.reject(new Error('not seeded in this test')),
     });
     const session = sessions.create(null, { nodes: [], edges: [] });
-    await collect(service.stream({ message: 'x', session_id: session.id }, never, null, null));
+    await collect(service.stream({ message: 'x', session_id: session.id }, never, NO_CALLER));
     expect(session.workflowId).toBeNull();
     await collect(
       service.stream(
         { message: 'Saved and turned on.', session_id: session.id, workflow_id: 'wf-9' },
         never,
-        null,
-        null,
+        NO_CALLER,
       ),
     );
     expect(session.workflowId).toBe('wf-9');
     await collect(
-      service.stream({ message: 'y', session_id: session.id, workflow_id: 'wf-other' }, never, null, null),
+      service.stream({ message: 'y', session_id: session.id, workflow_id: 'wf-other' }, never, NO_CALLER),
     );
     expect(session.workflowId).toBe('wf-9');
   });
@@ -1274,10 +1287,65 @@ describe('workflow binding adoption (composer-first new build)', () => {
 describe('ComposerService.refreshToken (long-turn rotation)', () => {
   it('updates the session token; unknown sessions 404 at the caller', async () => {
     const { service, sessions } = await makeService(scriptedQuery([]));
-    expect(service.refreshToken(crypto.randomUUID(), 'jwt-x')).toBe(false);
+    expect(service.refreshToken(crypto.randomUUID(), { token: 'jwt-x' })).toBe(false);
     const session = sessions.create(null, null);
-    expect(service.refreshToken(session.id, 'jwt-rotated')).toBe(true);
+    expect(service.refreshToken(session.id, { token: 'jwt-rotated' })).toBe(true);
     expect(session.callerToken).toBe('jwt-rotated');
+  });
+});
+
+describe('a composer session belongs to the user who started it', () => {
+  async function ownedSession() {
+    const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+    const first = await collect(
+      service.stream({ message: 'x' }, never, { token: 'jwt-owner', address: '203.0.113.1' }, 'user_owner'),
+    );
+    const session = sessions.get((first[0]!.data as { session_id: string }).session_id)!;
+    return { service, session };
+  }
+  const intruder = { token: 'jwt-intruder', address: '198.51.100.9' };
+
+  it("refuses another user's stream, token refresh and attach on that session id, changing nothing", async () => {
+    const { service, session } = await ownedSession();
+    const streamed = await collect(
+      service.stream({ message: 'y', session_id: session.id }, never, intruder, 'user_b'),
+    );
+    expect(streamed).toEqual([
+      { event: 'error', data: { message: 'Unknown or expired session — start a new one.' }, seq: 0 },
+    ]);
+    expect(service.refreshToken(session.id, intruder, 'user_b')).toBe(false);
+    const attached = await collect(service.attach({ sessionId: session.id, lastSeq: 0 }, never, 'user_b'));
+    expect(attached).toEqual([
+      { event: 'error', data: { message: 'Unknown or expired session — start a new one.' }, seq: 0 },
+    ]);
+    expect(session).toMatchObject({
+      callerToken: 'jwt-owner',
+      callerAddress: '203.0.113.1',
+      ownerSub: 'user_owner',
+    });
+  });
+
+  it("refuses another user's answer, and takes even the owner's caller only once an answer is accepted", async () => {
+    const { service, session } = await ownedSession();
+    expect(service.answerQuestion(session.id, crypto.randomUUID(), 'x', intruder, 'user_b')).toBe(false);
+    expect(
+      service.answerQuestion(
+        session.id,
+        crypto.randomUUID(),
+        'x',
+        { token: 'jwt-later', address: '203.0.113.2' },
+        'user_owner',
+      ),
+    ).toBe(false);
+    expect(session).toMatchObject({ callerToken: 'jwt-owner', callerAddress: '203.0.113.1' });
+  });
+
+  it('lets the owner keep going', async () => {
+    const { service, session } = await ownedSession();
+    expect(
+      service.refreshToken(session.id, { token: 'jwt-rotated', address: '203.0.113.3' }, 'user_owner'),
+    ).toBe(true);
+    expect(session).toMatchObject({ callerToken: 'jwt-rotated', callerAddress: '203.0.113.3' });
   });
 });
 
@@ -1384,7 +1452,7 @@ describe('WorkflowServiceClient credentials', () => {
 
   it('with real auth a null caller token FAILS — never escalates to the ork_ service key', async () => {
     const client = clientWith({ ...ENV, mockAuth: false });
-    await expect(client.searchCatalog('slack', 5, null)).rejects.toThrow(/no credentials/);
+    await expect(client.searchCatalog('slack', 5, NO_CALLER)).rejects.toThrow(/no credentials/);
   });
 
   it('under MOCK_AUTH the ork_ fallback is used', async () => {
@@ -1396,11 +1464,33 @@ describe('WorkflowServiceClient credentials', () => {
       return Promise.resolve(new Response(JSON.stringify({ results: [] }), { status: 200 }));
     }) as unknown as typeof fetch;
     try {
-      await client.searchCatalog('slack', 5, null);
+      await client.searchCatalog('slack', 5, NO_CALLER);
     } finally {
       global.fetch = realFetch;
     }
     expect(seen).toEqual(['Bearer ork_test']);
+  });
+
+  it("carries the visitor's address on every call, so the service counts their limits, not this process's", async () => {
+    const seen: Array<string | undefined> = [];
+    const service = createServer((req, res) => {
+      seen.push(req.headers['x-forwarded-for'] as string | undefined);
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ results: [] }));
+    });
+    await new Promise<void>((resolve) => service.listen(0, '127.0.0.1', resolve));
+    const client = clientWith({
+      ...ENV,
+      mockAuth: false,
+      workflowServiceUrl: `http://127.0.0.1:${(service.address() as AddressInfo).port}`,
+    });
+    try {
+      await client.searchCatalog('slack', 5, { token: 'jwt', address: '203.0.113.9' });
+      await client.listConnections({ token: 'jwt', address: '2001:db8:a:b::7' });
+      await client.searchCatalog('slack', 5, { token: 'jwt' });
+    } finally {
+      await new Promise((resolve) => service.close(resolve));
+    }
+    expect(seen).toEqual(['203.0.113.9', '2001:db8:a:b::7', undefined]);
   });
 });
 
@@ -1513,7 +1603,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('stream binds the (user, workflow) thread and write-throughs the transcript in order', async () => {
     const threads = fakeThreads({ id: 'thread-9', workflowId: 'wf-1' });
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    await collect(service.stream({ message: 'build it', workflow_id: 'wf-1' }, never, null, null, 'user_1'));
+    await collect(service.stream({ message: 'build it', workflow_id: 'wf-1' }, never, NO_CALLER, 'user_1'));
 
     expect(threads.resolve).toHaveBeenCalledWith('user_1', 'wf-1');
     const appended = threads.append.mock.calls.map((c) => c[1] as SequencedComposerEvent);
@@ -1527,7 +1617,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('a pre-existing thread sets the seq floor — new events continue the durable log', async () => {
     const threads = fakeThreads({ id: 'thread-9', lastSeq: 7 });
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    await collect(service.stream({ message: 'more' }, never, null, null, 'user_1'));
+    await collect(service.stream({ message: 'more' }, never, NO_CALLER, 'user_1'));
     const appended = threads.append.mock.calls.map((c) => c[1] as SequencedComposerEvent);
     expect(appended[0]).toMatchObject({ event: 'user_message', seq: 8 });
   });
@@ -1539,7 +1629,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       {},
       threads,
     );
-    const first = await collect(service.stream({ message: 'draft it' }, never, null, null, 'user_1'));
+    const first = await collect(service.stream({ message: 'draft it' }, never, NO_CALLER, 'user_1'));
     const sessionId = (first[0]!.data as { session_id: string }).session_id;
     expect(threads.resolve).toHaveBeenCalledWith('user_1', null);
 
@@ -1547,7 +1637,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       service.stream(
         { message: 'Saved and turned on.', session_id: sessionId, workflow_id: 'wf-new' },
         never,
-        null,
+        NO_CALLER,
         'user_1',
       ),
     );
@@ -1562,7 +1652,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       {},
       threads,
     );
-    const first = await collect(service.stream({ message: 'draft it' }, never, null, null, 'user_1'));
+    const first = await collect(service.stream({ message: 'draft it' }, never, NO_CALLER, 'user_1'));
     const sessionId = (first[0]!.data as { session_id: string }).session_id;
     threads.resolve.mockRejectedValue(
       new Error('violates foreign key constraint "composer_threads_workflow_id_fkey"'),
@@ -1573,7 +1663,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       service.stream(
         { message: 'Saved and turned on.', session_id: sessionId, workflow_id: 'wf-gone' },
         never,
-        null,
+        NO_CALLER,
         'user_1',
       ),
     );
@@ -1634,6 +1724,7 @@ describe('durable threads (write-through + rehydrate)', () => {
     const session = sessions.create('wf-1', null);
     session.threadId = 'thread-9';
     session.userKey = 'user_1';
+    session.ownerSub = 'user_1';
     session.seq = 1;
     emitToSession(session, { event: 'assistant_text', data: { text: 'tail' } }); // seq 2, buffer only
 
@@ -1658,7 +1749,7 @@ describe('durable threads (write-through + rehydrate)', () => {
     const threads = fakeThreads();
     threads.resolve.mockRejectedValue(new Error('connection refused'));
     const { service, sessions } = await makeService(scriptedQuery(turn), {}, threads);
-    const events = await collect(service.stream({ message: 'x' }, never, null, null, 'user_1'));
+    const events = await collect(service.stream({ message: 'x' }, never, NO_CALLER, 'user_1'));
     expect(events.map((e) => e.event)).toEqual(['session', 'assistant_text', 'done']);
     const sessionId = (events[0]!.data as { session_id: string }).session_id;
     expect(sessions.get(sessionId)!.threadId).toBeNull();
@@ -1668,7 +1759,7 @@ describe('durable threads (write-through + rehydrate)', () => {
   it('user_message is transcript-only: buffered and persisted, never pushed to the live stream', async () => {
     const threads = fakeThreads();
     const { service } = await makeService(scriptedQuery(turn), {}, threads);
-    const events = await collect(service.stream({ message: 'hello' }, never, null, null, 'user_1'));
+    const events = await collect(service.stream({ message: 'hello' }, never, NO_CALLER, 'user_1'));
     expect(events.some((e) => e.event === 'user_message')).toBe(false);
     const appended = threads.append.mock.calls.map((c) => (c[1] as SequencedComposerEvent).event);
     expect(appended).toContain('user_message');

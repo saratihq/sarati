@@ -33,6 +33,7 @@ import { ComposeModule } from './compose/compose.module';
 import { SubWorkflowModule } from './sub-workflow/sub-workflow.module';
 import { McpModule } from './mcp/mcp.module';
 import { PlatformModule } from './platform/platform.module';
+import { rateLimitKey } from './common/rate-limit-key';
 
 @Module({
   imports: [
@@ -58,12 +59,15 @@ import { PlatformModule } from './platform/platform.module';
         level: process.env.LOG_LEVEL ?? 'info',
       },
     }),
-    // Keyed per client IP; X-Forwarded-For is honored only behind TRUST_PROXY_HEADERS (bootstrap.ts).
+    // Keyed per client address, which TRUST_PROXY_HOPS resolves through the proxies in front (bootstrap.ts).
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<{ env: EnvConfig }, true>) => {
         const env = config.get('env', { infer: true });
-        return { throttlers: [{ ttl: env.throttleTtlMs, limit: env.throttleLimit }] };
+        return {
+          throttlers: [{ ttl: env.throttleTtlMs, limit: env.throttleLimit }],
+          getTracker: (req: { ip?: string }) => rateLimitKey(req.ip),
+        };
       },
     }),
     DatabaseModule,
