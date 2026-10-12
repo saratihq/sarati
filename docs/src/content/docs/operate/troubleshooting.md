@@ -181,6 +181,17 @@ your branch but not on the target. If the review that ran it was on a branch sin
 message says so instead of naming it. Commit a fix, or re-test once the cause is resolved — see
 [Reviews](/version-control/reviews/#merge).
 
+## Everyone is refused with "Rate limit exceeded"
+
+```json
+{"detail":"Rate limit exceeded. Please try again later."}
+```
+
+for every visitor at once, or one person's failed sign-ins lock everyone else out: another proxy —
+Cloudflare, a load balancer — fronts Sarati, so every visitor arrives from its address and shares one
+limit. Set its ranges in `SARATI_TRUSTED_PROXIES`, as
+[Behind another proxy](/operate/configuration/#behind-another-proxy) shows.
+
 ## A setting is not taking effect
 
 ```bash

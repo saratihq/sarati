@@ -59,14 +59,36 @@ TRIGGER_POLL_INTERVAL_SECONDS=60
 THROTTLE_LIMIT=60
 THROTTLE_TTL_MS=60000
 
-# Behind a reverse proxy that sets X-Forwarded-*.
-TRUST_PROXY_HEADERS=false
+# Address ranges of a proxy in front of Sarati's own, space-separated — see "Behind another proxy".
+SARATI_TRUSTED_PROXIES=
 
 MAX_REQUEST_BODY_BYTES=2097152
 
 # The Claude model the AI composer calls — change it when your Anthropic key cannot use this one.
 COMPOSER_MODEL=claude-opus-4-8
 ```
+
+## Behind another proxy
+
+Rate limits count per visitor address, the sign-in limit of five attempts a minute included. Sarati's
+own proxy works that address out and hands it on, so nothing needs setting when visitors reach it
+directly. When another proxy sits in front — Cloudflare, a load balancer, your own nginx — every
+visitor arrives from that proxy's addresses and they all share one limit, so one visitor's failed
+sign-ins lock everyone out. List the proxy's addresses so each visitor's own is used:
+
+```bash
+# Cloudflare's published ranges, from https://www.cloudflare.com/ips/ — space-separated.
+SARATI_TRUSTED_PROXIES=173.245.48.0/20 103.21.244.0/22 2400:cb00::/32
+```
+
+- **How the address is read:** from the right of `X-Forwarded-For`, skipping only the listed ranges,
+  so a visitor cannot choose their own by sending the header. `private_ranges` stands for every
+  private range, for a proxy on your own network.
+- **List only proxies you run or pay for:** an address in a listed range can claim to be any visitor.
+- **`CF-Connecting-IP` is never read:** anyone can send it to a server that Cloudflare does not front.
+- **The service image without Sarati's proxy:** set `TRUST_PROXY_HOPS` to the number of proxies in
+  front of it that each append to `X-Forwarded-For` — never more. Its default, `0`, uses the
+  connecting address. The images that bundle the proxy set it to `1` themselves.
 
 ## Not here: the two platform API keys
 

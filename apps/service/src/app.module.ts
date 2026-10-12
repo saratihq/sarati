@@ -53,7 +53,7 @@ import { PlatformModule } from './platform/platform.module';
         level: process.env.LOG_LEVEL ?? 'info',
       },
     }),
-    // Keyed per client IP; X-Forwarded-For is honored only behind TRUST_PROXY_HEADERS (bootstrap.ts).
+    // Keyed per client IP, which TRUST_PROXY_HOPS resolves through the proxies in front (bootstrap.ts).
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<{ env: EnvConfig }, true>) => {

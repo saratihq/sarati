@@ -44,6 +44,8 @@ services:
       FRONTEND_URL: ${SARATI_URL:-http://localhost:8080}
       # Where third parties send webhooks: the same origin unless a tunnel fronts inbound traffic.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-${SARATI_URL:-http://localhost:8080}}
+      # The proxy below is the one hop in front, and it hands on the client address it resolved.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
     volumes:
       - service-data:/data
 
@@ -69,6 +71,9 @@ services:
     depends_on: [service, client]
     ports:
       - '${SARATI_PORT:-8080}:8080'
+    environment:
+      # Ranges of a proxy in front of this one (Cloudflare, a load balancer); empty trusts none.
+      SARATI_TRUSTED_PROXIES: ${SARATI_TRUSTED_PROXIES:-}
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -32,6 +32,16 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
+### v0.2.24: visitor addresses and `TRUST_PROXY_HEADERS`
+
+Rate limits now count per visitor. Before, the service saw Sarati's own proxy as every visitor, so
+all of them shared one limit and one person's failed sign-ins locked everyone out. Behind another
+proxy, such as Cloudflare, set its ranges in `SARATI_TRUSTED_PROXIES` —
+[Behind another proxy](/operate/configuration/#behind-another-proxy) has the detail.
+
+`TRUST_PROXY_HEADERS` is no longer read: `true` now counts as one proxy hop and is logged at boot.
+Remove it, and set `TRUST_PROXY_HOPS` only if you run the service image without Sarati's proxy.
+
 ### v0.2.23: outbound requests to private addresses
 
 Every step and trigger that calls an address from this server now refuses a private or internal one,

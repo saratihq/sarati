@@ -106,8 +106,14 @@ export class EnvConfig {
   @IsString()
   fernetKey = '';
 
+  /** Proxy hops in front of the service whose X-Forwarded-For entry is trusted; 0 = the socket peer is the client. */
+  @IsInt()
+  @Min(0)
+  trustProxyHops = 0;
+
+  /** TRUST_PROXY_HEADERS is set: it is replaced by TRUST_PROXY_HOPS, and `true` reads as one hop. */
   @IsBoolean()
-  trustProxyHeaders = false;
+  legacyTrustProxyHeaders = false;
 
   @IsInt()
   @Min(1)
@@ -242,7 +248,8 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       corsOrigins: raw.CORS_ORIGINS || undefined,
       secretKey: raw.SECRET_KEY || INSECURE_SECRET_KEY,
       fernetKey: raw.FERNET_KEY ?? '',
-      trustProxyHeaders: asBool(raw.TRUST_PROXY_HEADERS, false),
+      trustProxyHops: asInt(raw.TRUST_PROXY_HOPS, asBool(raw.TRUST_PROXY_HEADERS, false) ? 1 : 0),
+      legacyTrustProxyHeaders: Boolean(raw.TRUST_PROXY_HEADERS),
       maxRequestBodyBytes: asInt(raw.MAX_REQUEST_BODY_BYTES, 2_097_152),
       pgBossEnabled: asBool(raw.PGBOSS_ENABLED, true),
       dbosEnabled: asBool(raw.DBOS_ENABLED, false),
