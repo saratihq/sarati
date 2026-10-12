@@ -265,7 +265,6 @@ export class ComposerService {
     }
   }
 
-  /** Attach session resolution: in-memory session id first; else the caller's durable thread. */
   private async locateForAttach(
     request: AttachRequest,
     userKey: string | null,
@@ -279,11 +278,6 @@ export class ComposerService {
     return keyed ? this.threadSession(userKey, request.workflowId ?? null) : null;
   }
 
-  /**
-   * The caller's durable thread (find-or-create), served by the live session
-   * bound to it or a session rehydrated from the persisted event log; null
-   * when persistence is off or the thread can't be resolved.
-   */
   private async threadSession(
     userKey: string | null,
     workflowId: string | null,
