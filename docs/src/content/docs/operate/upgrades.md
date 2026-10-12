@@ -47,9 +47,6 @@ workflows that use them before you upgrade; each fix is one field on the step.
 - **A managed Jira step whose Instance URL is not a Jira Cloud host,** such as a self-hosted
   `https://jira.acme.com`, used to have it ignored. It now refuses: set Instance URL to your Jira
   Cloud site, `https://<your-site>.atlassian.net`.
-- **A managed Jira step whose Instance URL leaves out `https://` or uses `http://`,** such as
-  `acme.atlassian.net` or `http://acme.atlassian.net`, used to run on the connection's first site. It
-  now refuses as not a Jira Cloud site: set Instance URL to `https://<your-site>.atlassian.net`.
 - **A Salesforce step or trigger whose Instance URL is a legacy instance host** —
   `na123.salesforce.com`, a `cloudforce.com` host or an Experience Cloud `my.site.com` host — now
   refuses to send its credential there. Set Instance URL to your org's My Domain URL,

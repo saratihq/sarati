@@ -400,18 +400,23 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       return awaitRun(fired.body.run_id as string);
     }
 
-    it('a blank instanceUrl resolves to the one site the connection reaches', async () => {
-      sites = [{ id: 'cloud-acme', url: SITE, name: 'acme' }];
-      const run = await fire(await deploy(org, getIssueDoc('jira one site', connectionId, '')));
+    it.each(['', 'acme.atlassian.net', 'http://acme.atlassian.net'])(
+      'instanceUrl %j resolves to the one site the connection reaches',
+      async (instanceUrl) => {
+        sites = [{ id: 'cloud-acme', url: SITE, name: 'acme' }];
+        const run = await fire(
+          await deploy(org, getIssueDoc(`jira one site ${instanceUrl}`, connectionId, instanceUrl)),
+        );
 
-      expect(run.status).toBe('completed');
-      expect((run.outputs as Record<string, unknown>).issue).toMatchObject({ key: 'ENG-1' });
-      expect(proxyHits.map((h) => h.endpoint)).toEqual([
-        `${GATEWAY}/oauth/token/accessible-resources`,
-        `${GATEWAY}/ex/jira/cloud-acme/rest/api/3/issue/ENG-1`,
-      ]);
-      expect(proxyHits.every((h) => h.connectedAccountId === ACCOUNT_ID)).toBe(true);
-    });
+        expect(run.status).toBe('completed');
+        expect((run.outputs as Record<string, unknown>).issue).toMatchObject({ key: 'ENG-1' });
+        expect(proxyHits.map((h) => h.endpoint)).toEqual([
+          `${GATEWAY}/oauth/token/accessible-resources`,
+          `${GATEWAY}/ex/jira/cloud-acme/rest/api/3/issue/ENG-1`,
+        ]);
+        expect(proxyHits.every((h) => h.connectedAccountId === ACCOUNT_ID)).toBe(true);
+      },
+    );
 
     it('a blank instanceUrl on a connection reaching two sites is refused, naming both', async () => {
       sites = [
