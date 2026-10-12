@@ -7,7 +7,7 @@ import { COMPOSIO_DIRECT_APPS } from '../connections/managed-app-rails';
 import type { EnvConfig } from '../config/env.config';
 import { ActionRouterProvider } from './action-router.provider';
 import { InMemoryStore } from './provider-store';
-import { composioToolFor } from './sdk-actions.registry';
+import { composioToolFor, isSdkActionType } from './sdk-actions.registry';
 import { composioTriggerTypes, POLL_CURSOR_KEY } from './composio-trigger.registry';
 import type { RunActionInput, TriggerInput } from './managed-integration-provider';
 import type { SdkActionsProvider } from './sdk-actions.provider';
@@ -29,7 +29,7 @@ function build(opts: {
   fallbackApps?: string;
   managedRef?: ManagedConnectionRef | null;
   composioConfigured?: boolean;
-  /** Public types the SDK owns for this test (default: none → nothing routes to ours). */
+  /** Public types treated as SDK-owned on top of the real registry. */
   sdkTypes?: string[];
   /** The org cluster connection resolveClusterConnection returns (default: none). */
   clusterConn?: { id: string; ownerUserId: string } | null;
@@ -46,7 +46,7 @@ function build(opts: {
 
   const sdkTypes = new Set(opts.sdkTypes ?? []);
   const orchestrActions = {
-    has: (type: string) => sdkTypes.has(type),
+    has: (type: string) => isSdkActionType(type) || sdkTypes.has(type),
     runAction: runOurs,
   } as unknown as SdkActionsProvider;
   const composio = {
@@ -76,6 +76,8 @@ function build(opts: {
 
 // A real catalog entry that is NOT an SDK action — a genuine per-action gap, the universal fallback's target.
 const COMPOSIO_ONLY = 'asana.get_current_user';
+// A real catalog entry of a TRANSPORT-GAP app the SDK ships no action for.
+const TRANSPORT_GAP = 'trello.add_boards';
 
 const input = (
   actionId: string,
@@ -170,24 +172,32 @@ describe('ActionRouterProvider', () => {
 
   it('routes a TRANSPORT-GAP app on a managed connection through Composio', async () => {
     const { router, execute } = build({ managedRef: managed() });
-    const out = await router.runAction(input('jira.search_issues', 'conn-1'));
+    const out = await router.runAction(input(TRANSPORT_GAP, 'conn-1'));
     expect(out).toEqual({ output: { via: 'composio' } });
     expect(execute).toHaveBeenCalledWith({
       scope: SCOPE,
-      appSlug: 'jira',
-      actionName: 'search_issues',
+      appSlug: 'trello',
+      actionName: 'add_boards',
       props: { foo: 'bar' },
       connectedAccountId: 'ca__1',
       userId: 'user-1',
       // The EXACT catalog tool is passed so execution routes by slug, not name.
-      tool: composioToolFor('jira.search_issues'),
+      tool: composioToolFor(TRANSPORT_GAP),
     });
+  });
+
+  it('a managed Jira step runs on OUR action — the SDK owns jira, so rail (a) wins', async () => {
+    const { router, execute, runOurs } = build({ managedRef: managed() });
+    const out = await router.runAction(input('jira.search_issues', 'conn-1'));
+    expect(out).toEqual({ output: { via: 'sdk-actions' } });
+    expect(runOurs).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('drops idempotencyKey on the Composio typed rail (accepted at-least-once) — and never errors for it', async () => {
     const { router, execute } = build({ managedRef: managed() });
     const withKey: RunActionInput = {
-      ...input('jira.search_issues', 'conn-1'),
+      ...input(TRANSPORT_GAP, 'conn-1'),
       idempotencyKey: 'user-1:run-7:n1',
     };
     const out = await router.runAction(withKey); // must not throw for lacking a key
@@ -198,7 +208,7 @@ describe('ActionRouterProvider', () => {
 
   it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed', async () => {
     const { router, execute } = build({}); // no managed connection at all
-    const dry: RunActionInput = { ...input('jira.search_issues'), dryRun: true };
+    const dry: RunActionInput = { ...input(TRANSPORT_GAP), dryRun: true };
     const out = await router.runAction(dry);
     expect(out.output).toMatchObject({ dry_run: true, withheld: 'managed_step' });
     expect(execute).not.toHaveBeenCalled();

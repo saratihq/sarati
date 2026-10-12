@@ -121,7 +121,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /** Pull a token out of a stored/inline credential across the common shapes. */
-function extractToken(credential: unknown): string | null {
+export function extractToken(credential: unknown): string | null {
   if (typeof credential === 'string') return credential || null;
   const c = asRecord(credential);
   if (c) {

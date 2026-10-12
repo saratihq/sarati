@@ -357,7 +357,7 @@ describe('dual-rail inventory', () => {
   /** Live-checked: Composio already answers `sheets.clear_sheet` in the SDK's shape, so it needs no mapping. */
   const ALREADY_IN_CONTRACT = ['sheets.clear_sheet'];
   /** Apps whose actions have NOT been run on both rails — no live connection to check them against. */
-  const UNVERIFIED_APPS = ['calendar', 'docs', 'gmail', 'intercom', 'jira', 'mailchimp', 'zendesk'];
+  const UNVERIFIED_APPS = ['calendar', 'docs', 'gmail', 'intercom', 'mailchimp', 'zendesk'];
 
   const appOf = (type: string): string => type.split('.')[0] ?? type;
   const dualRail = actions.catalogActions

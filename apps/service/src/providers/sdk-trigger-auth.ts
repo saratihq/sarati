@@ -19,20 +19,9 @@ import { serializeAuthScheme } from './sdk-actions.registry';
 import { DomainError } from '../common/domain-error';
 import { ConnectionsService, MANAGED_TOKEN_PREFIX } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
+import { extractToken, toDirectCredential } from './sdk-auth';
 
 /** Shared glue for the two IN-PROCESS SDK trigger rails — credential resolution, the store adapter, the catalog row. */
-
-/** Pull a bearer token out of a stored/inline credential across the common shapes. */
-export function extractToken(credential: unknown): string | null {
-  if (typeof credential === 'string') return credential || null;
-  if (credential && typeof credential === 'object') {
-    const c = credential as Record<string, unknown>;
-    for (const key of ['access_token', 'token', 'api_key', 'apiKey', 'secret_text', 'value']) {
-      if (typeof c[key] === 'string' && c[key]) return c[key];
-    }
-  }
-  return null;
-}
 
 const NEEDS_CONNECTION = 'This trigger needs a connected account to run — connect the app first';
 
@@ -44,9 +33,9 @@ export class ConnectionGoneError extends Error {
 }
 
 /**
- * Resolve a trigger's credential into an SDK {@link DirectCredential} — a `none` scheme needs no token, a
- * `{connectionId}` is decrypted, an inline credential passes through. A MANAGED connection is rejected: its
- * sentinel is not a usable token and must never be sent to a provider as a bearer.
+ * Resolve a trigger's credential into an SDK {@link DirectCredential} shaped for its scheme, exactly as the action
+ * rail does — a `{connectionId}` is decrypted, an inline credential passes through. A MANAGED connection is
+ * rejected: its sentinel is not a usable token and must never reach a provider.
  */
 export async function resolveTriggerCredential(
   connections: ConnectionsService | undefined,
@@ -63,14 +52,14 @@ export async function resolveTriggerCredential(
     resolved = await connections.getCredential(externalUserId, auth.connectionId);
     if (resolved === null) throw new ConnectionGoneError();
   }
-  const token = extractToken(resolved);
-  if (!token) throw new Error(NEEDS_CONNECTION);
-  if (token.startsWith(MANAGED_TOKEN_PREFIX)) {
+  if (extractToken(resolved)?.startsWith(MANAGED_TOKEN_PREFIX)) {
     throw new Error(
       'This trigger needs a directly-authenticated connection — a managed (Composio) connection cannot be used on the direct rail. Reconnect the app with your own credentials.',
     );
   }
-  return { type: 'bearer', token };
+  const credential = toDirectCredential(scheme, resolved);
+  if (!credential) throw new Error(NEEDS_CONNECTION);
+  return credential;
 }
 
 /** Build the opaque auth handle a direct-rail trigger runs on (test-injectable fetch when set). */

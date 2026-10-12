@@ -7,7 +7,6 @@
 export const FALLBACK_ONLY_APPS: ReadonlySet<string> = new Set([
   'convertkit',
   'intercom',
-  'jira',
   'mailchimp',
   'trello',
   'whatsapp',
