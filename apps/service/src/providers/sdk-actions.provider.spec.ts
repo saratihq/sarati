@@ -5,17 +5,24 @@ import { DomainError } from '../common/domain-error';
 import type { ConnectionsService, ManagedConnectionRef } from '../connections/connections.service';
 import type { EnvConfig } from '../config/env.config';
 import { SdkActionsProvider } from './sdk-actions.provider';
+import { sdkCatalogEntries } from './sdk-actions.registry';
 import { PlatformKeysService } from '../platform/platform-keys.service';
+
+interface FetchCall {
+  url: string;
+  body: unknown;
+  authorization?: string;
+}
 
 /** A one-shot fake `fetch` returning a canned JSON response and recording the last call. */
 function fakeFetch(
   handler: (url: string, init: { body?: unknown } | undefined) => { status: number; body: unknown },
-): { impl: FetchLike; calls: Array<{ url: string; body: unknown }> } {
-  const calls: Array<{ url: string; body: unknown }> = [];
+): { impl: FetchLike; calls: FetchCall[] } {
+  const calls: FetchCall[] = [];
   const impl: FetchLike = (input, init) => {
     const url = String(input);
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : init?.body;
-    calls.push({ url, body });
+    calls.push({ url, body, authorization: init?.headers?.authorization });
     const { status, body: resBody } = handler(url, { body });
     const res: FetchLikeResponse = {
       status,
@@ -60,6 +67,17 @@ const GMAIL_PROFILE = {
   messagesTotal: 42,
   threadsTotal: 10,
   historyId: '9001',
+};
+
+// Per basic-scheme app, a step and the username a user following that app's form hints types.
+const TYPED_BASIC: Record<string, { actionId: string; props: Record<string, unknown>; username: string }> = {
+  jira: {
+    actionId: 'jira.get_issue',
+    props: { instanceUrl: 'https://acme.atlassian.net', issueIdOrKey: 'ENG-1' },
+    username: 'me@acme.com',
+  },
+  mailchimp: { actionId: 'mailchimp.list_audiences', props: { serverPrefix: 'us21' }, username: 'anything' },
+  zendesk: { actionId: 'zendesk.list_tickets', props: { subdomain: 'acme' }, username: 'me@acme.com/token' },
 };
 
 describe('SdkActionsProvider', () => {
@@ -203,6 +221,39 @@ describe('SdkActionsProvider', () => {
     expect((err as DomainError).message).toBe(`Connection conn-x ${reason}`);
     expect(calls).toEqual([]);
   });
+
+  it('checks the wire credential of every basic-scheme app the form gives hints for', () => {
+    const basicApps = sdkCatalogEntries()
+      .filter((e) => (e.authScheme as { type: string }).type === 'basic')
+      .map((e) => String(e.category));
+    expect([...new Set(basicApps)].sort()).toEqual(Object.keys(TYPED_BASIC).sort());
+  });
+
+  it.each(Object.entries(TYPED_BASIC))(
+    'sends a %s username and password exactly as typed, so the form hints stay true',
+    async (_app, { actionId, props, username }) => {
+      const { impl, calls } = fakeFetch(() => ({
+        status: 200,
+        body: { id: '1', key: 'ENG-1', fields: {}, lists: [], tickets: [], next_page: null },
+      }));
+      const provider = new SdkActionsProvider(
+        config(),
+        connections({
+          ref: { id: 'conn-b', authType: 'token', status: 'active', connectedAccountId: null },
+          credential: { username, password: 'tok' },
+        }),
+        impl,
+        platformKeys(),
+      );
+      await provider.runAction({
+        externalUserId: 'user-1',
+        actionId,
+        props,
+        auth: { connectionId: 'conn-b' },
+      });
+      expect(calls[0]?.authorization).toBe(`Basic ${Buffer.from(`${username}:tok`).toString('base64')}`);
+    },
+  );
 
   it('loadOptions returns the SDK picker options for a managed connection', async () => {
     const { impl } = fakeFetch(() => ({

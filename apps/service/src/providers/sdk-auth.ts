@@ -28,11 +28,7 @@ export interface SdkAuthContext {
   fetchImpl?: FetchLike;
 }
 
-/**
- * Build the opaque {@link AuthHandle} an SDK primitive runs on: `none` → credential-free, MANAGED → the Composio
- * proxy transport (we hold no token), BYO/inline → the decrypted credential on the direct rail. The caller's
- * `needsConnectionMessage` becomes the 422 when no credential satisfies the scheme; the key only ever reaches the transport.
- */
+/** The AuthHandle an SDK primitive runs on; a connection's wrong-shaped credential names what to reconnect with, any other miss is `needsConnectionMessage`. */
 export async function resolveSdkAuthHandle(
   scheme: AuthScheme,
   ctx: SdkAuthContext,

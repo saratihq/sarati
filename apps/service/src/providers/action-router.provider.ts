@@ -44,9 +44,9 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
 
   async runAction(input: RunActionInput): Promise<RunActionResult> {
     // The commit check's own gate, before any connection lookup or provider call: commit-reject ⟺ run-400.
-    this.routableAppSlug(input.actionId);
+    const appSlug = this.routableAppSlug(input.actionId);
     // Env-scoping runs BEFORE routing, so every rail resolves the right account transparently.
-    input = await this.applyEnvConnection(input);
+    input = await this.applyEnvConnection(input, appSlug);
     // Only now is the connection the step runs as decided, so only now can `{{$account…}}` be filled (#17).
     input = await this.fillAccount(input);
     return this.route(input);
@@ -122,10 +122,8 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
    * Rebind a step's connection through the env's SLOT for `(environmentId, app)`, via the SHARED resolver.
    * A connection-less step and a Default run are untouched; a missing slot is a hard 428, NEVER a personal-pool fallback.
    */
-  private async applyEnvConnection(input: RunActionInput): Promise<RunActionInput> {
+  private async applyEnvConnection(input: RunActionInput, appSlug: string): Promise<RunActionInput> {
     if (!connectionIdOf(input.auth)) return input; // step uses no connection (http/text/…)
-    const appSlug = validatedAppSlug(input.actionId);
-    if (!appSlug) return input;
     const slot = await resolveEnvSlotConnection(this.connections, input, appSlug);
     if (!slot) return input; // Default run — the personal pool, untouched
     // Rebind the identity too — the downstream getCredential/managedRef is user-scoped, so the step must run as the owner.
