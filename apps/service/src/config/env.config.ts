@@ -194,7 +194,7 @@ export class EnvConfig {
   @IsString()
   composioBaseUrl = 'https://backend.composio.dev';
 
-  /** Extra app slugs (comma/space list) forced onto the Composio execution fallback rail. */
+  /** App slugs (comma/space list) whose MANAGED connections run on Composio ahead of the SDK actions; BYO is unaffected. */
   @IsString()
   composioFallbackApps = '';
 

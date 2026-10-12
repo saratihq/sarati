@@ -7,11 +7,7 @@ import { type AccountIdentity } from '../connections/account-identity';
 import { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import { ConnectionsService, type ManagedConnectionRef } from '../connections/connections.service';
 import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
-import {
-  isComposioDirectApp,
-  mustUseComposioFallback,
-  parseFallbackOverride,
-} from '../connections/managed-app-rails';
+import { isComposioDirectApp, parseFallbackOverride } from '../connections/managed-app-rails';
 import type { EnvConfig } from '../config/env.config';
 import { accountRefFields, accountRefText, fillAccountRefs, isAccountRefField } from '../runtime/account-ref';
 import { accountProbeFor, type AccountTarget, identityFrom } from './account-probes';
@@ -32,7 +28,7 @@ import type {
 
 /**
  * The run-time resolution-priority seam across the two execution rails (our clean-room SDK and Composio), picking one
- * per action in the order marked (a0)/(a)/(b)/(c)/(d) in its `route`. The decision is a
+ * per action in the order marked (a0)/(a)/(b) in its `route`. The decision is a
  * static registry/allowlist, never a run-time guess, and only MANAGED connections may take a Composio rail.
  */
 @Injectable()
@@ -113,12 +109,14 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return { ...input, props: props as Record<string, unknown> };
   }
 
-  /** Pick the rail for one action, in the order marked (a0)/(a)/(b)/(c)/(d). */
+  /** Pick the rail for one action, in the order marked (a0)/(a)/(b). */
   private async route(input: RunActionInput): Promise<RunActionResult> {
     const appSlug = validatedAppSlug(input.actionId);
-    // (a0) COMPOSIO-DIRECT apps: a managed connection executes via Composio typed execution
+    // The commit check's own gate, ahead of every rail, so commit-reject ⟺ run-400.
+    if (!appSlug || !isRoutableActionType(input.actionId)) throw this.unknownAction(input.actionId);
+    // (a0) COMPOSIO-DIRECT apps and the COMPOSIO_FALLBACK_APPS override: a managed connection executes via Composio
     //      ahead of every other rail (Google rejects the SDK's proxy leg); BYO/none falls through.
-    if (appSlug && isComposioDirectApp(appSlug)) {
+    if (isComposioDirectApp(appSlug, this.fallbackOverride)) {
       const ref = await this.managedRefOf(input.externalUserId, input.auth);
       if (ref?.authType === 'managed') return this.runViaComposio(appSlug, input, ref);
     }
@@ -127,16 +125,8 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
       this.logger.log(`Routing ${input.actionId} through our own action`);
       return this.orchestrActions.runAction(input);
     }
-    // (b) TRANSPORT-GAP allowlist — a managed connection must run via Composio.
-    if (appSlug && mustUseComposioFallback(appSlug, this.fallbackOverride)) {
-      return this.runViaComposio(appSlug, input);
-    }
-    // (c) UNIVERSAL FALLBACK, else (d) an honest error — both decided by `isRoutableActionType`,
-    //     the same gate the version-write commit check keys on, so commit-reject ⟺ run-400.
-    if (appSlug && isRoutableActionType(input.actionId)) {
-      return this.runViaComposio(appSlug, input);
-    }
-    throw this.unknownAction(input.actionId);
+    // (b) UNIVERSAL FALLBACK — every other routable type is a Composio catalog action.
+    return this.runViaComposio(appSlug, input);
   }
 
   /**
@@ -293,12 +283,12 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return dot >= 0 ? actionId.slice(dot + 1) : actionId;
   }
 
-  /** No SDK action and no Composio home for this action id — an honest 400. */
+  /** Neither registry claims this action id — the same 400 the commit check gives. */
   private unknownAction(actionId: string): DomainError {
     const slug = validatedAppSlug(actionId);
     return new DomainError(
       slug
-        ? `No installed rail can run "${actionId}" — "${slug}" has no SDK action and no managed (Composio) connection`
+        ? `No installed rail can run "${actionId}" — it is neither an SDK action nor in the managed (Composio) catalog`
         : `Malformed action id "${actionId}" — expected "<app>.<action>"`,
       400,
     );

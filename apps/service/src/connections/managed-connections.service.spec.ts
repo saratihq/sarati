@@ -94,7 +94,7 @@ describe('ManagedConnectionsService.listApps', () => {
     const bySlug = Object.fromEntries(apps.map((a) => [a.slug, a.executable]));
     expect(bySlug.discord).toBe(true);
     expect(bySlug.supabase).toBe(true);
-    // ConvertKit is a TRANSPORT-GAP app but the Composio fallback still runs it.
+    // ConvertKit has no SDK action, but the Composio fallback runs it.
     expect(bySlug.convertkit).toBe(true);
   });
 

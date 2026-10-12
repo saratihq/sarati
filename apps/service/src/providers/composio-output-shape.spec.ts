@@ -1,6 +1,6 @@
 import { actions } from '@sarati/actions-sdk';
 
-import { COMPOSIO_DIRECT_APPS, FALLBACK_ONLY_APPS } from '../connections/managed-app-rails';
+import { COMPOSIO_DIRECT_APPS } from '../connections/managed-app-rails';
 import { alignComposioOutput, ALIGNED_ACTION_TYPES } from './composio-output-shape';
 
 /**
@@ -357,12 +357,12 @@ describe('dual-rail inventory', () => {
   /** Live-checked: Composio already answers `sheets.clear_sheet` in the SDK's shape, so it needs no mapping. */
   const ALREADY_IN_CONTRACT = ['sheets.clear_sheet'];
   /** Apps whose actions have NOT been run on both rails — no live connection to check them against. */
-  const UNVERIFIED_APPS = ['calendar', 'docs', 'gmail', 'intercom', 'mailchimp', 'zendesk'];
+  const UNVERIFIED_APPS = ['calendar', 'docs', 'gmail'];
 
   const appOf = (type: string): string => type.split('.')[0] ?? type;
   const dualRail = actions.catalogActions
     .map((action) => action.type)
-    .filter((type) => COMPOSIO_DIRECT_APPS.has(appOf(type)) || FALLBACK_ONLY_APPS.has(appOf(type)));
+    .filter((type) => COMPOSIO_DIRECT_APPS.has(appOf(type)));
 
   it('every action of a live-verified app is either aligned or checked to need no alignment', () => {
     const verified = dualRail.filter((type) => !UNVERIFIED_APPS.includes(appOf(type)));
