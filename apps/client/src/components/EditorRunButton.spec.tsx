@@ -109,6 +109,21 @@ describe("EditorRunButton watching a run whose call is still open", () => {
     expect(getRun).toHaveBeenCalledTimes(2);
   });
 
+  it("a decision on its way says who made it, never the inbox, and stops promising once its wait is past due", async () => {
+    const decided = (until: string) =>
+      watched({
+        status: "waiting",
+        waiting: { kind: "decided", until, decided_by: { id: "u-2", name: "Bo", email: null } },
+      });
+    getRun.mockResolvedValueOnce(decided("2026-10-12T09:30:00.000Z")).mockResolvedValue(decided("2026-10-09T09:30:00.000Z"));
+    await startAndWatchOnce();
+
+    expect(screen.getByText("Decided by Bo — the run will continue shortly")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /approvals inbox/ })).not.toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(3100));
+    expect(screen.getByText("Decided by Bo — the run has yet to take it")).toBeInTheDocument();
+  });
+
   // A Wait step is not in the approvals inbox: pointing there sent people to a page that never listed the run.
   it("a run paused on a Wait step says when it wakes, with no inbox and no decision", async () => {
     getRun.mockResolvedValue(

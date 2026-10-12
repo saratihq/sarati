@@ -13,7 +13,7 @@ Configure the step with a topic and how long to wait:
 
 | Field | |
 |---|---|
-| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` are reserved: a workflow or raw plan that uses one is refused before any step runs. |
+| `topic` | The event name the run waits for, e.g. `manager_approval`. Names starting `orchestr:timer:` or `orchestr:wait:` are reserved: a workflow or raw plan that uses one is refused before any step runs. |
 | `timeout_ms` | How long to wait before giving up |
 
 ## While it waits
@@ -21,7 +21,7 @@ Configure the step with a topic and how long to wait:
 The run's status is `waiting`, and the waiting step shows in the run's step log. Nothing after it
 has executed.
 
-Every run waiting for an event appears in the **Approvals inbox** in the header, org-wide — so an
+Every wait for an event appears in the **Approvals inbox** in the header, org-wide — so an
 approval is not something one person has to remember. You can act on a teammate's run, not only your
 own.
 
@@ -35,38 +35,79 @@ event reads **Waiting for a decision**, with a link to the inbox. Over the API,
 {"status": "waiting", "waiting": {"kind": "timer", "until": "2026-10-12T09:30:00.000Z"}}
 ```
 
-`kind` is `timer` or `event`; `until` is when a timer wakes, or when an event wait times out.
+`kind` is `timer`, `event`, or `decided` for a decision already made that the run has yet to take,
+which also names who made it in `decided_by`; `until` is when a timer wakes, or when an event wait
+times out.
 
-<img class="shot shot-dark" src="/shots/approvals-dark.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
-<img class="shot shot-light" src="/shots/approvals-light.webp" alt="The approvals inbox with one waiting run, its topic, a countdown, and approve or reject." />
+<img class="shot shot-dark" src="/shots/approvals-dark.webp" alt="The approvals inbox with one waiting run, its topic and step, a countdown, and approve or reject." />
+<img class="shot shot-light" src="/shots/approvals-light.webp" alt="The approvals inbox with one waiting run, its topic and step, a countdown, and approve or reject." />
 
-Each entry shows the workflow, the topic it is waiting on, who started it, how long it has waited
-and **how long is left** before the timeout. Expand it to see the payload the run started with.
+Each entry shows the workflow, the topic it is waiting on, the step it waits at, who started it, how
+long it has waited and **how long is left** before the timeout. **Custom payload…** sends an event other than approve or
+reject.
+
+## More than one wait at once
+
+Steps on separate branches run at the same time, so a run can wait on several things at once — a
+**Wait** step and an approval, or two approvals. Each wait is its own: every approval is a separate
+entry in the inbox, answered on its own, and a **Wait** step still wakes on its own clock. The run
+stays `waiting` until none is left. Its `waiting` names the one that matters most — an approval
+before a timer, then whichever is due first — and each step in the run's `steps` carries its own
+`waiting` while it is parked.
+
+Two waits in one run on the **same topic** are both listed, each row naming its step. Deciding one in
+the inbox answers that wait and no other. A run started before this version with two such waits in
+parallel branches is listed once for both, marked as sharing one decision: a decision sent by topic
+answers one of them, whichever the run picks, and the other ends at once with no decision (`null`).
+
+Until a fix for how runs resume lands, a run with a wait in a parallel branch, or beside another step
+that runs at the same time, can fail when it resumes after a restart, an upgrade or going back to an
+earlier version, even with a single approval waiting: it can end in an error, or put a decision on the
+wrong wait. Let such runs finish before you restart.
 
 ## Deciding
 
-**Approve** or **Reject** from the inbox — both resume the run, carrying your decision into it. Or
-send the event yourself:
+**Approve** or **Reject** from the inbox — both resume what comes after that wait, carrying your
+decision into it. Or send the event yourself:
 
 ```bash
 curl -X POST http://localhost:8080/api/runs/<run-id>/events \
   -H 'Content-Type: application/json' \
-  -d '{"topic":"manager_approval","payload":{"decision":"approved"}}'
+  -d '{"topic":"manager_approval","step_key":"approval","payload":{"decision":"approved"}}'
 ```
 
 ```json
 {"status":"sent"}
 ```
 
-The run picks up where it stopped and the remaining steps execute. The run records **who** decided
-and **when**, and it drops out of the inbox.
+`step_key` names the wait: the `step_key` of its entry in `GET /api/runs/waiting`, which is also the
+name the inbox shows on its row. A wait inside a loop or a branch runs under a longer key than its
+node, such as `loop#0/approval`.
 
-The payload is available to later steps, so the decision itself can drive what happens next.
+Leave `step_key` out and the event answers the oldest wait on that topic that is still undecided and
+more than two seconds from timing out. Sending the same event again therefore answers the next wait
+on that topic, if there is one — so in a workflow with several approvals on one topic, send each
+decision with its `step_key`, as the inbox does. An entry with no `step_key` is answered by topic only.
 
-An event sent to a run paused by a **Wait** step is refused with `409` — with the code `timer_wait`
-once the run is `waiting` — and the run keeps waiting.
+The steps after the wait execute, and the run reads `waiting` until no other wait is left. The run
+records **who** decided and **when**, and the wait drops out of the inbox.
+
+The payload is available to later steps, so the decision itself can drive what happens next. A
+decision sent without one reaches them as `null`.
+
+An event answers exactly one wait. Once a wait is decided, every further event naming it by
+`step_key` is refused with `409`, and so is one that arrives after the run was cancelled, or within two
+seconds of the wait timing out. So is an event on a topic the run is not waiting on, or with a `step_key` the run has no
+wait at, which the refusal lists, and the run keeps waiting. A topic starting `orchestr:timer:`
+belongs to a **Wait** step and is always refused with the code `timer_wait`, as is a `step_key` naming
+a **Wait** step, and any event while the run waits only on a **Wait** step.
+
+A decision is kept with the wait it answers until the run takes it, so a run that is down when you
+decide picks the decision up when it comes back. Until then the run reads **Decided by** whoever made
+it, and the wait is no longer in the inbox.
 
 ## If nobody decides
 
 When `timeout_ms` passes, the wait ends rather than hanging forever. A run whose worker died while
-waiting is [reaped](/run/runs/#when-a-worker-dies) rather than left in limbo.
+waiting is [reaped](/run/runs/#when-a-worker-dies) rather than left in limbo. So is a run holding a
+decision it can no longer resume to take: it ends in an error that names who decided.

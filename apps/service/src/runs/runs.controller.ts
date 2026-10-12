@@ -88,6 +88,11 @@ class SendEventDto {
   @IsString()
   topic!: string;
 
+  /** The parked step to answer; without it, the wait on `topic` that has waited longest. */
+  @IsOptional()
+  @IsString()
+  step_key?: string;
+
   /** Arbitrary event payload (e.g. an approval decision). */
   @Allow()
   payload?: unknown;
@@ -337,7 +342,7 @@ export class RunsController {
     return { sample: await this.runs.sampleFor(await this.access(req), parsed) };
   }
 
-  /** The approvals inbox: runs parked on a `waitForEvent` node. Must stay declared before `:runId` so the literal path wins. */
+  /** The approvals inbox: one entry per parked `waitForEvent` step. Must stay declared before `:runId` so the literal path wins. */
   @Scope('workflow:read')
   @Get('waiting')
   async listWaiting(
@@ -392,7 +397,7 @@ export class RunsController {
     @Param('runId') runId: string,
     @Body() body: SendEventDto,
   ): Promise<{ status: string }> {
-    await this.runs.sendEvent(runId, body.topic, body.payload, await this.access(req));
+    await this.runs.sendEvent(runId, body.topic, body.payload, await this.access(req), body.step_key);
     return { status: 'sent' };
   }
 

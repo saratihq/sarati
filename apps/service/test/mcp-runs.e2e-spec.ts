@@ -418,8 +418,32 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
       kind: 'timer',
       until: await dueAt('mcp-sleeper'),
     });
-    expect((await parked('mcp-asker')).waiting).toEqual({ kind: 'event', until: await dueAt('mcp-asker') });
+    const asking = await parked('mcp-asker');
+    expect(asking.waiting).toEqual({ kind: 'event', until: await dueAt('mcp-asker') });
+    expect(asking.steps).toEqual([
+      expect.objectContaining({
+        step_key: 'ask',
+        waiting: { kind: 'event', until: await dueAt('mcp-asker') },
+      }),
+    ]);
     expect((await getRun(runIdA)).waiting).toBeNull();
+
+    const claim = (by: string | null) =>
+      db.query(
+        `UPDATE runtime_run_steps s SET claimed_at = CASE WHEN $2::uuid IS NULL THEN NULL ELSE now() END, claimed_by = $2
+           FROM runtime_runs r WHERE r.id = s.run_id AND r.run_id = 'mcp-asker' AND r.user_id = $1`,
+        [userA, by],
+      );
+    await claim(userA);
+    const decided = await getRun('mcp-asker');
+    const onItsWay = {
+      kind: 'decided',
+      until: await dueAt('mcp-asker'),
+      decided_by: expect.objectContaining({ id: userA }),
+    };
+    expect(decided.waiting).toEqual(onItsWay);
+    expect(decided.steps).toEqual([expect.objectContaining({ step_key: 'ask', waiting: onItsWay })]);
+    await claim(null);
 
     await asSessionA(
       http()

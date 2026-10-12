@@ -73,6 +73,13 @@ The run and the failing step both carry the reason, for example
 If the worker came back, it resumes on its own. If it never comes back, the reaper moves the run to
 `error` once it passes `RUN_MAX_DURATION_SECONDS`, within five minutes.
 
+## A run reads "Decided by … the run has yet to take it"
+
+Someone decided, and the decision is waiting for the run to pick it up — the run is down, or catching
+up after a restart. It is sent again until the run takes it. If the run can never resume here, the
+reaper ends it once the wait is past its window by `RUN_MAX_DURATION_SECONDS`, with an error naming
+who decided; run the workflow again.
+
 ## The composer is not there
 
 Without an Anthropic key the composer is absent, not broken: **New workflow** opens a bare canvas and

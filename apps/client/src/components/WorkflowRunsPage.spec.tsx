@@ -140,6 +140,57 @@ describe("WorkflowRunsPage", () => {
     );
   });
 
+  it("a run parked on a timer and an approval at once says, on each step, what that step waits for", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T09:00:00.000Z"));
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-both", status: "waiting" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-both", status: "waiting" }),
+      steps: [
+        { node_id: "pause", status: "running", waiting: { kind: "timer", until: "2026-10-12T09:30:00.000Z" } },
+        { node_id: "approve", status: "running", waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" } },
+        { node_id: "fetch", status: "completed", waiting: null },
+      ],
+      waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" },
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect((await screen.findByTestId("run-waiting")).textContent).toBe(
+      "Waiting for a decision. Paused on an approval step — open the approvals inbox.",
+    );
+    expect(screen.getAllByTestId("run-step-waiting").map((line) => line.textContent)).toEqual([
+      "Waiting until Oct 12, 9:30 AM",
+      "Waiting for a decision",
+    ]);
+  });
+
+  it("a decision made but not yet taken reads who made it, never the inbox that no longer lists it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T09:00:00.000Z"));
+    const decided = { kind: "decided" as const, until: "2026-10-09T10:00:00.000Z", decided_by: { id: "u-2", name: "Bo", email: null } };
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-decided", status: "waiting" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-decided", status: "waiting" }),
+      steps: [{ node_id: "approve", status: "running", waiting: decided }],
+      waiting: decided,
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect((await screen.findByTestId("run-waiting")).textContent).toBe(
+      "Decided by Bo — the run will continue shortly. ",
+    );
+    expect(screen.getAllByTestId("run-step-waiting").map((line) => line.textContent)).toEqual([
+      "Decided by Bo — the run will continue shortly",
+    ]);
+    expect(screen.queryByRole("link", { name: /approvals inbox/ })).not.toBeInTheDocument();
+  });
+
   it("a real run's step that returns an object shaped like a marker is shown as its output", async () => {
     listRuns.mockResolvedValue({ runs: [run({ run_id: "r-live" })] });
     getRun.mockResolvedValue({

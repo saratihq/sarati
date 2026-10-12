@@ -348,6 +348,16 @@ describe('compileWorkflowIrDag — node mapping + translation (via the shared he
       );
     });
 
+    it('refuses an orchestr:wait_for_event topic spelled like a step’s own receive', () => {
+      const workflow = ir(
+        [irNode('approval', 'orchestr:wait_for_event', { topic: 'orchestr:wait:fork|0/a' })],
+        [],
+      );
+      expect(() => compileWorkflowIrDag(workflow)).toThrow(
+        /topic "orchestr:wait:fork\|0\/a" — topics starting "orchestr:wait:" are reserved/,
+      );
+    });
+
     it('rejects an orchestr:if with an unknown op', () => {
       const workflow = ir(
         [

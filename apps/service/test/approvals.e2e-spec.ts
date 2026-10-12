@@ -6,6 +6,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { RunsService } from '../src/runs/runs.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -239,14 +240,19 @@ describe('runs history + approvals (e2e, isolated DB, mock auth)', () => {
     );
     expect(waitStep).toMatchObject({ kind: 'waitForEvent', status: 'completed' });
 
-    // A completed run is not waiting on anything — late events are a 409.
+    // A completed run is not waiting on anything — late events are a 409, and a timer's topic is always timer_wait.
     await http().post('/api/runs/appr-1/events').send({ topic: 'approve', payload: {} }).expect(409);
+    const toTimer = await http()
+      .post('/api/runs/appr-1/events')
+      .send({ topic: 'orchestr:timer:pause', payload: {} })
+      .expect(409);
+    expect(toTimer.body.code).toBe('timer_wait');
   });
 
   it('a wait that times out resolves to null and leaves the waiting list', async () => {
     const pending = http()
       .post('/api/runs/from-ir')
-      .send({ workflow_ir: approvalIr('never-comes', 1_200, false), run_id: 'appr-timeout' })
+      .send({ workflow_ir: approvalIr('never-comes', 3_500, false), run_id: 'appr-timeout' })
       .then((r) => r);
 
     const waiting = await awaitWaiting('appr-timeout');
@@ -263,4 +269,29 @@ describe('runs history + approvals (e2e, isolated DB, mock auth)', () => {
     const detail = await http().get('/api/runs/appr-timeout').expect(200);
     expect(detail.body.status).toBe('completed');
   }, 20_000);
+
+  it('says a decision overtaken by a cancel met a cancelled run, and leaves nothing parked on it', async () => {
+    const pending = http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: approvalIr('approve', 15_000), run_id: 'appr-overtaken' })
+      .then((r) => r);
+    await awaitWaiting('appr-overtaken');
+
+    // The cancel lands after the decision has claimed the wait, just before it is handed to the run.
+    const runs: { deliver: (...args: unknown[]) => Promise<void> } = app.get(RunsService);
+    const deliver = runs.deliver.bind(runs);
+    jest.spyOn(runs, 'deliver').mockImplementationOnce(async (...args: unknown[]) => {
+      await http().post('/api/runs/appr-overtaken/cancel').expect(200);
+      await deliver(...args);
+    });
+
+    const late = await http().post('/api/runs/appr-overtaken/events').send({ topic: 'approve', payload: {} });
+    expect(late.status).toBe(409);
+    expect(late.body.detail).toBe('Run appr-overtaken was cancelled');
+    const detail = await http().get('/api/runs/appr-overtaken').expect(200);
+    expect(detail.body.status).toBe('cancelled');
+    expect(detail.body.waiting).toBeNull();
+    expect((detail.body.steps as Array<{ waiting: unknown }>).every((s) => s.waiting === null)).toBe(true);
+    await pending;
+  }, 30_000);
 });

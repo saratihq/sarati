@@ -36,12 +36,23 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
   }
 
   async function parkedOn(runId: string): Promise<{ status: string; waiting_topic: string | null }> {
-    const res = await db.query(`SELECT status, waiting_topic FROM runtime_runs WHERE run_id = $1`, [runId]);
+    const res = await db.query(
+      `SELECT r.status, s.waiting_topic
+         FROM runtime_runs r
+         LEFT JOIN runtime_run_steps s ON s.run_id = r.id AND s.waiting_topic IS NOT NULL
+        WHERE r.run_id = $1`,
+      [runId],
+    );
     return res.rows[0] as { status: string; waiting_topic: string | null };
   }
 
+  const PARKED_STEP = `r.id = s.run_id AND r.run_id = $1 AND s.waiting_topic IS NOT NULL`;
+
   async function dueAt(runId: string): Promise<Date> {
-    const res = await db.query(`SELECT waiting_timeout_at FROM runtime_runs WHERE run_id = $1`, [runId]);
+    const res = await db.query(
+      `SELECT s.waiting_timeout_at FROM runtime_run_steps s, runtime_runs r WHERE ${PARKED_STEP}`,
+      [runId],
+    );
     return (res.rows[0] as { waiting_timeout_at: Date }).waiting_timeout_at;
   }
 
@@ -134,7 +145,7 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
   it('says a timer past its wake time was due then, never that it is waiting until a time gone by', async () => {
     const due = await dueAt('sleeper');
     await db.query(
-      `UPDATE runtime_runs SET waiting_timeout_at = now() - interval '1 minute' WHERE run_id = $1`,
+      `UPDATE runtime_run_steps s SET waiting_timeout_at = now() - interval '1 minute' FROM runtime_runs r WHERE ${PARKED_STEP}`,
       ['sleeper'],
     );
     try {
@@ -145,7 +156,10 @@ describe('a timed wait wakes only on its deadline (e2e, isolated DB, DBOS on, mo
         /^Run sleeper was due at \d{4}-\d\d-\d\dT[\d:.]+Z, not waiting for an event — it resumes on its own$/,
       );
     } finally {
-      await db.query(`UPDATE runtime_runs SET waiting_timeout_at = $2 WHERE run_id = $1`, ['sleeper', due]);
+      await db.query(
+        `UPDATE runtime_run_steps s SET waiting_timeout_at = $2 FROM runtime_runs r WHERE ${PARKED_STEP}`,
+        ['sleeper', due],
+      );
     }
   });
 

@@ -155,6 +155,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='webhook_url'",
   },
   {
+    migration: '033_run_step_waits.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_run_steps' AND column_name='resumed_at'",
+  },
+  {
     migration: '037_env_pointer_unique.sql',
     probe: "SELECT 1 FROM pg_indexes WHERE indexname='uq_workflow_env_pointers_workflow_env'",
   },

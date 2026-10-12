@@ -7,7 +7,7 @@ import { useApprovals } from "@/store/useApprovals";
 
 const BADGE_POLL_MS = 20_000;
 
-// Header entry for the approvals inbox: badge counts runs waiting on a human (shared useApprovals store).
+// Header entry for the approvals inbox: badge counts decisions people owe (shared useApprovals store).
 export default function ApprovalsNavButton() {
   const waiting = useApprovals((s) => s.waiting);
   const fetchWaiting = useApprovals((s) => s.fetchWaiting);
