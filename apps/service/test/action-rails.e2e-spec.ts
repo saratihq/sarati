@@ -19,8 +19,7 @@ const ACCOUNT_ID = 'ca_rails_e2e';
 const TRELLO_TOOL = composioToolFor('trello.add_boards')!.slug;
 const TEAM_INFO_TOOL = composioToolFor('slack.fetch_team_info')!.slug;
 const RETIRED_WARNING =
-  'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect: a managed step runs on its built-in ' +
-  'action when one exists, and on Composio only when none does. Remove it from .env.';
+  'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.';
 
 /** What the provider answers behind Composio's proxy leg, keyed by `METHOD url`. */
 const PROVIDER_REPLIES: Array<[RegExp, unknown]> = [
@@ -252,7 +251,7 @@ describe('action rails (e2e, isolated DB, loopback Composio, mock auth)', () => 
 
   describe.each([
     ['unset', undefined],
-    ['set to the apps it used to move', 'zoom, zendesk,jira slack,mailchimp'],
+    ['still set from an earlier release', 'zoom, zendesk,jira slack,mailchimp'],
   ])('with COMPOSIO_FALLBACK_APPS %s', (_label, fallbackApps) => {
     const { app, warnings } = bootWith(fallbackApps);
 

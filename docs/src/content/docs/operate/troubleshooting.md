@@ -115,8 +115,8 @@ Anything else reads **"The composer hit a problem — please try again."**, and 
 http.send_request failed: refusing to send a request to a private/internal address (wiki.internal). An operator can allow it by adding wiki.internal to ORCHESTR_HTTP_ALLOWED_HOSTS.
 ```
 
-The address resolves to somewhere that is not public, so the HTTP step was stopped before anything
-was sent. If it is a host you mean to reach, add the name in the parentheses to
+The address resolves to somewhere that is not public, so the step was stopped before anything was
+sent. If it is a host you mean to reach, add the name in the parentheses to
 [`ORCHESTR_HTTP_ALLOWED_HOSTS`](/operate/configuration/#private-addresses) — the hostname alone, no
 scheme or port — then run `docker compose up -d`; restarting the container is not enough. When the
 parentheses also say `redirected from https://…`, the address you gave was reached and answered with
@@ -131,8 +131,8 @@ resolved. A proxy that filters by domain name refuses tunnels to addresses; allo
 should see so they reach it by name, as
 [Private addresses](/operate/configuration/#private-addresses) describes.
 
-If every app step is refused, including ones aimed at public services, this server's DNS is probably
-handing out synthetic private addresses (a fake-IP proxy or ZPA). The
+If every app step on your own credentials is refused, including ones aimed at public services, this
+server's DNS is probably handing out synthetic private addresses (a fake-IP proxy or ZPA). The
 [Private addresses](/operate/configuration/#private-addresses) section covers that, egress proxies,
 and what an entry exposes.
 
@@ -149,16 +149,20 @@ Point the step at the app's own address:
 - **Salesforce:** set **Instance URL** to your org's My Domain URL,
   `https://<your-domain>.my.salesforce.com`. A legacy instance host such as `na123.salesforce.com`,
   a `cloudforce.com` host or an Experience Cloud `my.site.com` host is refused.
+
+## A Mailchimp or Zendesk step refuses its server prefix or subdomain
+
+```
+mailchimp.list_audiences failed: serverPrefix must be a single DNS label (letters, digits and hyphens), e.g. "acme"
+zendesk.list_tickets failed: subdomain must be a single DNS label (letters, digits and hyphens), e.g. "acme"
+```
+
+The step builds the app's address from this one field, so anything more than a single label, such as
+a whole hostname, is refused before anything is sent:
+
 - **Mailchimp:** set **Server prefix** to the datacenter alone, such as `us21`: the suffix on your API
   key, not a hostname.
 - **Zendesk:** set **Subdomain** to the subdomain alone, `acme` for `acme.zendesk.com`.
-
-A Mailchimp server prefix or Zendesk subdomain that is more than one label is refused the same way,
-before anything is sent:
-
-```
-zendesk.list_tickets failed: subdomain must be a single DNS label (letters, digits and hyphens), e.g. "acme"
-```
 
 ## A Jira step refuses its Instance URL
 

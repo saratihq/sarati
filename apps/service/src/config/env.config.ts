@@ -231,8 +231,7 @@ function asInt(value: string | undefined, fallback: number): number {
 export function warnRetiredEnv(raw: Record<string, string | undefined>): void {
   if (!raw.COMPOSIO_FALLBACK_APPS?.trim()) return;
   new Logger('EnvConfig').warn(
-    'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect: a managed step runs on its built-in ' +
-      'action when one exists, and on Composio only when none does. Remove it from .env.',
+    'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.',
   );
 }
 

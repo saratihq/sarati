@@ -51,14 +51,16 @@ workflows that use them before you upgrade; each fix is one field on the step.
   `na123.salesforce.com`, a `cloudforce.com` host or an Experience Cloud `my.site.com` host — now
   refuses to send its credential there. Set Instance URL to your org's My Domain URL,
   `https://<your-domain>.my.salesforce.com`.
-- **`COMPOSIO_FALLBACK_APPS` is removed.** It moved the listed apps' managed steps off their
-  built-in action onto a Composio tool matched by name, which could be the wrong tool. A managed
-  step now always runs on its built-in action when one exists. If the variable is still set, the
-  service logs one warning at boot and otherwise ignores it; delete the line from `.env`.
 
 The messages and what to set are in Troubleshooting:
 [a Jira step](/operate/troubleshooting/#a-jira-step-refuses-its-instance-url) and
 [a Salesforce step](/operate/troubleshooting/#a-step-wont-send-its-connections-credential).
+
+`COMPOSIO_FALLBACK_APPS` is removed. In v0.2.23 and earlier it only changed where a listed app's
+step went when its type was neither a built-in action nor in the Composio catalog, and saving a
+workflow refuses such a type, so nothing changes for a step a workflow can save. If the variable is
+still set, the service logs one warning at boot and otherwise ignores it; delete the line from
+`.env`.
 
 ### v0.2.23: outbound requests to private addresses
 

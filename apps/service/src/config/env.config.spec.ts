@@ -112,10 +112,7 @@ describe('env config', () => {
     try {
       warnRetiredEnv({ COMPOSIO_FALLBACK_APPS: 'zoom,jira' });
       expect(warn.mock.calls).toEqual([
-        [
-          'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect: a managed step runs on its built-in ' +
-            'action when one exists, and on Composio only when none does. Remove it from .env.',
-        ],
+        ['COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.'],
       ]);
       warn.mockClear();
       warnRetiredEnv({});

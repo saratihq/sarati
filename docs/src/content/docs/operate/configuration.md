@@ -103,11 +103,14 @@ refused, so on a DNS64 network with another local-use prefix, allowlist the host
 address checked is the one actually connected to, with or without a proxy, so a name that resolves
 to a private address is refused, and every redirect is checked again.
 
-- **What it covers:** the HTTP and GraphQL steps and the HTTP and RSS polling triggers, which carry
-  no connection. A connection's credential only ever goes to its own app's domains, so an app step
-  pointed anywhere else is refused before this list is read, and no entry here changes that — see
-  [the refusal and what to set](/operate/troubleshooting/#a-step-wont-send-its-connections-credential).
-  A step on a managed connection is sent by Composio, not from this server.
+- **What it covers:** every step and trigger that sends from this server, including app steps and
+  triggers on your own credentials. Only the HTTP and GraphQL steps and the HTTP and RSS polling
+  triggers can reach a host you name. A connection's credential only ever goes to its own app's
+  domains, and no entry here changes that
+  ([the refusal and what to set](/operate/troubleshooting/#a-step-wont-send-its-connections-credential)),
+  so for a step or trigger with a connection an entry matters only for that app's own domains, as
+  under an egress proxy or synthetic DNS below. A step on a managed connection is sent by Composio,
+  not from this server.
 - **Your own OAuth clients:** an OAuth client entered in the Connect dialog has its endpoints checked
   when you connect, where a host this server cannot resolve is refused too. Its token endpoint is
   checked again on every token exchange, and a token exchange never follows a redirect.
@@ -135,8 +138,9 @@ to a private address is refused, and every redirect is checked again.
   public address — the server's own public IP, a cloud network's global IPv6 range — is not covered,
   so restrict outbound traffic at the network where that matters.
 - **Synthetic DNS:** if this server's DNS answers public names with private addresses — a fake-IP
-  proxy such as Clash or Surge (`198.18.0.0/15`), or ZPA (`100.64.0.0/10`) — every app step is
-  refused. Turn that mode off for this server, or allowlist the hostnames you call.
+  proxy such as Clash or Surge (`198.18.0.0/15`), or ZPA (`100.64.0.0/10`) — every app step on your
+  own credentials is refused. Turn that mode off for this server, or allowlist the hostnames you
+  call.
 
 `COMPOSIO_BASE_URL` and `CLERK_API_URL` point the service at a proxy or a self-hosted API instead of
 the provider's own. Requests to them carry an API secret, so in production each has to be
