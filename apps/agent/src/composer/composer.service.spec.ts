@@ -159,6 +159,7 @@ function makeCtx(
     persist: null,
     draftIr: { nodes: draftNodes, edges: [] },
     canvasBranch: null,
+    draftSteps: null,
     busy: true,
     lastUsedAt: Date.now(),
     seq: 0,
@@ -173,7 +174,6 @@ function makeCtx(
       assumptions: [],
       stepResults: new Map(),
       connectionNeeds: new Map(),
-      ir: null,
       offerPending: false,
     },
     fixAttempts: new Map(),
@@ -447,6 +447,175 @@ describe('ComposerService on any canvas', () => {
   });
 });
 
+describe('the canvas note: steps of the last draft that are not on the canvas now', () => {
+  const promptOf = (query: jest.Mock): string => (query.mock.calls.at(-1)![0] as { prompt: string }).prompt;
+  const sessionIdOf = (events: AttachEvent[]): string =>
+    (events[0]!.data as { session_id: string }).session_id;
+  const node = (id: string, name: string, nodeType: string): Record<string, unknown> => ({
+    id,
+    name,
+    node_type: nodeType,
+    parameters: {},
+  });
+  const trigger = node('trigger', 'Trigger', 'orchestr:trigger');
+  const digest = node('build_digest', 'Build the digest', 'orchestr:code');
+  const report = node('send_report', 'Email me the report', 'gmail.send_email');
+  const canvas = (...nodes: Array<Record<string, unknown>>): Record<string, unknown> => ({
+    nodes,
+    edges: [],
+  });
+  const REPORT_GONE =
+    '<canvas_changes>Not on the canvas now: "Email me the report" (send_report).</canvas_changes>';
+
+  // The build turn on the compose page: a message on [trigger], then the composer's batch adding the digest and the report.
+  async function built(threads?: ThreadStore): Promise<{
+    query: jest.Mock;
+    service: ComposerService;
+    id: string;
+  }> {
+    const query = jest.fn(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+    const { service, sessions } = await makeService(query, {}, threads);
+    const first = await collect(
+      service.stream(
+        { message: 'Email me a daily digest', ir: canvas(trigger), branch: 'main' },
+        never,
+        null,
+        null,
+        'user_1',
+      ),
+    );
+    const id = sessionIdOf(first);
+    emitToSession(sessions.get(id)!, {
+      event: 'op_applied',
+      data: { ops: [], ir: canvas(trigger, digest, report) },
+    });
+    return { query, service, id };
+  }
+
+  const say = (
+    service: ComposerService,
+    message: string,
+    ir: Record<string, unknown>,
+    branch: string,
+    extra: { session_id?: string; workflow_id?: string } = {},
+  ): Promise<AttachEvent[]> =>
+    collect(service.stream({ message, ir, branch, ...extra }, never, null, null, 'user_1'));
+
+  it('names a step of its last draft the canvas lacks, on the same branch, and only once', async () => {
+    const { query, service, id } = await built();
+
+    await say(service, 'Created it.', canvas(trigger, digest), 'main', {
+      session_id: id,
+      workflow_id: 'wf-1',
+    });
+    expect(promptOf(query)).toContain(REPORT_GONE);
+
+    await say(service, 'Add a filter', canvas(trigger, digest), 'main', { session_id: id });
+    expect(promptOf(query)).not.toContain('<canvas_changes>');
+  });
+
+  it('says nothing when the canvas holds every step of its last draft', async () => {
+    const { query, service, id } = await built();
+    await say(service, 'Looks good', canvas(trigger, digest, report), 'main', { session_id: id });
+    expect(promptOf(query)).not.toContain('<canvas_changes>');
+  });
+
+  it('says nothing on a branch switch, then judges that branch by its own last canvas', async () => {
+    const { query, service, id } = await built();
+
+    await say(service, 'Tweak it', canvas(trigger, digest), 'older', { session_id: id });
+    expect(promptOf(query)).not.toContain('<canvas_changes>');
+
+    await say(service, 'And now?', canvas(trigger), 'older', { session_id: id });
+    expect(promptOf(query)).toContain(
+      '<canvas_changes>Not on the canvas now: "Build the digest" (build_digest).</canvas_changes>',
+    );
+  });
+
+  describe('in a session rebuilt from the durable log', () => {
+    // What a live service wrote to its thread, through JSON as the database stores it.
+    const writtenTo = (threads: ReturnType<typeof fakeThreads>): SequencedComposerEvent[] =>
+      JSON.parse(
+        JSON.stringify(threads.append.mock.calls.map((call) => call[1] as SequencedComposerEvent)),
+      ) as SequencedComposerEvent[];
+
+    // A restart: a fresh service whose session is rebuilt from the thread's log.
+    async function restarted(
+      log: SequencedComposerEvent[],
+    ): Promise<{ query: jest.Mock; service: ComposerService }> {
+      const threads = fakeThreads({ id: 'thread-1', workflowId: 'wf-1', lastSeq: log.at(-1)!.seq });
+      threads.loadEvents.mockResolvedValue(log);
+      const query = jest.fn(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+      const { service } = await makeService(query, {}, threads);
+      await collect(service.attach({ workflowId: 'wf-1', lastSeq: 0 }, never, 'user_1'));
+      return { query, service };
+    }
+    const sessionIdAfter = async (service: ComposerService): Promise<string> =>
+      sessionIdOf(await collect(service.attach({ workflowId: 'wf-1', lastSeq: 0 }, never, 'user_1')));
+
+    it('records the branch and the steps of the canvas each message carried', async () => {
+      const threads = fakeThreads();
+      await built(threads);
+      expect(writtenTo(threads)[0]).toMatchObject({
+        event: 'user_message',
+        data: {
+          text: 'Email me a daily digest',
+          branch: 'main',
+          steps: [{ id: 'trigger', name: 'Trigger' }],
+        },
+      });
+    });
+
+    it('names a step the canvas lacks, as the live session would have', async () => {
+      const threads = fakeThreads();
+      await built(threads);
+
+      const { query, service } = await restarted(writtenTo(threads));
+      await say(service, 'Created it.', canvas(trigger, digest), 'main', {
+        session_id: await sessionIdAfter(service),
+      });
+      expect(promptOf(query)).toContain(REPORT_GONE);
+    });
+
+    it('never names it again once a message showed the canvas without it', async () => {
+      const threads = fakeThreads();
+      const { service, id } = await built(threads);
+      await say(service, 'Created it.', canvas(trigger, digest), 'main', {
+        session_id: id,
+        workflow_id: 'wf-1',
+      });
+
+      const after = await restarted(writtenTo(threads));
+      await say(after.service, 'Add a filter', canvas(trigger, digest), 'main', {
+        session_id: await sessionIdAfter(after.service),
+      });
+      expect(promptOf(after.query)).not.toContain('<canvas_changes>');
+    });
+
+    it('says nothing when the canvas is now another branch', async () => {
+      const threads = fakeThreads();
+      await built(threads);
+
+      const { query, service } = await restarted(writtenTo(threads));
+      await say(service, 'Tweak it', canvas(trigger, digest), 'older', {
+        session_id: await sessionIdAfter(service),
+      });
+      expect(promptOf(query)).not.toContain('<canvas_changes>');
+    });
+
+    it('says nothing on a thread recorded before messages carried their branch', async () => {
+      const { query, service } = await restarted([
+        { event: 'user_message', data: { text: 'Email me a daily digest' }, seq: 1 },
+        { event: 'op_applied', data: { ops: [], ir: canvas(trigger, digest, report) }, seq: 2 },
+      ]);
+      await say(service, 'Created it.', canvas(trigger, digest), 'main', {
+        session_id: await sessionIdAfter(service),
+      });
+      expect(promptOf(query)).not.toContain('<canvas_changes>');
+    });
+  });
+});
+
 describe('ComposerService.attach (refresh replay)', () => {
   it('gap-free lastSeq → tail replay; fresh attach (lastSeq 0) → ONE snapshot instead', async () => {
     const { service, sessions } = await makeService(scriptedQuery([]));
@@ -460,14 +629,14 @@ describe('ComposerService.attach (refresh replay)', () => {
 
     // Fresh page: state snapshot, not history.
     const fresh = await collect(service.attach({ sessionId: session.id, lastSeq: 0 }, never));
-    expect(fresh.map((e) => e.event)).toEqual(['session', 'snapshot']);
+    expect(fresh.map((e) => e.event)).toEqual(['session', 'snapshot', 'replayed']);
     const snap = fresh[1]!.data as { brief: { goal: string } | null; busy: boolean };
     expect(snap.brief?.goal).toBe('g');
     expect(snap.busy).toBe(false);
 
     // Brief blip with a still-buffered seq: just the missed tail.
     const partial = await collect(service.attach({ sessionId: session.id, lastSeq: 2 }, never));
-    expect(partial.map((e) => e.event)).toEqual(['session', 'done']);
+    expect(partial.map((e) => e.event)).toEqual(['session', 'done', 'replayed']);
     expect(partial[1]!.seq).toBe(3);
   });
 
@@ -487,7 +656,7 @@ describe('ComposerService.attach (refresh replay)', () => {
     // lastSeq 1 with oldest buffered seq 2 is still gap-free; force the gap:
     session.buffer.splice(0, 1); // seq 2 gone too — only seq 3 remains
     const gapped = await collect(service.attach({ sessionId: session.id, lastSeq: 1 }, never));
-    expect(gapped.map((e) => e.event)).toEqual(['session', 'snapshot']);
+    expect(gapped.map((e) => e.event)).toEqual(['session', 'snapshot', 'replayed']);
     const snap = gapped[1]!.data as { questions: Array<{ question_id: string }> };
     expect(snap.questions.map((q) => q.question_id)).toContain('q9');
     void events;
@@ -515,7 +684,13 @@ describe('ComposerService.attach (refresh replay)', () => {
     emitToSession(session, { event: 'done', data: { session_id: session.id, duration_ms: 1 } });
     await consumer;
 
-    expect(received.map((e) => e.event)).toEqual(['session', 'snapshot', 'question_resolved', 'done']);
+    expect(received.map((e) => e.event)).toEqual([
+      'session',
+      'snapshot',
+      'replayed',
+      'question_resolved',
+      'done',
+    ]);
     const snap = received[1]!.data as { questions: Array<{ question_id: string; answer?: string }> };
     expect(snap.questions[0]).toMatchObject({ question_id: 'q1' });
     expect(snap.questions[0]!.answer).toBeUndefined();
@@ -1371,7 +1546,8 @@ describe('durable threads (write-through + rehydrate)', () => {
     // No in-memory session at all (restart/TTL) — identity is the only key.
     const events = await collect(service.attach({ workflowId: 'wf-1', lastSeq: 0 }, never, 'user_1'));
     expect(events[0]!.event).toBe('session');
-    expect(events.slice(1)).toEqual(log); // the exact persisted transcript, in order
+    expect(events.slice(1, -1)).toEqual(log); // the exact persisted transcript, in order
+    expect(events.at(-1)).toEqual({ event: 'replayed', data: {}, seq: 5 });
     expect(threads.loadEvents).toHaveBeenCalledWith('thread-9', 0);
 
     // The rebuilt session is indistinguishable from one that lived the events.
@@ -1415,6 +1591,7 @@ describe('durable threads (write-through + rehydrate)', () => {
       ['session', 2],
       ['user_message', 1],
       ['assistant_text', 2],
+      ['replayed', 2],
     ]);
   });
 

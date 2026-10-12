@@ -3,8 +3,8 @@ import * as agent from "@/api/agent";
 import * as api from "@/api/client";
 import { activeConnections, matchingConnections } from "@/lib/connections";
 import { composeMerge, type ComposerMergeConflict } from "@/api/client";
-import { irCanvasKey, irContentKey } from "@/lib/irCompare";
-import { UNTITLED_WORKFLOW, useWorkflow } from "@/store/useWorkflow";
+import { irCanvasKey } from "@/lib/irCompare";
+import { UNTITLED_WORKFLOW, useWorkflow, type SaveOutcome } from "@/store/useWorkflow";
 
 /**
  * Composer conversation state — ONE store, because ComposerBar and the canvas node badges render the
@@ -92,6 +92,8 @@ export function adoptSessionForWorkflow(workflowId: string): void {
 
 /** The canvas at turn start — the three-way merge base for co-editing. */
 let turnBaseIr: Record<string, unknown> | null = null;
+// While an attach replays: the current turn's latest batch, which a live batch after the replay merges from.
+let replayBase: Record<string, unknown> | null = null;
 /** Same-field collisions found while merging; relayed to the agent at turn end. */
 let pendingConflicts: ComposerMergeConflict[] = [];
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
@@ -145,9 +147,16 @@ function forgetSession(workflowId?: string): void {
   }
 }
 
+const clone = (doc: Record<string, unknown>): Record<string, unknown> =>
+  JSON.parse(JSON.stringify(doc)) as Record<string, unknown>;
+
 export const useComposer = create<ComposerStore>((set, get) => {
-  /** The one reducer both live streaming and attach-replay run through. */
-  const handleEvent = async (evt: agent.SequencedComposerEvent, workflowId?: string): Promise<void> => {
+  // The one reducer both live streaming and attach-replay run through; a replayed event restores the conversation, never the canvas.
+  const handleEvent = async (
+    evt: agent.SequencedComposerEvent,
+    workflowId?: string,
+    replayed = false,
+  ): Promise<void> => {
     if (evt.event === "session") {
       set({ sessionId: evt.data.session_id });
       rememberSession(workflowId, evt.data.session_id);
@@ -155,6 +164,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
       startTokenRefresh(evt.data.session_id);
     } else if (evt.event === "user_message") {
       // Replay only; supersedes a standing offer exactly as send() does, so replay ends in the same state.
+      replayBase = null;
       set((s) => ({
         offerPending: false,
         thread: [...s.thread, { id: nextEntryId++, kind: "user", text: evt.data.text }],
@@ -259,6 +269,11 @@ export const useComposer = create<ComposerStore>((set, get) => {
         ],
       }));
     } else if (evt.event === "op_applied") {
+      // The canvas is the saved version plus the person's edits: a batch from history never lands on it.
+      if (replayed) {
+        replayBase = clone(evt.data.ir);
+        return;
+      }
       // The agent's doc lands THROUGH a three-way merge, so mid-turn user edits survive.
       const ours = useWorkflow.getState().workflowJson;
       const base = turnBaseIr;
@@ -268,18 +283,12 @@ export const useComposer = create<ComposerStore>((set, get) => {
         useWorkflow.getState().resumeDraftIr(evt.data.ir);
         // Advance the base to the agent's own doc each batch, so its add-then-fill never re-diffs as
         // phantom user edits and a later batch can't read as a revert.
-        turnBaseIr = JSON.parse(JSON.stringify(evt.data.ir)) as Record<string, unknown>;
+        turnBaseIr = clone(evt.data.ir);
       } else {
         try {
           const { merged, conflicts } = await composeMerge(base, ours, evt.data.ir);
           useWorkflow.getState().resumeDraftIr(merged);
-          // A canvas equal to the committed baseline is NOT dirty — a re-armed Save would mint a
-          // no-diff version.
-          const wf = useWorkflow.getState();
-          if (wf.workflowId && wf.lastGeneratedJson && irContentKey(merged) === irContentKey(wf.lastGeneratedJson)) {
-            useWorkflow.setState({ dirty: false });
-          }
-          turnBaseIr = JSON.parse(JSON.stringify(evt.data.ir)) as Record<string, unknown>;
+          turnBaseIr = clone(evt.data.ir);
           for (const c of conflicts) {
             if (!pendingConflicts.some((p) => p.node_id === c.node_id && p.field_path === c.field_path)) {
               pendingConflicts.push(c);
@@ -324,11 +333,6 @@ export const useComposer = create<ComposerStore>((set, get) => {
         connectionNeeds[c.node_id] = { provider: c.provider, providerLabel: c.provider_label };
       }
       set({ thread, questions, assumptions, stepResults, connectionNeeds, offerPending: snap.offer_pending });
-      if (snap.ir) {
-        useWorkflow.getState().resumeDraftIr(snap.ir);
-        // A mid-turn refresh loses the original base; the agent's current draft becomes it.
-        turnBaseIr = snap.ir;
-      }
     } else if (evt.event === "error") {
       set({ failure: evt.data.message });
     }
@@ -386,7 +390,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
       controller = mine;
       const canvas = useWorkflow.getState().workflowJson;
       // The merge base: what BOTH sides start from this turn.
-      turnBaseIr = canvas ? (JSON.parse(JSON.stringify(canvas)) as Record<string, unknown>) : null;
+      turnBaseIr = canvas ? clone(canvas) : null;
       set((s) => ({
         streaming: true,
         failure: null,
@@ -441,20 +445,11 @@ export const useComposer = create<ComposerStore>((set, get) => {
           return;
         }
         // Save ≠ Live: commit a new version, never publish.
-        await useWorkflow.getState().saveDeployedEdits();
+        const outcome = await useWorkflow.getState().saveDeployedEdits();
         // BranchMovedDialog now owns the resolution — bail quietly rather than stack a failure on it.
-        if (useWorkflow.getState().branchMoved) return;
-        if (useWorkflow.getState().dirty) {
-          set({ failure: "Couldn't save — try Save in the header." });
-          return;
-        }
-        const { editBranch } = useWorkflow.getState();
-        await get().send(
-          editBranch === "main"
-            ? "Saved a new version. It won't go live until you publish it from the overview."
-            : `Saved a new version on ${editBranch}. It reaches what runs only after a merge into main and a publish, or a promotion.`,
-          workflowId,
-        );
+        if (outcome.kind === "moved") return;
+        await get().send(saveNote(outcome), workflowId);
+        if (outcome.kind === "failed") set({ failure: `Couldn't save: ${outcome.message}` });
       } catch (e) {
         set({ failure: e instanceof Error ? e.message : "Couldn't save." });
       } finally {
@@ -472,6 +467,8 @@ export const useComposer = create<ComposerStore>((set, get) => {
       controller = mine;
       set({ streaming: true, failure: null, sessionId });
       if (sessionId) startTokenRefresh(sessionId);
+      replayBase = null;
+      let replaying = true;
       try {
         for await (const evt of agent.composerAttach(
           { sessionId, workflowId, scratch: !workflowId, lastEventSeq: 0 },
@@ -487,7 +484,15 @@ export const useComposer = create<ComposerStore>((set, get) => {
           if (evt.event === "session" && evt.data.session_id !== sessionId) {
             startTokenRefresh(evt.data.session_id);
           }
-          await handleEvent(evt, workflowId);
+          if (evt.event === "replayed") {
+            replaying = false;
+            // A live batch merges onto the canvas as it stands, from the turn's latest batch or else from that canvas.
+            const canvas = useWorkflow.getState().workflowJson;
+            turnBaseIr = replayBase ?? (canvas ? clone(canvas) : null);
+            replayBase = null;
+            continue;
+          }
+          await handleEvent(evt, workflowId, replaying);
         }
       } catch (e) {
         if (!mine.signal.aborted) {
@@ -528,7 +533,8 @@ export const useComposer = create<ComposerStore>((set, get) => {
       const waitingNodes = Object.entries(get().connectionNeeds)
         .filter(([, need]) => need.provider === provider)
         .map(([nodeId]) => nodeId);
-      if (waitingNodes.length > 0) {
+      // A protected branch's canvas can't be saved, so nothing is written to it.
+      if (waitingNodes.length > 0 && !useWorkflow.getState().editBranchProtected) {
         try {
           const { connections } = await api.listConnections();
           const match = matchingConnections(activeConnections(connections), provider).sort((a, b) =>
@@ -591,6 +597,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
       controller = null;
       stopTokenRefresh();
       turnBaseIr = null;
+      replayBase = null;
       pendingConflicts = [];
       set({
         sessionId: undefined,
@@ -625,6 +632,21 @@ export const useComposer = create<ComposerStore>((set, get) => {
     );
   }
 });
+
+// What the composer is told a save chip did — never a version that wasn't minted.
+function saveNote(outcome: Exclude<SaveOutcome, { kind: "moved" }>): string {
+  if (outcome.kind === "failed") return `(canvas note) Nothing was saved — the save failed: ${outcome.message}`;
+  if (outcome.kind === "unchanged") {
+    const matched =
+      outcome.matches === null
+        ? "is unchanged since it was last opened or saved"
+        : `already matches v${outcome.matches}, the latest version on ${outcome.branch}`;
+    return `(canvas note) Nothing was saved — the canvas ${matched}, so no new version was made.`;
+  }
+  return outcome.branch === "main"
+    ? "Saved a new version. It won't go live until you publish it from the overview."
+    : `Saved a new version on ${outcome.branch}. It reaches what runs only after a merge into main and a publish, or a promotion.`;
+}
 
 /** The one unanswered question pinned to this node, if any (canvas chip). */
 export function pendingQuestionFor(

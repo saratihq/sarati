@@ -67,7 +67,6 @@ describe("useComposer suggestedName", () => {
             assumptions: [],
             step_results: [],
             connection_needs: [],
-            ir: null,
             offer_pending: false,
             busy: false,
           },
@@ -126,9 +125,7 @@ describe("useComposer on any canvas", () => {
   });
 
   it("after saving a branch canvas, tells the composer the save changes nothing that runs", async () => {
-    const saveDeployedEdits = vi.fn(async () => {
-      useWorkflow.setState({ dirty: false });
-    });
+    const saveDeployedEdits = vi.fn(async () => ({ kind: "committed" as const, versionNumber: 4, branch: "lane" }));
     useWorkflow.setState({ workflowJson: { name: "Digest", nodes: [], edges: [] }, editBranch: "lane", saveDeployedEdits });
 
     await useComposer.getState().acceptOffer("live", "wf-1");

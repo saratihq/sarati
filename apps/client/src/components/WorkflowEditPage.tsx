@@ -120,12 +120,14 @@ export default function WorkflowEditPage() {
   const backToOverview = () =>
     router.push(`/workflows/${id}/overview${onMain ? "" : `?branch=${encodeURIComponent(branch)}`}`);
 
+  // A stored draft is never written over before the person answers "Resume your draft?".
+  const keepsDraft = dirty && state === "ready" && resumeDraft === null;
   const flushDraft = useDraftAutosave({
     userId,
     workflowId: draftId ?? null,
     ir: workflowJson,
     name: workflowName ?? "",
-    enabled: dirty,
+    enabled: keepsDraft,
   });
 
   // Deploy gate: the same per-node required-field walk the compose page's
@@ -133,7 +135,7 @@ export default function WorkflowEditPage() {
   const missing = useMissingRequired(workflowJson);
 
   // The server refuses a commit to a protected branch; say so before the edit, not after it.
-  const [branchProtected, setBranchProtected] = useState(false);
+  const branchProtected = useWorkflow((s) => s.editBranchProtected);
   const saveBlocked = branchProtected ? `${branch} is protected — changes come in through a review` : null;
   useEffect(() => {
     if (!id) return;
@@ -141,7 +143,11 @@ export default function WorkflowEditPage() {
     void api
       .listBranches(id)
       .then((res) => {
-        if (!cancelled) setBranchProtected(res.branches.some((b) => b.name === branch && b.is_protected));
+        if (!cancelled) {
+          useWorkflow.setState({
+            editBranchProtected: res.branches.some((b) => b.name === branch && b.is_protected),
+          });
+        }
       })
       .catch(() => undefined); // the save still fails closed on the server
     return () => {
@@ -187,7 +193,7 @@ export default function WorkflowEditPage() {
   // Back never asks: flush the draft synchronously (the debounce may not have
   // fired) and confirm with a toast.
   const handleBack = () => {
-    if (dirty) {
+    if (keepsDraft) {
       flushDraft();
       toast.success("Draft saved");
     }

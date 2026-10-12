@@ -4,19 +4,33 @@
  * Both keys sort, so neither can be fooled by serialization order.
  */
 function canonical(doc: unknown, keepPositions: boolean): string {
-  const strip = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(strip);
+  const sorted = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sorted);
     if (value && typeof value === "object") {
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-        if (key === "position" && !keepPositions) continue;
-        out[key] = strip((value as Record<string, unknown>)[key]);
+        out[key] = sorted((value as Record<string, unknown>)[key]);
       }
       return out;
     }
     return value;
   };
-  return JSON.stringify(strip(doc));
+  return JSON.stringify(sorted(keepPositions ? doc : withoutLayout(doc)));
+}
+
+// Layout is a node's own `position`; a parameter or metadata field of that name is content.
+function withoutLayout(doc: unknown): unknown {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return doc;
+  const { nodes } = doc as { nodes?: unknown };
+  if (!Array.isArray(nodes)) return doc;
+  return {
+    ...doc,
+    nodes: nodes.map((node: unknown) => {
+      if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+      const { position: _layout, ...content } = node as Record<string, unknown>;
+      return content;
+    }),
+  };
 }
 
 /** Content identity: key order and node coordinates ignored. */

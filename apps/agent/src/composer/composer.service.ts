@@ -8,13 +8,14 @@ import { EventChannel } from './event-channel';
 import { anthropicParamCompleter, type ParamCompleteFn } from './param-filler';
 import { PendingAnswers } from './pending-answers';
 import { providerFailureMessage } from './provider-failure';
-import type { AttachEvent, ComposerEvent, SequencedComposerEvent, WorkflowIr } from './protocol';
+import type { AttachEvent, CanvasStep, ComposerEvent, SequencedComposerEvent, WorkflowIr } from './protocol';
 import {
   emitToSession,
   recordUserMessage,
   rehydrateIntoSession,
   SessionStore,
   snapshotOf,
+  stepsOf,
   type ComposerSession,
 } from './sessions';
 import { composerSystemPrompt } from './system-prompt';
@@ -130,8 +131,10 @@ export class ComposerService {
       await this.bindThread(session, userKey);
       // The editor's canvas is the source of truth for the draft: refresh it
       // on every message so manual edits between turns are never clobbered.
-      if (request.ir !== undefined && request.ir !== null) session.draftIr = request.ir;
-      session.canvasBranch = request.branch ?? null;
+      const canvas = request.ir ?? null;
+      const branch = request.branch ?? null;
+      const missing = canvas ? notOnCanvas(session, canvas, branch) : [];
+      if (canvas) session.draftIr = canvas;
 
       // Bookkeeping, not history: the session id is not buffered for replay.
       yield { event: 'session', data: { session_id: session.id }, seq: session.seq };
@@ -149,8 +152,8 @@ export class ComposerService {
       clientGone.addEventListener('abort', onGone, { once: true });
       // The transcript's turn opener — persisted/buffered for attach replay,
       // never sent live (the sender renders its own message optimistically).
-      recordUserMessage(session, request.message);
-      const turn = this.runTurn(session, request.message);
+      recordUserMessage(session, request.message, { branch, steps: canvas ? stepsOf(canvas) : null });
+      const turn = this.runTurn(session, request.message, missing);
       try {
         for await (const event of channel) {
           if (clientGone.aborted) break;
@@ -167,24 +170,6 @@ export class ComposerService {
   }
 
   /**
-   * Reattach after a refresh/drop/restart. Session resolution: the given
-   * session id when it's still live in memory (same-tab fast path), else the
-   * caller's durable thread — (user, workflow) or the scratch thread — which
-   * finds a live session bound to it or REHYDRATES one from the Postgres
-   * event log (survives agent-service restarts and the session TTL).
-   *
-   * Replay, in order of preference:
-   *  - DURABLE LOG: the thread's full transcript after `lastSeq` (from seq 1
-   *    on a fresh page), the exact live event shapes — the chat panel renders
-   *    through the same reducer path as live and comes back IDENTICAL. Any
-   *    buffered tail the async write-through hasn't landed yet follows.
-   *  - Memory-only fallback (no DATABASE_URL / DB down): the pre-thread
-   *    behavior — gap-free buffered tail when lastSeq allows, else ONE
-   *    `snapshot` event (the canvas-state supplement) carrying current state.
-   * Then — when a turn is live — continue streaming it; idle sessions end
-   * after the replay. Replay + live are deduped by seq.
-   */
-  /**
    * Clear the caller's (user, workflow) conversation (owner, 2026-07-14):
    * delete the durable thread and drop any live session on it. Memory-only
    * mode has nothing durable — the client resets and the session TTLs out.
@@ -199,6 +184,7 @@ export class ComposerService {
     return { cleared: false };
   }
 
+  /** Reattach after a refresh or restart: replay the thread (durable log, else memory), a `replayed` marker, then any live turn — deduped by seq. */
   async *attach(
     request: AttachRequest,
     clientGone: AbortSignal,
@@ -254,6 +240,7 @@ export class ComposerService {
         yield { event: 'snapshot', data: snapshotOf(session), seq: session.seq };
       }
     }
+    yield { event: 'replayed', data: {}, seq: delivered };
     if (!session.busy || clientGone.aborted) {
       clientGone.removeEventListener('abort', onGone);
       if (session.subscriber === channel) session.subscriber = null;
@@ -398,7 +385,7 @@ export class ComposerService {
    * session emitter (buffered for replay + forwarded to the live consumer).
    * Closes whatever consumer is live when the turn ends.
    */
-  private async runTurn(session: ComposerSession, message: string): Promise<void> {
+  private async runTurn(session: ComposerSession, message: string, missing: CanvasStep[]): Promise<void> {
     const startedAt = Date.now();
     // Per-turn state: the two-fix bound counts within one turn; a new message
     // also supersedes any standing save offer.
@@ -426,7 +413,7 @@ export class ComposerService {
     });
 
     const q = this.queryFn({
-      prompt: this.buildPrompt(session, message),
+      prompt: this.buildPrompt(session, message, missing),
       options: {
         model: this.env.composerModel,
         systemPrompt: composerSystemPrompt(paramCompleter !== null),
@@ -569,7 +556,7 @@ export class ComposerService {
   }
 
   /** The user message plus the current canvas so the agent never edits blind. */
-  private buildPrompt(session: ComposerSession, message: string): string {
+  private buildPrompt(session: ComposerSession, message: string, missing: CanvasStep[]): string {
     const parts: string[] = [];
     if (session.canvasBranch && session.canvasBranch !== 'main') {
       parts.push(
@@ -584,9 +571,20 @@ export class ComposerService {
     } else {
       parts.push('<canvas_state>empty — no steps yet</canvas_state>');
     }
+    if (missing.length > 0) {
+      const named = missing.map((step) => `"${step.name}" (${step.id})`).join(', ');
+      parts.push(`<canvas_changes>Not on the canvas now: ${named}.</canvas_changes>`);
+    }
     parts.push(message);
     return parts.join('\n\n');
   }
+}
+
+// Steps of the composer's last draft that the canvas lacks — a fact about the canvas, never a claim of who removed them.
+function notOnCanvas(session: ComposerSession, canvas: WorkflowIr, branch: string | null): CanvasStep[] {
+  if (!session.draftSteps || branch === null || branch !== session.canvasBranch) return [];
+  const shown = new Set(stepsOf(canvas).map((step) => step.id));
+  return session.draftSteps.filter((step) => !shown.has(step.id));
 }
 
 function messageOf(err: unknown): string {

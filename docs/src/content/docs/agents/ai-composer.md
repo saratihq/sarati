@@ -73,8 +73,14 @@ it never renames over you, however often it re-plans.
 
 ## Saving
 
-Nothing becomes a workflow until you save. The conversation and its draft are kept as you go, so
-reopening the editor picks up where you left off; **clear conversation** deletes them.
+Nothing becomes a workflow until you save. The conversation is kept as you go, so reopening the
+editor picks it up where you left off; **clear conversation** deletes it. Reopening never changes
+the canvas: it shows what you saved, plus any unsaved draft you choose to resume. A build still
+running when you come back lands its next changes merged onto that canvas.
+
+With your next message, the composer is told which steps of its last draft are not on the canvas,
+and to leave them off unless you ask for them back. On a workflow that already exists, its save chip
+saves a new version — or says nothing was saved when the canvas has no changes.
 
 | | |
 |---|---|

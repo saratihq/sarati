@@ -32,6 +32,18 @@ export interface CanvasHistory {
   future: Array<Record<string, unknown>>;
 }
 
+/** How a save of the canvas ended — so a caller reports only what actually happened. */
+export type SaveOutcome =
+  | { kind: "committed"; versionNumber: number; branch: string }
+  | {
+      kind: "unchanged";
+      /** The version the canvas equals, when the service named it. */
+      matches: number | null;
+      branch: string;
+    }
+  | { kind: "moved" }
+  | { kind: "failed"; message: string };
+
 /** The head-moved-under-us facts a 409 `branch_moved` carries. */
 export interface BranchMovedState {
   /** The version now at the branch head — what rebase/discard reload onto. */
@@ -148,7 +160,7 @@ interface WorkflowState {
   ) => void;
   revertEdits: () => void;
   beginDeployedEdit: () => void;
-  saveDeployedEdits: (message?: string) => Promise<void>;
+  saveDeployedEdits: (message?: string) => Promise<SaveOutcome>;
   /** Load a branch's HEAD graph into the editor in "deployed" mode; resolves true on success. */
   loadForEdit: (
     workflowId: string,
@@ -157,6 +169,8 @@ interface WorkflowState {
   ) => Promise<boolean>;
   /** Which branch the editor is working on — set by loadForEdit, read by saveDeployedEdits. */
   editBranch: string;
+  /** That branch refuses saves, so nothing may write to its canvas for the person. */
+  editBranchProtected: boolean;
   /** Opened FROM an old version (continue-from-vN): Save still appends a NEW head — vN stays immutable. */
   editFromVersion: number | null;
   /** Optimistic-concurrency base: the head version this doc was last synced from. */
@@ -395,7 +409,20 @@ function primeHistoryBaseline(doc: Record<string, unknown> | null): void {
   historyBaselineKey = historyBaseline ? irContentKey(historyBaseline) : null;
 }
 
-// The set() patch that restores a document; `dirty` is decided by irContentKey, never a byte-compare.
+// The baseline's content key, cached by reference: every edit is measured against the same saved document.
+let baselineKey: { doc: Record<string, unknown>; key: string } | null = null;
+
+// `dirty` is a CONTENT claim against the saved baseline (constitution #4), never "a setter ran".
+function dirtyAgainst(
+  doc: Record<string, unknown>,
+  baseline: Record<string, unknown> | null,
+): boolean {
+  if (!baseline) return true;
+  if (baselineKey?.doc !== baseline) baselineKey = { doc: baseline, key: irContentKey(baseline) };
+  return irContentKey(doc) !== baselineKey.key;
+}
+
+// The set() patch that restores a document.
 function historyRestorePatch(
   doc: Record<string, unknown>,
   history: CanvasHistory,
@@ -407,9 +434,7 @@ function historyRestorePatch(
     history,
     nodeCount: workflowNodeCount(doc),
     connectionsCount: workflowConnectionCount(doc),
-    dirty: lastGeneratedJson
-      ? irContentKey(doc) !== irContentKey(lastGeneratedJson)
-      : true,
+    dirty: dirtyAgainst(doc, lastGeneratedJson),
   };
 }
 
@@ -469,6 +494,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   originalMessage: "",
   editorMode: "draft",
   editBranch: "main",
+  editBranchProtected: false,
   editFromVersion: null,
   baseVersionId: null,
   branchMoved: null,
@@ -559,6 +585,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       stripReady: false,
       originalMessage: "",
       editorMode: "draft",
+      editBranchProtected: false,
       baseVersionId: null,
       branchMoved: null,
       dirty: false,
@@ -701,7 +728,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: nextJson,
       workflowIr: patch(s.workflowIr!),
-      dirty: true,
+      dirty: dirtyAgainst(nextJson, s.lastGeneratedJson),
       nodeCount: irGraph.getIrNodes(nextJson).length,
       connectionsCount: irGraph.countIrEdges(nextJson),
     });
@@ -716,7 +743,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       workflowJson: next,
       workflowIr: irGraph.updateIrNode(s.workflowIr!, nodeId, patch),
       // markDirty:false = a programmatic default, which must not arm Save or autosave a draft.
-      ...(opts?.markDirty === false ? {} : { dirty: true }),
+      ...(opts?.markDirty === false ? {} : { dirty: dirtyAgainst(next, s.lastGeneratedJson) }),
     });
   },
 
@@ -741,7 +768,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: nextJson,
       workflowIr: apply(s.workflowIr!),
-      dirty: true,
+      dirty: dirtyAgainst(nextJson, s.lastGeneratedJson),
       connectionsCount: irGraph.countIrEdges(nextJson),
     });
   },
@@ -768,7 +795,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: nextJson,
       workflowIr: apply(s.workflowIr!),
-      dirty: true,
+      dirty: dirtyAgainst(nextJson, s.lastGeneratedJson),
       connectionsCount: irGraph.countIrEdges(nextJson),
     });
   },
@@ -792,7 +819,11 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     const apply = (doc: Record<string, unknown>): Record<string, unknown> =>
       irGraph.updateIrNode(doc, nodeId, { parameters: next });
     const nextJson = apply(s.workflowJson!);
-    set({ workflowJson: nextJson, workflowIr: apply(s.workflowIr!), dirty: true });
+    set({
+      workflowJson: nextJson,
+      workflowIr: apply(s.workflowIr!),
+      dirty: dirtyAgainst(nextJson, s.lastGeneratedJson),
+    });
   },
 
   setWorkflowDocName: (name) => {
@@ -837,7 +868,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: next,
       workflowIr: irGraph.deleteIrNode(s.workflowIr!, name),
-      dirty: true,
+      dirty: dirtyAgainst(next, s.lastGeneratedJson),
       nodeCount: irGraph.getIrNodes(next).length,
       connectionsCount: irGraph.countIrEdges(next),
     });
@@ -897,7 +928,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: nextJson,
       workflowIr: append(s.workflowIr!),
-      dirty: true,
+      dirty: dirtyAgainst(nextJson, s.lastGeneratedJson),
       nodeCount: irGraph.getIrNodes(nextJson).length,
       connectionsCount: irGraph.countIrEdges(nextJson),
     });
@@ -912,7 +943,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: next,
       workflowIr: irGraph.addIrEdge(s.workflowIr!, source, target, port, portType),
-      dirty: true,
+      dirty: dirtyAgainst(next, s.lastGeneratedJson),
       connectionsCount: irGraph.countIrEdges(next),
     });
   },
@@ -925,7 +956,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     set({
       workflowJson: next,
       workflowIr: irGraph.removeIrEdge(s.workflowIr!, source, target, port, portType),
-      dirty: true,
+      dirty: dirtyAgainst(next, s.lastGeneratedJson),
       connectionsCount: irGraph.countIrEdges(next),
     });
   },
@@ -956,27 +987,14 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   },
 
   saveDeployedEdits: async (message?: string) => {
-    const {
-      workflowId,
-      workflowJson,
-      dirty,
-      editBranch,
-      lastGeneratedJson,
-      baseVersionId,
-    } = get();
-    if (!workflowId || !workflowJson || !dirty) return;
-    // `dirty` can be re-armed by a merge landing the same content in a different byte order — compare
-    // canonically so a no-diff version is never committed.
-    if (
-      lastGeneratedJson &&
-      irContentKey(workflowJson) === irContentKey(lastGeneratedJson)
-    ) {
+    const { workflowId, workflowJson, editBranch, lastGeneratedJson, baseVersionId } = get();
+    if (!workflowId || !workflowJson) {
+      return { kind: "failed", message: "This workflow isn't saved on Sarati yet." };
+    }
+    // A no-op save is the caller's to report; it never toasts.
+    if (!dirtyAgainst(workflowJson, lastGeneratedJson)) {
       set({ dirty: false });
-      toast.info(
-        "No changes to save",
-        "The canvas already matches the latest version.",
-      );
-      return;
+      return { kind: "unchanged", matches: null, branch: editBranch };
     }
     const onMain = editBranch === "main";
     set({ isLoading: true, error: null });
@@ -1007,40 +1025,26 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
             baseVersionId: moved.base_version_id,
           },
         });
-        return;
+        return { kind: "moved" };
       }
-      toast.error(
-        "Couldn't save your edits",
-        e instanceof Error ? e.message : undefined,
-      );
-      return;
+      const reason = e instanceof Error ? e.message : "The save didn't go through.";
+      toast.error("Couldn't save your edits", reason);
+      return { kind: "failed", message: reason };
+    }
+
+    // The sent document is the new baseline; an edit made while the save was in flight stays unsaved.
+    set({
+      baseVersionId: version.id,
+      lastGeneratedJson: workflowJson,
+      dirty: dirtyAgainst(get().workflowJson ?? workflowJson, workflowJson),
+    });
+
+    if (version.no_changes) {
+      set({ isLoading: false });
+      return { kind: "unchanged", matches: version.version_number, branch: editBranch };
     }
 
     warnBrokenRefs(version.ref_warnings);
-
-    if (version.no_changes) {
-      // The head already IS our content — sync the base to it so the NEXT edit commits against the true head.
-      set({
-        dirty: false,
-        lastGeneratedJson: workflowJson,
-        baseVersionId: version.id,
-        isLoading: false,
-      });
-      toast.info(
-        "No changes to save",
-        `v${version.version_number} is already the latest.`,
-      );
-      return;
-    }
-
-    // Clear `dirty` here or a retry re-commits the same content as another version; advancing the base
-    // keeps the next commit's guard on the true head.
-    set({
-      dirty: false,
-      lastGeneratedJson: workflowJson,
-      baseVersionId: version.id,
-    });
-
     set({ isLoading: false, step: "execute", stripReady: false });
     if (!onMain) {
       toast.success(
@@ -1053,6 +1057,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
         "Saved as the latest version — Publish it to make it live",
       );
     }
+    return { kind: "committed", versionNumber: version.version_number, branch: editBranch };
   },
 
   dismissBranchMoved: () => set({ branchMoved: null }),
@@ -1206,13 +1211,10 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   },
 
   resumeDraftIr: (ir: Record<string, unknown>) => {
-    // Dirty is a CONTENT claim, not a "this setter ran" claim — byte-order/position noise must never arm Save.
-    const baseline = get().lastGeneratedJson;
-    const dirty = baseline ? irContentKey(ir) !== irContentKey(baseline) : true;
     set({
       workflowJson: ir,
       workflowIr: irGraph.isIrDocument(ir) ? ir : null,
-      dirty,
+      dirty: dirtyAgainst(ir, get().lastGeneratedJson),
       nodeCount: workflowNodeCount(ir),
       connectionsCount: workflowConnectionCount(ir),
     });

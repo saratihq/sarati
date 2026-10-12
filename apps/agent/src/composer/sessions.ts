@@ -5,6 +5,7 @@ import { Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
 import { EventChannel } from './event-channel';
 import type {
   BriefData,
+  CanvasStep,
   ComposerEvent,
   QuestionData,
   SequencedComposerEvent,
@@ -33,6 +34,8 @@ export interface ComposerSession {
   draftIr: WorkflowIr | null;
   /** The branch the editor's canvas belongs to, as of the latest message; null when unknown. */
   canvasBranch: string | null;
+  /** The steps of the composer's last draft — its latest batch, or the canvas the latest message carried; null when unknown. */
+  draftSteps: CanvasStep[] | null;
   busy: boolean;
   lastUsedAt: number;
   /** Monotonic per-session event counter (the SSE `id:` line). */
@@ -68,7 +71,6 @@ interface MutableSnapshot {
   assumptions: Array<{ node_id: string; text: string }>;
   stepResults: Map<string, { node_id: string; status: 'passed' | 'failed'; summary?: string }>;
   connectionNeeds: Map<string, { node_id: string; provider: string; provider_label: string }>;
-  ir: WorkflowIr | null;
   offerPending: boolean;
 }
 
@@ -82,7 +84,6 @@ export function snapshotOf(session: ComposerSession): SessionSnapshot {
     assumptions: [...session.snapshot.assumptions],
     step_results: [...session.snapshot.stepResults.values()],
     connection_needs: [...session.snapshot.connectionNeeds.values()],
-    ir: session.draftIr,
     offer_pending: session.snapshot.offerPending,
     busy: session.busy,
   };
@@ -110,10 +111,28 @@ function foldIntoSnapshot(snapshot: MutableSnapshot, event: ComposerEvent): void
     if (event.data.status === 'passed') snapshot.connectionNeeds.delete(event.data.node_id);
   } else if (event.event === 'connection_needed') {
     snapshot.connectionNeeds.set(event.data.node_id, { ...event.data });
-  } else if (event.event === 'op_applied') {
-    snapshot.ir = event.data.ir;
   } else if (event.event === 'offer') {
     snapshot.offerPending = true;
+  }
+}
+
+/** The steps of a document, named as the composer names them. */
+export function stepsOf(ir: WorkflowIr): CanvasStep[] {
+  const nodes: unknown[] = Array.isArray(ir.nodes) ? ir.nodes : [];
+  return nodes.flatMap((node) => {
+    const { id, name } = (node ?? {}) as { id?: unknown; name?: unknown };
+    if (typeof id !== 'string') return [];
+    return [{ id, name: typeof name === 'string' && name !== '' ? name : id }];
+  });
+}
+
+// What the composer last drafted, and on which branch — folded the same way live and on rehydrate.
+function trackCanvas(session: ComposerSession, event: ComposerEvent): void {
+  if (event.event === 'op_applied') {
+    session.draftSteps = stepsOf(event.data.ir);
+  } else if (event.event === 'user_message') {
+    session.canvasBranch = event.data.branch ?? null;
+    session.draftSteps = event.data.steps ?? null;
   }
 }
 
@@ -127,6 +146,7 @@ export const EVENT_BUFFER_CAP = 1000;
 export function emitToSession(session: ComposerSession, event: ComposerEvent): void {
   session.seq += 1;
   foldIntoSnapshot(session.snapshot, event);
+  trackCanvas(session, event);
   const sequenced = { ...event, seq: session.seq };
   session.buffer.push(sequenced);
   if (session.buffer.length > EVENT_BUFFER_CAP) session.buffer.shift();
@@ -140,9 +160,18 @@ export function emitToSession(session: ComposerSession, event: ComposerEvent): v
  * message optimistically; replaying it live would double it. Attach replay is
  * the only path that delivers user_message events to a client.
  */
-export function recordUserMessage(session: ComposerSession, text: string): void {
+export function recordUserMessage(
+  session: ComposerSession,
+  text: string,
+  canvas: { branch: string | null; steps: CanvasStep[] | null },
+): void {
   session.seq += 1;
-  const sequenced: SequencedComposerEvent = { event: 'user_message', data: { text }, seq: session.seq };
+  const sequenced: SequencedComposerEvent = {
+    event: 'user_message',
+    data: { text, ...canvas },
+    seq: session.seq,
+  };
+  trackCanvas(session, sequenced);
   session.buffer.push(sequenced);
   if (session.buffer.length > EVENT_BUFFER_CAP) session.buffer.shift();
   session.persist?.(sequenced);
@@ -158,6 +187,7 @@ export function recordUserMessage(session: ComposerSession, text: string): void 
 export function rehydrateIntoSession(session: ComposerSession, event: SequencedComposerEvent): void {
   if (event.seq > session.seq) session.seq = event.seq;
   foldIntoSnapshot(session.snapshot, event);
+  trackCanvas(session, event);
   if (event.event === 'op_applied') session.draftIr = event.data.ir;
   session.buffer.push(event);
   if (session.buffer.length > EVENT_BUFFER_CAP) session.buffer.shift();
@@ -189,6 +219,7 @@ export class SessionStore implements OnApplicationShutdown {
       persist: null,
       draftIr,
       canvasBranch: null,
+      draftSteps: null,
       busy: false,
       lastUsedAt: Date.now(),
       seq: 0,
@@ -204,7 +235,6 @@ export class SessionStore implements OnApplicationShutdown {
         assumptions: [],
         stepResults: new Map(),
         connectionNeeds: new Map(),
-        ir: null,
         offerPending: false,
       },
       fixAttempts: new Map(),
@@ -220,7 +250,6 @@ export class SessionStore implements OnApplicationShutdown {
     return session;
   }
 
-  /** The live session already bound to a durable thread, if any (identity attach). */
   /** Drop a session outright (thread cleared) — aborts a turn in flight. */
   remove(id: string): void {
     const session = this.sessions.get(id);
@@ -230,6 +259,7 @@ export class SessionStore implements OnApplicationShutdown {
     this.sessions.delete(id);
   }
 
+  /** The live session already bound to a durable thread, if any (identity attach). */
   findByThread(threadId: string): ComposerSession | undefined {
     for (const session of this.sessions.values()) {
       if (session.threadId === threadId) {
