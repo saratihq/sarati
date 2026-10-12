@@ -17,6 +17,7 @@ import { threeWayMerge, type ConflictEntry, type MergeResolution } from '../ir/m
 import type { WorkflowIR } from '../ir/models';
 import type { ReviewTestSummary } from '../reviews/review-test.types';
 import { rawQuery } from '../database/raw-query';
+import { lockWorkflowForWrite } from './workflow-row-lock';
 export interface BranchMergeOutcome {
   success: boolean;
   /** Null on success means the target already had every change on the source, so nothing was minted. */
@@ -49,6 +50,7 @@ export class BranchService {
     userId: string | null,
   ): Promise<WorkflowBranchEntity> {
     return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`);
 
@@ -138,9 +140,44 @@ export class BranchService {
     });
   }
 
-  async getBranch(em: EntityManager, workflowId: string, name: string): Promise<WorkflowBranchEntity> {
-    const branch = await em.findOne(WorkflowBranchEntity, { where: { workflowId, name } });
-    if (!branch) throw new DomainError(`Branch '${name}' not found`);
+  /** Lock these branches FOR UPDATE in name order: under the workflow row, a branch is locked before any review or tag of it. */
+  lockBranches(
+    em: EntityManager,
+    workflowId: string,
+    by: { names: string[] } | { ids: string[] },
+  ): Promise<WorkflowBranchEntity[]> {
+    const query = em
+      .createQueryBuilder(WorkflowBranchEntity, 'b')
+      .setLock('pessimistic_write')
+      .where('b.workflow_id = :workflowId', { workflowId });
+    const matched =
+      'names' in by
+        ? query.andWhere('b.name IN (:...names)', { names: by.names })
+        : query.andWhere('b.id IN (:...ids)', { ids: by.ids });
+    return matched.orderBy('b.name', 'ASC').getMany();
+  }
+
+  /** {@link lockBranches} for a merge's two branches by name, answering not-found when either is gone. */
+  async lockBranchPair(
+    em: EntityManager,
+    workflowId: string,
+    sourceName: string,
+    targetName: string,
+  ): Promise<{ source: WorkflowBranchEntity; target: WorkflowBranchEntity }> {
+    const byName = new Map(
+      (await this.lockBranches(em, workflowId, { names: [sourceName, targetName] })).map((b) => [b.name, b]),
+    );
+    const source = byName.get(sourceName);
+    const target = byName.get(targetName);
+    if (!source) throw new DomainError(`Branch '${sourceName}' not found`, 404);
+    if (!target) throw new DomainError(`Branch '${targetName}' not found`, 404);
+    return { source, target };
+  }
+
+  /** {@link lockBranches} for one branch by name, answering not-found when it is gone. */
+  async lockBranchByName(em: EntityManager, workflowId: string, name: string): Promise<WorkflowBranchEntity> {
+    const [branch] = await this.lockBranches(em, workflowId, { names: [name] });
+    if (!branch) throw new DomainError(`Branch '${name}' not found`, 404);
     return branch;
   }
 
@@ -152,9 +189,10 @@ export class BranchService {
     actorId: string,
   ): Promise<WorkflowBranchEntity> {
     return this.dataSource.transaction(async (em) => {
-      const branch = await this.getBranch(em, workflowId, name);
+      await lockWorkflowForWrite(em, workflowId);
+      const branch = await this.lockBranchByName(em, workflowId, name);
+      await em.update(WorkflowBranchEntity, { id: branch.id }, { isProtected });
       branch.isProtected = isProtected;
-      await em.save(WorkflowBranchEntity, branch);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       await this.events.emit(em, {
         orgId: wf?.orgId ?? null,
@@ -171,7 +209,8 @@ export class BranchService {
   /** Delete a branch, also removing its tag rows (rather than orphaning them via SET NULL); returns how many were removed. */
   async deleteBranch(workflowId: string, name: string, actorId: string | null): Promise<number> {
     return this.dataSource.transaction(async (em) => {
-      const branch = await this.getBranch(em, workflowId, name);
+      await lockWorkflowForWrite(em, workflowId);
+      const branch = await this.lockBranchByName(em, workflowId, name);
       if (branch.isDefault) throw new DomainError('Cannot delete the default branch');
       if (branch.isProtected) {
         throw new DomainError(
@@ -402,9 +441,10 @@ export class BranchService {
     userId: string | null,
     resolutions?: MergeResolution[],
   ): Promise<BranchMergeOutcome> {
-    return this.dataSource.transaction((em) =>
-      this.mergeBranchIn(em, workflowId, sourceBranchName, targetBranchName, userId, resolutions),
-    );
+    return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
+      return this.mergeBranchIn(em, workflowId, sourceBranchName, targetBranchName, userId, resolutions);
+    });
   }
 
   /** Same merge, inside the CALLER's transaction (reviews hold their row lock across it). */
@@ -417,19 +457,12 @@ export class BranchService {
     resolutions?: MergeResolution[],
   ): Promise<BranchMergeOutcome> {
     {
-      // Lock BOTH branches before reading heads; order by name for deadlock safety.
-      const rows = await em
-        .createQueryBuilder(WorkflowBranchEntity, 'b')
-        .setLock('pessimistic_write')
-        .where('b.workflow_id = :workflowId', { workflowId })
-        .andWhere('b.name IN (:...names)', { names: [sourceBranchName, targetBranchName] })
-        .orderBy('b.name', 'ASC')
-        .getMany();
-      const byName = new Map(rows.map((b) => [b.name, b]));
-      const source = byName.get(sourceBranchName);
-      const target = byName.get(targetBranchName);
-      if (!source) throw new DomainError(`Branch '${sourceBranchName}' not found`);
-      if (!target) throw new DomainError(`Branch '${targetBranchName}' not found`);
+      const { source, target } = await this.lockBranchPair(
+        em,
+        workflowId,
+        sourceBranchName,
+        targetBranchName,
+      );
       if (!source.headVersionId || !target.headVersionId) {
         throw new DomainError('Both branches must have at least one commit');
       }

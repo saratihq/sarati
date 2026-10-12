@@ -14,7 +14,7 @@ import { WorkflowsModule } from '../workflows/workflows.module';
 import { HooksController } from './hooks.controller';
 import { TriggerPollerJob } from './trigger-poller.job';
 import { TriggerReconcilerJob } from './canvas/trigger-reconciler.job';
-import { TriggerReconcilerService } from './canvas/trigger-reconciler.service';
+import { TriggerReconcilerService, WEBHOOK_DELETE_WAIT_MS } from './canvas/trigger-reconciler.service';
 import { TriggerCatalogModule } from './trigger-catalog.module';
 import { TriggerSignalsModule } from './trigger-signals.module';
 import { TriggersController } from './triggers.controller';
@@ -53,6 +53,7 @@ import { WebhookSecretsService } from './webhook-secrets.service';
     TriggerPollerJob,
     CatchStore,
     TriggerReconcilerService,
+    { provide: WEBHOOK_DELETE_WAIT_MS, useValue: 10_000 },
     TriggerReconcilerJob,
     WebhookSecretsService,
   ],

@@ -51,6 +51,14 @@ export function sameRegistration(
   );
 }
 
+/** Whether two webhooks deliver to one URL in one app: an app that refuses a second webhook at a URL refuses the later one. */
+export function sameAddress(
+  a: Pick<RegisteredWebhook, 'triggerType' | 'webhookUrl'>,
+  b: Pick<RegisteredWebhook, 'triggerType' | 'webhookUrl'>,
+): boolean {
+  return validatedAppSlug(a.triggerType) === validatedAppSlug(b.triggerType) && a.webhookUrl === b.webhookUrl;
+}
+
 function locator({ signingSecret: _minted, ...where }: WebhookRegistration): Record<string, unknown> {
   return where;
 }

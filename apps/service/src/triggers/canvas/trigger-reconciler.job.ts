@@ -47,9 +47,9 @@ export class TriggerReconcilerJob implements OnModuleInit {
       this.logger.error(`trigger reconciler setup failed: ${errorMessage(err)}`);
     }
     await this.reconciler
-      .reconcileUnfinished()
+      .reconcileStale()
       .catch((err: unknown) =>
-        this.logger.error(`reconcile of unfinished trigger activations failed: ${errorMessage(err)}`),
+        this.logger.error(`reconcile of stale trigger activations failed: ${errorMessage(err)}`),
       );
   }
 }

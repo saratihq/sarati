@@ -352,7 +352,11 @@ export class ComposerService {
   private async rekeyThread(session: ComposerSession, workflowId: string): Promise<void> {
     if (!this.threads.enabled || !session.threadId) return;
     try {
-      await this.threads.rekey(session.threadId, workflowId);
+      if (!(await this.threads.rekey(session.threadId, workflowId))) {
+        // The workflow went first and took the thread with it: the session goes on memory-only.
+        session.threadId = null;
+        session.persist = null;
+      }
     } catch (err) {
       this.logger.warn(`thread rekey failed (session ${session.id}): ${messageOf(err)}`);
     }

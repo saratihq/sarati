@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layers, Pencil, Plus, Trash2, X } from "lucide-react";
 import * as api from "@/api/client";
 import type { Connection } from "@/api/client";
@@ -61,6 +61,21 @@ export default function EnvironmentsSettings() {
   const [pendingAssign, setPendingAssign] = useState<PendingAssign | null>(null);
   const [confirmEmpty, setConfirmEmpty] = useState<{ env: Environment; slot: EnvironmentSlot } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Environment | null>(null);
+  const [pendingRename, setPendingRename] = useState<{
+    env: Environment;
+    name: string;
+    changes: envApi.UrlChange[];
+    /** The list changed after the user had confirmed an earlier one. */
+    again: boolean;
+  } | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const renameButtons = useRef(new Map<string, HTMLButtonElement>());
+  const renamingId = pendingRename?.env.id;
+  // The inline editor that opened the confirmation is gone by the time it closes.
+  const focusRenameButton = useCallback(
+    () => (renamingId ? renameButtons.current.get(renamingId) : undefined),
+    [renamingId],
+  );
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(
@@ -137,12 +152,16 @@ export default function EnvironmentsSettings() {
   };
 
   const doDelete = async (env: Environment) => {
+    setDeletingId(env.id);
     try {
       const { removed_pointers, unbound_triggers } = await envApi.deleteEnvironment(env.id);
       toast.success(`Deleted ${env.name}`, `Removed ${removed_pointers} pointers, unbound ${unbound_triggers} triggers.`);
-      await load();
     } catch (e) {
       toast.error(`Couldn't delete ${env.name}`, e instanceof Error ? e.message : undefined);
+    } finally {
+      // A refused delete may still have unpromoted the env's workflows.
+      await load();
+      setDeletingId(null);
     }
   };
 
@@ -156,12 +175,16 @@ export default function EnvironmentsSettings() {
     }
   };
 
-  const rename = async (env: Environment, name: string) => {
+  const rename = async (env: Environment, name: string, confirmed?: envApi.UrlChange[]) => {
     try {
-      await envApi.renameEnvironment(env.id, name);
+      await envApi.renameEnvironment(env.id, name, confirmed);
       setEnvironments((prev) => (prev ?? []).map((e) => (e.id === env.id ? { ...e, name } : e)));
       toast.success(`Renamed to "${name}"`);
     } catch (e) {
+      if (e instanceof envApi.RenameMovesUrlsError) {
+        setPendingRename({ env, name, changes: e.changes, again: confirmed !== undefined });
+        return;
+      }
       toast.error("Couldn't rename the environment", e instanceof Error ? e.message : undefined);
     }
   };
@@ -214,6 +237,11 @@ export default function EnvironmentsSettings() {
               onConnectedNew={(app, connectionId) => void assignFreshConnection(env, app, connectionId)}
               onEmpty={(slot) => setConfirmEmpty({ env, slot })}
               onRename={(name) => void rename(env, name)}
+              renameButtonRef={(el) => {
+                if (el) renameButtons.current.set(env.id, el);
+                else renameButtons.current.delete(env.id);
+              }}
+              deleting={deletingId === env.id}
               onDelete={() => setConfirmDelete(env)}
             />
           ))}
@@ -285,7 +313,53 @@ export default function EnvironmentsSettings() {
         }}
         onCancel={() => setConfirmDelete(null)}
       />
+
+      <ConfirmDialog
+        open={pendingRename !== null}
+        title={pendingRename ? `Rename ${pendingRename.env.name} to ${pendingRename.name}?` : ""}
+        message={
+          (pendingRename?.again ? "More trigger URLs change than the ones you confirmed. " : "These trigger URLs change. ") +
+          "Anything still sending to an old URL gets a 404 until you give it the new one."
+        }
+        confirmLabel="Rename"
+        returnFocusTo={focusRenameButton}
+        onConfirm={() => {
+          if (pendingRename) void rename(pendingRename.env, pendingRename.name, pendingRename.changes);
+          setPendingRename(null);
+        }}
+        onCancel={() => setPendingRename(null)}
+      >
+        {pendingRename && <UrlChangeList changes={pendingRename.changes} />}
+      </ConfirmDialog>
     </section>
+  );
+}
+
+function UrlChangeList({ changes }: { changes: envApi.UrlChange[] }) {
+  return (
+    <ul
+      className="list-none m-0 mt-3 p-0 max-h-[220px] overflow-y-auto space-y-2"
+      aria-label="Trigger URLs that change"
+      tabIndex={0}
+    >
+      {changes.map((c) => (
+        <li key={`${c.workflow_id}:${c.trigger}`} className="text-xs">
+          <span style={{ color: "var(--orchestr-ink)" }}>{c.workflow_name}</span>
+          {" "}
+          <span style={{ color: "var(--orchestr-ink-subtle)" }}>
+            · {c.trigger === "chat" ? "Chat" : "Incoming webhook"}
+          </span>
+          <code className="block break-all text-[11px] mt-0.5 line-through" style={{ color: "var(--orchestr-ink-subtle)" }}>
+            <span className="sr-only">Old URL: </span>
+            {api.absoluteApiUrl(c.from)}
+          </code>
+          <code className="block break-all text-[11px]" style={{ color: "var(--orchestr-ink-muted)" }}>
+            <span className="sr-only">New URL: </span>
+            {api.absoluteApiUrl(c.to)}
+          </code>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -315,6 +389,8 @@ function EnvironmentRow({
   onConnectedNew,
   onEmpty,
   onRename,
+  renameButtonRef,
+  deleting,
   onDelete,
 }: {
   env: Environment;
@@ -330,6 +406,9 @@ function EnvironmentRow({
   onConnectedNew: (app: string, connectionId: string) => void;
   onEmpty: (slot: EnvironmentSlot) => void;
   onRename: (name: string) => void;
+  renameButtonRef: (el: HTMLButtonElement | null) => void;
+  /** A delete of this env is in flight. */
+  deleting: boolean;
   onDelete: () => void;
 }) {
   const locked = isProtectedEnv(env);
@@ -341,9 +420,14 @@ function EnvironmentRow({
   return (
     <div className="rounded-xl p-4" style={cardStyle} data-testid={`env-row-${env.name}`}>
       <div className="flex items-center gap-2 mb-2.5">
-        <EnvName name={env.name} canRename={!locked && canManage} onRename={onRename} />
+        <EnvName
+          name={env.name}
+          canRename={!locked && canManage && !deleting}
+          onRename={onRename}
+          buttonRef={renameButtonRef}
+        />
         <span className="text-[11px] shrink-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
-          {countsLabel(env)}
+          {deleting ? "Deleting — removing its triggers from their apps…" : countsLabel(env)}
         </span>
         {!locked && canManage && (
           <Button
@@ -351,6 +435,8 @@ function EnvironmentRow({
             size="icon-xs"
             className="ml-auto"
             aria-label={`Delete ${env.name}`}
+            disabled={deleting}
+            aria-busy={deleting}
             onClick={onDelete}
           >
             <Trash2 size={12} />
@@ -484,28 +570,21 @@ function EnvName({
   name,
   canRename,
   onRename,
+  buttonRef,
 }: {
   name: string;
   canRename: boolean;
   onRename: (name: string) => void;
+  buttonRef: (el: HTMLButtonElement | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(name);
-  // Render-time derived reset: an externally changed name replaces the local copy unless mid-edit.
-  const [lastName, setLastName] = useState(name);
-  if (name !== lastName) {
-    setLastName(name);
-    if (!editing) setValue(name);
-  }
 
+  // The row shows the saved name, so a rename that is refused or waits on a confirmation never looks applied.
   const commit = () => {
     const next = value.trim();
     setEditing(false);
-    if (!next || next === name) {
-      setValue(name);
-      return;
-    }
-    onRename(next);
+    if (next && next !== name) onRename(next);
   };
 
   if (editing) {
@@ -516,10 +595,7 @@ function EnvName({
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") commit();
-          if (e.key === "Escape") {
-            setValue(name);
-            setEditing(false);
-          }
+          if (e.key === "Escape") setEditing(false);
         }}
         autoFocus
         aria-label="Environment name"
@@ -531,13 +607,17 @@ function EnvName({
   return (
     <span className="inline-flex items-center gap-1.5 min-w-0">
       <span className="text-[13px] font-semibold truncate" style={{ color: "var(--orchestr-ink)" }}>
-        {value}
+        {name}
       </span>
       {canRename && (
         <button
+          ref={buttonRef}
           type="button"
           aria-label={`Rename ${name}`}
-          onClick={() => setEditing(true)}
+          onClick={() => {
+            setValue(name);
+            setEditing(true);
+          }}
           className="shrink-0 bg-transparent border-none p-0.5 cursor-pointer inline-flex"
           style={{ color: "var(--orchestr-ink-subtle)" }}
         >

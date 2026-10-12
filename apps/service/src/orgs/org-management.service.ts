@@ -17,9 +17,9 @@ import {
 } from '../database/entities/organization.entity';
 import { rawQuery } from '../database/raw-query';
 import { EventsService } from '../events/events.service';
+import { isUniqueViolation } from '../database/pg-errors';
 
 const INVITE_TTL_DAYS = 14;
-const PG_UNIQUE_VIOLATION = '23505';
 
 export interface OrgSummary {
   id: string;
@@ -397,7 +397,7 @@ export class OrgManagementService {
       });
     } catch (err) {
       // Double-submit race: the membership unique constraint makes the loser idempotent.
-      if (this.isUniqueViolation(err)) {
+      if (isUniqueViolation(err)) {
         const invite = await this.dataSource.manager.findOne(OrgInviteEntity, { where: { token } });
         const org = invite
           ? await this.dataSource.manager.findOne(OrganizationEntity, { where: { id: invite.orgId } })
@@ -459,10 +459,5 @@ export class OrgManagementService {
       [orgId, userId],
     );
     return rows[0]?.count ?? 0;
-  }
-
-  private isUniqueViolation(err: unknown): boolean {
-    const e = (err as { driverError?: { code?: string }; code?: string }) ?? {};
-    return e.driverError?.code === PG_UNIQUE_VIOLATION || e.code === PG_UNIQUE_VIOLATION;
   }
 }

@@ -147,13 +147,14 @@ describe('ThreadStore.append (async write-through)', () => {
 });
 
 describe('ThreadStore.rekey (scratch → created workflow)', () => {
-  function clientPool(fail?: string): { pool: Pool; statements: string[] } {
+  function clientPool(fail?: string, workflowGone = false): { pool: Pool; statements: string[] } {
     const statements: string[] = [];
     const client = {
       query: (text: string) => {
         statements.push(text.trim().split(/\s+/, 1)[0]!.toUpperCase());
         if (fail && text.includes(fail)) return Promise.reject(new Error('boom'));
-        return Promise.resolve({ rows: [], rowCount: 0 });
+        const locked = text.includes('FROM workflows') && !workflowGone;
+        return Promise.resolve(locked ? { rows: [{}], rowCount: 1 } : { rows: [], rowCount: 0 });
       },
       release: jest.fn(),
     } as unknown as PoolClient;
@@ -163,14 +164,20 @@ describe('ThreadStore.rekey (scratch → created workflow)', () => {
 
   it('drops the standing (user, workflow) thread and takes the key — scratch history wins', async () => {
     const { pool, statements } = clientPool();
-    await new ThreadStore(pool).rekey('thread-scratch', 'wf-new');
-    expect(statements).toEqual(['BEGIN', 'DELETE', 'UPDATE', 'COMMIT']);
+    await expect(new ThreadStore(pool).rekey('thread-scratch', 'wf-new')).resolves.toBe(true);
+    expect(statements).toEqual(['BEGIN', 'SELECT', 'DELETE', 'UPDATE', 'COMMIT']);
+  });
+
+  it('drops the scratch thread when the workflow is already gone, as the delete would have', async () => {
+    const { pool, statements } = clientPool(undefined, true);
+    await expect(new ThreadStore(pool).rekey('thread-scratch', 'wf-gone')).resolves.toBe(false);
+    expect(statements).toEqual(['BEGIN', 'SELECT', 'DELETE', 'COMMIT']);
   });
 
   it('rolls back on failure and rethrows (the caller logs, the stream continues)', async () => {
     const { pool, statements } = clientPool('UPDATE');
     await expect(new ThreadStore(pool).rekey('thread-scratch', 'wf-new')).rejects.toThrow('boom');
-    expect(statements).toEqual(['BEGIN', 'DELETE', 'UPDATE', 'ROLLBACK']);
+    expect(statements).toEqual(['BEGIN', 'SELECT', 'DELETE', 'UPDATE', 'ROLLBACK']);
   });
 });
 

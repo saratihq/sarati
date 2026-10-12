@@ -17,6 +17,7 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { EventsService } from '../events/events.service';
 import type { MergeResolution } from '../ir/merge';
 import { BranchService, type ApprovalStanding } from './../workflows/branch.service';
+import { lockWorkflowForWrite } from '../workflows/workflow-row-lock';
 
 const PG_LOCK_NOT_AVAILABLE = '55P03';
 
@@ -47,8 +48,13 @@ export class ReviewsService {
     description: string | null,
   ): Promise<WorkflowReviewEntity> {
     return this.dataSource.transaction(async (em) => {
-      const source = await this.branches.getBranch(em, workflowId, sourceBranchName);
-      const target = await this.branches.getBranch(em, workflowId, targetBranchName);
+      await lockWorkflowForWrite(em, workflowId);
+      const { source, target } = await this.branches.lockBranchPair(
+        em,
+        workflowId,
+        sourceBranchName,
+        targetBranchName,
+      );
 
       const existing = await em.findOne(WorkflowReviewEntity, {
         where: { workflowId, sourceBranchId: source.id, targetBranchId: target.id, status: 'open' },
@@ -185,7 +191,8 @@ export class ReviewsService {
     nodeId: string | null,
   ): Promise<ReviewCommentEntity> {
     return this.dataSource.transaction(async (em) => {
-      const review = await this.getReviewScoped(workflowId, reviewId);
+      await lockWorkflowForWrite(em, workflowId);
+      const review = await this.lockReview(em, workflowId, reviewId, false);
       if (review.status === 'merged' || review.status === 'closed') {
         throw new DomainError('Cannot comment on a closed or merged review');
       }
@@ -211,13 +218,9 @@ export class ReviewsService {
     shownSourceVersionId: string | null = null,
   ): Promise<ReviewApprovalEntity> {
     return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
       // Lock the review row so concurrent decisions can't race the derived status.
-      const review = await em
-        .createQueryBuilder(WorkflowReviewEntity, 'r')
-        .setLock('pessimistic_write')
-        .where('r.id = :reviewId AND r.workflow_id = :workflowId', { reviewId, workflowId })
-        .getOne();
-      if (!review) throw new DomainError(`Review ${reviewId} not found`, 404);
+      const review = await this.reviewRow(em, workflowId, reviewId, 'pessimistic_write');
       if (review.status === 'merged' || review.status === 'closed') {
         throw new DomainError('Cannot approve a closed or merged review');
       }
@@ -283,13 +286,8 @@ export class ReviewsService {
     // ONE transaction: the NOWAIT review lock must be held ACROSS the merge.
     return this.dataSource
       .transaction(async (em) => {
-        const review = await em
-          .createQueryBuilder(WorkflowReviewEntity, 'r')
-          .setLock('pessimistic_write')
-          .setOnLocked('nowait')
-          .where('r.id = :reviewId AND r.workflow_id = :workflowId', { reviewId, workflowId })
-          .getOne();
-        if (!review) throw new DomainError(`Review ${reviewId} not found`, 404);
+        await lockWorkflowForWrite(em, workflowId);
+        const review = await this.lockReview(em, workflowId, reviewId, true);
         if (review.status === 'merged') throw new DomainError('Review is already merged');
         if (review.status === 'closed') throw new DomainError('Review is closed');
 
@@ -345,23 +343,51 @@ export class ReviewsService {
           (err as { driverError?: { code?: string }; code?: string }).driverError?.code ??
           (err as { code?: string }).code;
         if (code === PG_LOCK_NOT_AVAILABLE) {
-          throw new DomainError('Another merge is in progress for this review — please retry shortly');
+          throw new DomainError('This review is being changed by someone else — retry shortly', 409, {
+            code: 'review_busy',
+          });
         }
         throw err;
       });
   }
 
+  /** Lock a review's branches and then the review, the order a branch delete takes them; `exclusive` takes the review FOR UPDATE NOWAIT. 404 once it is gone. */
+  private async lockReview(
+    em: EntityManager,
+    workflowId: string,
+    reviewId: string,
+    exclusive: boolean,
+  ): Promise<WorkflowReviewEntity> {
+    const seen = await this.reviewRow(em, workflowId, reviewId, null);
+    await this.branches.lockBranches(em, workflowId, { ids: [seen.sourceBranchId, seen.targetBranchId] });
+    return this.reviewRow(em, workflowId, reviewId, exclusive ? 'nowait' : 'for_key_share');
+  }
+
+  /** The workflow's review by id, read under `lock` ('nowait' = FOR UPDATE NOWAIT); 404 when there is none. */
+  private async reviewRow(
+    em: EntityManager,
+    workflowId: string,
+    reviewId: string,
+    lock: 'pessimistic_write' | 'nowait' | 'for_key_share' | null,
+  ): Promise<WorkflowReviewEntity> {
+    const notFound = new DomainError(`Review ${reviewId} not found`, 404);
+    if (!isIdShape(reviewId)) throw notFound;
+    const query = em
+      .createQueryBuilder(WorkflowReviewEntity, 'r')
+      .where('r.id = :reviewId AND r.workflow_id = :workflowId', { reviewId, workflowId });
+    if (lock === 'nowait') query.setLock('pessimistic_write').setOnLocked('nowait');
+    else if (lock) query.setLock(lock);
+    const review = await query.getOne();
+    if (!review) throw notFound;
+    return review;
+  }
+
   async closeReview(workflowId: string, reviewId: string, actorId: string): Promise<void> {
     await this.dataSource.transaction(async (em) => {
-      const review = await this.getReviewScoped(workflowId, reviewId);
+      await lockWorkflowForWrite(em, workflowId);
+      const review = await this.reviewRow(em, workflowId, reviewId, 'pessimistic_write');
       if (review.status === 'merged') throw new DomainError('Cannot close a merged review');
-      // Status only — a whole-row save would write back a test or a merge that landed after the read above.
-      const closed = await em.update(
-        WorkflowReviewEntity,
-        { id: reviewId, status: Not('merged') },
-        { status: 'closed', updatedAt: now() },
-      );
-      if (!closed.affected) throw new DomainError('Cannot close a merged review');
+      await em.update(WorkflowReviewEntity, { id: review.id }, { status: 'closed', updatedAt: now() });
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       await this.events.emit(em, {
         orgId: wf?.orgId ?? null,

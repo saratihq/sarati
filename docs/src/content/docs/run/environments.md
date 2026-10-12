@@ -57,6 +57,38 @@ account, production hits the real one, and the workflow document never contains 
 
 Sharing a workflow therefore never shares a credential.
 
+## Rename and delete
+
+An environment's name is part of its URLs, so renaming `staging` to `qa` moves
+`/api/hooks/<id>/staging` to `/api/hooks/<id>/qa`. A trigger registered with an app — a GitHub or
+Stripe webhook — follows on its own: the webhook at the old URL is deleted and a new one is
+registered at the new URL. A URL you gave a sender yourself, for an incoming webhook or a chat,
+changes too, so update it there.
+
+When a rename would move one of those, Sarati asks first: the confirmation lists each incoming
+webhook and chat promoted to the environment, with its old and new URL. Through the API, the rename
+answers `409` with that list in `url_changes`; send the list back as `confirm_url_changes` to go
+ahead. Each entry counts for exactly the old and new URL it names, so if a webhook or chat was
+promoted there since, or the environment was renamed meanwhile, the rename answers `409` again with
+the current list, and nothing moves without being listed first:
+
+```
+PATCH /api/environments/<id>
+{"name":"qa","confirm_url_changes":[{"workflow_id":"7fb69691-…","trigger":"webhook",
+  "from":"/api/hooks/7fb69691-…/staging","to":"/api/hooks/7fb69691-…/qa"}]}
+```
+
+Deleting an environment unpromotes every workflow from it and removes its triggers from their apps
+before the environment goes: webhooks are deleted and subscriptions cancelled. A webhook the app
+can't delete just then, or doesn't answer for within ten seconds, is retried on later reconciles after
+the environment is gone, every fifteen minutes when pg-boss is enabled; see
+[Changing a live app trigger](/build/triggers/#changing-a-live-app-trigger). Deleting a workflow
+removes its triggers from their apps the same way.
+
+If a workflow is promoted or published while one of these deletes is running, the delete keeps the
+environment or workflow and answers `409`; send it again. A change that reaches a workflow as its
+delete is finishing waits for the delete, then answers `404`.
+
 ## Publishing
 
 **Publish** is promote-to-production. See

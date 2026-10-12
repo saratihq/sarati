@@ -12,7 +12,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { connectOrExit } from './connect.mjs';
+import { SCHEMA_LOCK, connectOrExit } from './connect.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(here, '..', 'db', 'migrations');
@@ -37,13 +37,18 @@ const files = readdirSync(MIGRATIONS_DIR)
   .sort();
 
 const client = await connectOrExit(url);
+client.on('notice', (notice) => {
+  if (notice.severity === 'WARNING') console.warn(notice.message);
+});
 try {
+  await client.query('SELECT pg_advisory_lock($1)', [SCHEMA_LOCK]);
   for (const file of files) {
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
     await client.query(sql);
     console.log(`applied ${file}`);
   }
   console.log(`schema is up to date (${files.length} migrations checked).`);
+  await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK]);
 } catch (err) {
   console.error(`migration failed: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;

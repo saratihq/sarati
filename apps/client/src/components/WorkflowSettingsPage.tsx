@@ -19,6 +19,7 @@ export default function WorkflowSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     api
@@ -48,12 +49,14 @@ export default function WorkflowSettingsPage() {
 
   const handleDelete = async () => {
     setConfirmingDelete(false);
+    setDeleting(true);
     try {
       await api.deleteWorkflow(workflowId);
       toast.success(`Workflow "${name || workflowName}" deleted`);
       router.push("/");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
+      setDeleting(false);
     }
   };
 
@@ -129,8 +132,13 @@ export default function WorkflowSettingsPage() {
         <p className="text-[11px] mb-3" style={{ color: "var(--orchestr-ink-subtle)" }}>
           Permanently delete this workflow and all its versions, branches, and reviews.
         </p>
-        <Button variant="destructive" onClick={() => setConfirmingDelete(true)}>
-          Delete workflow
+        <Button
+          variant="destructive"
+          disabled={deleting}
+          aria-busy={deleting}
+          onClick={() => setConfirmingDelete(true)}
+        >
+          {deleting ? "Deleting — removing its triggers from their apps…" : "Delete workflow"}
         </Button>
       </section>
 

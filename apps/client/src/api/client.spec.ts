@@ -63,6 +63,21 @@ describe("absoluteApiUrl", () => {
   });
 });
 
+describe("absoluteApiUrl in a same-origin build", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("hangs the path off this page's origin, the address a sender outside the browser reaches", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "same-origin");
+    vi.resetModules();
+    const { absoluteApiUrl: sameOrigin } = await import("@/api/client");
+
+    expect(sameOrigin("/api/hooks/wf1/qa-two")).toBe(`${window.location.origin}/api/hooks/wf1/qa-two`);
+  });
+});
+
 describe("request: URL building and headers", () => {
   it("prefixes the path with the resolved API base", async () => {
     const fetchMock = mockFetch(jsonResponse(200, { ok: true }));

@@ -124,7 +124,7 @@ function fakeThreads(thread: Partial<ThreadRecord> = {}): ThreadStore & {
     resolve: jest.fn().mockResolvedValue(record),
     append: jest.fn(),
     recordSdkSession: jest.fn(),
-    rekey: jest.fn().mockResolvedValue(undefined),
+    rekey: jest.fn().mockResolvedValue(true),
     loadEvents: jest.fn().mockResolvedValue([]),
     transcriptExists: jest.fn().mockReturnValue(false),
   } as unknown as ThreadStore & {
@@ -1326,6 +1326,34 @@ describe('durable threads (write-through + rehydrate)', () => {
       ),
     );
     expect(threads.rekey).toHaveBeenCalledWith('thread-scratch', 'wf-new');
+  });
+
+  it('a re-key to a workflow deleted meanwhile leaves the session memory-only, writing nothing more to the dropped thread', async () => {
+    const threads = fakeThreads({ id: 'thread-scratch', workflowId: null });
+    threads.rekey.mockResolvedValue(false);
+    const { service } = await makeService(
+      scriptedQuery([{ type: 'result', subtype: 'success' }]),
+      {},
+      threads,
+    );
+    const first = await collect(service.stream({ message: 'draft it' }, never, null, null, 'user_1'));
+    const sessionId = (first[0]!.data as { session_id: string }).session_id;
+    threads.resolve.mockRejectedValue(
+      new Error('violates foreign key constraint "composer_threads_workflow_id_fkey"'),
+    );
+    const written = threads.append.mock.calls.length;
+
+    await collect(
+      service.stream(
+        { message: 'Saved and turned on.', session_id: sessionId, workflow_id: 'wf-gone' },
+        never,
+        null,
+        'user_1',
+      ),
+    );
+
+    expect(threads.rekey).toHaveBeenCalledWith('thread-scratch', 'wf-gone');
+    expect(threads.append.mock.calls.length).toBe(written);
   });
 
   it('attach by identity REHYDRATES from the event log — full replay from seq 1, live shapes', async () => {

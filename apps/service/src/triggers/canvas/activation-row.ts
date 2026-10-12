@@ -16,7 +16,12 @@ export function actualOf(row: RuntimeTriggerActivationEntity): ActualActivation 
     props: row.props ?? {},
     connection: connectionOf(row),
     paused: row.paused,
-    materialized: row.materialized,
+    webhookUrl: row.webhookUrl,
+    // A snapshot recorded before migration 032 has no URL.
+    materialized: row.materialized && {
+      ...row.materialized,
+      webhookUrl: row.materialized.webhookUrl ?? null,
+    },
   };
 }
 

@@ -33,11 +33,15 @@ export type KindResolver = (triggerNode: IRNode) => ActivationKind | null;
 /** Whether a trigger node is currently paused by an operator override (default: not paused). */
 export type PauseResolver = (environmentId: string, triggerNode: IRNode) => boolean;
 
+/** The intake URL a kind hands its provider under an env; `null` for a kind that registers none. */
+export type WebhookUrlResolver = (environmentId: string, kind: ActivationKind) => string | null;
+
 export interface DeriveInput {
   workflowId: string;
   pointers: EnvPointerInput[];
   kindOf: KindResolver;
   connectionOf: ConnectionResolver;
+  webhookUrlOf: WebhookUrlResolver;
   pausedOf?: PauseResolver;
 }
 
@@ -67,6 +71,7 @@ export function deriveDesiredActivations(input: DeriveInput): DesiredActivation[
         props: triggerPropsOf(node),
         connection: input.connectionOf(pointer.environmentId, node),
         paused: pausedOf(pointer.environmentId, node),
+        webhookUrl: input.webhookUrlOf(pointer.environmentId, kind),
       });
     }
   }

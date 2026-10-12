@@ -612,9 +612,16 @@ export async function getCatch(
   return request(`/catch/${encodeURIComponent(catchId)}`);
 }
 
+/** The API host a sender outside the browser reaches: the configured base, else this page's origin (a same-origin build). */
+export function apiOrigin(): string {
+  if (apiBaseUrl) return apiBaseUrl;
+  if (typeof window !== "undefined") return window.location.origin;
+  return "http://localhost:8001";
+}
+
 /** Absolute URL on the API host for a service-relative path like `/api/hooks/catch/:id`. */
 export function absoluteApiUrl(path: string): string {
-  return API_BASE.replace(/\/api$/, "") + path;
+  return apiOrigin() + path;
 }
 
 // ─── Dashboard API Functions ───

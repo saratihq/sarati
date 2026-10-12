@@ -115,8 +115,14 @@ version you promoted.
 A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
 a polled trigger carries on from where it was.
 
-If the app can't delete the old webhook, the new trigger goes live anyway, and the delete is tried
-again every fifteen minutes — even after you remove the trigger, its workflow or its environment.
+Renaming the environment replaces a webhook the same way, because the address the app calls carries
+the environment's name: the webhook at the old address is deleted and one is registered at the new
+one.
+
+If the app can't delete the old webhook, or doesn't answer within ten seconds, the new trigger goes
+live anyway, and the delete is tried again every fifteen minutes — even after you remove the trigger,
+its workflow or its environment. An app that allows one webhook per address, such as GitHub, gets
+that delete first when a trigger is registered again at the same address.
 A webhook that a live trigger has registered again is never deleted: Typeform keeps one webhook per
 form for each workflow environment, and a new trigger on that form takes it over. A webhook that no
 live trigger holds is given up when the account that created it has been removed, or when the app
@@ -124,7 +130,8 @@ rejects its credential (a rate limit is not a rejection): the service log then n
 and the repository or form it is on (at warn level), and you delete it in the app yourself.
 
 Linear is the exception: the Linear trigger does not report a failed delete, so a webhook it could
-not delete stays in Linear, and nothing retries it or names it in the log.
+not delete stays in Linear and nothing retries it. The service log names every Linear webhook it
+deletes, with its address (at warn level), so one still in Linear can be found and deleted there.
 
 A registration that failed to start shows its error on the workflow overview and is retried every
 fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
@@ -137,5 +144,9 @@ A webhook is a push. A service on the internet cannot reach `http://localhost`.
 
 For local development, expose your instance with a tunnel and set `PUBLIC_BASE_URL` to the public
 URL so generated webhook URLs are the ones a sender can actually reach.
+
+If the tunnel's address changes, update `PUBLIC_BASE_URL` and restart. Webhooks registered with apps
+move to the new address when the service starts. A URL you gave a sender yourself has to be updated
+there.
 
 Your own `curl` on the same machine works without any of this.

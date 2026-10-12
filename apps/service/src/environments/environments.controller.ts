@@ -1,5 +1,15 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Req, UseGuards } from '@nestjs/common';
-import { IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+  ValidateNested,
+} from 'class-validator';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
@@ -15,7 +25,28 @@ class CreateEnvironmentDto {
   name!: string;
 }
 
-class RenameEnvironmentDto extends CreateEnvironmentDto {}
+class ConfirmedUrlChangeDto {
+  @IsUUID()
+  workflow_id!: string;
+
+  @IsIn(['webhook', 'chat'])
+  trigger!: 'webhook' | 'chat';
+
+  @IsString()
+  from!: string;
+
+  @IsString()
+  to!: string;
+}
+
+class RenameEnvironmentDto extends CreateEnvironmentDto {
+  /** The `url_changes` a 409 listed, sent back to rename anyway; a trigger missing from it is listed again. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConfirmedUrlChangeDto)
+  confirm_url_changes?: ConfirmedUrlChangeDto[];
+}
 
 class AssignSlotDto {
   @IsUUID()
@@ -53,7 +84,7 @@ export class EnvironmentsController {
     @Body() body: RenameEnvironmentDto,
   ): Promise<{ id: string; name: string }> {
     const { orgId, userId } = this.manager(req);
-    return this.environments.rename(orgId, id, body.name, userId);
+    return this.environments.rename(orgId, id, body.name, userId, body.confirm_url_changes ?? null);
   }
 
   @Scope('workflow:deploy')

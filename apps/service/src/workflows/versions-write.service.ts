@@ -7,7 +7,7 @@ import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { newId, now } from '../database/ids';
-import { jsonRecord, rawQuery } from '../database/raw-query';
+import { jsonRecord, rawMutate, rawQuery } from '../database/raw-query';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
@@ -22,6 +22,7 @@ import { BranchService } from './branch.service';
 import { VersionsReadService } from './versions-read.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
+import { lockWorkflowForPointerMove, lockWorkflowForWrite } from './workflow-row-lock';
 
 export interface CommitInput {
   workflowJson?: Record<string, unknown> | null;
@@ -227,12 +228,11 @@ export class VersionsWriteService {
       }
     }
     return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
-      if (!wf) throw new DomainError('Workflow not found');
-      const branch = branchName
-        ? await em.findOne(WorkflowBranchEntity, { where: { workflowId, name: branchName } })
-        : await this.ensureDefaultBranch(em, wf);
-      if (!branch) throw new DomainError(`Branch '${branchName}' not found`);
+      if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
+      const named = branchName || (await this.ensureDefaultBranch(em, wf)).name;
+      const branch = await this.branches.lockBranchByName(em, workflowId, named);
       const head = await em.findOne(WorkflowVersionEntity, {
         where: { workflowId, branchId: branch.id },
         order: { versionNumber: 'DESC' },
@@ -259,9 +259,11 @@ export class VersionsWriteService {
       };
       const json = patchDoc(head.workflowJson);
       const ir = patchDoc(head.workflowIr);
-      head.workflowJson = json.doc as Record<string, unknown>;
-      head.workflowIr = ir.doc;
-      await em.save(WorkflowVersionEntity, head);
+      await rawMutate(em, `UPDATE workflow_versions SET workflow_json = $2, workflow_ir = $3 WHERE id = $1`, [
+        head.id,
+        JSON.stringify(json.doc),
+        ir.doc && JSON.stringify(ir.doc),
+      ]);
       return { updated: Math.max(json.touched, ir.touched) };
     });
   }
@@ -272,9 +274,10 @@ export class VersionsWriteService {
     const irData = documentOf(input);
 
     return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, input.workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: input.workflowId } });
       if (!wf) throw new DomainError(`Workflow ${input.workflowId} not found`, 404);
-      const branch = await this.lockBranchByName(em, wf.id, input.branchName);
+      const branch = await this.branches.lockBranchByName(em, wf.id, input.branchName);
 
       // Rollback deliberately still lands here — it is the documented recovery path.
       if (branch.isProtected) {
@@ -380,6 +383,7 @@ export class VersionsWriteService {
     }
 
     return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
       const targetBranch = target.branchId
         ? await em.findOne(WorkflowBranchEntity, { where: { id: target.branchId } })
         : null;
@@ -387,8 +391,9 @@ export class VersionsWriteService {
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
 
-      const branch = targetBranch ?? (await this.ensureDefaultBranch(em, wf));
-      await this.lockBranchById(em, branch.id);
+      const named = targetBranch ?? (await this.ensureDefaultBranch(em, wf));
+      const [branch] = await this.branches.lockBranches(em, workflowId, { ids: [named.id] });
+      if (!branch) throw new DomainError(`Branch '${named.name}' not found`, 404);
       // A branchless version may come back only to a branch that once held it — never a deleted branch's work.
       const orphaned =
         !targetBranch &&
@@ -402,9 +407,8 @@ export class VersionsWriteService {
       }
 
       // Like a no-diff commit (invariant #3): a fresh id for the head's own content would make its test look stale.
-      const locked = await em.findOne(WorkflowBranchEntity, { where: { id: branch.id } });
-      const head = locked?.headVersionId
-        ? await em.findOne(WorkflowVersionEntity, { where: { id: locked.headVersionId } })
+      const head = branch.headVersionId
+        ? await em.findOne(WorkflowVersionEntity, { where: { id: branch.headVersionId } })
         : null;
       if (
         head?.workflowIr &&
@@ -477,6 +481,7 @@ export class VersionsWriteService {
     opts: { eventType: string; status: string; defaultToHead: boolean },
   ): Promise<Record<string, unknown>> {
     const result = await this.dataSource.transaction(async (em) => {
+      await lockWorkflowForPointerMove(em, workflowId);
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
 
@@ -510,7 +515,7 @@ export class VersionsWriteService {
 
       // Only write + emit when the pointer actually moves, so a repeated publish doesn't spam the
       // outbox. Publish IS promote-to-prod: the write goes through the env-pointer seam.
-      if (wf.activeVersionId !== target.id) {
+      if ((await this.envPointers.resolveVersionId(em, wf, PROD_ENV)) !== target.id) {
         await this.envPointers.setPointer(em, wf.id, PROD_ENV, target.id);
         await this.events.emit(em, {
           orgId: wf.orgId,
@@ -603,23 +608,5 @@ export class VersionsWriteService {
       payload: { branch: branch.name, version_number: nextVersion },
     });
     return version;
-  }
-
-  async lockBranchByName(em: EntityManager, workflowId: string, name: string): Promise<WorkflowBranchEntity> {
-    const branch = await em
-      .createQueryBuilder(WorkflowBranchEntity, 'b')
-      .setLock('pessimistic_write')
-      .where('b.workflow_id = :workflowId AND b.name = :name', { workflowId, name })
-      .getOne();
-    if (!branch) throw new DomainError(`Branch '${name}' not found`);
-    return branch;
-  }
-
-  async lockBranchById(em: EntityManager, branchId: string): Promise<void> {
-    await em
-      .createQueryBuilder(WorkflowBranchEntity, 'b')
-      .setLock('pessimistic_write')
-      .where('b.id = :branchId', { branchId })
-      .getOne();
   }
 }

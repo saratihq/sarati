@@ -7,7 +7,6 @@ import Link from "next/link";
 import { AlertTriangle, Braces, Check, Clock, Copy, MessageCircle, Pin, Play, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, Webhook, Workflow, Wrench, X, Zap } from "lucide-react";
 import * as api from "@/api/client";
 import type { AccountIdentity, AgentStep, CallableWorkflow, Connection, DropdownOption, NodeParamSchema, NodeTypeEntry, TriggerCatalogEntry } from "@/api/client";
-import { apiBaseUrl } from "@/lib/config";
 import { useWorkflow } from "@/store/useWorkflow";
 import { useStepSamples } from "@/store/useStepSamples";
 import { catalogEntryFor } from "./NodeCatalogPanel";
@@ -1062,14 +1061,6 @@ const CHAT_TRIGGER = "orchestr:chat";
 const TOOL_TRIGGER = "orchestr:tool_trigger";
 // Unconfigured, the webhook/chat endpoints below are a GUESS and the copy has to say so.
 const API_URL_CONFIGURED = Boolean(process.env.NEXT_PUBLIC_API_URL);
-// The browser's own origin is the fallback (correct behind a same-origin proxy), never a
-// hard-coded localhost an outside caller can't reach. Resolved via config, so the same-origin
-// build renders the real origin rather than its sentinel.
-function apiOrigin(): string {
-  if (apiBaseUrl) return apiBaseUrl;
-  if (typeof window !== "undefined") return window.location.origin;
-  return "http://localhost:8001";
-}
 // The chat endpoint is env-scoped: it goes live once a version carrying the trigger is promoted here.
 const CHAT_ENV = "production";
 
@@ -1519,8 +1510,8 @@ function TriggerTypeConfig({
   const kind = kindOf(type);
   const current = catalog?.find((e) => e.type === type) ?? null;
   const params = (node.parameters as Record<string, unknown>) ?? {};
-  const webhookUrl = workflowId ? `${apiOrigin()}/api/hooks/${workflowId}/production` : null;
-  const chatUrl = workflowId ? `${apiOrigin()}/api/chat/${workflowId}/${CHAT_ENV}` : null;
+  const webhookUrl = workflowId ? api.absoluteApiUrl(`/api/hooks/${workflowId}/production`) : null;
+  const chatUrl = workflowId ? api.absoluteApiUrl(`/api/chat/${workflowId}/${CHAT_ENV}`) : null;
 
   const pick = (entry: TriggerCatalogEntry) => {
     // Native control triggers carry no connection and no marker; the service knows them by node_type.
