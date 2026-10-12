@@ -5,13 +5,13 @@ import { motion } from "framer-motion";
 import { GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SaratiLoader } from "./SaratiLogo";
-import { useWorkflow } from "@/store/useWorkflow";
+import { useWorkflow, type SaveOutcome } from "@/store/useWorkflow";
 
 /**
  * Optimistic-concurrency conflict dialog for a 409 `branch_moved` commit: rebase onto
  * the moved head or discard. Escape/backdrop keeps the local edits — never a silent retry or overwrite.
  */
-export function BranchMovedDialog({ onResolved }: { onResolved?: () => void } = {}) {
+export function BranchMovedDialog({ onResolved }: { onResolved?: (saved?: SaveOutcome) => void } = {}) {
   const branchMoved = useWorkflow((s) => s.branchMoved);
   const rebaseOntoHead = useWorkflow((s) => s.rebaseOntoHead);
   const discardAndLoadHead = useWorkflow((s) => s.discardAndLoadHead);
@@ -69,8 +69,8 @@ export function BranchMovedDialog({ onResolved }: { onResolved?: () => void } = 
   const runRebase = async () => {
     setPending("rebase");
     try {
-      await rebaseOntoHead();
-      if (resolvedOk()) onResolved?.();
+      const saved = await rebaseOntoHead();
+      if (resolvedOk()) onResolved?.(saved);
     } finally {
       setPending(null);
     }

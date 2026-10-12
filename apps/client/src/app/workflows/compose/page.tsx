@@ -19,7 +19,7 @@ import { useSessionUserId } from "@/lib/useSessionUserId";
 import { clearDraft, loadDraft, type WorkflowDraft } from "@/lib/drafts";
 import { timeAgo } from "@/lib/format";
 import { toast } from "@/lib/toast";
-import { useMissingRequired } from "@/lib/workflow-validation";
+import { hasStepBeyondTrigger, useMissingRequired } from "@/lib/workflow-validation";
 import { useComposerAvailable } from "@/lib/useComposerAvailable";
 
 /**
@@ -75,15 +75,14 @@ export default function ComposeNewWorkflowPage() {
     setWorkflowDocName(name);
   }, [seeded, name, docName, setWorkflowDocName]);
 
-  const nodeCount = Array.isArray(workflowJson?.nodes) ? (workflowJson.nodes as unknown[]).length : 0;
-  const hasSteps = nodeCount > 1; // more than the trigger
+  const hasSteps = hasStepBeyondTrigger(workflowJson);
   // The create gate: nothing incomplete deploys straight to LIVE.
   const missing = useMissingRequired(workflowJson);
   // Once the agent's save created the workflow, Save MUST disarm — clicking again would duplicate it.
   const canCreate = !isLoading && !streaming && hasSteps && missing.length === 0 && !createdId;
 
-  // The same per-user scratch slot /workflows/build uses, so autosave here must never clobber its draft.
-  const [resumeDraft, setResumeDraft] = useState<WorkflowDraft | null>(null);
+  // `undefined` until looked up; /workflows/build shares this per-user scratch slot, so autosave must never clobber it.
+  const [resumeDraft, setResumeDraft] = useState<WorkflowDraft | null | undefined>(undefined);
   const decided = useRef(false);
   useEffect(() => {
     if (decided.current || !userId) return;
@@ -91,7 +90,9 @@ export default function ComposeNewWorkflowPage() {
     Promise.resolve().then(() => setResumeDraft(loadDraft(userId, null)));
   }, [userId]);
 
-  const flushDraft = useDraftAutosave({ userId, workflowId: null, ir: workflowJson, name, enabled: hasSteps });
+  // A stored draft is never written over before the person answers "Resume your draft?".
+  const keepsDraft = hasSteps && resumeDraft === null;
+  const flushDraft = useDraftAutosave({ userId, workflowId: null, ir: workflowJson, name, enabled: keepsDraft });
 
   // Follow a composer-driven save to the editor, where it reattaches. A manual Save navigates itself,
   // so the ref keeps this effect from racing it.
@@ -104,7 +105,7 @@ export default function ComposeNewWorkflowPage() {
   }, [createdId, streaming, router, userId]);
 
   const handleBack = () => {
-    if (hasSteps) {
+    if (keepsDraft) {
       flushDraft();
       toast.success("Draft saved");
     }
@@ -218,7 +219,7 @@ export default function ComposeNewWorkflowPage() {
         </main>
       </div>
 
-      {resumeDraft !== null && (
+      {resumeDraft && (
         <ResumeDraftModal
           title="Resume your draft?"
           message={`You have an unsaved workflow from ${timeAgo(resumeDraft.savedAt)}. Continue where you left off, or start fresh on a blank canvas.`}
@@ -228,8 +229,7 @@ export default function ComposeNewWorkflowPage() {
             setResumeDraft(null);
           }}
           onStartFresh={() => {
-            // Two layers hold unsaved work: the canvas draft AND the durable composer session, which
-            // rebuilds both conversation and canvas on reattach. A fresh start must clear both.
+            // A fresh start clears both layers of unsaved work: the canvas draft and the durable composer conversation.
             clearDraft(userId, null);
             void clearThread(undefined);
             startScratch();

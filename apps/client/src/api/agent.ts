@@ -101,6 +101,8 @@ export type ComposerStreamEvent =
     }
   | { event: "offer"; data: { offer_id: string } }
   | { event: "snapshot"; data: SessionSnapshot }
+  // Attach only: every event before it is history, every event after it is live; `turn_base` is a running turn's starting canvas.
+  | { event: "replayed"; data: { turn_base?: Record<string, unknown> } }
   | {
       event: "step_result";
       data: { node_id: string; status: "passed" | "failed"; summary?: string };
@@ -130,7 +132,6 @@ export interface SessionSnapshot {
   assumptions: Array<{ node_id: string; text: string }>;
   step_results: Array<{ node_id: string; status: "passed" | "failed"; summary?: string }>;
   connection_needs: Array<{ node_id: string; provider: string; provider_label: string }>;
-  ir: Record<string, unknown> | null;
   offer_pending: boolean;
   busy: boolean;
 }

@@ -36,10 +36,8 @@ export interface QuestionData {
 
 export type ComposerEvent =
   | { event: 'session'; data: { session_id: string } }
-  // The user's own message, recorded for durable replay only: it is buffered
-  // and persisted but NEVER pushed to the live stream (the sender renders its
-  // message optimistically) — attach replay is how it reaches a client.
-  | { event: 'user_message'; data: { text: string } }
+  // Replay only, never pushed live; `branch` and `steps` are the canvas it carried, absent on older threads.
+  | { event: 'user_message'; data: { text: string; branch?: string | null; steps?: CanvasStep[] | null } }
   | { event: 'assistant_text'; data: { text: string } }
   | { event: 'op_applied'; data: { ops: ComposeOp[]; ir: WorkflowIr } }
   | { event: 'brief'; data: BriefData }
@@ -86,10 +84,18 @@ export interface SessionSnapshot {
   assumptions: Array<{ node_id: string; text: string }>;
   step_results: Array<{ node_id: string; status: 'passed' | 'failed'; summary?: string }>;
   connection_needs: Array<{ node_id: string; provider: string; provider_label: string }>;
-  ir: WorkflowIr | null;
   offer_pending: boolean;
   busy: boolean;
 }
 
+/** A step as the composer names it: its id and the name a person sees. */
+export interface CanvasStep {
+  id: string;
+  name: string;
+}
+
 export type AttachEvent =
-  SequencedComposerEvent | ({ event: 'snapshot'; data: SessionSnapshot } & { seq: number });
+  | SequencedComposerEvent
+  | ({ event: 'snapshot'; data: SessionSnapshot } & { seq: number })
+  // Attach only: every event before it is history, every event after it is live; `turn_base` is a running turn's starting canvas.
+  | ({ event: 'replayed'; data: { turn_base?: WorkflowIr } } & { seq: number });

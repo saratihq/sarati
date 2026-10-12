@@ -48,6 +48,11 @@ function irNodes(ir: Record<string, unknown> | null): IrNodeShape[] {
   return Array.isArray(nodes) ? nodes : [];
 }
 
+/** A new workflow needs a step beyond its trigger: half of the create gate the compose page's Save and the composer's chip share. */
+export function hasStepBeyondTrigger(ir: Record<string, unknown> | null): boolean {
+  return irNodes(ir).length > 1;
+}
+
 /**
  * Mode-/shape-dependent requirements a flat `schema.required` can't express, in ONE place beside the
  * flat check. Must mirror the inspector editors exactly, or the deploy gate and the inline warnings
