@@ -19,6 +19,9 @@ vi.mock("@/api/client", async (importOriginal) => ({
   getWorkflow: vi.fn(),
   listVersions: vi.fn(),
   listBranches: vi.fn(),
+  commitVersion: vi.fn(),
+  composeMerge: vi.fn(),
+  listNodeTypes: vi.fn(),
 }));
 
 const step = (to: string) => ({
@@ -42,6 +45,7 @@ const storedDraft = (): unknown => JSON.parse(localStorage.getItem(draftKey) ?? 
 const pastAutosave = () => act(() => new Promise((resolve) => setTimeout(resolve, 1000)));
 
 beforeEach(() => {
+  vi.clearAllMocks();
   useWorkflow.getState().reset();
   vi.mocked(api.getWorkflow).mockResolvedValue({ name: "Report" } as Awaited<ReturnType<typeof api.getWorkflow>>);
   vi.mocked(api.listVersions).mockResolvedValue({
@@ -51,6 +55,18 @@ beforeEach(() => {
   vi.mocked(api.listBranches).mockResolvedValue({
     branches: [{ name: "main", is_protected: false }],
   } as Awaited<ReturnType<typeof api.listBranches>>);
+  vi.mocked(api.listNodeTypes).mockResolvedValue({
+    node_types: [
+      {
+        name: "Send an email",
+        type: "gmail.send_email",
+        category: "Gmail",
+        description: "",
+        auth: "oauth2",
+        parameters: { to: { type: "STRING", required: true } },
+      },
+    ],
+  });
 });
 
 describe("WorkflowEditPage with a stored draft", () => {
@@ -96,5 +112,53 @@ describe("WorkflowEditPage on a protected branch", () => {
     expect(await screen.findByText("main is protected · start a branch and open a review to change it")).toBeInTheDocument();
     expect(useWorkflow.getState().editBranchProtected).toBe(true);
     expect(screen.getByRole("button", { name: /Save new version/ })).toBeDisabled();
+  });
+});
+
+describe("WorkflowEditPage when a save finds nothing new", () => {
+  const editRecipient = () =>
+    act(() => useWorkflow.getState().updateIrNode("send_report", { parameters: { to: "new@example.test" } }));
+
+  it("says in the header which version already holds the canvas, until the next edit", async () => {
+    render(<WorkflowEditPage />);
+    await screen.findByText("Editing the live workflow · saves commit a new version on Sarati");
+    editRecipient();
+    vi.mocked(api.commitVersion).mockResolvedValue({
+      id: "v1",
+      version_number: 1,
+      no_changes: true,
+    } as Awaited<ReturnType<typeof api.commitVersion>>);
+
+    await userEvent.click(screen.getByRole("button", { name: /Save new version/ }));
+
+    expect(await screen.findByText("Already saved as v1")).toBeInTheDocument();
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    act(() => useWorkflow.getState().updateIrNode("send_report", { parameters: { to: "other@example.test" } }));
+    expect(screen.queryByText("Already saved as v1")).toBeNull();
+  });
+
+  it("says so after a rebase that lands on what the moved-on head already holds", async () => {
+    render(<WorkflowEditPage />);
+    await screen.findByText("Editing the live workflow · saves commit a new version on Sarati");
+    editRecipient();
+    const mine = useWorkflow.getState().workflowJson!;
+    act(() =>
+      useWorkflow.setState({
+        branchMoved: { currentHeadVersionId: "v2", currentHeadVersionNumber: 2, baseVersionId: "v1" },
+      }),
+    );
+    vi.mocked(api.listVersions).mockResolvedValue({
+      workflow_id: "wf-1",
+      versions: [
+        { id: "v1", version_number: 1, workflow_json: head },
+        { id: "v2", version_number: 2, workflow_json: mine },
+      ],
+    } as Awaited<ReturnType<typeof api.listVersions>>);
+    vi.mocked(api.composeMerge).mockResolvedValue({ merged: mine, conflicts: [] });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Rebase onto latest" }));
+
+    expect(await screen.findByText("Already saved as v2")).toBeInTheDocument();
+    expect(api.commitVersion).not.toHaveBeenCalled();
   });
 });

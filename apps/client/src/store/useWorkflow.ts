@@ -178,7 +178,7 @@ interface WorkflowState {
   /** Set on a 409 `branch_moved`; drives BranchMovedDialog — we never silently retry or overwrite. */
   branchMoved: BranchMovedState | null;
   /** Three-way-merge our edits onto the moved-on head, then re-commit against the fresh base. */
-  rebaseOntoHead: () => Promise<void>;
+  rebaseOntoHead: () => Promise<SaveOutcome>;
   /** Drop local edits and load the current head as the clean baseline. */
   discardAndLoadHead: () => Promise<void>;
   /** Close the branch-moved dialog without resolving (keeps local edits intact). */
@@ -585,6 +585,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       stripReady: false,
       originalMessage: "",
       editorMode: "draft",
+      editBranch: "main",
       editBranchProtected: false,
       baseVersionId: null,
       branchMoved: null,
@@ -1065,7 +1066,9 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
   rebaseOntoHead: async () => {
     const { workflowId, editBranch, branchMoved, workflowJson, lastGeneratedJson } =
       get();
-    if (!workflowId || !branchMoved || !workflowJson) return;
+    if (!workflowId || !branchMoved || !workflowJson) {
+      return { kind: "failed", message: "There is nothing to rebase." };
+    }
     set({ isLoading: true, error: null });
 
     let head: api.WorkflowVersionSummary | undefined;
@@ -1091,11 +1094,9 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       ({ merged, conflicts } = await api.composeMerge(base, workflowJson, theirs));
     } catch (e) {
       set({ isLoading: false });
-      toast.error(
-        "Couldn't rebase onto the latest version",
-        e instanceof Error ? e.message : undefined,
-      );
-      return; // leave the dialog open so the user can retry or discard
+      const reason = e instanceof Error ? e.message : "The rebase didn't go through.";
+      toast.error("Couldn't rebase onto the latest version", reason);
+      return { kind: "failed", message: reason }; // leave the dialog open so the user can retry or discard
     }
 
     // Land on the fresh head: the moved-on doc is the new baseline and the base id advances, so the
@@ -1114,7 +1115,11 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       );
     }
     // Re-commit against the fresh base; a no-op just clears dirty, a real diff mints the next version.
-    await get().saveDeployedEdits();
+    const outcome = await get().saveDeployedEdits();
+    // The baseline is now the head, so a canvas equal to it is that version.
+    return outcome.kind === "unchanged" && outcome.matches === null
+      ? { ...outcome, matches: head.version_number }
+      : outcome;
   },
 
   discardAndLoadHead: async () => {

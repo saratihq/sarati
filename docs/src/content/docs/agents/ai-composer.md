@@ -84,7 +84,7 @@ saves a new version — or says nothing was saved when the canvas has no changes
 
 | | |
 |---|---|
-| **Save and turn on** | Creates the workflow and makes it live. |
+| **Save and turn on** | Creates the workflow and makes it live — or, like **Save**, creates nothing while the canvas has no steps or a required field is empty. |
 | **Keep tweaking** | Carries on the conversation. Nothing becomes a workflow until you save. |
 
 The composer commits versions. It never moves a live pointer on an existing workflow — see

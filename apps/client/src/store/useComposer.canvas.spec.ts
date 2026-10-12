@@ -23,6 +23,7 @@ vi.mock("@/api/client", async (importOriginal) => ({
   commitVersion: vi.fn(),
   listConnections: vi.fn(),
   composeMerge: vi.fn(),
+  listNodeTypes: vi.fn(),
 }));
 
 const composerAttach = vi.mocked(agent.composerAttach);
@@ -33,9 +34,10 @@ const listVersions = vi.mocked(api.listVersions);
 const commitVersion = vi.mocked(api.commitVersion);
 const listConnections = vi.mocked(api.listConnections);
 const composeMerge = vi.mocked(api.composeMerge);
+const listNodeTypes = vi.mocked(api.listNodeTypes);
 
 type Doc = Record<string, unknown>;
-type Node = { id: string; parameters?: Record<string, unknown> };
+type Node = { id: string; name?: string; parameters?: Record<string, unknown> };
 type Edge = { source_node_id: string; target_node_id: string };
 
 function scripted(events: agent.SequencedComposerEvent[]) {
@@ -89,22 +91,41 @@ const idsOf = (doc: unknown): string[] => (doc as { nodes: Node[] }).nodes.map((
 const paramsOf = (doc: unknown, id: string) => (doc as { nodes: Node[] }).nodes.find((n) => n.id === id)?.parameters;
 const lastSent = () => composerStream.mock.calls.at(-1)![0];
 
-// The service's three-way merge, reduced to whole steps: what the person removed, changed or added since the base stays so.
-async function stepMerge(base: Doc, ours: Doc, theirs: Doc) {
-  const byId = (doc: Doc) => new Map((doc.nodes as Node[]).map((n) => [n.id, n]));
-  const was = byId(base);
-  const mine = byId(ours);
+// The service's composer merge at step grain: a step edited on one side and removed on the other is kept and reported, and an edge either side added lands whether or not its steps did.
+async function serviceMerge(base: Doc, ours: Doc, theirs: Doc) {
+  const stepsOf = (doc: Doc) => new Map((doc.nodes as Node[]).map((n) => [n.id, n]));
+  const edgesOf = (doc: Doc) => new Map((doc.edges as Edge[]).map((e) => [`${e.source_node_id}>${e.target_node_id}`, e]));
+  const changed = (now: Node, before: Node) => irContentKey(now) !== irContentKey(before);
+  const [was, mine, agents] = [stepsOf(base), stepsOf(ours), stepsOf(theirs)];
   const nodes: Node[] = [];
-  for (const n of theirs.nodes as Node[]) {
-    const before = was.get(n.id);
-    const now = mine.get(n.id);
-    if (before && !now) continue;
-    nodes.push(before && now && irContentKey(now) !== irContentKey(before) ? now : n);
+  const conflicts: api.ComposerMergeConflict[] = [];
+  for (const id of new Set([...was.keys(), ...mine.keys(), ...agents.keys()])) {
+    const before = was.get(id);
+    const mineNow = mine.get(id);
+    const agentsNow = agents.get(id);
+    if (!before) {
+      nodes.push((mineNow ?? agentsNow)!);
+    } else if (mineNow && agentsNow) {
+      nodes.push(changed(mineNow, before) ? mineNow : agentsNow);
+    } else if (mineNow ?? agentsNow) {
+      const edited = (mineNow ?? agentsNow)!;
+      if (!changed(edited, before)) continue;
+      nodes.push(edited);
+      conflicts.push({
+        node_id: id,
+        node_name: edited.name ?? id,
+        kind: "edit_delete",
+        field_path: null,
+        ours: mineNow ?? null,
+        theirs: agentsNow ?? null,
+        base: before,
+      });
+    }
   }
-  for (const n of ours.nodes as Node[]) if (!was.has(n.id) && !nodes.some((m) => m.id === n.id)) nodes.push(n);
-  const present = new Set(nodes.map((n) => n.id));
-  const edges = (theirs.edges as Edge[]).filter((e) => present.has(e.source_node_id) && present.has(e.target_node_id));
-  return { merged: { ...theirs, nodes, edges }, conflicts: [] };
+  const [wasEdges, mineEdges, agentsEdges] = [edgesOf(base), edgesOf(ours), edgesOf(theirs)];
+  const edges = new Map([...wasEdges].filter(([key]) => mineEdges.has(key) && agentsEdges.has(key)));
+  for (const [key, e] of [...mineEdges, ...agentsEdges]) if (!wasEdges.has(key)) edges.set(key, e);
+  return { merged: { ...theirs, nodes, edges: [...edges.values()] }, conflicts };
 }
 
 // The build turn on the compose page, as the agent streams it live.
@@ -134,7 +155,12 @@ const buildLog = (): agent.SequencedComposerEvent[] => [
 ];
 
 // Open the editor on a saved head, as a navigation or reload does: both stores start over, the head loads, the composer reattaches.
-async function openEditor(head: Doc, live: agent.SequencedComposerEvent[] = [], log = buildLog()): Promise<void> {
+async function openEditor(
+  head: Doc,
+  live: agent.SequencedComposerEvent[] = [],
+  log = buildLog(),
+  meanwhile: () => void = () => undefined,
+): Promise<void> {
   useComposer.getState().reset();
   useWorkflow.getState().reset();
   getWorkflow.mockResolvedValue({ name: "Daily digest" } as Awaited<ReturnType<typeof api.getWorkflow>>);
@@ -144,14 +170,14 @@ async function openEditor(head: Doc, live: agent.SequencedComposerEvent[] = [], 
   } as Awaited<ReturnType<typeof api.listVersions>>);
   expect(await useWorkflow.getState().loadForEdit("wf-1")).toBe(true);
   const lastSeq = log.at(-1)?.seq ?? 0;
-  composerAttach.mockImplementationOnce(
-    scripted([
-      { event: "session", data: { session_id: "s-1" }, seq: lastSeq },
-      ...log,
-      { event: "replayed", data: {}, seq: lastSeq },
-      ...live,
-    ]),
-  );
+  composerAttach.mockImplementationOnce(async function* () {
+    yield { event: "session", data: { session_id: "s-1" }, seq: lastSeq } as agent.SequencedComposerEvent;
+    yield* log;
+    yield { event: "replayed", data: {}, seq: lastSeq } as agent.SequencedComposerEvent;
+    // The person's edits between the replay and the turn's next batch.
+    meanwhile();
+    yield* live;
+  });
   await useComposer.getState().attach("wf-1");
 }
 
@@ -161,7 +187,8 @@ beforeEach(() => {
   useComposer.getState().reset();
   useWorkflow.getState().reset();
   composerStream.mockImplementation(scripted([]));
-  composeMerge.mockImplementation(stepMerge);
+  composeMerge.mockImplementation(serviceMerge);
+  listNodeTypes.mockResolvedValue({ node_types: [] });
 });
 
 describe("the owner's sequence: compose, remove the Gmail step on the canvas, Save", () => {
@@ -246,54 +273,89 @@ describe("a reattach restores the conversation, never the canvas", () => {
     expect(useWorkflow.getState().dirty).toBe(false);
   });
 
-  it("a live batch of a turn the reattach joins merges onto the canvas as it stands — a step the person removed stays removed", async () => {
+  // A turn still running when the editor reopens: its earlier batch is only in the replay, never on the canvas.
+  const joinedTurn: agent.SequencedComposerEvent[] = [
+    { event: "user_message", data: { text: "Email me the report" }, seq: 1 },
+    { event: "op_applied", data: { ops: [], ir: withReport }, seq: 2 },
+  ];
+  const editTheDigest = () =>
+    useWorkflow.getState().updateIrNode("build_digest", { parameters: { language: "js", code: "return 42;" } });
+
+  it("a live batch that fills in a step only the replay held lands it, and says nothing in the person's name", async () => {
+    const filled = docOf(
+      [trigger, digest, { ...report, parameters: { ...report.parameters, subject: "Weekly digest" } }],
+      withReport.edges as unknown[],
+    );
+    await openEditor(withDigest, [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }], joinedTurn);
+
+    expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "send_report"]);
+    expect(paramsOf(canvas(), "send_report")?.subject).toBe("Weekly digest");
+    expect(composerStream).not.toHaveBeenCalled();
+  });
+
+  it("a live batch wiring a new step after one only the replay held lands both, with every edge between steps on the canvas", async () => {
     const live = docOf(
       [trigger, digest, report, summarize],
-      [edge("trigger", "build_digest"), edge("build_digest", "send_report"), edge("build_digest", "summarize")],
+      [edge("trigger", "build_digest"), edge("build_digest", "send_report"), edge("send_report", "summarize")],
+    );
+    await openEditor(withDigest, [{ event: "op_applied", data: { ops: [], ir: live }, seq: 3 }], joinedTurn, editTheDigest);
+
+    expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "send_report", "summarize"]);
+    expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 42;");
+    const steps = new Set(idsOf(canvas()));
+    for (const e of canvas().edges as Edge[]) {
+      expect([steps.has(e.source_node_id), steps.has(e.target_node_id)]).toEqual([true, true]);
+    }
+    expect(composerStream).not.toHaveBeenCalled();
+  });
+
+  it("a step the person removes while a joined turn fills it in is reported as their removal, not the composer's", async () => {
+    const filled = docOf(
+      [trigger, digest, { ...report, parameters: { ...report.parameters, subject: "Weekly digest" } }],
+      withReport.edges as unknown[],
     );
     await openEditor(
-      withDigest,
-      [{ event: "op_applied", data: { ops: [], ir: live }, seq: 3 }],
-      [
-        { event: "user_message", data: { text: "Email me the report, then summarize it" }, seq: 1 },
-        { event: "op_applied", data: { ops: [], ir: withReport }, seq: 2 },
-      ],
+      withReport,
+      [{ event: "op_applied", data: { ops: [], ir: filled }, seq: 3 }],
+      joinedTurn,
+      () => useWorkflow.getState().deleteWorkflowNode("send_report"),
     );
 
-    expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "summarize"]);
-    expect(composeMerge).toHaveBeenCalledTimes(1);
-    const [base, ours] = composeMerge.mock.calls[0]!;
-    expect(irContentKey(base)).toBe(irContentKey(withReport));
-    expect(irContentKey(ours)).toBe(irContentKey(withDigest));
-    expect(useWorkflow.getState().dirty).toBe(true);
+    expect(paramsOf(canvas(), "send_report")?.subject).toBe("Weekly digest");
+    expect(lastSent().message).toBe(
+      '(canvas note) While you were building I made my own edits. We collided: I removed step "Email me the report" but you had edited it — yours is back on the canvas. Ask me which to keep where we disagree.',
+    );
   });
 
   it("joined before its first batch, the live batch merges from the canvas at the reattach, keeping an edit made since", async () => {
     const live = docOf([trigger, digest, summarize], [edge("trigger", "build_digest"), edge("build_digest", "summarize")]);
-    let replayDone!: () => void;
-    const replayed = new Promise<void>((resolve) => (replayDone = resolve));
-    let sendLive!: () => void;
-    const turnContinues = new Promise<void>((resolve) => (sendLive = resolve));
-    await openEditor(withDigest, [], []);
-    useComposer.getState().reset();
-    composerAttach.mockImplementationOnce(async function* () {
-      yield { event: "session", data: { session_id: "s-1" }, seq: 1 } as agent.SequencedComposerEvent;
-      yield { event: "user_message", data: { text: "Add a summary" }, seq: 1 } as agent.SequencedComposerEvent;
-      yield { event: "replayed", data: {}, seq: 1 } as agent.SequencedComposerEvent;
-      replayDone();
-      await turnContinues;
-      yield { event: "op_applied", data: { ops: [], ir: live }, seq: 2 } as agent.SequencedComposerEvent;
-    });
-    const attached = useComposer.getState().attach("wf-1");
-    await replayed;
-
-    useWorkflow.getState().updateIrNode("build_digest", { parameters: { language: "js", code: "return 42;" } });
-    sendLive();
-    await attached;
+    await openEditor(
+      withDigest,
+      [{ event: "op_applied", data: { ops: [], ir: live }, seq: 2 }],
+      [{ event: "user_message", data: { text: "Add a summary" }, seq: 1 }],
+      editTheDigest,
+    );
 
     expect(idsOf(canvas())).toEqual(["trigger", "build_digest", "summarize"]);
     expect(paramsOf(canvas(), "build_digest")?.code).toBe("return 42;");
     expect(irContentKey(composeMerge.mock.calls[0]![0])).toBe(irContentKey(withDigest));
+  });
+});
+
+describe("a new workflow after a branch editor", () => {
+  it("tells the composer its canvas is on main", async () => {
+    getWorkflow.mockResolvedValue({ name: "Daily digest" } as Awaited<ReturnType<typeof api.getWorkflow>>);
+    listVersions.mockResolvedValue({
+      workflow_id: "wf-1",
+      versions: [{ id: "v1", version_number: 1, workflow_json: withDigest }],
+    } as Awaited<ReturnType<typeof api.listVersions>>);
+    expect(await useWorkflow.getState().loadForEdit("wf-1", "lane")).toBe(true);
+
+    useWorkflow.getState().reset();
+    useWorkflow.getState().startScratch();
+    await useComposer.getState().send("Email me a daily digest");
+
+    expect(lastSent()).toMatchObject({ message: "Email me a daily digest", branch: "main" });
   });
 });
 

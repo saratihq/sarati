@@ -514,6 +514,17 @@ describe('the canvas note: steps of the last draft that are not on the canvas no
     expect(promptOf(query)).not.toContain('<canvas_changes>');
   });
 
+  it('names it after the header Save too: the editor rejoins the scratch session and messages from main', async () => {
+    const { query, service, id } = await built();
+    await collect(service.attach({ sessionId: id, workflowId: 'wf-1', lastSeq: 0 }, never, 'user_1'));
+
+    await say(service, 'Add a filter', canvas(trigger, digest), 'main', {
+      session_id: id,
+      workflow_id: 'wf-1',
+    });
+    expect(promptOf(query)).toContain(REPORT_GONE);
+  });
+
   it('says nothing when the canvas holds every step of its last draft', async () => {
     const { query, service, id } = await built();
     await say(service, 'Looks good', canvas(trigger, digest, report), 'main', { session_id: id });

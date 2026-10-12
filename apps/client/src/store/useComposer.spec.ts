@@ -10,6 +10,11 @@ vi.mock("@/api/agent", async (importOriginal) => ({
   refreshSessionToken: vi.fn(),
 }));
 
+vi.mock("@/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/client")>()),
+  listNodeTypes: vi.fn().mockResolvedValue({ node_types: [] }),
+}));
+
 const composerAttach = vi.mocked(agent.composerAttach);
 const composerStream = vi.mocked(agent.composerStream);
 
@@ -19,6 +24,16 @@ function scripted(events: agent.SequencedComposerEvent[]) {
     for (const evt of events) yield evt;
   };
 }
+
+// A canvas the compose page's Save would create: a trigger and one complete step.
+const built = (name: string) => ({
+  name,
+  nodes: [
+    { id: "trigger", node_type: "orchestr:trigger", parameters: {} },
+    { id: "fetch", node_type: "orchestr:code", parameters: { language: "js", code: "return 1;" } },
+  ],
+  edges: [],
+});
 
 const brief = (over: Partial<agent.BriefData> = {}): agent.BriefData => ({
   name: "Hacker News mentions → Slack",
@@ -83,7 +98,7 @@ describe("useComposer suggestedName", () => {
    */
   it("stamps the plan's name on the document the save chip creates", async () => {
     const deploy = vi.fn().mockResolvedValue(undefined);
-    useWorkflow.setState({ workflowJson: { name: UNTITLED_WORKFLOW, nodes: [], edges: [] }, deploy });
+    useWorkflow.setState({ workflowJson: built(UNTITLED_WORKFLOW), deploy });
     composerAttach.mockImplementation(scripted([{ event: "brief", data: brief(), seq: 1 }]));
     await useComposer.getState().attach();
 
@@ -97,12 +112,13 @@ describe("useComposer suggestedName", () => {
 
   it("never renames a workflow a person already named", async () => {
     const deploy = vi.fn().mockResolvedValue(undefined);
-    useWorkflow.setState({ workflowJson: { name: "My own name", nodes: [], edges: [] }, deploy });
+    useWorkflow.setState({ workflowJson: built("My own name"), deploy });
     composerAttach.mockImplementation(scripted([{ event: "brief", data: brief(), seq: 1 }]));
     await useComposer.getState().attach();
 
     await useComposer.getState().acceptOffer("live");
 
+    expect(deploy).toHaveBeenCalled();
     expect((useWorkflow.getState().workflowJson as { name: string }).name).toBe("My own name");
   });
 

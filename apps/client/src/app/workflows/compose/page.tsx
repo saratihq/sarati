@@ -19,7 +19,7 @@ import { useSessionUserId } from "@/lib/useSessionUserId";
 import { clearDraft, loadDraft, type WorkflowDraft } from "@/lib/drafts";
 import { timeAgo } from "@/lib/format";
 import { toast } from "@/lib/toast";
-import { useMissingRequired } from "@/lib/workflow-validation";
+import { hasStepBeyondTrigger, useMissingRequired } from "@/lib/workflow-validation";
 import { useComposerAvailable } from "@/lib/useComposerAvailable";
 
 /**
@@ -75,8 +75,7 @@ export default function ComposeNewWorkflowPage() {
     setWorkflowDocName(name);
   }, [seeded, name, docName, setWorkflowDocName]);
 
-  const nodeCount = Array.isArray(workflowJson?.nodes) ? (workflowJson.nodes as unknown[]).length : 0;
-  const hasSteps = nodeCount > 1; // more than the trigger
+  const hasSteps = hasStepBeyondTrigger(workflowJson);
   // The create gate: nothing incomplete deploys straight to LIVE.
   const missing = useMissingRequired(workflowJson);
   // Once the agent's save created the workflow, Save MUST disarm — clicking again would duplicate it.

@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Check, GitBranch } from "lucide-react";
 import InlineRename from "./InlineRename";
 import * as api from "@/api/client";
-import { useWorkflow } from "@/store/useWorkflow";
+import { useWorkflow, type SaveOutcome } from "@/store/useWorkflow";
 import { Button } from "@/components/ui/button";
 import { ResumeDraftModal } from "@/components/ResumeDraftModal";
 import { BranchMovedDialog } from "@/components/BranchMovedDialog";
@@ -155,6 +155,14 @@ export default function WorkflowEditPage() {
     };
   }, [id, branch]);
 
+  // A save that found nothing new says so here, for as long as the canvas it judged stays on screen.
+  const [unchanged, setUnchanged] = useState<{ text: string; doc: Record<string, unknown> | null } | null>(null);
+  const noteUnchanged = (saved: SaveOutcome) => {
+    if (saved.kind !== "unchanged") return;
+    const text = saved.matches === null ? "Nothing to save" : `Already saved as v${saved.matches}`;
+    setUnchanged({ text, doc: useWorkflow.getState().workflowJson });
+  };
+
   const [commitMessage, setCommitMessage] = useState("");
   const handleSave = async () => {
     if (missing.length > 0) {
@@ -164,7 +172,7 @@ export default function WorkflowEditPage() {
       );
       return;
     }
-    await saveDeployedEdits(commitMessage);
+    noteUnchanged(await saveDeployedEdits(commitMessage));
     // saveDeployedEdits clears `dirty` and toasts the minted version; the
     // editor stays on the canvas because a save is a checkpoint, not an exit.
     if (!useWorkflow.getState().dirty) {
@@ -257,6 +265,11 @@ export default function WorkflowEditPage() {
             <span className="text-[11px] flex items-center gap-1.5 shrink-0" style={{ color: "var(--orchestr-warning)" }}>
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--orchestr-warning)" }} />
               Unsaved changes
+            </span>
+          )}
+          {!dirty && unchanged && unchanged.doc === workflowJson && (
+            <span role="status" className="text-[11px] shrink-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              {unchanged.text}
             </span>
           )}
           {dirty && (
@@ -367,7 +380,12 @@ export default function WorkflowEditPage() {
 
       {/* Optimistic-concurrency guard: a 409 from either save path surfaces the same
           rebase/discard dialog; resolving drops the now-stale autosaved draft. */}
-      <BranchMovedDialog onResolved={() => clearDraft(userId, draftId ?? null)} />
+      <BranchMovedDialog
+        onResolved={(saved) => {
+          clearDraft(userId, draftId ?? null);
+          if (saved) noteUnchanged(saved);
+        }}
+      />
     </div>
   );
 }

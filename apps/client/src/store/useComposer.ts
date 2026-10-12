@@ -4,6 +4,7 @@ import * as api from "@/api/client";
 import { activeConnections, matchingConnections } from "@/lib/connections";
 import { composeMerge, type ComposerMergeConflict } from "@/api/client";
 import { irCanvasKey } from "@/lib/irCompare";
+import { collectMissingRequired, hasStepBeyondTrigger } from "@/lib/workflow-validation";
 import { UNTITLED_WORKFLOW, useWorkflow, type SaveOutcome } from "@/store/useWorkflow";
 
 /**
@@ -92,8 +93,6 @@ export function adoptSessionForWorkflow(workflowId: string): void {
 
 /** The canvas at turn start — the three-way merge base for co-editing. */
 let turnBaseIr: Record<string, unknown> | null = null;
-// While an attach replays: the current turn's latest batch, which a live batch after the replay merges from.
-let replayBase: Record<string, unknown> | null = null;
 /** Same-field collisions found while merging; relayed to the agent at turn end. */
 let pendingConflicts: ComposerMergeConflict[] = [];
 let tokenTimer: ReturnType<typeof setInterval> | null = null;
@@ -164,7 +163,6 @@ export const useComposer = create<ComposerStore>((set, get) => {
       startTokenRefresh(evt.data.session_id);
     } else if (evt.event === "user_message") {
       // Replay only; supersedes a standing offer exactly as send() does, so replay ends in the same state.
-      replayBase = null;
       set((s) => ({
         offerPending: false,
         thread: [...s.thread, { id: nextEntryId++, kind: "user", text: evt.data.text }],
@@ -270,10 +268,7 @@ export const useComposer = create<ComposerStore>((set, get) => {
       }));
     } else if (evt.event === "op_applied") {
       // The canvas is the saved version plus the person's edits: a batch from history never lands on it.
-      if (replayed) {
-        replayBase = clone(evt.data.ir);
-        return;
-      }
+      if (replayed) return;
       // The agent's doc lands THROUGH a three-way merge, so mid-turn user edits survive.
       const ours = useWorkflow.getState().workflowJson;
       const base = turnBaseIr;
@@ -423,6 +418,12 @@ export const useComposer = create<ComposerStore>((set, get) => {
       set({ accepting: true });
       try {
         if (!workflowId) {
+          const refusal = await createRefusal(useWorkflow.getState().workflowJson);
+          if (refusal) {
+            await get().send(refusal.note);
+            set({ failure: refusal.failure });
+            return;
+          }
           // The agent's own document carries the seeded name, so the plan's name is stamped on
           // before the create — this chip saves without the compose page's header in the loop.
           nameUnsavedWorkflow(get().suggestedName);
@@ -467,7 +468,6 @@ export const useComposer = create<ComposerStore>((set, get) => {
       controller = mine;
       set({ streaming: true, failure: null, sessionId });
       if (sessionId) startTokenRefresh(sessionId);
-      replayBase = null;
       let replaying = true;
       try {
         for await (const evt of agent.composerAttach(
@@ -486,10 +486,9 @@ export const useComposer = create<ComposerStore>((set, get) => {
           }
           if (evt.event === "replayed") {
             replaying = false;
-            // A live batch merges onto the canvas as it stands, from the turn's latest batch or else from that canvas.
+            // A joined turn merges onto the canvas as it stands: a step only the replay held is the composer's addition, never the person's removal.
             const canvas = useWorkflow.getState().workflowJson;
-            turnBaseIr = replayBase ?? (canvas ? clone(canvas) : null);
-            replayBase = null;
+            turnBaseIr = canvas ? clone(canvas) : null;
             continue;
           }
           await handleEvent(evt, workflowId, replaying);
@@ -597,7 +596,6 @@ export const useComposer = create<ComposerStore>((set, get) => {
       controller = null;
       stopTokenRefresh();
       turnBaseIr = null;
-      replayBase = null;
       pendingConflicts = [];
       set({
         sessionId: undefined,
@@ -621,17 +619,39 @@ export const useComposer = create<ComposerStore>((set, get) => {
     if (pendingConflicts.length === 0 || get().streaming) return;
     const conflicts = pendingConflicts;
     pendingConflicts = [];
-    const lines = conflicts.map((c) =>
-      c.kind === "field"
-        ? `on step "${c.node_name || c.node_id}" (${c.field_path ?? "field"}) I set ${JSON.stringify(c.ours)} while you set ${JSON.stringify(c.theirs)}`
-        : `you removed step "${c.node_name || c.node_id}" but I had edited it (I kept it)`,
-    );
+    const lines = conflicts.map((c) => {
+      const step = `step "${c.node_name || c.node_id}"`;
+      if (c.kind === "field") {
+        return `on ${step} (${c.field_path ?? "field"}) I set ${JSON.stringify(c.ours)} while you set ${JSON.stringify(c.theirs)} — mine is on the canvas`;
+      }
+      // An edit-vs-delete carries no value on the side that removed the step.
+      return c.ours === null
+        ? `I removed ${step} but you had edited it — yours is back on the canvas`
+        : `you removed ${step} but I had edited it — I kept it`;
+    });
     await get().send(
-      `(canvas note) While you were building I made my own edits. We collided: ${lines.join("; ")}. My values are on the canvas — ask me which to keep where we disagree.`,
+      `(canvas note) While you were building I made my own edits. We collided: ${lines.join("; ")}. Ask me which to keep where we disagree.`,
       workflowId,
     );
   }
 });
+
+// The compose page's create gate, so the chip never creates what the header's Save refuses.
+async function createRefusal(doc: Record<string, unknown> | null): Promise<{ failure: string; note: string } | null> {
+  if (!hasStepBeyondTrigger(doc)) {
+    return {
+      failure: "Nothing was created: the canvas has no steps yet.",
+      note: "(canvas note) Nothing was created — the canvas has no step beyond the trigger, so it doesn't hold your draft.",
+    };
+  }
+  const missing = await collectMissingRequired(doc);
+  if (missing.length === 0) return null;
+  const fields = missing.map((m) => `${m.nodeName} (${m.field})`).join(", ");
+  return {
+    failure: `Nothing was created: ${missing.length} required field${missing.length === 1 ? " is" : "s are"} empty.`,
+    note: `(canvas note) Nothing was created — required fields are empty on the canvas: ${fields}.`,
+  };
+}
 
 // What the composer is told a save chip did — never a version that wasn't minted.
 function saveNote(outcome: Exclude<SaveOutcome, { kind: "moved" }>): string {
