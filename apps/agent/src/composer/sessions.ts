@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
 
+import type { CallerContext } from '../config/platform-keys.client';
 import { EventChannel } from './event-channel';
 import type {
   BriefData,
@@ -55,6 +56,8 @@ export interface ComposerSession {
   callerToken: string | null;
   /** The org the caller is acting in — decides whose platform keys the turn resolves. */
   callerOrgId: string | null;
+  /** The visitor's address from their latest request, so the service counts this turn's calls against them. */
+  callerAddress: string | null;
   /** Aborts the RUNNING turn — fired only when the orphan grace period expires. */
   turnAbort: AbortController | null;
   /** Pending orphan-abort timer (armed on disconnect, cleared on reattach). */
@@ -77,6 +80,17 @@ interface MutableSnapshot {
 }
 
 /** The wire-shaped snapshot for POST /api/composer/attach. */
+/** The caller a session's tool calls run as: the freshest bearer, org and address it was given. */
+export function sessionCaller(session: ComposerSession): CallerContext {
+  return { token: session.callerToken, orgId: session.callerOrgId, address: session.callerAddress };
+}
+
+/** Take the caller's freshest credentials and address; a request without a bearer keeps the last one. */
+export function refreshCaller(session: ComposerSession, caller: CallerContext): void {
+  if (caller.token) session.callerToken = caller.token;
+  session.callerAddress = caller.address ?? session.callerAddress;
+}
+
 export function snapshotOf(session: ComposerSession): SessionSnapshot {
   return {
     brief: session.snapshot.brief,
@@ -230,6 +244,7 @@ export class SessionStore implements OnApplicationShutdown {
       subscriber: null,
       callerToken: null,
       callerOrgId: null,
+      callerAddress: null,
       turnAbort: null,
       orphanTimer: null,
       snapshot: {

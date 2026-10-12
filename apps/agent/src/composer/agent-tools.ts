@@ -7,7 +7,7 @@ import { resolveDropdownParams } from './dropdown-values';
 import { fillParams, type ParamCompleteFn } from './param-filler';
 import type { PendingAnswers } from './pending-answers';
 import type { BriefData, ComposerEvent, ComposeOp } from './protocol';
-import type { ComposerSession } from './sessions';
+import { type ComposerSession, sessionCaller } from './sessions';
 import type { CatalogEntry, ComposerAccount, RunRecord, WorkflowServiceClient } from './workflow-client';
 
 /**
@@ -66,7 +66,7 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
     },
     async ({ query, top_k }) => {
       try {
-        const results = await ctx.client.searchCatalog(query, top_k, ctx.session.callerToken);
+        const results = await ctx.client.searchCatalog(query, top_k, sessionCaller(ctx.session));
         if (results.length === 0) {
           return { content: [{ type: 'text' as const, text: `No catalog matches for "${query}".` }] };
         }
@@ -85,7 +85,7 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
     { workflow_id: z.string().min(1).describe('The workflow id (UUID)') },
     async ({ workflow_id }) => {
       try {
-        const wf = await ctx.client.readWorkflow(workflow_id, ctx.session.callerToken);
+        const wf = await ctx.client.readWorkflow(workflow_id, sessionCaller(ctx.session));
         const text = [
           `Workflow "${wf.name}"`,
           wf.ir ? `Committed graph:\n${JSON.stringify(wf.ir)}` : 'No committed version yet.',
@@ -353,7 +353,7 @@ interface ToolResult {
 export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<ToolResult> {
   try {
     const { ops: settled, notes } = await settleDropdownValues(ctx, ops);
-    const result = await ctx.client.applyOps(ctx.session.draftIr, settled, ctx.session.callerToken);
+    const result = await ctx.client.applyOps(ctx.session.draftIr, settled, sessionCaller(ctx.session));
     if (!result.ok) {
       return { content: [{ type: 'text', text: `Batch rejected: ${result.detail}` }], isError: true };
     }
@@ -393,7 +393,7 @@ async function connectionForNode(
   const own = parameters.connectionId;
   if (typeof own === 'string' && own) return own;
   const provider = nodeType.split('.')[0] ?? '';
-  const connections = await ctx.client.listConnections(ctx.session.callerToken);
+  const connections = await ctx.client.listConnections(sessionCaller(ctx.session));
   return connections.find((c) => c.provider === provider && c.status === 'active')?.id ?? null;
 }
 
@@ -412,7 +412,7 @@ async function settleDropdownValues(
       continue;
     }
     const params = parameters as Record<string, unknown>;
-    const entry = await ctx.client.getActionSchema(nodeType, ctx.session.callerToken);
+    const entry = await ctx.client.getActionSchema(nodeType, sessionCaller(ctx.session));
     if (!entry) {
       settled.push(op);
       continue;
@@ -420,7 +420,7 @@ async function settleDropdownValues(
     let connectionId: string | null | undefined;
     const resolution = await resolveDropdownParams(entry.parameters ?? {}, params, async (prop) => {
       connectionId ??= await connectionForNode(ctx, nodeType, params);
-      return ctx.client.loadOptions(nodeType, prop, connectionId, ctx.session.callerToken);
+      return ctx.client.loadOptions(nodeType, prop, connectionId, sessionCaller(ctx.session));
     });
     notes.push(...resolution.notes);
     settled.push(
@@ -544,7 +544,7 @@ export function runNoteAssumption(ctx: ToolContext, input: { node_id: string; te
 /** The get_action_schema handler: the FULL parameter schema for one exact type. */
 export async function runGetActionSchema(ctx: ToolContext, type: string): Promise<ToolResult> {
   try {
-    const entry = await ctx.client.getActionSchema(type.trim(), ctx.session.callerToken);
+    const entry = await ctx.client.getActionSchema(type.trim(), sessionCaller(ctx.session));
     if (!entry) {
       return {
         content: [
@@ -620,7 +620,7 @@ export async function runTestStep(
             : {},
       },
       sampleScope,
-      ctx.session.callerToken,
+      sessionCaller(ctx.session),
     );
     if (outcome.ok) {
       ctx.emit({ event: 'step_result', data: { node_id: nodeId, status: 'passed' } });
@@ -678,7 +678,7 @@ export async function runRunDraft(
   try {
     const outcome = await ctx.client.runFromIr(
       { ir: draft, runId, workflowId: ctx.session.workflowId, triggerPayload },
-      ctx.session.callerToken,
+      sessionCaller(ctx.session),
     );
     if (outcome.ok) {
       for (const nodeId of Object.keys(outcome.outputs)) {
@@ -700,7 +700,7 @@ export async function runRunDraft(
     let failedNodeId: string | undefined;
     let stepLines = '';
     try {
-      const record = await ctx.client.readRun(runId, ctx.session.callerToken);
+      const record = await ctx.client.readRun(runId, sessionCaller(ctx.session));
       for (const step of record.steps) {
         if (!step.node_id) continue;
         const failed = step.status === 'error';
@@ -785,7 +785,7 @@ export async function runGetSamples(ctx: ToolContext): Promise<ToolResult> {
     };
   }
   try {
-    const outputs = await ctx.client.latestRunSamples(ctx.session.workflowId, ctx.session.callerToken);
+    const outputs = await ctx.client.latestRunSamples(ctx.session.workflowId, sessionCaller(ctx.session));
     if (!outputs) {
       return {
         content: [
@@ -827,7 +827,7 @@ export async function runListRuns(ctx: ToolContext, limit: number): Promise<Tool
     };
   }
   try {
-    const runs = await ctx.client.listRuns(ctx.session.workflowId, limit, ctx.session.callerToken);
+    const runs = await ctx.client.listRuns(ctx.session.workflowId, limit, sessionCaller(ctx.session));
     if (runs.length === 0) {
       return { content: [{ type: 'text', text: 'No runs recorded for this workflow yet.' }] };
     }
@@ -844,7 +844,7 @@ export async function runListRuns(ctx: ToolContext, limit: number): Promise<Tool
 /** The connections_status handler: provider + status, read-only. */
 export async function runConnectionsStatus(ctx: ToolContext): Promise<ToolResult> {
   try {
-    const connections = await ctx.client.listConnections(ctx.session.callerToken);
+    const connections = await ctx.client.listConnections(sessionCaller(ctx.session));
     if (connections.length === 0) {
       return {
         content: [{ type: 'text', text: 'No app connections yet — steps that need one will say so.' }],
@@ -889,7 +889,7 @@ function accountNote(account: ComposerAccount | null): string {
 /** The read_run handler: the per-step record, formatted for the fix loop. */
 export async function runReadRun(ctx: ToolContext, runId: string): Promise<ToolResult> {
   try {
-    const record = await ctx.client.readRun(runId, ctx.session.callerToken);
+    const record = await ctx.client.readRun(runId, sessionCaller(ctx.session));
     return { content: [{ type: 'text', text: formatRunRecord(record) }] };
   } catch (err) {
     return toolError(err);
@@ -914,7 +914,7 @@ function formatRunRecord(record: RunRecord): string {
  */
 export async function runFindTrigger(ctx: ToolContext, query: string): Promise<ToolResult> {
   try {
-    const catalog = await ctx.client.listTriggerCatalog(ctx.session.callerToken);
+    const catalog = await ctx.client.listTriggerCatalog(sessionCaller(ctx.session));
     const tokens = query
       .toLowerCase()
       .split(/[^a-z0-9]+/)
@@ -1037,7 +1037,7 @@ export async function runFillParams(ctx: ToolContext, nodeId: string, intent: st
     };
   }
   try {
-    const entry = await ctx.client.getActionSchema(type, ctx.session.callerToken);
+    const entry = await ctx.client.getActionSchema(type, sessionCaller(ctx.session));
     if (!entry) {
       return {
         content: [{ type: 'text', text: `fill_params: unknown action type "${type}".` }],

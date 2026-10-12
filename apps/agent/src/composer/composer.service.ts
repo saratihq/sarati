@@ -12,7 +12,9 @@ import type { AttachEvent, CanvasStep, ComposerEvent, SequencedComposerEvent, Wo
 import {
   emitToSession,
   recordUserMessage,
+  refreshCaller,
   rehydrateIntoSession,
+  sessionCaller,
   SessionStore,
   snapshotOf,
   stepsOf,
@@ -21,7 +23,7 @@ import {
 import { composerSystemPrompt } from './system-prompt';
 import { ThreadStore, type ThreadRecord } from './thread-store';
 import { WorkflowServiceClient } from './workflow-client';
-import { PlatformKeysClient } from '../config/platform-keys.client';
+import { type CallerContext, PlatformKeysClient } from '../config/platform-keys.client';
 
 /**
  * One composer turn: user message in, protocol events out. The SDK loop and
@@ -98,8 +100,7 @@ export class ComposerService {
   async *stream(
     request: StreamRequest,
     clientGone: AbortSignal,
-    callerToken: string | null,
-    callerOrgId: string | null,
+    caller: CallerContext,
     userKey: string | null = null,
   ): AsyncGenerator<SequencedComposerEvent> {
     const workflowId = request.workflow_id ?? null;
@@ -120,8 +121,8 @@ export class ComposerService {
     session.turnBaseIr = request.ir ?? null;
     try {
       // Freshest caller credentials win — tool calls run AS the user.
-      if (callerToken) session.callerToken = callerToken;
-      session.callerOrgId = callerOrgId;
+      refreshCaller(session, caller);
+      session.callerOrgId = caller.orgId ?? null;
       // A session that started before its workflow existed (composer-first new
       // build) binds to it on the first message carrying the id — never
       // rebinds. Its durable thread moves with it (scratch → the created
@@ -400,10 +401,7 @@ export class ComposerService {
     // ComposerEnabledGuard already 503s every route into here without a key; reaching this
     // without one means it was cleared mid-turn, and a keyless subprocess would surface that
     // as an opaque SDK failure instead.
-    const anthropicApiKey = await this.platformKeys.anthropicApiKey({
-      token: session.callerToken,
-      orgId: session.callerOrgId,
-    });
+    const anthropicApiKey = await this.platformKeys.anthropicApiKey(sessionCaller(session));
     if (!anthropicApiKey) throw new Error('No Anthropic API key is configured — the composer is disabled.');
     const paramCompleter = this.paramCompleterFor(anthropicApiKey);
     const server = buildComposerServer({
@@ -540,20 +538,20 @@ export class ComposerService {
   }
 
   /** Long-turn token refresh (A3): the client calls this when Clerk rotates the token mid-stream. */
-  refreshToken(sessionId: string, callerToken: string | null): boolean {
+  refreshToken(sessionId: string, caller: CallerContext): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
-    if (callerToken) session.callerToken = callerToken;
+    refreshCaller(session, caller);
     return true;
   }
 
   /** Answer a pending clarifying question (thread chip or canvas chip — first answer wins). */
-  answerQuestion(sessionId: string, questionId: string, answer: string, callerToken: string | null): boolean {
+  answerQuestion(sessionId: string, questionId: string, answer: string, caller: CallerContext): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     // An answer often arrives after a long pause — its fresh token unblocks
     // the tool calls that follow (Clerk session JWTs are short-lived).
-    if (callerToken) session.callerToken = callerToken;
+    refreshCaller(session, caller);
     return this.answers.answer(sessionId, questionId, answer);
   }
 

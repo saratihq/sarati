@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 
 import type { CallerContext } from '../config/platform-keys.client';
+import { callerTokenOf } from './composer-auth.guard';
 
 /**
  * The caller as workflow-service will see them: their own bearer, and the org they are acting in.
@@ -11,5 +12,10 @@ export function callerOf(req: Request): CallerContext {
   const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : null;
   const raw = req.headers['x-org-id'];
   const orgId = (Array.isArray(raw) ? raw[0] : raw)?.trim() || null;
-  return { token: token || null, orgId };
+  return { token: token || null, orgId, address: req.ip ?? null };
+}
+
+/** The caller as the auth guard verified them: that bearer, with the org and address the request names. */
+export function verifiedCaller(req: Request): CallerContext {
+  return { ...callerOf(req), token: callerTokenOf(req) };
 }

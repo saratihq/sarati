@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { Logger } from '@nestjs/common';
+
 import { parseCorsOrigins, validateEnv } from './env.config';
 
 const PROD = {
@@ -21,6 +23,55 @@ describe('env config', () => {
     expect(cfg.corsOriginList).toContain('http://localhost:3100');
     expect(cfg.frontendUrl).toBe('http://localhost:3100');
     expect(cfg.clerkAuthorizedParties).toBe('http://localhost:3100');
+  });
+
+  describe('TRUST_PROXY_HOPS', () => {
+    const warned = (): string[] =>
+      warn.mock.calls.map((call) => String(call[0])).filter((text) => text.includes('TRUST_PROXY'));
+    let warn: jest.SpyInstance;
+    beforeEach(() => {
+      warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    });
+    afterEach(() => warn.mockRestore());
+
+    it('defaults to trusting no proxy, and reads a whole number as given', () => {
+      expect(validateEnv({}).trustProxyHops).toBe(0);
+      expect(validateEnv({ TRUST_PROXY_HOPS: '2' }).trustProxyHops).toBe(2);
+      expect(warned()).toEqual([]);
+    });
+
+    it('reads the old flag renamed — "true" as 1, "false" as 0 — and says to write the number', () => {
+      expect(validateEnv({ TRUST_PROXY_HOPS: 'true' }).trustProxyHops).toBe(1);
+      expect(validateEnv({ TRUST_PROXY_HOPS: 'FALSE' }).trustProxyHops).toBe(0);
+      expect(warned()).toEqual([
+        'TRUST_PROXY_HOPS counts proxy hops — "true" is read as 1; write the number',
+        'TRUST_PROXY_HOPS counts proxy hops — "FALSE" is read as 0; write the number',
+      ]);
+    });
+
+    it.each(['-1', '1.5', '1e1', 'two'])('refuses %j, naming the variable', (value) => {
+      expect(() => validateEnv({ TRUST_PROXY_HOPS: value })).toThrow(
+        `TRUST_PROXY_HOPS must be a whole number of proxy hops (0, 1, 2 …), got ${JSON.stringify(value)}`,
+      );
+    });
+
+    it('reads TRUST_PROXY_HEADERS=true as one hop, and ignores it beside TRUST_PROXY_HOPS', () => {
+      expect(validateEnv({ TRUST_PROXY_HEADERS: 'true' }).trustProxyHops).toBe(1);
+      expect(validateEnv({ TRUST_PROXY_HEADERS: 'true', TRUST_PROXY_HOPS: '1' }).trustProxyHops).toBe(1);
+      expect(warned()).toEqual([
+        "TRUST_PROXY_HEADERS=true is read as TRUST_PROXY_HOPS=1 — remove it, and set TRUST_PROXY_HOPS=1 instead only if this service sits behind a proxy of your own rather than Sarati's",
+        'TRUST_PROXY_HEADERS is ignored because TRUST_PROXY_HOPS is set — remove it',
+      ]);
+    });
+
+    it('says nothing about TRUST_PROXY_HEADERS=false', () => {
+      expect(validateEnv({ TRUST_PROXY_HEADERS: 'false' }).trustProxyHops).toBe(0);
+      expect(warned()).toEqual([]);
+    });
+  });
+
+  it('names the variable when a number is not one', () => {
+    expect(() => validateEnv({ PORT: 'eighty' })).toThrow('PORT must be a whole number, got "eighty"');
   });
 
   it('rejects invalid CORS origins loudly at boot', () => {

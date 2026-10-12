@@ -8,7 +8,7 @@ async function bootstrap(): Promise<void> {
   // itself so prod and the e2e harness share one pipeline.
   const app = await NestFactory.create(AppModule, { bufferLogs: true, bodyParser: false });
   const env = configureApp(app);
-  await app.listen(env.port);
+  await (env.listenHost ? app.listen(env.port, env.listenHost) : app.listen(env.port));
 }
 
 void bootstrap();

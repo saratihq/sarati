@@ -5,6 +5,8 @@
  * with the composer disabled and saying so, rather than crash-looping.
  */
 
+import { Logger } from '@nestjs/common';
+
 /** Why the composer is off — the client renders one explanation per reason. */
 export type ComposerDisabledReason = 'anthropic_api_key_missing' | 'caller_auth_unconfigured';
 
@@ -56,6 +58,29 @@ export interface EnvConfig {
   readonly serviceSharedSecret: string | null;
   /** Whether ANY caller-auth path is configured — a boot fact, unlike the Anthropic key. */
   readonly callerAuthConfigured: boolean;
+  /** Proxy hops in front whose X-Forwarded-For entry names the visitor; 0 = the connecting peer is the visitor. */
+  readonly trustProxyHops: number;
+  /** The interface to listen on; null = every interface. */
+  readonly listenHost: string | null;
+}
+
+/** TRUST_PROXY_HOPS as a hop count; the old boolean renamed (`true`/`false`) reads as 1/0 with a warning. */
+function proxyHops(raw: string | undefined, errors: string[]): number {
+  const hops = raw?.trim() ?? '';
+  if (hops === '') return 0;
+  if (/^\d+$/.test(hops)) return Number(hops);
+  const flag = hops.toLowerCase();
+  if (flag === 'true' || flag === 'false') {
+    const read = flag === 'true' ? 1 : 0;
+    new Logger('EnvConfig').warn(
+      `TRUST_PROXY_HOPS counts proxy hops — "${hops}" is read as ${read}; write the number`,
+    );
+    return read;
+  }
+  errors.push(
+    `TRUST_PROXY_HOPS must be a whole number of proxy hops (0, 1, 2 …), got ${JSON.stringify(hops)}`,
+  );
+  return 0;
 }
 
 function asBool(value: string | undefined, fallback: boolean): boolean {
@@ -88,6 +113,7 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
   // configured, so a Clerk deployment never silently grows a second front door.
   const localAuthEnabled = asBool(raw.LOCAL_AUTH_ENABLED, !clerkIssuer);
   const localSessionSecret = localAuthEnabled ? raw.SECRET_KEY?.trim() || null : null;
+  const trustProxyHops = proxyHops(raw.TRUST_PROXY_HOPS, errors);
 
   if (errors.length > 0) {
     throw new Error(`Invalid environment:\n  - ${errors.join('\n  - ')}`);
@@ -111,5 +137,7 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
     localSessionSecret,
     serviceSharedSecret: raw.SECRET_KEY?.trim() || null,
     callerAuthConfigured: mockAuth || Boolean(clerkIssuer) || Boolean(localSessionSecret),
+    trustProxyHops,
+    listenHost: raw.LISTEN_HOST?.trim() || null,
   };
 }

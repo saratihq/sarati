@@ -10,6 +10,8 @@ import type { EnvConfig } from './env.config';
 export interface CallerContext {
   token: string | null;
   orgId?: string | null;
+  /** The visitor's address, sent on as X-Forwarded-For so the service counts their limits, not this process's. */
+  address?: string | null;
 }
 
 /** Matches workflow-service's internal issuer; its own, so this token is never a user session. */
@@ -55,6 +57,7 @@ export class PlatformKeysClient {
           Authorization: `Bearer ${caller.token}`,
           [INTERNAL_TOKEN_HEADER]: await this.token(this.secret, caller.token),
           ...(caller.orgId ? { 'X-Org-Id': caller.orgId } : {}),
+          ...(caller.address ? { 'X-Forwarded-For': caller.address } : {}),
         },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });

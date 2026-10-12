@@ -12,7 +12,8 @@ restarts in place — no need to stop anything first.
 curl -fsSL https://get.sarati.io | sh
 ```
 
-Already have the current stack file and only want new images:
+Already have the current stack file and only want new images — not when a note below says the stack
+file changed:
 
 ```bash
 cd sarati && docker compose pull && docker compose up -d
@@ -31,6 +32,22 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 ```
 
 ## Notes for specific versions
+
+### v0.2.24: visitor addresses and `TRUST_PROXY_HEADERS`
+
+Rate limits now count per visitor — an IPv6 visitor per `/64` — and the AI composer's calls count
+against the visitor who made them. Before, the service saw Sarati's own proxy as every visitor, so
+they all shared one limit: one person's failed sign-ins locked everyone out, and anyone could switch
+the composer off for everybody.
+
+- **Five containers: re-run the installer.** The stack file changed: part of the fix is in
+  `docker-compose.yaml` and `docker/Caddyfile`, which only the installer refreshes, so
+  `docker compose pull` alone keeps the shared limit. One container needs only the new image.
+- **Behind another proxy** — Cloudflare, a load balancer, a Cloudflare Tunnel — list it in
+  `SARATI_TRUSTED_PROXIES`; [Behind another proxy](/operate/configuration/#behind-another-proxy) says
+  how.
+- **`TRUST_PROXY_HEADERS` is replaced:** remove it from `.env`. With Sarati's own proxy it is ignored,
+  and the boot log says so. `TRUST_PROXY_HOPS` is only for the service image run without that proxy.
 
 ### v0.2.23: outbound requests to private addresses
 
