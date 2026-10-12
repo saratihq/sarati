@@ -112,7 +112,7 @@ Anything else reads **"The composer hit a problem — please try again."**, and 
 ## A step refuses a private/internal address
 
 ```
-refusing to send a request to a private/internal address (jira.internal). An operator can allow it by adding jira.internal to ORCHESTR_HTTP_ALLOWED_HOSTS.
+http.send_request failed: refusing to send a request to a private/internal address (wiki.internal). An operator can allow it by adding wiki.internal to ORCHESTR_HTTP_ALLOWED_HOSTS.
 ```
 
 The address resolves to somewhere that is not public, so the step was stopped before anything was
@@ -131,10 +131,59 @@ resolved. A proxy that filters by domain name refuses tunnels to addresses; allo
 should see so they reach it by name, as
 [Private addresses](/operate/configuration/#private-addresses) describes.
 
-If every app step is refused, including ones aimed at public services, this server's DNS is probably
-handing out synthetic private addresses (a fake-IP proxy or ZPA). The
+If every app step on your own credentials is refused, including ones aimed at public services, this
+server's DNS is probably handing out synthetic private addresses (a fake-IP proxy or ZPA). The
 [Private addresses](/operate/configuration/#private-addresses) section covers that, egress proxies,
 and what an entry exposes.
+
+## A step won't send its connection's credential
+
+```
+salesforce.run_query failed: refusing to send this connection's credential to https://na123.salesforce.com — it is only sent to https://*.my.salesforce.com, https://*.salesforce.mil, https://*.sfcrmproducts.cn
+```
+
+A connection's credential only ever goes to its own app's domains, the ones the message lists, so
+the step was stopped before anything was sent. `ORCHESTR_HTTP_ALLOWED_HOSTS` does not change this.
+Point the step at the app's own address:
+
+- **Salesforce:** set **Instance URL** to your org's My Domain URL,
+  `https://<your-domain>.my.salesforce.com`. A legacy instance host such as `na123.salesforce.com`,
+  a `cloudforce.com` host or an Experience Cloud `my.site.com` host is refused.
+
+## A Mailchimp or Zendesk step refuses its server prefix or subdomain
+
+```
+mailchimp.list_audiences failed: serverPrefix must be a single DNS label (letters, digits and hyphens), e.g. "acme"
+zendesk.list_tickets failed: subdomain must be a single DNS label (letters, digits and hyphens), e.g. "acme"
+```
+
+The step builds the app's address from this one field, so anything more than a single label, such as
+a whole hostname, is refused before anything is sent:
+
+- **Mailchimp:** set **Server prefix** to the datacenter alone, such as `us21`: the suffix on your API
+  key, not a hostname.
+- **Zendesk:** set **Subdomain** to the subdomain alone, `acme` for `acme.zendesk.com`.
+
+## A Jira step refuses its Instance URL
+
+```
+jira.get_issue failed: instanceUrl "https://jira.acme.internal" is not a Jira Cloud site — use e.g. https://your-domain.atlassian.net, https://your-domain.jira.com or https://your-domain.atlassian-us-gov-mod.net
+```
+
+Jira steps run against Jira Cloud only. Set **Instance URL** to your Jira Cloud site URL,
+`https://<your-site>.atlassian.net`.
+
+On a managed connection, the step also refuses to guess between sites:
+
+```
+jira.get_issue failed: this connection can reach several Jira sites (https://acme.atlassian.net, https://beta.atlassian.net) — set instanceUrl to the one to use
+```
+
+```
+jira.get_issue failed: instanceUrl https://old.atlassian.net is not a site this connection can reach — it can reach https://acme.atlassian.net
+```
+
+Set **Instance URL** to one of the sites the message lists.
 
 ## A step says it needs a connection
 

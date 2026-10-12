@@ -204,5 +204,16 @@ describe('SDK actions (e2e, isolated DB, stubbed Composio, mock auth)', () => {
     expect(detail.body.authScheme).toBeDefined();
     expect(typeof detail.body.authScheme.type).toBe('string');
     expect(detail.body.authScheme.type).not.toBe('none');
+
+    // The BYO form reads each app's field hints off this list: Zendesk's username is `{email}/token`.
+    const byo = await request(app.getHttpServer()).get('/api/node-types?engine=orchestr').expect(200);
+    const zendesk = (byo.body.node_types as Array<{ type: string; authScheme?: unknown }>).find(
+      (n) => n.type === 'zendesk.get_ticket',
+    );
+    expect(zendesk?.authScheme).toEqual({
+      type: 'basic',
+      usernameHint: '{email}/token — your Zendesk email followed by /token, e.g. me@acme.com/token',
+      passwordHint: 'A Zendesk API token',
+    });
   }, 30_000);
 });

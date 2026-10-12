@@ -32,6 +32,36 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
+### v0.2.24: moving to this version
+
+A few saved steps that ran before now stop with an error before sending anything, because they
+could act on the wrong Jira site or send a credential somewhere it does not belong. Check the
+workflows that use them before you upgrade; each fix is one field on the step.
+
+- **A managed Jira step with a blank Instance URL, on a connection that reaches two or more sites,**
+  used to run on the first of them. It now refuses and lists the sites: set Instance URL to the one
+  to use.
+- **A managed Jira step whose Instance URL names a site the connection can't reach,** such as
+  `https://old.atlassian.net`, used to run on the connection's first site instead. It now refuses and
+  lists the sites the connection can reach: set Instance URL to one of them.
+- **A managed Jira step whose Instance URL is not a Jira Cloud host,** such as a self-hosted
+  `https://jira.acme.com`, used to have it ignored. It now refuses: set Instance URL to your Jira
+  Cloud site, `https://<your-site>.atlassian.net`.
+- **A Salesforce step or trigger whose Instance URL is a legacy instance host** —
+  `na123.salesforce.com`, a `cloudforce.com` host or an Experience Cloud `my.site.com` host — now
+  refuses to send its credential there. Set Instance URL to your org's My Domain URL,
+  `https://<your-domain>.my.salesforce.com`.
+
+The messages and what to set are in Troubleshooting:
+[a Jira step](/operate/troubleshooting/#a-jira-step-refuses-its-instance-url) and
+[a Salesforce step](/operate/troubleshooting/#a-step-wont-send-its-connections-credential).
+
+`COMPOSIO_FALLBACK_APPS` is removed. In v0.2.23 and earlier it only changed where a listed app's
+step went when its type was neither a built-in action nor in the Composio catalog, and saving a
+workflow refuses such a type, so nothing changes for a step a workflow can save. If the variable is
+still set, the service logs one warning at boot and otherwise ignores it; delete the line from
+`.env`.
+
 ### v0.2.23: outbound requests to private addresses
 
 Every step and trigger that calls an address from this server now refuses a private or internal one,

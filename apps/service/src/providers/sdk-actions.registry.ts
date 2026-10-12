@@ -58,8 +58,17 @@ export function sdkCatalogEntries(): CatalogEntry[] {
   return CATALOG_ACTIONS.map((action) => manifestToCatalogEntry(action.toManifest(), action.auth));
 }
 
+const BASIC_FIELD_HINTS: Readonly<Record<string, { usernameHint: string; passwordHint: string }>> = {
+  jira: { usernameHint: 'Your Atlassian account email', passwordHint: 'An Atlassian API token' },
+  mailchimp: { usernameHint: 'Any text — Mailchimp ignores it', passwordHint: 'Your Mailchimp API key' },
+  zendesk: {
+    usernameHint: '{email}/token — your Zendesk email followed by /token, e.g. me@acme.com/token',
+    passwordHint: 'A Zendesk API token',
+  },
+};
+
 /** The auth scheme as SERIALIZABLE wire metadata for the client's credential form — a `custom` scheme's `apply()` stays server-side. */
-export function serializeAuthScheme(scheme: AuthScheme): Record<string, unknown> {
+export function serializeAuthScheme(scheme: AuthScheme, app: string): Record<string, unknown> {
   switch (scheme.type) {
     case 'apiKey':
       return { type: 'apiKey', in: scheme.in, name: scheme.name, prefix: scheme.prefix ?? '' };
@@ -71,7 +80,7 @@ export function serializeAuthScheme(scheme: AuthScheme): Record<string, unknown>
         scopes: scheme.scopes ?? [],
       };
     case 'basic':
-      return { type: 'basic' };
+      return { type: 'basic', ...BASIC_FIELD_HINTS[app] };
     case 'custom':
       return { type: 'custom' };
     case 'none':
@@ -98,7 +107,7 @@ function manifestToCatalogEntry(manifest: ManifestEntry, scheme: AuthScheme): Ca
     parameters,
     auth: manifest.authType === 'none' ? 'none' : 'connection',
     // Absent on Composio rows (managed) — the client shows a BYO form only where this is present.
-    authScheme: serializeAuthScheme(scheme),
+    authScheme: serializeAuthScheme(scheme, appSlugOf(manifest.type)),
   };
 }
 

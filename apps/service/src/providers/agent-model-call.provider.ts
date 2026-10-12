@@ -1,6 +1,6 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { type ApiKeyScheme, callAgentModel, type FetchLike, HttpClient } from '@sarati/actions-sdk';
+import { agentModelAuth, callAgentModel, type FetchLike, HttpClient } from '@sarati/actions-sdk';
 
 import { ConnectionsService } from '../connections/connections.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
@@ -17,21 +17,6 @@ import { resolveSdkAuthHandle } from './sdk-auth';
 
 /** Test-only fetch for the agent model call; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const AGENT_MODEL_FETCH = Symbol('AGENT_MODEL_FETCH');
-
-/**
- * How each provider authenticates its REST API — must stay identical to the scheme the SDK's
- * `<provider>.generate_text` LLM nodes declare, so the agent resolves a BYO/managed key exactly as they do.
- */
-const PROVIDER_AUTH: Record<AgentProvider, ApiKeyScheme> = {
-  // Anthropic: raw key in `x-api-key` (no bearer prefix).
-  claude: { type: 'apiKey', in: 'header', name: 'x-api-key' },
-  // OpenAI: bearer key in `Authorization`.
-  openai: { type: 'apiKey', in: 'header', name: 'Authorization', prefix: 'Bearer ' },
-  // Mistral: bearer key in `Authorization` (OpenAI-shaped API).
-  mistral: { type: 'apiKey', in: 'header', name: 'Authorization', prefix: 'Bearer ' },
-  // Gemini: key as a `?key=` query parameter.
-  gemini: { type: 'apiKey', in: 'query', name: 'key' },
-};
 
 /** How each provider is written to a person — the model call's error names the app, not the enum value. */
 const PROVIDER_LABEL: Record<AgentProvider, string> = {
@@ -85,7 +70,7 @@ export class AgentModelCallProvider implements AgentModelPort {
   }
 
   async call(req: ModelCallRequest, auth: AgentModelAuth): Promise<ModelTurn> {
-    const scheme = PROVIDER_AUTH[req.provider];
+    const scheme = agentModelAuth[req.provider];
     if (!scheme) {
       throw new Error(`Agent model call: unsupported provider "${String(req.provider)}"`);
     }

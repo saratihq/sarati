@@ -1509,7 +1509,13 @@ export interface NodeTypeSupport {
 export type AuthScheme =
   | { type: "apiKey"; in: "header" | "query"; name: string; prefix: string }
   | { type: "oauth2"; authUrl?: string; tokenUrl?: string; scopes: string[] }
-  | { type: "basic" }
+  | {
+      type: "basic";
+      /** What the app wants as the username, when "Username" alone would mislead. */
+      usernameHint?: string;
+      /** What the app wants as the password, e.g. an API token. */
+      passwordHint?: string;
+    }
   | { type: "custom" }
   | { type: "none" };
 

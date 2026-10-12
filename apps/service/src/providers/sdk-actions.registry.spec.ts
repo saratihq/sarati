@@ -66,6 +66,22 @@ describe('sdk-actions registry', () => {
     const custom = byType('custom');
     if (custom) expect(Object.keys(custom)).toEqual(['type']);
   });
+
+  it('every basic-scheme row says what its username and password take', () => {
+    const basic = sdkCatalogEntries()
+      .map((e) => [String(e.category), e.authScheme as Record<string, unknown>] as const)
+      .filter(([, scheme]) => scheme.type === 'basic');
+    expect(basic.length).toBeGreaterThan(0);
+    for (const [, scheme] of basic) {
+      expect(scheme.usernameHint).toEqual(expect.any(String));
+      expect(scheme.passwordHint).toEqual(expect.any(String));
+    }
+    expect(Object.fromEntries(basic.map(([app, scheme]) => [app, scheme.usernameHint]))).toEqual({
+      jira: 'Your Atlassian account email',
+      mailchimp: 'Any text — Mailchimp ignores it',
+      zendesk: '{email}/token — your Zendesk email followed by /token, e.g. me@acme.com/token',
+    });
+  });
 });
 
 describe('Composio universal-fallback catalog (data/composio_catalog.json)', () => {

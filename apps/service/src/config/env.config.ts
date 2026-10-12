@@ -194,10 +194,6 @@ export class EnvConfig {
   @IsString()
   composioBaseUrl = 'https://backend.composio.dev';
 
-  /** Extra app slugs (comma/space list) forced onto the Composio execution fallback rail. */
-  @IsString()
-  composioFallbackApps = '';
-
   /** Open-core edition flag: gates ee-only wiring, never core logic. */
   @IsIn(['oss', 'cloud'])
   edition: 'oss' | 'cloud' = 'oss';
@@ -229,6 +225,14 @@ function asInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   if (!Number.isInteger(n)) throw new Error(`Expected an integer env value, got ${JSON.stringify(value)}`);
   return n;
+}
+
+/** Warn at boot when a variable the service no longer reads is still set, since it silently does nothing. */
+export function warnRetiredEnv(raw: Record<string, string | undefined>): void {
+  if (!raw.COMPOSIO_FALLBACK_APPS?.trim()) return;
+  new Logger('EnvConfig').warn(
+    'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.',
+  );
 }
 
 /** Parse the process env into an EnvConfig; fails fast at boot on invalid values and prod guards. */
@@ -264,7 +268,6 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       composioBaseUrl: raw.COMPOSIO_BASE_URL
         ? parseApiBaseUrl('COMPOSIO_BASE_URL', raw.COMPOSIO_BASE_URL)
         : undefined,
-      composioFallbackApps: raw.COMPOSIO_FALLBACK_APPS ?? '',
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
       throttleLimit: asInt(raw.THROTTLE_LIMIT, 60),

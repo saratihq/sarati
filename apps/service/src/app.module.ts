@@ -10,7 +10,7 @@ import { LocalAuthModule } from './auth/local/local-auth.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { genRequestId } from './common/request-id';
 import { REQUEST_LOG_REDACTION } from './common/request-log-redaction';
-import { validateEnv, type EnvConfig } from './config/env.config';
+import { validateEnv, warnRetiredEnv, type EnvConfig } from './config/env.config';
 import { CoreModule } from './core.module';
 import { DatabaseModule } from './database/database.module';
 import { EnvironmentsModule } from './environments/environments.module';
@@ -38,7 +38,12 @@ import { PlatformModule } from './platform/platform.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [() => ({ env: validateEnv(process.env) })],
+      load: [
+        () => {
+          warnRetiredEnv(process.env);
+          return { env: validateEnv(process.env) };
+        },
+      ],
     }),
     LoggerModule.forRoot({
       pinoHttp: {

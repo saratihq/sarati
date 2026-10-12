@@ -320,17 +320,25 @@ function AppCredentialForm({
               autoFocus
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              aria-describedby={scheme.usernameHint ? "byo-username-hint" : undefined}
               data-testid="byo-username"
             />
           </Field>
+          {scheme.usernameHint && (
+            <Hint id="byo-username-hint">{scheme.usernameHint}</Hint>
+          )}
           <Field label="Password">
             <Input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              aria-describedby={scheme.passwordHint ? "byo-password-hint" : undefined}
               data-testid="byo-password"
             />
           </Field>
+          {scheme.passwordHint && (
+            <Hint id="byo-password-hint">{scheme.passwordHint}</Hint>
+          )}
           <DisplayNameField value={displayName} onChange={setDisplayName} />
           <div className="flex justify-end pt-1">
             <Button
@@ -464,9 +472,10 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Hint({ children }: { children: ReactNode }) {
+function Hint({ id, children }: { id?: string; children: ReactNode }) {
   return (
     <p
+      id={id}
       className="text-[11px] m-0"
       style={{ color: "var(--orchestr-ink-subtle)" }}
     >

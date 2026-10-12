@@ -28,11 +28,7 @@ export interface SdkAuthContext {
   fetchImpl?: FetchLike;
 }
 
-/**
- * Build the opaque {@link AuthHandle} an SDK primitive runs on: `none` → credential-free, MANAGED → the Composio
- * proxy transport (we hold no token), BYO/inline → the decrypted credential on the direct rail. The caller's
- * `needsConnectionMessage` becomes the 422 when no credential satisfies the scheme; the key only ever reaches the transport.
- */
+/** The AuthHandle an SDK primitive runs on; a connection's wrong-shaped credential names what to reconnect with, any other miss is `needsConnectionMessage`. */
 export async function resolveSdkAuthHandle(
   scheme: AuthScheme,
   ctx: SdkAuthContext,
@@ -83,7 +79,14 @@ export async function resolveSdkAuthHandle(
     // BYO/direct connection: decrypt and shape into an SDK DirectCredential.
     const credential = await ctx.connections.getCredential(ctx.externalUserId, connectionId);
     const direct = toDirectCredential(scheme, credential);
-    if (!direct) throw new DomainError(needsConnectionMessage, 422);
+    if (!direct) {
+      throw new DomainError(
+        credential === null
+          ? needsConnectionMessage
+          : `Connection ${connectionId} ${unusableCredential(scheme)}`,
+        422,
+      );
+    }
     return createDirectAuth(scheme, direct, fetchOptions);
   }
 
@@ -116,12 +119,19 @@ export function toDirectCredential(scheme: AuthScheme, credential: unknown): Dir
   return scheme.type === 'apiKey' ? { type: 'apiKey', value: token } : { type: 'bearer', token };
 }
 
+/** Why a connected credential can't sign in on this scheme, and what to reconnect it with. */
+export function unusableCredential(scheme: AuthScheme): string {
+  return scheme.type === 'basic'
+    ? 'has no username and password — reconnect it with an email or username plus an API token or password'
+    : 'has no API key or token — reconnect it with one';
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
 
 /** Pull a token out of a stored/inline credential across the common shapes. */
-function extractToken(credential: unknown): string | null {
+export function extractToken(credential: unknown): string | null {
   if (typeof credential === 'string') return credential || null;
   const c = asRecord(credential);
   if (c) {

@@ -1,9 +1,6 @@
-import type { ConfigService } from '@nestjs/config';
-
 import type { AccountIdentity } from '../connections/account-identity';
 import type { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import type { ConnectionsService, StoredAccount } from '../connections/connections.service';
-import type { EnvConfig } from '../config/env.config';
 import type { PlatformKeysService } from '../platform/platform-keys.service';
 import { ActionRouterProvider } from './action-router.provider';
 import type { RunActionInput } from './managed-integration-provider';
@@ -41,7 +38,6 @@ function build(stored: Record<string, StoredAccount>, slot?: { id: string; owner
       accountOf,
       recordAccount,
     } as unknown as ConnectionsService,
-    { get: () => ({ composioFallbackApps: '' }) } as unknown as ConfigService<{ env: EnvConfig }, true>,
     {
       scopeFor: (userId: string) => Promise.resolve({ kind: 'user', userId }),
     } as unknown as PlatformKeysService,
@@ -140,6 +136,22 @@ describe('{{$account…}} in the action router', () => {
       'this step runs as none',
     );
     expect(runOurs).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown type before asking the provider or storing an account', async () => {
+    const { router, runOurs, accountOf, recordAccount } = build({
+      'u1:c1': { provider: 'slack', account: null, checkedAt: null },
+    });
+    const failure = router.runAction(
+      send({ text: '{{$account.name}}' }, { actionId: 'slack.no_such_thing' }),
+    );
+    await expect(failure).rejects.toThrow(
+      'No installed rail can run "slack.no_such_thing" — it is neither an SDK action nor in the managed (Composio) catalog',
+    );
+    await expect(failure).rejects.toMatchObject({ status: 400 });
+    expect(runOurs).not.toHaveBeenCalled();
+    expect(accountOf).not.toHaveBeenCalled();
+    expect(recordAccount).not.toHaveBeenCalled();
   });
 
   it('touches nothing when a step has no account reference', async () => {

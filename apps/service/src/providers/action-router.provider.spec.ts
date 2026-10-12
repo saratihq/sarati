@@ -1,13 +1,10 @@
-import type { ConfigService } from '@nestjs/config';
-
 import { DomainError } from '../common/domain-error';
 import type { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import type { ConnectionsService, ManagedConnectionRef } from '../connections/connections.service';
 import { COMPOSIO_DIRECT_APPS } from '../connections/managed-app-rails';
-import type { EnvConfig } from '../config/env.config';
 import { ActionRouterProvider } from './action-router.provider';
 import { InMemoryStore } from './provider-store';
-import { composioToolFor } from './sdk-actions.registry';
+import { composioToolFor, isSdkActionType } from './sdk-actions.registry';
 import { composioTriggerTypes, POLL_CURSOR_KEY } from './composio-trigger.registry';
 import type { RunActionInput, TriggerInput } from './managed-integration-provider';
 import type { SdkActionsProvider } from './sdk-actions.provider';
@@ -26,11 +23,8 @@ function platformKeysStub(): PlatformKeysService {
 
 // There are exactly two rails: our SDK actions and Composio, else an honest error.
 function build(opts: {
-  fallbackApps?: string;
   managedRef?: ManagedConnectionRef | null;
   composioConfigured?: boolean;
-  /** Public types the SDK owns for this test (default: none → nothing routes to ours). */
-  sdkTypes?: string[];
   /** The org cluster connection resolveClusterConnection returns (default: none). */
   clusterConn?: { id: string; ownerUserId: string } | null;
   /** The env SLOT connection resolveSlotConnection returns (; default: none). */
@@ -44,9 +38,8 @@ function build(opts: {
   const resolveClusterConnection = jest.fn().mockResolvedValue(opts.clusterConn ?? null);
   const resolveSlotConnection = jest.fn().mockResolvedValue(opts.slotConn ?? null);
 
-  const sdkTypes = new Set(opts.sdkTypes ?? []);
   const orchestrActions = {
-    has: (type: string) => sdkTypes.has(type),
+    has: isSdkActionType,
     runAction: runOurs,
   } as unknown as SdkActionsProvider;
   const composio = {
@@ -59,10 +52,7 @@ function build(opts: {
     resolveClusterConnection,
     resolveSlotConnection,
   } as unknown as ConnectionsService;
-  const config = {
-    get: () => ({ composioFallbackApps: opts.fallbackApps ?? '' }) as Partial<EnvConfig>,
-  } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const router = new ActionRouterProvider(orchestrActions, composio, connections, config, platformKeysStub());
+  const router = new ActionRouterProvider(orchestrActions, composio, connections, platformKeysStub());
   return {
     router,
     execute,
@@ -76,6 +66,12 @@ function build(opts: {
 
 // A real catalog entry that is NOT an SDK action — a genuine per-action gap, the universal fallback's target.
 const COMPOSIO_ONLY = 'asana.get_current_user';
+// A real catalog entry of an app the SDK ships no action for.
+const TRELLO_CATALOG = 'trello.add_boards';
+// A type of that same app that is in neither registry, so the commit check refuses it too.
+const TRELLO_UNKNOWN = 'trello.get_card';
+// SDK-owned AND in the Composio catalog — both rails could run it.
+const BOTH_RAILS = 'jira.search_issues';
 
 const input = (
   actionId: string,
@@ -99,45 +95,55 @@ const managed = (over: Partial<ManagedConnectionRef> = {}): ManagedConnectionRef
 
 describe('ActionRouterProvider', () => {
   it('routes an SDK action to OUR provider FIRST — before every Composio rail', async () => {
-    // github is on NO Composio-direct rail, so ours wins even on a managed connection.
-    const { router, execute, runOurs } = build({
-      sdkTypes: ['github.create_issue'],
-      managedRef: managed(),
-    });
-    const out = await router.runAction(input('github.create_issue', 'conn-1'));
+    // slack is on NO Composio-direct rail, so ours wins even on a managed connection.
+    const { router, execute, runOurs } = build({ managedRef: managed() });
+    const out = await router.runAction(input('slack.send_channel_message', 'conn-1'));
     expect(out).toEqual({ output: { via: 'sdk-actions' } });
     expect(runOurs).toHaveBeenCalledTimes(1);
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it.each(['mailchimp.list_audiences', 'zendesk.list_tickets', 'intercom.list_contacts'])(
+    'a managed %s step runs on OUR action — no app-wide Composio allowlist pre-empts it',
+    async (type) => {
+      const { router, execute, runOurs } = build({ managedRef: managed() });
+      const out = await router.runAction(input(type, 'conn-1'));
+      expect(out).toEqual({ output: { via: 'sdk-actions' } });
+      expect(runOurs).toHaveBeenCalledTimes(1);
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
   // ─── Rail (a0): COMPOSIO-DIRECT apps — a MANAGED connection goes via Composio before
   //     every other rail; BYO/none keeps the SDK rail. ───
 
   it('routes EVERY googleapis app on a managed connection through Composio typed execution', async () => {
-    for (const slug of ['gmail', 'sheets', 'docs', 'calendar', 'drive']) {
-      const { router, execute, runOurs } = build({
-        sdkTypes: [`${slug}.get_thing`],
-        managedRef: managed(),
-      });
-      const out = await router.runAction(input(`${slug}.get_thing`, 'conn-1'));
+    for (const type of [
+      'gmail.get_profile',
+      'sheets.read_range',
+      'docs.read_document',
+      'calendar.delete_event',
+      'drive.list_files',
+    ]) {
+      const { router, execute, runOurs } = build({ managedRef: managed() });
+      const out = await router.runAction(input(type, 'conn-1'));
       expect(out).toEqual({ output: { via: 'composio' } });
+      const [appSlug, actionName] = type.split('.');
       expect(execute).toHaveBeenCalledWith({
         scope: SCOPE,
-        appSlug: slug,
-        actionName: 'get_thing',
+        appSlug,
+        actionName,
         props: { foo: 'bar' },
         connectedAccountId: 'ca__1',
         userId: 'user-1',
+        tool: composioToolFor(type),
       });
       expect(runOurs).not.toHaveBeenCalled();
     }
   });
 
   it('a managed gmail SDK action (the 401 repro, gmail.get_profile) goes Composio-direct, not the SDK rail', async () => {
-    const { router, execute, runOurs, managedRef } = build({
-      sdkTypes: ['gmail.get_profile'],
-      managedRef: managed(),
-    });
+    const { router, execute, runOurs, managedRef } = build({ managedRef: managed() });
     const out = await router.runAction(input('gmail.get_profile', 'conn-1'));
     expect(out).toEqual({ output: { via: 'composio' } });
     expect(runOurs).not.toHaveBeenCalled();
@@ -148,7 +154,6 @@ describe('ActionRouterProvider', () => {
 
   it('a BYO googleapis connection keeps the SDK rail (a real token needs no proxy)', async () => {
     const { router, execute, runOurs } = build({
-      sdkTypes: ['gmail.get_profile'],
       managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
     });
     const out = await router.runAction(input('gmail.get_profile', 'conn-1'));
@@ -158,7 +163,7 @@ describe('ActionRouterProvider', () => {
   });
 
   it('a googleapis step with NO connection falls through to the SDK rail (its honest 422)', async () => {
-    const { router, execute, runOurs, managedRef } = build({ sdkTypes: ['gmail.get_profile'] });
+    const { router, execute, runOurs, managedRef } = build({});
     const out = await router.runAction(input('gmail.get_profile'));
     expect(out).toEqual({ output: { via: 'sdk-actions' } });
     expect(runOurs).toHaveBeenCalledTimes(1);
@@ -166,71 +171,7 @@ describe('ActionRouterProvider', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  // ─── Rail (b): TRANSPORT-GAP apps — a managed connection runs via Composio. ───
-
-  it('routes a TRANSPORT-GAP app on a managed connection through Composio', async () => {
-    const { router, execute } = build({ managedRef: managed() });
-    const out = await router.runAction(input('jira.search_issues', 'conn-1'));
-    expect(out).toEqual({ output: { via: 'composio' } });
-    expect(execute).toHaveBeenCalledWith({
-      scope: SCOPE,
-      appSlug: 'jira',
-      actionName: 'search_issues',
-      props: { foo: 'bar' },
-      connectedAccountId: 'ca__1',
-      userId: 'user-1',
-      // The EXACT catalog tool is passed so execution routes by slug, not name.
-      tool: composioToolFor('jira.search_issues'),
-    });
-  });
-
-  it('drops idempotencyKey on the Composio typed rail (accepted at-least-once) — and never errors for it', async () => {
-    const { router, execute } = build({ managedRef: managed() });
-    const withKey: RunActionInput = {
-      ...input('jira.search_issues', 'conn-1'),
-      idempotencyKey: 'user-1:run-7:n1',
-    };
-    const out = await router.runAction(withKey); // must not throw for lacking a key
-    expect(out).toEqual({ output: { via: 'composio' } });
-    // Composio's tool-execute has no idempotency param → the key is deliberately not forwarded.
-    expect(execute).toHaveBeenCalledWith(expect.not.objectContaining({ idempotencyKey: expect.anything() }));
-  });
-
-  it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed', async () => {
-    const { router, execute } = build({}); // no managed connection at all
-    const dry: RunActionInput = { ...input('jira.search_issues'), dryRun: true };
-    const out = await router.runAction(dry);
-    expect(out.output).toMatchObject({ dry_run: true, withheld: 'managed_step' });
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it('honours the COMPOSIO_FALLBACK_APPS override (forces slack onto Composio)', async () => {
-    const { router, execute } = build({ fallbackApps: 'slack', managedRef: managed() });
-    await router.runAction(input('slack.list_users', 'conn-1'));
-    expect(execute).toHaveBeenCalledTimes(1);
-  });
-
-  it('refuses a fallback-only app on a BYO connection with an honest error', async () => {
-    const { router, execute } = build({
-      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
-    });
-    await expect(router.runAction(input('trello.get_card', 'conn-1'))).rejects.toThrow(
-      /needs a managed connection/i,
-    );
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it('refuses a fallback-only step that references no connection', async () => {
-    const { router } = build({});
-    await expect(router.runAction(input('trello.get_card'))).rejects.toBeInstanceOf(DomainError);
-  });
-
-  it('refuses a managed connection that is not active yet', async () => {
-    const { router } = build({ managedRef: managed({ status: 'pending' }) });
-    await expect(router.runAction(input('zendesk.find_tickets', 'conn-1'))).rejects.toThrow(/not active/i);
-  });
-
-  // ─── Rail (c): universal Composio fallback — only after (a) and (b) decline. ───
+  // ─── Rail (b): universal Composio fallback — every routable type no SDK action owns. ───
 
   it('routes a Composio-only action on a managed connection through the universal fallback', async () => {
     const { router, execute, runOurs } = build({ managedRef: managed() });
@@ -249,12 +190,51 @@ describe('ActionRouterProvider', () => {
     });
   });
 
+  it('a catalog type of an app with no SDK action (trello) runs on the universal fallback', async () => {
+    const { router, execute, runOurs } = build({ managedRef: managed() });
+    const out = await router.runAction(input(TRELLO_CATALOG, 'conn-1'));
+    expect(out).toEqual({ output: { via: 'composio' } });
+    expect(runOurs).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appSlug: 'trello',
+        actionName: 'add_boards',
+        tool: composioToolFor(TRELLO_CATALOG),
+      }),
+    );
+  });
+
   it('the SDK action wins over the universal fallback when both could run it', async () => {
-    const { router, execute, runOurs } = build({ sdkTypes: [COMPOSIO_ONLY], managedRef: managed() });
-    const out = await router.runAction(input(COMPOSIO_ONLY, 'conn-1'));
+    const { router, execute, runOurs } = build({ managedRef: managed() });
+    const out = await router.runAction(input(BOTH_RAILS, 'conn-1'));
     expect(out).toEqual({ output: { via: 'sdk-actions' } });
     expect(runOurs).toHaveBeenCalledTimes(1);
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('drops idempotencyKey on the Composio typed rail (accepted at-least-once) — and never errors for it', async () => {
+    const { router, execute } = build({ managedRef: managed() });
+    const withKey: RunActionInput = {
+      ...input(COMPOSIO_ONLY, 'conn-1'),
+      idempotencyKey: 'user-1:run-7:n1',
+    };
+    const out = await router.runAction(withKey); // must not throw for lacking a key
+    expect(out).toEqual({ output: { via: 'composio' } });
+    // Composio's tool-execute has no idempotency param → the key is deliberately not forwarded.
+    expect(execute).toHaveBeenCalledWith(expect.not.objectContaining({ idempotencyKey: expect.anything() }));
+  });
+
+  it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed', async () => {
+    const { router, execute } = build({}); // no managed connection at all
+    const dry: RunActionInput = { ...input(COMPOSIO_ONLY), dryRun: true };
+    const out = await router.runAction(dry);
+    expect(out.output).toMatchObject({ dry_run: true, withheld: 'managed_step' });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses a managed connection that is not active yet', async () => {
+    const { router } = build({ managedRef: managed({ status: 'pending' }) });
+    await expect(router.runAction(input(TRELLO_CATALOG, 'conn-1'))).rejects.toThrow(/not active/i);
   });
 
   it('gives a Composio-only action on a BYO connection the honest managed-only error', async () => {
@@ -273,7 +253,7 @@ describe('ActionRouterProvider', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  // ─── Rail (d): honest error — no SDK action and no Composio home for the app. ───
+  // ─── An unroutable type: the commit check's own refusal, before any rail or connection lookup. ───
 
   it('throws an honest DomainError when nothing anywhere can run the action', async () => {
     const { router, execute } = build({});
@@ -283,6 +263,38 @@ describe('ActionRouterProvider', () => {
     await expect(router.runAction(input('nope.definitely_not_real', 'conn-1'))).rejects.toBeInstanceOf(
       DomainError,
     );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['managed', managed()],
+    ['BYO', managed({ authType: 'oauth2', connectedAccountId: null })],
+  ] as const)(
+    'an unknown type of an app Composio runs (trello.get_card) is the same 400 on a %s connection',
+    async (_label, ref) => {
+      const { router, execute, runOurs, managedRef } = build({ managedRef: ref });
+      const failure = router.runAction(input(TRELLO_UNKNOWN, 'conn-1'));
+      await expect(failure).rejects.toThrow(
+        'No installed rail can run "trello.get_card" — it is neither an SDK action nor in the managed (Composio) catalog',
+      );
+      await expect(failure).rejects.toMatchObject({ status: 400 });
+      expect(managedRef).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(runOurs).not.toHaveBeenCalled();
+    },
+  );
+
+  it('an unknown type with no connection is the same 400', async () => {
+    const { router } = build({});
+    await expect(router.runAction(input(TRELLO_UNKNOWN))).rejects.toThrow(/No installed rail can run/);
+  });
+
+  it('an unknown type of a COMPOSIO-DIRECT app is the same 400, never a fuzzy Composio match', async () => {
+    const { router, execute, managedRef } = build({ managedRef: managed() });
+    await expect(router.runAction(input('gmail.not_a_real_action', 'conn-1'))).rejects.toThrow(
+      /No installed rail can run "gmail\.not_a_real_action"/,
+    );
+    expect(managedRef).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -298,10 +310,9 @@ describe('ActionRouterProvider', () => {
 
   it('env run swaps the step connection for the org cluster connection, run AS its owner', async () => {
     const { router, runOurs, resolveClusterConnection } = build({
-      sdkTypes: ['slack.list_users'],
       clusterConn: { id: 'cluster-conn', ownerUserId: 'owner-9' },
     });
-    await router.runAction(input('slack.list_users', 'personal-conn', PROD));
+    await router.runAction(input('slack.send_channel_message', 'personal-conn', PROD));
     expect(resolveClusterConnection).toHaveBeenCalledWith('org-1', 'prod', 'slack');
     // The downstream rail sees the CLUSTER connection + the OWNER identity.
     expect(runOurs).toHaveBeenCalledWith(
@@ -310,16 +321,16 @@ describe('ActionRouterProvider', () => {
   });
 
   it('env run with no cluster connection for the app is a hard 428 (never the author personal one)', async () => {
-    const { router, runOurs } = build({ sdkTypes: ['slack.list_users'], clusterConn: null });
-    await expect(router.runAction(input('slack.list_users', 'personal-conn', PROD))).rejects.toThrow(
-      /No "slack" connection in the prod environment/i,
-    );
+    const { router, runOurs } = build({ clusterConn: null });
+    await expect(
+      router.runAction(input('slack.send_channel_message', 'personal-conn', PROD)),
+    ).rejects.toThrow(/No "slack" connection in the prod environment/i);
     expect(runOurs).not.toHaveBeenCalled();
   });
 
   it('a TEST run (no environment) keeps the step personal connection + identity untouched', async () => {
-    const { router, runOurs, resolveClusterConnection } = build({ sdkTypes: ['slack.list_users'] });
-    await router.runAction(input('slack.list_users', 'personal-conn'));
+    const { router, runOurs, resolveClusterConnection } = build({});
+    await router.runAction(input('slack.send_channel_message', 'personal-conn'));
     expect(resolveClusterConnection).not.toHaveBeenCalled();
     expect(runOurs).toHaveBeenCalledWith(
       expect.objectContaining({ auth: { connectionId: 'personal-conn' }, externalUserId: 'user-1' }),
@@ -328,10 +339,9 @@ describe('ActionRouterProvider', () => {
 
   it('an env run for a step that references NO connection is left untouched (no cluster lookup)', async () => {
     const { router, runOurs, resolveClusterConnection } = build({
-      sdkTypes: ['slack.list_users'],
       clusterConn: { id: 'cluster-conn', ownerUserId: 'owner-9' },
     });
-    await router.runAction(input('slack.list_users', undefined, PROD));
+    await router.runAction(input('slack.send_channel_message', undefined, PROD));
     expect(resolveClusterConnection).not.toHaveBeenCalled();
     expect(runOurs).toHaveBeenCalledWith(
       expect.objectContaining({ auth: undefined, externalUserId: 'user-1' }),
@@ -342,10 +352,9 @@ describe('ActionRouterProvider', () => {
 
   it('an env run with environment_id rebinds the step through the SLOT, run AS its owner', async () => {
     const { router, runOurs, resolveSlotConnection, resolveClusterConnection } = build({
-      sdkTypes: ['slack.list_users'],
       slotConn: { id: 'slot-conn', ownerUserId: 'owner-7' },
     });
-    await router.runAction(input('slack.list_users', 'personal-conn', STAGING_SLOT));
+    await router.runAction(input('slack.send_channel_message', 'personal-conn', STAGING_SLOT));
     expect(resolveSlotConnection).toHaveBeenCalledWith('env-42', 'slack');
     expect(resolveClusterConnection).not.toHaveBeenCalled(); // the id path never touches the legacy key
     expect(runOurs).toHaveBeenCalledWith(
@@ -355,26 +364,34 @@ describe('ActionRouterProvider', () => {
 
   it('a MISSING slot is a hard 428 naming the env + app — never the pool', async () => {
     const { router, runOurs } = build({
-      sdkTypes: ['slack.list_users'],
       slotConn: null,
       // Even a legacy cluster row must NOT rescue an id-keyed run — no borrowing.
       clusterConn: { id: 'cluster-conn', ownerUserId: 'owner-9' },
     });
-    await expect(router.runAction(input('slack.list_users', 'personal-conn', STAGING_SLOT))).rejects.toThrow(
-      /No "slack" connection in the staging environment/i,
-    );
     await expect(
-      router.runAction(input('slack.list_users', 'personal-conn', STAGING_SLOT)),
+      router.runAction(input('slack.send_channel_message', 'personal-conn', STAGING_SLOT)),
+    ).rejects.toThrow(/No "slack" connection in the staging environment/i);
+    await expect(
+      router.runAction(input('slack.send_channel_message', 'personal-conn', STAGING_SLOT)),
     ).rejects.toMatchObject({ status: 428 });
     expect(runOurs).not.toHaveBeenCalled();
   });
 
+  it('an unknown type in an env run with no slot is the commit check’s 400, before any slot lookup', async () => {
+    const { router, resolveSlotConnection, resolveClusterConnection, managedRef } = build({ slotConn: null });
+    const failure = router.runAction(input(TRELLO_UNKNOWN, 'personal-conn', STAGING_SLOT));
+    await expect(failure).rejects.toThrow(/No installed rail can run "trello\.get_card"/);
+    await expect(failure).rejects.toMatchObject({ status: 400 });
+    expect(resolveSlotConnection).not.toHaveBeenCalled();
+    expect(resolveClusterConnection).not.toHaveBeenCalled();
+    expect(managedRef).not.toHaveBeenCalled();
+  });
+
   it('a Default run (no env context) never touches slot or cluster resolution', async () => {
     const { router, runOurs, resolveSlotConnection, resolveClusterConnection } = build({
-      sdkTypes: ['slack.list_users'],
       slotConn: { id: 'slot-conn', ownerUserId: 'owner-7' },
     });
-    await router.runAction(input('slack.list_users', 'personal-conn'));
+    await router.runAction(input('slack.send_channel_message', 'personal-conn'));
     expect(resolveSlotConnection).not.toHaveBeenCalled();
     expect(resolveClusterConnection).not.toHaveBeenCalled();
     expect(runOurs).toHaveBeenCalledWith(

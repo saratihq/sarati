@@ -232,8 +232,8 @@ importers:
         specifier: ^11.0.3
         version: 11.0.3(@nestjs/common@11.1.28(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)(typeorm@1.1.0(pg@8.22.0)(ts-node@10.9.2(@types/node@22.20.1)(typescript@5.9.3)))
       '@sarati/actions-sdk':
-        specifier: ^0.1.6
-        version: 0.1.6
+        specifier: ^0.2.1
+        version: 0.2.1
       class-transformer:
         specifier: ^0.5.1
         version: 0.5.1
@@ -2470,8 +2470,8 @@ packages:
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
 
-  '@sarati/actions-sdk@0.1.6':
-    resolution: {integrity: sha512-qgiScb6BlKXjGYJu54Bbqk7ultpcGS0yqXYf9Q3RJVEA24UKgRmls7P7YFg+xAKTyIkSzcx3blUXzqpOxOrfJw==}
+  '@sarati/actions-sdk@0.2.1':
+    resolution: {integrity: sha512-HScRour7YEv8cOfV2ElFWYP2Xf2pvsMgfhCbbI2TD6vJowoqbUx38fiwTF3CGlY+vo+MRiNz3h9NHiSYo1baSQ==}
     engines: {node: '>=22'}
 
   '@sinclair/typebox@0.27.12':
@@ -9259,7 +9259,7 @@ snapshots:
 
   '@rtsao/scc@1.1.0': {}
 
-  '@sarati/actions-sdk@0.1.6':
+  '@sarati/actions-sdk@0.2.1':
     dependencies:
       exceljs: 4.4.0
       fast-xml-parser: 4.5.7

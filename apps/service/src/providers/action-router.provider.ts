@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
@@ -7,12 +6,7 @@ import { type AccountIdentity } from '../connections/account-identity';
 import { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import { ConnectionsService, type ManagedConnectionRef } from '../connections/connections.service';
 import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
-import {
-  isComposioDirectApp,
-  mustUseComposioFallback,
-  parseFallbackOverride,
-} from '../connections/managed-app-rails';
-import type { EnvConfig } from '../config/env.config';
+import { isComposioDirectApp } from '../connections/managed-app-rails';
 import { accountRefFields, accountRefText, fillAccountRefs, isAccountRefField } from '../runtime/account-ref';
 import { accountProbeFor, type AccountTarget, identityFrom } from './account-probes';
 import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
@@ -30,26 +24,18 @@ import type {
   TriggerInput,
 } from './managed-integration-provider';
 
-/**
- * The run-time resolution-priority seam across the two execution rails (our clean-room SDK and Composio), picking one
- * per action in the order marked (a0)/(a)/(b)/(c)/(d) in its `route`. The decision is a
- * static registry/allowlist, never a run-time guess, and only MANAGED connections may take a Composio rail.
- */
+/** Picks each action's rail in the static order marked in `route`; only a MANAGED connection takes Composio. */
 @Injectable()
 export class ActionRouterProvider implements ManagedIntegrationProvider {
   readonly key = 'router';
   private readonly logger = new Logger(ActionRouterProvider.name);
-  private readonly fallbackOverride: ReadonlySet<string>;
 
   constructor(
     private readonly orchestrActions: SdkActionsProvider,
     private readonly composio: ComposioExecutionProvider,
     private readonly connections: ConnectionsService,
-    config: ConfigService<{ env: EnvConfig }, true>,
     private readonly platformKeys: PlatformKeysService,
-  ) {
-    this.fallbackOverride = parseFallbackOverride(config.get('env', { infer: true }).composioFallbackApps);
-  }
+  ) {}
 
   /** Whose key this run uses: `scopeFor` is the ONE rule, so a personal-org id resolves to the user. */
   private scopeOf(input: { externalUserId: string; orgId?: string | null }): Promise<PlatformKeyScope> {
@@ -57,8 +43,10 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   }
 
   async runAction(input: RunActionInput): Promise<RunActionResult> {
+    // The commit check's own gate, before any connection lookup or provider call: commit-reject ⟺ run-400.
+    const appSlug = this.routableAppSlug(input.actionId);
     // Env-scoping runs BEFORE routing, so every rail resolves the right account transparently.
-    input = await this.applyEnvConnection(input);
+    input = await this.applyEnvConnection(input, appSlug);
     // Only now is the connection the step runs as decided, so only now can `{{$account…}}` be filled (#17).
     input = await this.fillAccount(input);
     return this.route(input);
@@ -113,12 +101,11 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return { ...input, props: props as Record<string, unknown> };
   }
 
-  /** Pick the rail for one action, in the order marked (a0)/(a)/(b)/(c)/(d). */
+  /** Pick the rail for one action, in the order marked (a0)/(a)/(b). */
   private async route(input: RunActionInput): Promise<RunActionResult> {
-    const appSlug = validatedAppSlug(input.actionId);
-    // (a0) COMPOSIO-DIRECT apps: a managed connection executes via Composio typed execution
-    //      ahead of every other rail (Google rejects the SDK's proxy leg); BYO/none falls through.
-    if (appSlug && isComposioDirectApp(appSlug)) {
+    const appSlug = this.routableAppSlug(input.actionId);
+    // (a0) COMPOSIO-DIRECT apps: a managed connection runs via Composio (Google rejects the SDK's proxy leg).
+    if (isComposioDirectApp(appSlug)) {
       const ref = await this.managedRefOf(input.externalUserId, input.auth);
       if (ref?.authType === 'managed') return this.runViaComposio(appSlug, input, ref);
     }
@@ -127,26 +114,16 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
       this.logger.log(`Routing ${input.actionId} through our own action`);
       return this.orchestrActions.runAction(input);
     }
-    // (b) TRANSPORT-GAP allowlist — a managed connection must run via Composio.
-    if (appSlug && mustUseComposioFallback(appSlug, this.fallbackOverride)) {
-      return this.runViaComposio(appSlug, input);
-    }
-    // (c) UNIVERSAL FALLBACK, else (d) an honest error — both decided by `isRoutableActionType`,
-    //     the same gate the version-write commit check keys on, so commit-reject ⟺ run-400.
-    if (appSlug && isRoutableActionType(input.actionId)) {
-      return this.runViaComposio(appSlug, input);
-    }
-    throw this.unknownAction(input.actionId);
+    // (b) UNIVERSAL FALLBACK — every other routable type is a Composio catalog action.
+    return this.runViaComposio(appSlug, input);
   }
 
   /**
    * Rebind a step's connection through the env's SLOT for `(environmentId, app)`, via the SHARED resolver.
    * A connection-less step and a Default run are untouched; a missing slot is a hard 428, NEVER a personal-pool fallback.
    */
-  private async applyEnvConnection(input: RunActionInput): Promise<RunActionInput> {
+  private async applyEnvConnection(input: RunActionInput, appSlug: string): Promise<RunActionInput> {
     if (!connectionIdOf(input.auth)) return input; // step uses no connection (http/text/…)
-    const appSlug = validatedAppSlug(input.actionId);
-    if (!appSlug) return input;
     const slot = await resolveEnvSlotConnection(this.connections, input, appSlug);
     if (!slot) return input; // Default run — the personal pool, untouched
     // Rebind the identity too — the downstream getCredential/managedRef is user-scoped, so the step must run as the owner.
@@ -293,12 +270,17 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return dot >= 0 ? actionId.slice(dot + 1) : actionId;
   }
 
-  /** No SDK action and no Composio home for this action id — an honest 400. */
+  private routableAppSlug(actionId: string): string {
+    const appSlug = validatedAppSlug(actionId);
+    if (!appSlug || !isRoutableActionType(actionId)) throw this.unknownAction(actionId);
+    return appSlug;
+  }
+
   private unknownAction(actionId: string): DomainError {
     const slug = validatedAppSlug(actionId);
     return new DomainError(
       slug
-        ? `No installed rail can run "${actionId}" — "${slug}" has no SDK action and no managed (Composio) connection`
+        ? `No installed rail can run "${actionId}" — it is neither an SDK action nor in the managed (Composio) catalog`
         : `Malformed action id "${actionId}" — expected "<app>.<action>"`,
       400,
     );
