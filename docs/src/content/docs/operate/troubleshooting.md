@@ -187,10 +187,14 @@ message says so instead of naming it. Commit a fix, or re-test once the cause is
 {"detail":"Rate limit exceeded. Please try again later."}
 ```
 
-for every visitor at once, or one person's failed sign-ins lock everyone else out: another proxy —
-Cloudflare, a load balancer — fronts Sarati, so every visitor arrives from its address and shares one
-limit. Set its ranges in `SARATI_TRUSTED_PROXIES`, as
-[Behind another proxy](/operate/configuration/#behind-another-proxy) shows.
+for every visitor at once, or one person's failed sign-ins lock everyone else out: every visitor is
+arriving from one address and sharing one limit.
+
+- **A five-container install upgraded with `docker compose pull`:** its stack file predates
+  per-visitor limits. Re-run the installer, as [the v0.2.24 note](/operate/upgrades/) says.
+- **Another proxy in front — Cloudflare, a load balancer, a Cloudflare Tunnel:** list it in
+  `SARATI_TRUSTED_PROXIES`, as [Behind another proxy](/operate/configuration/#behind-another-proxy)
+  shows.
 
 ## A setting is not taking effect
 

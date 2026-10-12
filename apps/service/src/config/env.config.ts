@@ -111,9 +111,9 @@ export class EnvConfig {
   @Min(0)
   trustProxyHops = 0;
 
-  /** TRUST_PROXY_HEADERS is set: it is replaced by TRUST_PROXY_HOPS, and `true` reads as one hop. */
-  @IsBoolean()
-  legacyTrustProxyHeaders = false;
+  /** The interface to listen on; empty = every interface. */
+  @IsString()
+  listenHost = '';
 
   @IsInt()
   @Min(1)
@@ -230,11 +230,37 @@ export function asBool(value: string | undefined, fallback: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
-function asInt(value: string | undefined, fallback: number): number {
+function asInt(name: string, value: string | undefined, fallback: number): number {
   if (value === undefined || value === '') return fallback;
   const n = Number(value);
-  if (!Number.isInteger(n)) throw new Error(`Expected an integer env value, got ${JSON.stringify(value)}`);
+  if (!Number.isInteger(n)) throw new Error(`${name} must be a whole number, got ${JSON.stringify(value)}`);
   return n;
+}
+
+/** TRUST_PROXY_HOPS, or the replaced TRUST_PROXY_HEADERS flag read as one hop; never suggests a value that shares a bucket. */
+function proxyHops(raw: Record<string, string | undefined>): number {
+  const hops = raw.TRUST_PROXY_HOPS?.trim() ?? '';
+  const legacy = asBool(raw.TRUST_PROXY_HEADERS, false);
+  const logger = new Logger('EnvConfig');
+  if (hops === '') {
+    if (legacy) {
+      logger.warn(
+        "TRUST_PROXY_HEADERS=true is read as TRUST_PROXY_HOPS=1 — remove it, and set TRUST_PROXY_HOPS=1 instead only if this service sits behind a proxy of your own rather than Sarati's",
+      );
+    }
+    return legacy ? 1 : 0;
+  }
+  if (legacy) logger.warn('TRUST_PROXY_HEADERS is ignored because TRUST_PROXY_HOPS is set — remove it');
+  if (/^\d+$/.test(hops)) return Number(hops);
+  const flag = hops.toLowerCase();
+  if (flag === 'true' || flag === 'false') {
+    const read = flag === 'true' ? 1 : 0;
+    logger.warn(`TRUST_PROXY_HOPS counts proxy hops — "${hops}" is read as ${read}; write the number`);
+    return read;
+  }
+  throw new Error(
+    `TRUST_PROXY_HOPS must be a whole number of proxy hops (0, 1, 2 …), got ${JSON.stringify(hops)}`,
+  );
 }
 
 /** Parse the process env into an EnvConfig; fails fast at boot on invalid values and prod guards. */
@@ -243,21 +269,25 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
   const provided = Object.fromEntries(
     Object.entries({
       environment: (raw.ENVIRONMENT ?? 'development').trim().toLowerCase(),
-      port: asInt(raw.PORT, 8001),
+      port: asInt('PORT', raw.PORT, 8001),
       databaseUrl: raw.DATABASE_URL || DEFAULT_DATABASE_URL,
       corsOrigins: raw.CORS_ORIGINS || undefined,
       secretKey: raw.SECRET_KEY || INSECURE_SECRET_KEY,
       fernetKey: raw.FERNET_KEY ?? '',
-      trustProxyHops: asInt(raw.TRUST_PROXY_HOPS, asBool(raw.TRUST_PROXY_HEADERS, false) ? 1 : 0),
-      legacyTrustProxyHeaders: Boolean(raw.TRUST_PROXY_HEADERS),
-      maxRequestBodyBytes: asInt(raw.MAX_REQUEST_BODY_BYTES, 2_097_152),
+      trustProxyHops: proxyHops(raw),
+      listenHost: raw.LISTEN_HOST?.trim() ?? '',
+      maxRequestBodyBytes: asInt('MAX_REQUEST_BODY_BYTES', raw.MAX_REQUEST_BODY_BYTES, 2_097_152),
       pgBossEnabled: asBool(raw.PGBOSS_ENABLED, true),
       dbosEnabled: asBool(raw.DBOS_ENABLED, false),
       dbosSystemDatabaseUrl: raw.DBOS_SYSTEM_DATABASE_URL ?? '',
       dbosAppVersion: raw.DBOS_APP_VERSION ?? '',
       dbosExecutorId: raw.DBOS_EXECUTOR_ID ?? '',
-      triggerPollIntervalSeconds: asInt(raw.TRIGGER_POLL_INTERVAL_SECONDS, 60),
-      runMaxDurationSeconds: asInt(raw.RUN_MAX_DURATION_SECONDS, 3600),
+      triggerPollIntervalSeconds: asInt(
+        'TRIGGER_POLL_INTERVAL_SECONDS',
+        raw.TRIGGER_POLL_INTERVAL_SECONDS,
+        60,
+      ),
+      runMaxDurationSeconds: asInt('RUN_MAX_DURATION_SECONDS', raw.RUN_MAX_DURATION_SECONDS, 3600),
       publicBaseUrl: raw.PUBLIC_BASE_URL ?? '',
       clerkIssuer: raw.CLERK_ISSUER ?? '',
       clerkSecretKey: raw.CLERK_SECRET_KEY ?? '',
@@ -274,8 +304,8 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       composioFallbackApps: raw.COMPOSIO_FALLBACK_APPS ?? '',
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
-      throttleLimit: asInt(raw.THROTTLE_LIMIT, 60),
-      throttleTtlMs: asInt(raw.THROTTLE_TTL_MS, 60_000),
+      throttleLimit: asInt('THROTTLE_LIMIT', raw.THROTTLE_LIMIT, 60),
+      throttleTtlMs: asInt('THROTTLE_TTL_MS', raw.THROTTLE_TTL_MS, 60_000),
     }).filter(([, v]) => v !== undefined),
   );
   const cfg = plainToInstance(EnvConfig, provided);

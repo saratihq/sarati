@@ -70,11 +70,12 @@ COMPOSER_MODEL=claude-opus-4-8
 
 ## Behind another proxy
 
-Rate limits count per visitor address, the sign-in limit of five attempts a minute included. Sarati's
-own proxy works that address out and hands it on, so nothing needs setting when visitors reach it
-directly. When another proxy sits in front — Cloudflare, a load balancer, your own nginx — every
-visitor arrives from that proxy's addresses and they all share one limit, so one visitor's failed
-sign-ins lock everyone out. List the proxy's addresses so each visitor's own is used:
+Rate limits count per visitor address — an IPv6 visitor per `/64`, which one subscriber is handed
+whole — the sign-in limit of five attempts a minute included. Sarati's own proxy works that address
+out and hands it on, so nothing needs setting when visitors reach it directly. When another proxy sits
+in front — Cloudflare, a load balancer, your own nginx — every visitor arrives from that proxy's
+addresses and they all share one limit, so one visitor's failed sign-ins lock everyone out. List the
+proxy's addresses so each visitor's own is used:
 
 ```bash
 # Cloudflare's published ranges, from https://www.cloudflare.com/ips/ — space-separated.
@@ -86,9 +87,27 @@ SARATI_TRUSTED_PROXIES=173.245.48.0/20 103.21.244.0/22 2400:cb00::/32
   private range, for a proxy on your own network.
 - **List only proxies you run or pay for:** an address in a listed range can claim to be any visitor.
 - **`CF-Connecting-IP` is never read:** anyone can send it to a server that Cloudflare does not front.
-- **The service image without Sarati's proxy:** set `TRUST_PROXY_HOPS` to the number of proxies in
-  front of it that each append to `X-Forwarded-For` — never more. Its default, `0`, uses the
-  connecting address. The images that bundle the proxy set it to `1` themselves.
+
+### A Cloudflare Tunnel
+
+`cloudflared` connects to Sarati itself, so tunnel requests arrive from wherever `cloudflared` runs —
+not from Cloudflare's ranges, which change nothing here. Cloudflare has already put the visitor on
+`X-Forwarded-For`; list the address Sarati sees `cloudflared` connect from. To find it, send one request
+through the tunnel and read `remote_ip` on its line in the proxy's log (`docker compose logs proxy`,
+or `docker logs sarati` for one container).
+
+With `cloudflared` on the same machine as Docker, that is Docker's gateway address, which every other
+connection to the published port from that machine shares — and anything arriving from a listed
+address can name its own. List it only where nobody else reaches that port. Leaving
+`SARATI_TRUSTED_PROXIES` empty is safe: tunnel visitors then share one limit, and nobody can name an
+address.
+
+### The service image without Sarati's proxy
+
+Set `TRUST_PROXY_HOPS` to the number of proxies in front of it that each append to `X-Forwarded-For`.
+Its default, `0`, uses the connecting address. Counting too few only makes visitors share a limit;
+counting too many lets any visitor write the address their limits count against, so sign-in attempts
+become unlimited. The one-container image and `docker-compose.yaml` set it to `1` for Sarati's proxy.
 
 ## Not here: the two platform API keys
 
@@ -170,6 +189,9 @@ Running the Docker stack, not from a clone:
 - **`DBOS_ENABLED` defaults to `true`** and `DBOS_APP_VERSION` to a stable in-code value, so
   [durable resume](/run/runs/#durability) is on without configuring anything.
 - `ENVIRONMENT=production` and `PORT=8001` are baked into the image.
+- **`TRUST_PROXY_HOPS=1`** comes from the one-container image and from `docker-compose.yaml`: Sarati's
+  own proxy is the one hop in front. The one-container image also listens on loopback only
+  (`LISTEN_HOST=127.0.0.1`), so nothing but that proxy reaches the service. Leave both unset in `.env`.
 - If `SECRET_KEY` and `FERNET_KEY` are absent, the entrypoint generates them into
   `/data/secrets.env` on the service's data volume on first boot — so **that volume has to outlive
   the container**.

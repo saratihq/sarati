@@ -60,6 +60,8 @@ services:
       SECRET_KEY: ${SECRET_KEY}
       WORKFLOW_SERVICE_URL: http://service:8001
       CORS_ORIGINS: ${SARATI_URL:-http://localhost:8080}
+      # Behind the proxy too: the visitor's address it reads rides on to the service with each call.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
 
   client:
     image: ghcr.io/saratihq/sarati-client:${SARATI_VERSION:-latest}

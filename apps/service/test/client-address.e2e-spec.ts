@@ -1,6 +1,5 @@
-import type { INestApplication } from '@nestjs/common';
+import { type INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Logger } from 'nestjs-pino';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
@@ -77,6 +76,16 @@ describe('client address behind proxies (e2e, isolated DB)', () => {
         throttledAfterLimit,
       );
     });
+
+    it('counts an IPv6 client by its /64, so rotating through it is still throttled', async () => {
+      expect(await signIns(app(), LOGIN_LIMIT + 2, (i) => `2001:db8:a:b::${i}`)).toEqual(throttledAfterLimit);
+      expect(await signIns(app(), 1, () => '2001:db8:a:c::1')).toEqual([401]);
+    });
+
+    it('counts an IPv4-mapped address as the IPv4 client it carries', async () => {
+      expect(await signIns(app(), LOGIN_LIMIT, () => '203.0.113.13')).toEqual(Array(LOGIN_LIMIT).fill(401));
+      expect(await signIns(app(), 1, () => '::ffff:203.0.113.13')).toEqual([429]);
+    });
   });
 
   describe('another proxy in front of it (TRUST_PROXY_HOPS=2)', () => {
@@ -99,9 +108,29 @@ describe('client address behind proxies (e2e, isolated DB)', () => {
       );
     });
 
-    it('says at boot that it is no longer read', () => {
+    it('says at boot what it is read as, without telling a bundled stack to set anything', () => {
       expect(warnings()).toContain(
-        'TRUST_PROXY_HEADERS is no longer read — set TRUST_PROXY_HOPS instead; trusting 1 proxy hop(s)',
+        "TRUST_PROXY_HEADERS=true is read as TRUST_PROXY_HOPS=1 — remove it, and set TRUST_PROXY_HOPS=1 instead only if this service sits behind a proxy of your own rather than Sarati's",
+      );
+    });
+  });
+
+  describe('the replaced TRUST_PROXY_HEADERS=false, as the old docs shipped it', () => {
+    const { app, warnings } = bootWith({ TRUST_PROXY_HEADERS: 'false' });
+
+    it('changes nothing and says nothing', async () => {
+      expect(await signIns(app(), LOGIN_LIMIT + 2, (i) => `198.51.100.${i}`)).toEqual(throttledAfterLimit);
+      expect(warnings().filter((w) => w.includes('TRUST_PROXY'))).toEqual([]);
+    });
+  });
+
+  describe('TRUST_PROXY_HOPS=true, the old flag renamed', () => {
+    const { app, warnings } = bootWith({ TRUST_PROXY_HOPS: 'true' });
+
+    it('boots trusting one hop, and says to write the number', async () => {
+      expect(await signIns(app(), 1, () => '203.0.113.40')).toEqual([401]);
+      expect(warnings()).toContain(
+        'TRUST_PROXY_HOPS counts proxy hops — "true" is read as 1; write the number',
       );
     });
   });

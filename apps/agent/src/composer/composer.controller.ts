@@ -12,11 +12,11 @@ import {
 } from 'class-validator';
 import type { Request, Response } from 'express';
 
-import { callerSubOf, callerTokenOf, ComposerAuthGuard } from './composer-auth.guard';
+import { callerSubOf, ComposerAuthGuard } from './composer-auth.guard';
 import { ComposerEnabledGuard } from './composer-enabled.guard';
 import { ComposerService } from './composer.service';
 import type { AttachEvent, WorkflowIr } from './protocol';
-import { callerOf } from './caller-context';
+import { verifiedCaller } from './caller-context';
 
 class StreamDto {
   @IsString()
@@ -107,13 +107,7 @@ export class ComposerController {
     await this.pipe(
       req,
       res,
-      this.composer.stream(
-        body,
-        this.gone(req).signal,
-        callerTokenOf(req),
-        callerOf(req).orgId ?? null,
-        callerSubOf(req),
-      ),
+      this.composer.stream(body, this.gone(req).signal, verifiedCaller(req), callerSubOf(req)),
     );
   }
 
@@ -157,7 +151,7 @@ export class ComposerController {
   @HttpCode(200)
   @Post('token')
   token(@Req() req: Request, @Body() body: TokenDto): { status: string } {
-    if (!this.composer.refreshToken(body.session_id, callerTokenOf(req))) {
+    if (!this.composer.refreshToken(body.session_id, verifiedCaller(req))) {
       throw new HttpException({ message: 'Unknown or expired session.' }, 404);
     }
     return { status: 'refreshed' };
@@ -171,7 +165,7 @@ export class ComposerController {
       body.session_id,
       body.question_id,
       body.answer,
-      callerTokenOf(req),
+      verifiedCaller(req),
     );
     if (!accepted) {
       throw new HttpException({ message: 'Unknown or already-answered question.' }, 404);

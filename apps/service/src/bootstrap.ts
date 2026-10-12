@@ -22,14 +22,6 @@ export function configureApp(app: INestApplication): EnvConfig {
   };
   // A hop count, never `true`: Express would then take the left-most X-Forwarded-For entry, which the client writes.
   if (env.trustProxyHops > 0) express.set('trust proxy', env.trustProxyHops);
-  if (env.legacyTrustProxyHeaders) {
-    app
-      .get(Logger)
-      .warn(
-        `TRUST_PROXY_HEADERS is no longer read — set TRUST_PROXY_HOPS instead; trusting ${env.trustProxyHops} proxy hop(s)`,
-        'Bootstrap',
-      );
-  }
 
   // Request id first — logs and error responses all see the same id.
   app.use((req: Request, res: Response, next: NextFunction) => {

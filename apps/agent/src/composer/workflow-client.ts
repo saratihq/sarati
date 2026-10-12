@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import type { EnvConfig } from '../config/env.config';
+import type { CallerContext } from '../config/platform-keys.client';
 import type { DropdownOption } from './dropdown-values';
 import type { ComposeOp, WorkflowIr } from './protocol';
 
@@ -84,18 +85,18 @@ export class WorkflowServiceClient {
     this.fallbackKey = env.mockAuth ? env.workflowServiceApiKey : null;
   }
 
-  async searchCatalog(query: string, topK: number, token: string | null): Promise<CatalogEntry[]> {
+  async searchCatalog(query: string, topK: number, caller: CallerContext): Promise<CatalogEntry[]> {
     const q = new URLSearchParams({ q: query, top_k: String(topK) });
-    const { status, body } = await this.request('GET', `/api/compose/catalog?${q.toString()}`, token);
+    const { status, body } = await this.request('GET', `/api/compose/catalog?${q.toString()}`, caller);
     if (status !== 200) throw this.asError('catalog search', status, body);
     const results = (body as { results?: unknown }).results;
     return Array.isArray(results) ? (results as CatalogEntry[]) : [];
   }
 
   /** Exact-type lookup with the FULL parameter schema (A1). Null when the type is unknown. */
-  async getActionSchema(type: string, token: string | null): Promise<CatalogEntry | null> {
+  async getActionSchema(type: string, caller: CallerContext): Promise<CatalogEntry | null> {
     const q = new URLSearchParams({ type });
-    const { status, body } = await this.request('GET', `/api/compose/catalog?${q.toString()}`, token);
+    const { status, body } = await this.request('GET', `/api/compose/catalog?${q.toString()}`, caller);
     if (status === 404) return null;
     if (status !== 200) throw this.asError('action schema lookup', status, body);
     const entry = (body as { entry?: unknown }).entry;
@@ -107,8 +108,8 @@ export class WorkflowServiceClient {
    * `ok: false` with the agent-facing detail — the agent self-corrects on
    * them, they are not transport failures.
    */
-  async applyOps(ir: WorkflowIr | null, ops: ComposeOp[], token: string | null): Promise<ApplyOpsResult> {
-    const { status, body } = await this.request('POST', '/api/compose/apply-ops', token, { ir, ops });
+  async applyOps(ir: WorkflowIr | null, ops: ComposeOp[], caller: CallerContext): Promise<ApplyOpsResult> {
+    const { status, body } = await this.request('POST', '/api/compose/apply-ops', caller, { ir, ops });
     if (status === 201 || status === 200) {
       const doc = (body as { ir?: unknown }).ir;
       if (!doc || typeof doc !== 'object') {
@@ -122,15 +123,15 @@ export class WorkflowServiceClient {
     throw this.asError('apply-ops', status, body);
   }
 
-  async readWorkflow(workflowId: string, token: string | null): Promise<WorkflowRead> {
-    const detail = await this.request('GET', `/api/workflows/${encodeURIComponent(workflowId)}`, token);
+  async readWorkflow(workflowId: string, caller: CallerContext): Promise<WorkflowRead> {
+    const detail = await this.request('GET', `/api/workflows/${encodeURIComponent(workflowId)}`, caller);
     if (detail.status !== 200) throw this.asError('read workflow', detail.status, detail.body);
     const wf = detail.body as { name?: unknown };
 
     const versions = await this.request(
       'GET',
       `/api/workflows/${encodeURIComponent(workflowId)}/versions?branch=main`,
-      token,
+      caller,
     );
     if (versions.status !== 200) throw this.asError('read workflow versions', versions.status, versions.body);
     const list = (versions.body as { versions?: Array<{ version_number?: number; workflow_json?: unknown }> })
@@ -154,9 +155,9 @@ export class WorkflowServiceClient {
   async testStep(
     node: TestStepNode,
     sampleScope: Record<string, unknown>,
-    token: string | null,
+    caller: CallerContext,
   ): Promise<RunOutcome> {
-    const { status, body } = await this.request('POST', '/api/runs/test-step', token, {
+    const { status, body } = await this.request('POST', '/api/runs/test-step', caller, {
       node,
       sample_scope: sampleScope,
     });
@@ -171,9 +172,9 @@ export class WorkflowServiceClient {
       workflowId?: string | null;
       triggerPayload?: Record<string, unknown>;
     },
-    token: string | null,
+    caller: CallerContext,
   ): Promise<RunOutcome> {
-    const { status, body } = await this.request('POST', '/api/runs/from-ir', token, {
+    const { status, body } = await this.request('POST', '/api/runs/from-ir', caller, {
       workflow_ir: args.ir,
       run_id: args.runId,
       ...(args.workflowId ? { workflow_id: args.workflowId } : {}),
@@ -188,8 +189,8 @@ export class WorkflowServiceClient {
    * copies a "type" and applies it to the canvas trigger node via apply_ops
    * ; there is no separate trigger row anymore.
    */
-  async listTriggerCatalog(token: string | null): Promise<TriggerCatalogEntry[]> {
-    const { status, body } = await this.request('GET', '/api/triggers/catalog', token);
+  async listTriggerCatalog(caller: CallerContext): Promise<TriggerCatalogEntry[]> {
+    const { status, body } = await this.request('GET', '/api/triggers/catalog', caller);
     if (status !== 200) throw this.asError('list trigger catalog', status, body);
     // The endpoint wraps the list as { triggers: [...] }.
     const rows = Array.isArray(body)
@@ -211,10 +212,10 @@ export class WorkflowServiceClient {
   async listRuns(
     workflowId: string,
     limit: number,
-    token: string | null,
+    caller: CallerContext,
   ): Promise<Array<{ run_id: string; status: string; error: string | null; started_at: string | null }>> {
     const q = new URLSearchParams({ workflow_id: workflowId, limit: String(limit) });
-    const { status, body } = await this.request('GET', `/api/runs?${q.toString()}`, token);
+    const { status, body } = await this.request('GET', `/api/runs?${q.toString()}`, caller);
     if (status !== 200) throw this.asError('list runs', status, body);
     const runs = (body as { runs?: Array<Record<string, unknown>> }).runs;
     return Array.isArray(runs)
@@ -236,12 +237,12 @@ export class WorkflowServiceClient {
     nodeType: string,
     prop: string,
     connectionId: string | null,
-    token: string | null,
+    caller: CallerContext,
   ): Promise<DropdownOption[] | null> {
     const { status, body } = await this.request(
       'POST',
       `/api/node-types/${encodeURIComponent(nodeType)}/options`,
-      token,
+      caller,
       { prop, ...(connectionId ? { connection_id: connectionId } : {}) },
     );
     if (status !== 200 && status !== 201) return null;
@@ -253,8 +254,8 @@ export class WorkflowServiceClient {
   }
 
   /** The caller's connections (provider + status + which account each is) — read-only credential awareness. */
-  async listConnections(token: string | null): Promise<ComposerConnection[]> {
-    const { status, body } = await this.request('GET', '/api/connections', token);
+  async listConnections(caller: CallerContext): Promise<ComposerConnection[]> {
+    const { status, body } = await this.request('GET', '/api/connections', caller);
     if (status !== 200) throw this.asError('list connections', status, body);
     const list = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [];
     return list.map((c) => ({
@@ -272,9 +273,9 @@ export class WorkflowServiceClient {
    * the same sample source the editor's data picker eats from (W3). Null when
    * the workflow has never completed a run.
    */
-  async latestRunSamples(workflowId: string, token: string | null): Promise<Record<string, unknown> | null> {
+  async latestRunSamples(workflowId: string, caller: CallerContext): Promise<Record<string, unknown> | null> {
     const q = new URLSearchParams({ workflow_id: workflowId });
-    const { status, body } = await this.request('GET', `/api/runs/samples?${q.toString()}`, token);
+    const { status, body } = await this.request('GET', `/api/runs/samples?${q.toString()}`, caller);
     if (status !== 200) throw this.asError('run samples', status, body);
     const sample = (body as { sample?: { outputs?: unknown } | null }).sample;
     return sample && sample.outputs && typeof sample.outputs === 'object'
@@ -282,8 +283,8 @@ export class WorkflowServiceClient {
       : null;
   }
 
-  async readRun(runId: string, token: string | null): Promise<RunRecord> {
-    const { status, body } = await this.request('GET', `/api/runs/${encodeURIComponent(runId)}`, token);
+  async readRun(runId: string, caller: CallerContext): Promise<RunRecord> {
+    const { status, body } = await this.request('GET', `/api/runs/${encodeURIComponent(runId)}`, caller);
     if (status !== 200) throw this.asError('read run', status, body);
     const rec = body as {
       run_id?: unknown;
@@ -324,10 +325,10 @@ export class WorkflowServiceClient {
   private async request(
     method: 'GET' | 'POST',
     path: string,
-    token: string | null,
+    caller: CallerContext,
     jsonBody?: unknown,
   ): Promise<HttpReply> {
-    const bearer = token ?? this.fallbackKey;
+    const bearer = caller.token ?? this.fallbackKey;
     if (!bearer) {
       throw new WorkflowServiceError(
         'no credentials for workflow-service — the caller token is missing and no fallback key is configured',
@@ -339,6 +340,7 @@ export class WorkflowServiceClient {
         method,
         headers: {
           Authorization: `Bearer ${bearer}`,
+          ...(caller.address ? { 'X-Forwarded-For': caller.address } : {}),
           ...(jsonBody !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },
         body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
