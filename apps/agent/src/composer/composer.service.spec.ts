@@ -1296,12 +1296,14 @@ describe('ComposerService.refreshToken (long-turn rotation)', () => {
 
 describe('a composer session belongs to the user who started it', () => {
   async function ownedSession() {
-    const { service, sessions } = await makeService(scriptedQuery([{ type: 'result', subtype: 'success' }]));
+    const { service, sessions, answers } = await makeService(
+      scriptedQuery([{ type: 'result', subtype: 'success' }]),
+    );
     const first = await collect(
       service.stream({ message: 'x' }, never, { token: 'jwt-owner', address: '203.0.113.1' }, 'user_owner'),
     );
     const session = sessions.get((first[0]!.data as { session_id: string }).session_id)!;
-    return { service, session };
+    return { service, session, answers };
   }
   const intruder = { token: 'jwt-intruder', address: '198.51.100.9' };
 
@@ -1325,18 +1327,24 @@ describe('a composer session belongs to the user who started it', () => {
     });
   });
 
-  it("refuses another user's answer, and takes even the owner's caller only once an answer is accepted", async () => {
+  it("refuses another user's answer to the owner's real pending question, which stays pending for the owner", async () => {
+    const { service, session, answers } = await ownedSession();
+    const { questionId, outcome } = answers.create(session.id, 60_000);
+
+    expect(service.answerQuestion(session.id, questionId, 'from B', intruder, 'user_b')).toBe(false);
+    expect(answers.hasPending(session.id)).toBe(true);
+    expect(session).toMatchObject({ callerToken: 'jwt-owner', callerAddress: '203.0.113.1' });
+
+    const owner = { token: 'jwt-owner-2', address: '203.0.113.2' };
+    expect(service.answerQuestion(session.id, questionId, 'from A', owner, 'user_owner')).toBe(true);
+    await expect(outcome).resolves.toEqual({ kind: 'answered', answer: 'from A' });
+    expect(session).toMatchObject({ callerToken: 'jwt-owner-2', callerAddress: '203.0.113.2' });
+  });
+
+  it("takes even the owner's caller only once an answer is accepted", async () => {
     const { service, session } = await ownedSession();
-    expect(service.answerQuestion(session.id, crypto.randomUUID(), 'x', intruder, 'user_b')).toBe(false);
-    expect(
-      service.answerQuestion(
-        session.id,
-        crypto.randomUUID(),
-        'x',
-        { token: 'jwt-later', address: '203.0.113.2' },
-        'user_owner',
-      ),
-    ).toBe(false);
+    const later = { token: 'jwt-later', address: '203.0.113.2' };
+    expect(service.answerQuestion(session.id, crypto.randomUUID(), 'x', later, 'user_owner')).toBe(false);
     expect(session).toMatchObject({ callerToken: 'jwt-owner', callerAddress: '203.0.113.1' });
   });
 

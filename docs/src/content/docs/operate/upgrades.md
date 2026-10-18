@@ -69,8 +69,9 @@ the composer off for everybody.
 - **Behind another proxy** — Cloudflare, a load balancer, a Cloudflare Tunnel — list it in
   `SARATI_TRUSTED_PROXIES`; [Behind another proxy](/operate/configuration/#behind-another-proxy) says
   how.
-- **`TRUST_PROXY_HEADERS` is replaced:** remove it from `.env`. With Sarati's own proxy it is ignored,
-  and the boot log says so. `TRUST_PROXY_HOPS` is only for the images run without that proxy.
+- **`TRUST_PROXY_HEADERS` is replaced:** remove it from `.env`. With Sarati's own proxy it is ignored —
+  a leftover `true` is reported in the boot log, a leftover `false` silently. `TRUST_PROXY_HOPS` is only
+  for the images run without that proxy.
 - **One container answers on 8080 only:** its service (8001) and composer (8010) now listen inside the
   container alone, so reach everything — the MCP endpoint included — through port 8080.
 
