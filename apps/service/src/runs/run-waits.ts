@@ -2,7 +2,7 @@ import type { EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
-import { isParkedStep, PARKED_STEP, parkedStep } from '../runtime/run-recorder.service';
+import { CLEAR_CLAIM, isParkedStep, PARKED_STEP, parkedStep } from '../runtime/run-recorder.service';
 import { isTimerWait } from '../runtime/timer-wait';
 
 /** Someone who decided a wait. */
@@ -48,15 +48,23 @@ export function runWaitingOf(
   return waits.sort((a, b) => RANK[a.kind] - RANK[b.kind] || due(a) - due(b))[0] ?? null;
 }
 
-/** Who made each decision still on its way to a run, by user id. */
+/** Who made each decision on a run — taken, or still on its way — by user id; a removed account keeps its id. */
 export async function decidersOf(
   em: EntityManager,
   steps: RuntimeRunStepEntity[],
+  runDecider: string | null = null,
 ): Promise<Map<string, Decider>> {
-  const ids = [...new Set(steps.filter(isParkedStep).flatMap((s) => (s.claimedBy ? [s.claimedBy] : [])))];
+  const ids = [
+    ...new Set(
+      [runDecider, ...steps.flatMap((s) => [isParkedStep(s) ? s.claimedBy : null, s.decidedBy])].filter(
+        (id) => id !== null,
+      ),
+    ),
+  ];
   if (ids.length === 0) return new Map();
   const rows = await em.query<Decider[]>(`SELECT id, name, email FROM users WHERE id = ANY($1)`, [ids]);
-  return new Map(rows.map((r) => [r.id, { id: r.id, name: r.name, email: r.email }]));
+  const found = new Map(rows.map((r) => [r.id, { id: r.id, name: r.name, email: r.email }]));
+  return new Map(ids.map((id) => [id, found.get(id) ?? { id, name: null, email: null }]));
 }
 
 export function parkedSteps(em: EntityManager, scoped: string): Promise<RuntimeRunStepEntity[]> {
@@ -154,8 +162,7 @@ export async function unclaimWaits(
   claimedAt: Date,
 ): Promise<void> {
   await em.query(
-    `UPDATE runtime_run_steps SET claimed_at = NULL, claimed_by = NULL, claimed_payload = NULL
-      WHERE run_id = $1 AND step_key = ANY($2) AND claimed_at = $3`,
+    `UPDATE runtime_run_steps SET ${CLEAR_CLAIM} WHERE run_id = $1 AND step_key = ANY($2) AND claimed_at = $3`,
     [scoped, waits.map((w) => w.stepKey), claimedAt],
   );
 }

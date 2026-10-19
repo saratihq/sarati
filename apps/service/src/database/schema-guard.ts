@@ -164,6 +164,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe: "SELECT 1 FROM pg_indexes WHERE indexname='uq_workflow_env_pointers_workflow_env'",
   },
   {
+    migration: '038_run_step_decider.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_run_steps' AND column_name='decided_by'",
+  },
+  {
     migration: '039_run_step_resumed_backfill.sql',
     probe: "SELECT 1 FROM pg_indexes WHERE indexname='ix_runtime_run_steps_resumed'",
   },

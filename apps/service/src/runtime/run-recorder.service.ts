@@ -4,6 +4,7 @@ import { IsNull, Not, type DataSource, type EntityManager } from 'typeorm';
 
 import { errorMessage } from '../common/error-message';
 import { newId } from '../database/ids';
+import { rawQuery } from '../database/raw-query';
 import { TIMER_TOPIC_SQL_PREFIX } from './timer-wait';
 import type { RunSource, RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
@@ -14,10 +15,13 @@ const MAX_STORED_JSON_CHARS = 16_000;
 const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
+// Ends a step's wait and leaves any claim on it for that wait's own resume to settle.
+const END_WAIT =
+  'waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL, delivery_topic = NULL';
+/** SET clause that drops a step's claim. */
+export const CLEAR_CLAIM = 'claimed_at = NULL, claimed_by = NULL, claimed_payload = NULL';
 /** SET clause that ends a step's wait and any claim on it. */
-export const CLEAR_WAIT =
-  'waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL, delivery_topic = NULL, ' +
-  'claimed_at = NULL, claimed_by = NULL, claimed_payload = NULL';
+export const CLEAR_WAIT = `${END_WAIT}, ${CLEAR_CLAIM}`;
 /** SET clause that empties the run's slot. */
 export const CLEAR_SLOT =
   'waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL';
@@ -117,7 +121,7 @@ export interface RunRecorder {
     durationMs: number,
     deliveryTopic?: string | null,
   ): Promise<Date | null>;
-  /** The step's wait ended; `answered` when the run took an event, which credits the decider who claimed it. */
+  /** The step's wait ended; `answered` when the run took an event, which credits its claim's decider on this step. */
   stepResumed(scopedRunId: string, stepKey: string, answered?: boolean): Promise<void>;
   runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void>;
   /** A cancel unwinds the run as a failure `runFinished` has just recorded; restore what actually ended it. */
@@ -235,26 +239,20 @@ export class RunRecorderService implements RunRecorder {
     output: unknown,
     error: string | null,
   ): Promise<void> {
-    const finished = await this.write<[Array<{ waiting_topic: string | null }>, number]>(
-      'stepFinished',
-      scopedRunId,
-      [
-        `UPDATE runtime_run_steps
+    const finished = await this.write<
+      [Array<{ kind: string; waiting_topic: string | null; claimed: boolean }>, number]
+    >('stepFinished', scopedRunId, [
+      `UPDATE runtime_run_steps
           SET status = $3, output = CAST($4 AS json), error = $5, finished_at = now()
         WHERE run_id = $1 AND step_key = $2
-        RETURNING waiting_topic`,
-        [scopedRunId, stepKey, error === null ? 'completed' : 'error', cappedJson(output), error],
-      ],
-    );
-    // A wait still set here lost its unpark write; clearing it now keeps the run from reading `waiting`.
-    if (finished?.[0][0]?.waiting_topic) {
-      await this.writeWait('stepFinished', scopedRunId, (em) =>
-        em.query(
-          `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = COALESCE(resumed_at, now())
-            WHERE run_id = $1 AND step_key = $2`,
-          [scopedRunId, stepKey],
-        ),
-      );
+        RETURNING kind, waiting_topic, claimed_at IS NOT NULL AS claimed`,
+      [scopedRunId, stepKey, error === null ? 'completed' : 'error', cappedJson(output), error],
+    ]);
+    // A wait or claim still set here lost its resume write; recording it now credits a decision the step took.
+    const step = finished?.[0][0];
+    if (step && (step.waiting_topic || step.claimed)) {
+      const took = step.kind === 'waitForEvent' && error === null && output !== null && output !== undefined;
+      await this.stepResumed(scopedRunId, stepKey, took);
     }
   }
 
@@ -313,21 +311,30 @@ export class RunRecorderService implements RunRecorder {
   }
 
   async stepResumed(scopedRunId: string, stepKey: string, answered = false): Promise<void> {
-    // Credited before the claim is cleared; a replay credits the same claim again or finds it gone.
-    if (answered) {
-      await this.write('stepResumed', scopedRunId, [
-        `UPDATE runtime_runs r SET decided_by = s.claimed_by, decided_at = s.claimed_at
-           FROM runtime_run_steps s
-          WHERE r.id = $1 AND s.run_id = r.id AND s.step_key = $2 AND s.claimed_by IS NOT NULL`,
-        [scopedRunId, stepKey],
-      ]);
+    try {
+      await this.dataSource.manager.transaction(async (em) => {
+        await lockRunRow(em, scopedRunId);
+        // Read once under the step's lock, so the step and the run's slot credit the same claim; a replay finds it gone.
+        const [claim] = answered
+          ? await rawQuery<{ claimed_by: string; claimed_at: Date }>(
+              em,
+              `SELECT claimed_by, claimed_at FROM runtime_run_steps
+                WHERE run_id = $1 AND step_key = $2 AND claimed_by IS NOT NULL FOR NO KEY UPDATE`,
+              [scopedRunId, stepKey],
+            )
+          : [];
+        await em.query(
+          `UPDATE runtime_run_steps
+              SET decided_by = COALESCE($3::uuid, decided_by), decided_at = COALESCE($4::timestamptz, decided_at),
+                  ${CLEAR_WAIT}, resumed_at = COALESCE(resumed_at, now())
+            WHERE run_id = $1 AND step_key = $2`,
+          [scopedRunId, stepKey, claim?.claimed_by ?? null, claim?.claimed_at ?? null],
+        );
+        await deriveRunWait(em, scopedRunId, claim ? { by: claim.claimed_by, at: claim.claimed_at } : null);
+      });
+    } catch (err) {
+      this.logger.warn(`run history stepResumed failed for ${scopedRunId}: ${errorMessage(err)}`);
     }
-    await this.writeWait('stepResumed', scopedRunId, (em) =>
-      em.query(
-        `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = COALESCE(resumed_at, now()) WHERE run_id = $1 AND step_key = $2`,
-        [scopedRunId, stepKey],
-      ),
-    );
   }
 
   async runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void> {
@@ -435,9 +442,20 @@ export function withWaitLock<T>(
   return manager.transaction(async (em) => {
     await lockRunRow(em, scopedRunId);
     const result = await write(em);
-    // The slot mirrors the headline wait an older image can answer: never one received on its own topic.
-    await em.query(
-      `UPDATE runtime_runs r
+    await deriveRunWait(em, scopedRunId);
+    return result;
+  });
+}
+
+// The run's one UPDATE under lockRunRow (row 11): a second would re-check its workflow and environment keys after the run lock.
+async function deriveRunWait(
+  em: EntityManager,
+  scopedRunId: string,
+  decision: { by: string; at: Date } | null = null,
+): Promise<void> {
+  // The slot mirrors the headline wait an older image can answer, and its latest decision: never one received on its own topic.
+  await em.query(
+    `UPDATE runtime_runs r
           SET status = CASE WHEN EXISTS (
                 SELECT 1 FROM runtime_run_steps s WHERE s.run_id = r.id AND ${parkedStep('s')}
               ) THEN 'waiting' ELSE 'running' END,
@@ -447,12 +465,12 @@ export function withWaitLock<T>(
                  WHERE s.run_id = r.id AND ${parkedStep('s')} AND s.delivery_topic IS NULL
                  ORDER BY s.waiting_topic LIKE $2 || '%', s.waiting_timeout_at NULLS LAST, s.step_key
                  LIMIT 1
-              )
+              ),
+              decided_by = CASE WHEN r.decided_at > $4::timestamptz THEN r.decided_by ELSE COALESCE($3::uuid, r.decided_by) END,
+              decided_at = GREATEST(r.decided_at, $4::timestamptz)
         WHERE r.id = $1 AND r.status IN ('running', 'waiting')`,
-      [scopedRunId, TIMER_TOPIC_SQL_PREFIX],
-    );
-    return result;
-  });
+    [scopedRunId, TIMER_TOPIC_SQL_PREFIX, decision?.by ?? null, decision?.at ?? null],
+  );
 }
 
 /** Mark a non-terminal run `cancelled` and unpark its steps; run it holding {@link lockRunRow}. */
@@ -463,7 +481,10 @@ export async function recordCancel(em: EntityManager, scopedRunId: string): Prom
       WHERE id = $1 AND status IN ('running', 'waiting')`,
     [scopedRunId],
   );
-  await clearStepWaits(em, scopedRunId);
+  // A claim stays: the run may already have taken its decision, and only that wait's resume knows.
+  await em.query(`UPDATE runtime_run_steps SET ${END_WAIT} WHERE run_id = $1 AND waiting_topic IS NOT NULL`, [
+    scopedRunId,
+  ]);
 }
 
 /** End every wait still set on a run's steps, and any claim on them. */

@@ -460,9 +460,12 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     // goes on waiting. Ending with none takes it milliseconds, so one still parked after this is parked.
     await new Promise((r) => setTimeout(r, 5_000));
     const detail = await json('/api/runs/legacy');
-    const steps = detail.steps as Array<{ output: unknown; finished_at: string | null }>;
-    expect(steps.filter((s) => JSON.stringify(s.output) === JSON.stringify({ d: 'x' }))).toHaveLength(1);
+    const steps = detail.steps as Array<{ output: unknown; finished_at: string | null; decided_by: unknown }>;
+    const takers = steps.filter((s) => JSON.stringify(s.output) === JSON.stringify({ d: 'x' }));
+    expect(takers).toHaveLength(1);
+    expect(takers[0]!.decided_by).toMatchObject({ id: MOCK_USER_ID });
     const other = steps.find((s) => JSON.stringify(s.output) !== JSON.stringify({ d: 'x' }))!;
+    expect(other.decided_by).toBeNull();
     if (detail.status === 'completed') {
       expect(other).toMatchObject({ output: null, finished_at: expect.any(String) });
     } else {
@@ -503,6 +506,17 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       await holder.end();
     }
     expect((await waitOutputs('held-take')).sort()).toEqual([null, { d: 'x' }].sort());
+    const credits = await db.query<{ output: unknown; decided_by: string | null }>(
+      `SELECT output, decided_by FROM runtime_run_steps WHERE run_id = $1 AND kind = 'waitForEvent'`,
+      [runKey],
+    );
+    expect(credits.rows).toHaveLength(2);
+    expect(credits.rows).toEqual(
+      expect.arrayContaining([
+        { output: { d: 'x' }, decided_by: MOCK_USER_ID },
+        { output: null, decided_by: null },
+      ]),
+    );
     const kept = await db.query(`SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND finished_at IS NULL`, [
       runKey,
     ]);
@@ -850,11 +864,17 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     try {
       await boot({ RUN_MAX_DURATION_SECONDS: '5' });
       const stranded = await eventually(
-        () => db.query(`SELECT status, error, decided_by FROM runtime_runs WHERE run_id = 'stranded'`),
+        () =>
+          db.query(
+            `SELECT r.status, r.error, r.decided_by AS slot,
+                    (SELECT string_agg(s.decided_by::text, ',') FROM runtime_run_steps s WHERE s.run_id = r.id) AS decided_by
+               FROM runtime_runs r WHERE r.run_id = 'stranded'`,
+          ),
         (res) => res.rows[0]?.status === 'error',
         'the stranded run reaped',
       );
       expect(stranded.rows[0].decided_by).toBe(MOCK_USER_ID);
+      expect(stranded.rows[0].slot).toBe(MOCK_USER_ID);
       expect(stranded.rows[0].error).toMatch(
         /^Decided by .+, but the run could not resume to take the decision — run it again$/,
       );
@@ -864,5 +884,91 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       await dbos.query('ROLLBACK');
     }
     expect((await completed('resumable')).outputs).toEqual({ approve: null });
+  }, 120_000);
+
+  it('keeps a claim a cancel left while its wait was taking it, when the workflow stops at entry, until its run is long over', async () => {
+    const runKey = `${MOCK_USER_ID}:never-resumed`;
+    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
+    expect(
+      (await post('/api/runs/async', { run_id: 'never-resumed', plan: { id: 'plan-never-resumed', nodes } }))
+        .status,
+    ).toBe(201);
+    await eventually(
+      () => parkedIn('never-resumed'),
+      (p) => p.length === 1,
+      'the approval parked',
+    );
+    const sysUrl = new URL(databaseUrl);
+    sysUrl.pathname = `${sysUrl.pathname}_dbos`;
+    const holder = new Client({ connectionString: sysUrl.toString() });
+    await holder.connect();
+    try {
+      // The take cannot commit, so the cancel lands while the run is taking the decision, and the crash ends that take.
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE dbos.operation_outputs IN EXCLUSIVE MODE');
+      expect(
+        (await post('/api/runs/never-resumed/events', { topic: 'approval', payload: { d: 'x' } })).status,
+      ).toBe(200);
+      await eventually(
+        () =>
+          dbos.query<{ query: string }>(
+            `SELECT query FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          ),
+        (res) => res.rows.some((r) => /INSERT INTO\s+"?dbos"?\.operation_outputs/i.test(r.query)),
+        'the take held',
+      );
+      expect((await post('/api/runs/never-resumed/cancel', {})).status).toBe(200);
+      await crash();
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+    const stepOf = async (): Promise<Record<string, unknown>> =>
+      (
+        await db.query(
+          `SELECT status, waiting_topic, claimed_by, decided_by FROM runtime_run_steps WHERE run_id = $1`,
+          [runKey],
+        )
+      ).rows[0] as Record<string, unknown>;
+    const left = { status: 'running', waiting_topic: null, claimed_by: MOCK_USER_ID, decided_by: null };
+    expect(await stepOf()).toEqual(left);
+
+    // As a recovery of it would: the workflow runs again on a run that has already ended.
+    await dbos.query(`UPDATE dbos.workflow_status SET status = 'PENDING' WHERE workflow_uuid = $1`, [runKey]);
+    await boot();
+    await eventually(
+      () =>
+        dbos.query<{ status: string }>(`SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
+          runKey,
+        ]),
+      (res) => res.rows[0]?.status === 'ERROR',
+      'the workflow stopped at its entry',
+    );
+    expect(await stepOf()).toEqual(left);
+    const detail = await json('/api/runs/never-resumed');
+    const step = (detail.steps as Array<Record<string, unknown>>)[0]!;
+    expect([detail.status, detail.waiting, detail.decided_by, step.waiting, step.decided_by]).toEqual([
+      'cancelled',
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const listed = ((await json('/api/runs/waiting')).runs as Array<Record<string, unknown>>).filter(
+      (r) => r.run_id === 'never-resumed',
+    );
+    expect(listed).toEqual([]);
+
+    await db.query(`UPDATE runtime_runs SET finished_at = now() - interval '2 hours' WHERE id = $1`, [
+      runKey,
+    ]);
+    await crash();
+    await boot();
+    await eventually(
+      () => stepOf(),
+      (s) => s.claimed_by === null,
+      'the boot reap dropping the claim',
+    );
+    expect((await json('/api/runs/never-resumed')).status).toBe('cancelled');
   }, 120_000);
 });

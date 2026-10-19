@@ -68,11 +68,12 @@ export class RuntimeRunEntity {
   @Column({ name: 'dry_run', type: 'boolean', default: false })
   dryRun!: boolean;
 
-  // Who resolved the wait — org-wide approvals mean this may differ from `user_id`.
-  @Column({ name: 'decided_by', type: 'uuid', nullable: true })
+  /** The run's last decider, kept for an older image and read only for a run no step credits. */
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true, insert: false, update: false })
   decidedBy!: string | null;
 
-  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true })
+  /** When that last decision was made. */
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true, insert: false, update: false })
   decidedAt!: Date | null;
 
   /** Environment name at run time (null = Default) — a historical SNAPSHOT, never re-resolved. */
@@ -156,7 +157,7 @@ export class RuntimeRunStepEntity {
   @Column({ name: 'claimed_at', type: 'timestamptz', nullable: true })
   claimedAt!: Date | null;
 
-  /** Who made the claimed decision — credited on the run once the run takes it. */
+  /** Who made the claimed decision — credited on this step once the run takes it. */
   @Column({ name: 'claimed_by', type: 'uuid', nullable: true })
   claimedBy!: string | null;
 
@@ -167,6 +168,14 @@ export class RuntimeRunStepEntity {
   /** When this step's wait ended; a replay never parks it again. */
   @Column({ name: 'resumed_at', type: 'timestamptz', nullable: true })
   resumedAt!: Date | null;
+
+  /** Who answered this wait — org-wide approvals mean it may differ from the run's `user_id`; null until the run takes an answer. */
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true })
+  decidedBy!: string | null;
+
+  /** When the answer this step took was made. */
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
 
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt!: Date;

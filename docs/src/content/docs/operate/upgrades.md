@@ -45,6 +45,9 @@ For a run that keeps its waits:
 - A decision made here that the run had not taken yet is applied there, but the earlier version does
   not record who made it. If it had not even gone out, because the service stopped as it was made,
   its wait is listed there to decide again.
+- The earlier version shows one decider per run: whoever answered its last approval. A run with
+  several approvals shows only that one there, and coming back to this version shows each on its own
+  step again.
 - Coming back to this version picks it up where the earlier version left it.
 
 The earlier version counts the time a run spent parked against `RUN_MAX_DURATION_SECONDS`, so it may

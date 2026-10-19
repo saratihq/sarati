@@ -1221,6 +1221,83 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       expect(await deadlocksSince(before)).toBe(0);
     });
 
+    const claimOn = (id: string, key: string, ago: string): Promise<unknown> =>
+      db.query(
+        `UPDATE runtime_run_steps SET claimed_at = date_trunc('milliseconds', now() - ${ago}::interval),
+                                      claimed_by = $3, claimed_payload = '{"d":1}'
+          WHERE run_id = $1 AND step_key = $2`,
+        [id, key, user],
+      );
+    const creditOf = async (id: string): Promise<{ step: string | null; slot: string | null }> =>
+      (
+        await db.query<{ step: string | null; slot: string | null }>(
+          `SELECT (SELECT string_agg(s.decided_by::text, ',') FROM runtime_run_steps s WHERE s.run_id = r.id) AS step,
+                  r.decided_by AS slot
+             FROM runtime_runs r WHERE r.id = $1`,
+          [id],
+        )
+      ).rows[0]!;
+
+    it.each([
+      ['a workflow', 'workflow'],
+      ['an environment', 'environment'],
+    ])(
+      'an answered resume held at its run update finishes before %s delete, keeping who decided',
+      async (_, kind) => {
+        const org = await workspace(`Resume then ${kind} delete`);
+        const wfId = await deploy(org, 'resume under delete');
+        const env = kind === 'environment' ? await createEnv(org, `resume-${suffix()}`) : undefined;
+        const id = await parkRun(`held-resume-${suffix()}`, {
+          workflowId: wfId,
+          environmentId: env,
+          waits: [{ key: 'approve', topic: 'approval', due: OPEN }],
+        });
+        await claimOn(id, 'approve', `'1 second'`);
+        const held = holdQuery(/SET status = CASE WHEN EXISTS/);
+        const before = await deadlocks();
+        try {
+          const resuming = app.get(RunRecorderService).stepResumed(id, 'approve', true);
+          await held.arrived;
+          const deleting = statusOf(env ? removeEnv(org, env) : remove(org, wfId));
+          await lockWaiters(1);
+          held.release();
+          await resuming;
+          expect(await deleting).toBe(200);
+        } finally {
+          held.restore();
+        }
+        expect(await creditOf(id)).toEqual({ step: user, slot: user });
+        expect(await runOf(id)).toMatchObject(env ? { environment_id: null } : { workflow_id: null });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+
+    it('a stranded decision held at its run update finishes before a workflow delete, keeping who decided', async () => {
+      const org = await workspace('Strand then delete');
+      const wfId = await deploy(org, 'strand under delete');
+      const id = await parkRun(`held-strand-${suffix()}`, {
+        workflowId: wfId,
+        waits: [{ key: 'approve', topic: 'approval', due: LAPSED }],
+      });
+      await claimOn(id, 'approve', `'150 minutes'`);
+      const held = holdQuery(/SET status = 'error', finished_at = now\(\), error = \$4/);
+      const before = await deadlocks();
+      try {
+        const reaping = app.get(RunReaperService).reapStale();
+        await held.arrived;
+        const deleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        held.release();
+        expect((await reaping).strandedDecisions).toBeGreaterThanOrEqual(1);
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+      expect(await creditOf(id)).toEqual({ step: user, slot: user });
+      expect(await runOf(id)).toMatchObject({ status: 'error', workflow_id: null });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
     it('a park held at its status re-derive finishes before a workflow delete', async () => {
       const org = await workspace('Park then delete');
       const wfId = await deploy(org, 'park under delete');

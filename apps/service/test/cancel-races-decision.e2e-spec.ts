@@ -47,7 +47,8 @@ describe('a cancel racing a decision (e2e, isolated DB, DBOS on, mock auth)', ()
     runId: string,
   ): Promise<{ status: string; decided_by: string | null; parked: number }> => {
     const res = await db.query<{ status: string; decided_by: string | null; parked: string }>(
-      `SELECT r.status, r.decided_by,
+      `SELECT r.status,
+              (SELECT string_agg(s.decided_by::text, ',') FROM runtime_run_steps s WHERE s.run_id = r.id) AS decided_by,
               (SELECT count(*) FROM runtime_run_steps s WHERE s.run_id = r.id AND s.waiting_topic IS NOT NULL) AS parked
          FROM runtime_runs r WHERE r.run_id = $1`,
       [runId],

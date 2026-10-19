@@ -12,6 +12,11 @@ export function isDurableCancellation(err: unknown): boolean {
   );
 }
 
+/** Whether DBOS holds no workflow under the run id it was given. */
+export function isUnknownDurableRun(err: unknown): boolean {
+  return err instanceof DbosErrors.DBOSNonExistentWorkflowError;
+}
+
 /**
  * `DurableStep` backed by DBOS: each step's result is checkpointed, so a resume returns the
  * memoized value rather than re-firing the side effect. Only meaningful inside a DBOS workflow.
