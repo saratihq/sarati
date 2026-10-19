@@ -12,9 +12,10 @@ import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
-import { DbosRuntime, isDurableCancellation } from '../dbos/dbos-runtime';
+import { isDurableCancellation } from '../dbos/dbos-durable-step';
+import { DbosRuntime } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
-import { PassThroughDurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, RunCancelledError } from '../providers/durable-step';
 import type { AgentWorkflowCatalog } from '../runtime/agent';
 import { AgentStepBus } from '../runtime/agent-step-bus';
 import { DagInterpreter } from '../runtime/dag-interpreter';
@@ -220,7 +221,7 @@ export type RunDetail = RunStatus & {
 export class RunsService {
   private readonly logger = new Logger(RunsService.name);
   private readonly dbosEnabled: boolean;
-  /** Direct-path runs in flight: scoped run id → the step substrate `sendEvent` delivers to. */
+  /** In-process runs in flight, nested ones included: scoped run id → the step substrate `sendEvent` and `cancelRun` act on. */
   private readonly waiters = new Map<string, PassThroughDurableStep>();
 
   constructor(
@@ -266,7 +267,7 @@ export class RunsService {
         throw new DomainError(err.message, err.status, { ...details, ...(err.details ?? {}) });
       }
       if (isDurableCancellation(err)) {
-        throw new DomainError(`Run ${runId} was cancelled`, 409, { code: 'run_cancelled', ...details });
+        throw new DomainError(`Run ${runId} was cancelled`, 409, { code: RUN_CANCELLED, ...details });
       }
       throw new DomainError(`Run ${runId} failed: ${errorMessage(err)}`, 422, {
         code: 'run_failed',
@@ -275,8 +276,25 @@ export class RunsService {
     }
   }
 
-  /** The two rails a compiled plan runs on: DBOS durable, or the in-process interpreter. */
+  /** Run a plan on its rail; on both, the run's row decides whether a cancel landed — before it starts, and however it ends. */
   private async execute(plan: DagPlan, scoped: string, opts: RunDispatchOptions): Promise<RunResult> {
+    if (await this.cancelled(scoped)) throw new RunCancelledError();
+    let result: RunResult;
+    try {
+      result = await this.dispatch(plan, scoped, opts);
+    } catch (err) {
+      throw (await this.cancelled(scoped)) ? new RunCancelledError() : err;
+    }
+    if (await this.cancelled(scoped)) throw new RunCancelledError();
+    return result;
+  }
+
+  private cancelled(scoped: string): Promise<boolean> {
+    return this.recorder?.isCancelled(scoped) ?? Promise.resolve(false);
+  }
+
+  /** The two rails a compiled plan runs on: DBOS durable, or the in-process interpreter. */
+  private async dispatch(plan: DagPlan, scoped: string, opts: RunDispatchOptions): Promise<RunResult> {
     // DBOS can't inject our dry-run http client, so a dry run must take the in-process path.
     if (this.dbosEnabled && !opts.dryRun) {
       return this.dbos.runDurably(plan, {
@@ -376,21 +394,31 @@ export class RunsService {
       parentStepKey: opts.parentStepKey,
       orgId: opts.orgId ?? null,
     });
-    return this.interpreter.run(plan, {
-      externalUserId: opts.externalUserId,
-      runId: scoped,
-      // The child's steps land in ITS run, so a failure inside is readable instead of showing
-      // only as whatever the call returned to the caller.
-      recorder: this.recorder,
-      durable: new PassThroughDurableStep(),
-      initialScope: opts.initialScope,
-      environment: opts.environment,
-      environmentId: opts.environmentId,
-      orgId: opts.orgId,
-      dryRun: opts.dryRun,
-      subWorkflowDepth: opts.subWorkflowDepth,
-      subWorkflowBudget: opts.subWorkflowBudget,
-    });
+    const run = async (durable: PassThroughDurableStep): Promise<RunResult> => {
+      this.waiters.set(scoped, durable);
+      try {
+        return await this.interpreter.run(plan, {
+          externalUserId: opts.externalUserId,
+          runId: scoped,
+          // The child's steps land in ITS run, so a failure inside is readable instead of showing
+          // only as whatever the call returned to the caller.
+          recorder: this.recorder,
+          durable,
+          initialScope: opts.initialScope,
+          environment: opts.environment,
+          environmentId: opts.environmentId,
+          orgId: opts.orgId,
+          dryRun: opts.dryRun,
+          subWorkflowDepth: opts.subWorkflowDepth,
+          subWorkflowBudget: opts.subWorkflowBudget,
+        });
+      } finally {
+        this.waiters.delete(scoped);
+      }
+    };
+    // Part of its caller's step: an in-process caller's cancel reaches it too. A DBOS caller's does not yet.
+    const caller = this.waiters.get(opts.parentRunId);
+    return caller ? caller.nest(run) : run(new PassThroughDurableStep());
   }
 
   /** Compile a WorkflowIR (from generation) to a RunPlan and run it (sync). */
@@ -991,8 +1019,8 @@ export class RunsService {
   }
 
   /**
-   * Cancel a run: DBOS interrupts at the next step boundary; the direct path can only drop a
-   * HITL waiter (best-effort). Idempotent — an already-terminal run returns its status unchanged.
+   * Cancel a run at its next step boundary, on either rail; a step already in flight finishes. A run another
+   * run's step started is refused — its caller is what to cancel. Idempotent: a finished run answers its status.
    */
   async cancelRun(runId: string, access: RunAccess): Promise<RunStatus> {
     const em = this.dataSource?.manager;
@@ -1005,20 +1033,29 @@ export class RunsService {
     const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     if (isTerminal(row.status)) return { runId, status: row.status };
+    if (row.parentRunId) {
+      throw new DomainError(
+        `Run ${runId} was started by another run's step — cancel the run that called it`,
+        409,
+        {
+          code: 'called_run',
+        },
+      );
+    }
     // Under the run's lock, so an event either lands before the cancel or finds its wait ended — never both.
-    return em.transaction(async (tx): Promise<RunStatus> => {
+    const status = await em.transaction(async (tx): Promise<RunStatus['status']> => {
       await lockRunRow(tx, row.id);
       const fresh = await tx.findOne(RuntimeRunEntity, { where: { id: row.id } });
-      if (fresh && isTerminal(fresh.status)) return { runId, status: fresh.status };
-      if (this.dbosEnabled) {
-        await this.dbos.cancelWorkflow(row.id);
-      } else {
-        // Direct path: forget any HITL waiter (the in-process run can't be interrupted).
-        this.waiters.delete(row.id);
-      }
+      if (!fresh || isTerminal(fresh.status)) return fresh?.status ?? row.status;
+      // DBOS first: if it can't be told, nothing is recorded and the caller may try again.
+      if (this.dbosEnabled) await this.dbos.cancelWorkflow(row.id);
       await recordCancel(tx, row.id);
-      return { runId, status: 'cancelled' };
+      return 'cancelled';
     });
+    if (status !== 'cancelled') return { runId, status };
+    // Told once committed, so an in-flight delivery reads the cancel; a dry run is in-process even with DBOS on.
+    this.waiters.get(row.id)?.cancel();
+    return { runId, status: 'cancelled' };
   }
 
   /** Linkage guard: the workflow must exist AND live in the caller's active org — anything else is an indistinguishable 404. */
@@ -1084,6 +1121,14 @@ export class RunsService {
       throw new DomainError('Asynchronous runs require DBOS (set DBOS_ENABLED=true)', 409);
     }
   }
+}
+
+/** The `code` a run's caller is answered with when its run was cancelled. */
+export const RUN_CANCELLED = 'run_cancelled';
+
+/** Whether a run entry point's rejection is its run having been cancelled, not failing. */
+export function isRunCancelled(err: unknown): boolean {
+  return err instanceof DomainError && err.details?.code === RUN_CANCELLED;
 }
 
 function durationMs(started: Date | null, finished: Date | null): number | null {

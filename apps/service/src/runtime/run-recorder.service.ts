@@ -122,6 +122,8 @@ export interface RunRecorder {
   runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void>;
   /** A cancel unwinds the run as a failure `runFinished` has just recorded; restore what actually ended it. */
   runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void>;
+  /** Whether the run's row reads cancelled — the one answer to whether a cancel has landed, on either rail. */
+  isCancelled(scopedRunId: string): Promise<boolean>;
 }
 
 /**
@@ -327,10 +329,11 @@ export class RunRecorderService implements RunRecorder {
   }
 
   async runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void> {
+    // A cancel is final: nothing the run does after it may rewrite it as completed or failed.
     await this.write('runFinished', scopedRunId, [
       `UPDATE runtime_runs
           SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(), ${CLEAR_SLOT}
-        WHERE id = $1`,
+        WHERE id = $1 AND status <> 'cancelled'`,
       [scopedRunId, error === null ? 'completed' : 'error', cappedOutputsJson(outputs), error],
     ]);
     await this.clearWaits('runFinished', scopedRunId);
@@ -349,6 +352,20 @@ export class RunRecorderService implements RunRecorder {
       `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
       [scopedRunId, unwindError, CANCELLED_STEP_ERROR],
     ]);
+  }
+
+  async isCancelled(scopedRunId: string): Promise<boolean> {
+    try {
+      const rows: unknown[] = await this.dataSource.query(
+        `SELECT 1 FROM runtime_runs WHERE id = $1 AND status = 'cancelled'`,
+        [scopedRunId],
+      );
+      return rows.length > 0;
+    } catch (err) {
+      // Fail open: a history read must never stop or fail a run that nobody cancelled.
+      this.logger.warn(`run history isCancelled failed for ${scopedRunId}: ${errorMessage(err)}`);
+      return false;
+    }
   }
 
   private async clearWaits(op: string, scopedRunId: string): Promise<void> {
