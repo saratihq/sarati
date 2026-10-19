@@ -1074,6 +1074,13 @@ CREATE INDEX ix_runtime_blobs_run ON public.runtime_blobs USING btree (run_id);
 
 
 --
+-- Name: ix_runtime_run_steps_resumed; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_run_steps_resumed ON public.runtime_run_steps USING btree (run_id, resumed_at) WHERE (resumed_at IS NOT NULL);
+
+
+--
 -- Name: ix_runtime_run_steps_waiting; Type: INDEX; Schema: public; Owner: orchestr
 --
 

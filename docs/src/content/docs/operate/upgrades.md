@@ -46,6 +46,9 @@ For a run that keeps its waits:
   its wait is listed there to decide again.
 - Coming back to this version picks it up where the earlier version left it.
 
+The earlier version counts the time a run spent parked against `RUN_MAX_DURATION_SECONDS`, so it may
+end a run that resumed from a long wait in an error.
+
 Running it by hand, without the installer:
 
 ```bash
