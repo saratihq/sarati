@@ -70,8 +70,11 @@ function markShared(groups: Waits[], routed: Set<DagWaitForEventNode>): void {
   }
 }
 
-// Two nodes of one plan run at once when neither waits on the other and some outcome of the routers upstream of them runs both.
-function runTogether(plan: DagPlan, sharing: Pair[]): Pair[] {
+/** The pairs of `plan.nodes` indexes in `sharing` that can run at once: neither waits on the other, and some router outcome runs both. */
+export function runTogether(
+  plan: DagPlan,
+  sharing: ReadonlyArray<readonly [number, number]>,
+): Array<[number, number]> {
   const guards = inPlanGuards(plan);
   const before = ancestorsOf(guards);
   const together: Pair[] = [];

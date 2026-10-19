@@ -122,6 +122,7 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
     why: RUN_LOCK,
   },
   'service:runs/runs.service.ts#cancelRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:dbos/recovery-guard.ts#admit#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'agent:composer/thread-store.ts#resolve#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#deleteThread#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#append#composer_thread_events': { in: 'autocommit', why: THREAD },
@@ -141,6 +142,12 @@ const PASS_THROUGH: Record<string, 'first argument' | 'autocommit'> = {
 const OPAQUE_READS: Record<string, string> = {
   'service:database/schema-guard.ts#onApplicationBootstrap':
     "runs this file's canary probes, every one a SELECT",
+  'service:dbos/recovery-guard.ts#resumability':
+    "sends readResumability's reads of a run's history, every one a SELECT",
+  'service:dbos/recovery-guard.ts#system':
+    'reads the DBOS system database, which holds no table under a workflow',
+  'service:scripts/legacy-report.cli.ts#main':
+    "sends readResumability's reads of a run's history, every one a SELECT",
 };
 
 /** Where each workflow-row lock is defined, so a look-alike of the same name is not taken for it. */

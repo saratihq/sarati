@@ -74,6 +74,15 @@ If the worker came back, it resumes on its own. If it never comes back, the reap
 `error` once it has been in flight for `RUN_MAX_DURATION_SECONDS` since it started or last resumed
 from a wait, within five minutes.
 
+## A run reads "…so it can't be resumed safely — run it again."
+
+The service stopped — a restart, a crash or an upgrade — and resuming the run could have put a step's
+result or a decision in the wrong place: it had run steps side by side, an AI Agent step in it was
+refused a sub-workflow call and carried on, or what it recorded does not fit its workflow. The
+message says which. Nothing in it ran again; run the workflow again.
+[Durability](/run/runs/#durability) says which runs this happens to, and
+[Upgrades](/operate/upgrades/#upgrade) how to list them before a restart.
+
 ## A run reads "Decided by … the run has yet to take it"
 
 Someone decided, and the decision is waiting for the run to pick it up — the run is down, or catching

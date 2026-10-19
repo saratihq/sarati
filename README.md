@@ -37,7 +37,9 @@ Sarati is both.
   settings on one step reconcile cleanly, and a renamed step keeps its identity.
 - **Reviews and protected branches** — a protected branch takes change only through an approved review.
 - **Environments** — promotion moves a pointer across staging, uat and production. Not a copy-paste.
-- **Durable runs** — crash or redeploy mid-flight and runs resume instead of being orphaned.
+- **Durable runs** — crash or redeploy mid-flight and runs resume instead of being orphaned. One that
+  can't be resumed safely, such as one that had already run steps side by side, ends in an error
+  saying so rather than resuming out of order.
 - **Connections belong to the environment** — a step names the app it needs, the environment supplies
   the account. Staging hits the sandbox, production hits the real thing, and sharing a workflow never
   shares a credential.

@@ -33,11 +33,12 @@ COPY --from=agent /app /opt/sarati/agent
 COPY --from=client /app /opt/sarati/client
 COPY --from=service /usr/local/bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --from=service /usr/local/bin/sarati-set-password /usr/local/bin/sarati-set-password
+COPY --from=service /usr/local/bin/sarati-legacy-report /usr/local/bin/sarati-legacy-report
 
 COPY docker/all-in-one/Caddyfile /etc/caddy/Caddyfile
 COPY docker/all-in-one/supervisord.conf /etc/supervisord.conf
 COPY docker/all-in-one/boot.sh /usr/local/bin/boot.sh
-RUN chmod +x /usr/local/bin/boot.sh /usr/local/bin/entrypoint.sh /usr/local/bin/sarati-set-password
+RUN chmod +x /usr/local/bin/boot.sh /usr/local/bin/entrypoint.sh /usr/local/bin/sarati-set-password /usr/local/bin/sarati-legacy-report
 
 # Everything that must outlive the container: the database, and the keys that decrypt credentials.
 VOLUME /data

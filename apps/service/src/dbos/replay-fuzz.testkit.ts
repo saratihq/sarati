@@ -12,6 +12,7 @@ import type { AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/age
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagNode, DagPlan } from '../runtime/dag-plan';
 import { seeded, type FuzzActionProps, type FuzzPlan } from '../runtime/random-dag-plan.testkit';
+import { MODEL_TURN, type RecordedOp, type RecordedRun } from '../runtime/recovery-exposure';
 import type { RunRecorder } from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { isTimerWait } from '../runtime/timer-wait';
@@ -62,6 +63,8 @@ export interface ReplayVerdict {
   drifted: number;
   /** Waits answered in time that finished as if nobody had answered. */
   answeredNull: number;
+  /** What the killed execution had committed when it died: its op rows, and the step rows whose write had landed. */
+  atCrash: RecordedRun;
 }
 
 const RESTART_AFTER_MS = 500;
@@ -80,7 +83,12 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
   const crashAt = Math.floor(seeded(seed * 7 + 3)() * Math.max(1, firstEnd));
   const crashed = world.start(seeded(seed * 7 + 1));
   let replay: Execution | undefined;
+  let atCrash: RecordedRun = { steps: [], ops: [] };
   world.clock.at(crashAt, () => {
+    atCrash = {
+      steps: [...world.recorder.rows.values()],
+      ops: [...world.wf.rows.values()].sort((a, b) => a.id - b.id).map(recordedOp),
+    };
     crashed.execution.crash();
     world.clock.at(world.clock.now() + RESTART_AFTER_MS, () => {
       replay = world.start(seeded(seed * 7 + 4));
@@ -107,7 +115,14 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
     wrongLane: probe.recorder.wrongLane.size + world.recorder.wrongLane.size,
     drifted: drifted(world.recorder.finished),
     answeredNull: probe.recorder.answeredNull.size + world.recorder.answeredNull.size,
+    atCrash,
   };
+}
+
+function recordedOp(row: OpRow): RecordedOp {
+  if (!MODEL_TURN.test(row.name)) return { name: row.name };
+  const turn = row.error ? { toolCalls: [] } : (row.output as ModelTurn);
+  return { name: row.name, toolCalls: turn.toolCalls.map(({ id, name }) => ({ id, name })) };
 }
 
 function drifted([killed, replay]: Array<Map<string, unknown>>): number {
@@ -282,6 +297,9 @@ class FuzzRecorder implements RunRecorder {
   readonly wrongLane = new Set<string>();
   readonly answeredNull = new Set<string>();
   readonly finished: Array<Map<string, unknown>> = [];
+  /** The step rows written so far, by step key. */
+  readonly rows = new Map<string, RecordedRun['steps'][number]>();
+  private readonly startedAt = new Map<string, number>();
   budgetRefusals = 0;
   private readonly kinds = new Map<string, RuntimeStepKind>();
   private readonly answered = new Set<string>();
@@ -302,9 +320,17 @@ class FuzzRecorder implements RunRecorder {
     return this.write();
   }
 
-  async stepStarted(_runId: string, stepKey: string, _nodeId: string, kind: RuntimeStepKind): Promise<void> {
+  async stepStarted(
+    _runId: string,
+    stepKey: string,
+    _nodeId: string,
+    kind: RuntimeStepKind,
+    pinned = false,
+  ): Promise<void> {
     this.kinds.set(stepKey, kind);
     await this.write();
+    this.rows.set(stepKey, { stepKey, kind, pinned });
+    if (!this.startedAt.has(stepKey)) this.startedAt.set(stepKey, this.clock.now());
   }
 
   /** Starts a new execution's record of what each step finished with. */
@@ -343,7 +369,8 @@ class FuzzRecorder implements RunRecorder {
         if (at < this.clock.now() + durationMs - 500) this.decidedInTime.add(stepKey);
       }
     }
-    return new Date(this.clock.now() + durationMs);
+    // Anchored on the step row's first start, which a replay's upsert keeps, as the real recorder answers.
+    return new Date((this.startedAt.get(stepKey) ?? this.clock.now()) + durationMs);
   }
 
   stepResumed(): Promise<void> {

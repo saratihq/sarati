@@ -40,7 +40,9 @@ supplies the account. Staging hits the sandbox; production hits the real thing.
 
 One execution of one version, in one environment.
 
-Runs are durable. If the engine restarts mid-flight, a run resumes rather than being orphaned.
+Runs are durable. If the engine restarts mid-flight, a run resumes rather than being orphaned —
+except one that can't be resumed safely, such as one that had already run steps side by side, which
+[ends in an error](/run/runs/#durability) rather than resuming out of order.
 
 ## How they fit
 
