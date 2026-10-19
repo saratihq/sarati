@@ -50,6 +50,14 @@ For a run that keeps its waits:
 The earlier version counts the time a run spent parked against `RUN_MAX_DURATION_SECONDS`, so it may
 end a run that resumed from a long wait in an error.
 
+For a step with no account chosen:
+
+- It fails on the earlier version, which needs an app step to name an account even under an
+  environment, where the environment's account is still the one it runs as. A run on Default and
+  **Test this branch** fail the same way. Pick an account on the step, and promote that version
+  again for an environment to run it. An AI Agent step is the exception under an environment: there
+  it runs as the environment's account with or without one.
+
 Running it by hand, without the installer:
 
 ```bash

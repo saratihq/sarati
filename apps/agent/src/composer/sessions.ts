@@ -134,6 +134,8 @@ function foldIntoSnapshot(snapshot: MutableSnapshot, event: ComposerEvent): void
     if (event.data.status === 'passed') snapshot.connectionNeeds.delete(event.data.node_id);
   } else if (event.event === 'connection_needed') {
     snapshot.connectionNeeds.set(event.data.node_id, { ...event.data });
+  } else if (event.event === 'connection_resolved') {
+    snapshot.connectionNeeds.delete(event.data.node_id);
   } else if (event.event === 'offer') {
     snapshot.offerPending = true;
   }

@@ -5,6 +5,7 @@ import {
   getNodeCategory,
   isToolEligibleTarget,
   NODE_ID_RE,
+  refWarningsOf,
   unconfiguredConnections,
   validateAuthoredIr,
   type CatalogFacts,
@@ -254,6 +255,55 @@ describe('the one author-time gate', () => {
       ['bare', false],
     ]);
     expect(unconfiguredConnections(ir, FACTS).map((r) => r.node_id)).toEqual(['bare']);
+  });
+
+  it('warns on {{$account…}} only where the action signs in to nothing, whatever account the step chose', () => {
+    const ir = doc({
+      nodes: [
+        node({
+          id: 'post',
+          name: 'Post as me',
+          node_type: 'slack.send_channel_message',
+          parameters: { text: 'From {{$account.name}}' },
+        }),
+        node({ id: 'join', name: 'Join', parameters: { texts: ['{{$account.email}}'], connectionId: 'c1' } }),
+        node({
+          id: 'ghost',
+          name: 'Ghost',
+          node_type: 'ghost.vanished',
+          parameters: { to: '{{$account.email}}' },
+        }),
+      ],
+    });
+    const expected = [
+      '"Join" uses {{$account.email}}, but its action signs in to nothing, so nothing can fill it',
+    ];
+    expect(validateAuthoredIr(ir, FACTS).ref_warnings).toEqual(expected);
+    expect(refWarningsOf(ir, FACTS)).toEqual(expected);
+  });
+
+  it('warns once on a step whose action signs in to nothing, even for a field an account lacks', () => {
+    const ir = doc({
+      nodes: [
+        node({
+          id: 'post',
+          name: 'Post as me',
+          node_type: 'slack.send_channel_message',
+          parameters: { text: 'From {{$account.address}}' },
+        }),
+        node({
+          id: 'join',
+          name: 'Join',
+          parameters: { texts: ['{{$account.address}}', '{{$account.phone}}'] },
+        }),
+      ],
+    });
+    const expected = [
+      '"Post as me" uses {{$account.address}}, but an account has only an email, handle, id and name',
+      '"Join" uses {{$account.address}}, but its action signs in to nothing, so nothing can fill it',
+    ];
+    expect(validateAuthoredIr(ir, FACTS).ref_warnings).toEqual(expected);
+    expect(refWarningsOf(ir, FACTS)).toEqual(expected);
   });
 
   it('throws the first error as a 422 carrying its machine code, for the commit path', () => {

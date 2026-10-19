@@ -170,13 +170,13 @@ describe('AI agent model call — env-slot connection fallback', () => {
     expect(calls[0]!.headers['x-api-key']).toBe(OWNER_KEY);
   });
 
-  it('(b) a Default run (no env) with no connection is still the honest 422', async () => {
+  it('(b) a Default run (no env) whose caller has no Claude account is the honest 422 naming the step', async () => {
     const plan = compileWorkflowIrDag(agentDoc());
     await expect(
       app
         .get(DagInterpreter)
         .run(plan, { externalUserId: CALLER_ID, initialScope: { trigger: { chatInput: 'hi' } } }),
-    ).rejects.toThrow(/no Claude connection.*Integrations/is);
+    ).rejects.toThrow(/^Step "Agent" has no Claude account to run as — connect one under Integrations/);
     expect(calls).toHaveLength(0); // never reached the provider
   });
 
@@ -190,7 +190,7 @@ describe('AI agent model call — env-slot connection fallback', () => {
         orgId: ORG_ID,
         initialScope: { trigger: { chatInput: 'hi' } },
       }),
-    ).rejects.toThrow(/No "claude" connection in the staging environment/i);
+    ).rejects.toThrow(/^staging has no Claude account assigned, so "Agent" can't run there/);
     expect(calls).toHaveLength(0); // resolved to a 428 before any provider call
   });
 });

@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
 import * as api from "@/api/client";
-import type { ReviewTestRun, ReviewTestSummary } from "@/api/client";
+import type { ReviewTestReadiness, ReviewTestRun, ReviewTestSummary } from "@/api/client";
 import type { EnvironmentSummary } from "@/api/environments";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -20,6 +20,10 @@ const VALUE_TRUNCATE = 60;
 interface ReviewTestPanelProps {
   workflowId: string;
   reviewId: string;
+  /** The branch under review — where its steps' accounts are picked. */
+  sourceBranch: string;
+  /** The branch's head version; a new one asks again what the test would refuse. */
+  sourceHeadVersionId?: string | null;
   /** Named environments to scope the test to; null = list unavailable (Default only). */
   environments: EnvironmentSummary[] | null;
   /** The persisted / latest test result to render, or null if never tested. */
@@ -126,6 +130,51 @@ function RunSideRow({
         <span className="min-w-0 break-words" style={{ color: "var(--orchestr-danger)" }}>
           {run.error}
         </span>
+      )}
+    </div>
+  );
+}
+
+// What the test would refuse before it runs, in the run's own words, and where each is fixed.
+function TestReadiness({
+  readiness,
+  workflowId,
+  sourceBranch,
+}: {
+  readiness: ReviewTestReadiness;
+  workflowId: string;
+  sourceBranch: string;
+}) {
+  const { blocked } = readiness;
+  if (blocked.length === 0) return null;
+  const toPick = blocked.filter((step) =>
+    ["several", "stale", "wrong_app", "needs_managed", "inactive"].includes(step.reason),
+  ).length;
+  const toConnect = blocked.some((step) =>
+    ["none", "needs_managed", "empty_slot", "wrong_app_slot", "needs_managed_slot", "inactive_slot"].includes(step.reason),
+  );
+  return (
+    <div
+      role="status"
+      data-testid="test-readiness"
+      className="rounded-lg py-2 px-2.5 text-[12px] space-y-1"
+      style={{ background: "var(--orchestr-warning-tint)", color: "var(--orchestr-warning)" }}
+    >
+      {blocked.map((step) => (
+        <div key={step.node_id}>{step.message}</div>
+      ))}
+      {toPick > 0 && (
+        <Link
+          href={`/workflows/${workflowId}/edit?branch=${encodeURIComponent(sourceBranch)}`}
+          className="inline-block mr-3 underline underline-offset-2 font-semibold"
+        >
+          {`Open ${sourceBranch} to pick ${toPick === 1 ? "its account" : "their accounts"}`}
+        </Link>
+      )}
+      {toConnect && (
+        <Link href="/integrations" className="inline-block underline underline-offset-2 font-semibold">
+          Open Integrations
+        </Link>
       )}
     </div>
   );
@@ -274,6 +323,8 @@ function TestResult({
 export default function ReviewTestPanel({
   workflowId,
   reviewId,
+  sourceBranch,
+  sourceHeadVersionId = null,
   environments,
   result,
   onResult,
@@ -287,6 +338,39 @@ export default function ReviewTestPanel({
   const [payloadError, setPayloadError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
+  // Keyed by the environment it was asked for, so a stale answer never speaks for a new pick.
+  const [readiness, setReadiness] = useState<
+    { envId: string; value: ReviewTestReadiness } | { envId: string; error: string } | null
+  >(null);
+  // A slot assigned or a step picked in another tab is seen once this one has focus back.
+  const [focused, setFocused] = useState(0);
+
+  useEffect(() => {
+    if (!canRun) return;
+    const askAgain = () => setFocused((n) => n + 1);
+    window.addEventListener("focus", askAgain);
+    return () => window.removeEventListener("focus", askAgain);
+  }, [canRun]);
+
+  useEffect(() => {
+    if (!canRun) return;
+    let cancelled = false;
+    api
+      .getReviewTestReadiness(workflowId, reviewId, envId === DEFAULT_ENV ? undefined : envId)
+      .then((value) => {
+        if (!cancelled) setReadiness({ envId, value });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setReadiness({ envId, error: e instanceof Error ? e.message : "unknown error" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workflowId, reviewId, envId, canRun, result, sourceHeadVersionId, focused]);
+  const ready = readiness?.envId === envId && "value" in readiness ? readiness.value : null;
+  const readinessError = readiness?.envId === envId && "error" in readiness ? readiness.error : null;
+  // An environment whose slot can't run a step refuses the test outright, so it isn't offered.
+  const slotRefuses = (ready?.blocked ?? []).some((step) => step.reason.endsWith("_slot"));
 
   // prod first, matching the Promote menu's ordering.
   const sortedEnvs = environments
@@ -299,7 +383,7 @@ export default function ReviewTestPanel({
 
   // Paste mode needs a non-empty payload; Latest run reuses the workflow's last trigger.
   const pasteEmpty = payloadSource === "paste" && payloadText.trim() === "";
-  const runDisabled = running || pasteEmpty;
+  const runDisabled = running || pasteEmpty || slotRefuses;
 
   const buildBody = (): { environment_id?: string; trigger_payload?: unknown } | null => {
     const body: { environment_id?: string; trigger_payload?: unknown } = {};
@@ -435,6 +519,13 @@ export default function ReviewTestPanel({
                   {payloadError}
                 </div>
               )}
+            </div>
+          )}
+
+          {ready && <TestReadiness readiness={ready} workflowId={workflowId} sourceBranch={sourceBranch} />}
+          {readinessError && (
+            <div className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              {`Couldn't check this branch's accounts before running (${readinessError}). The test still reports what fails.`}
             </div>
           )}
 

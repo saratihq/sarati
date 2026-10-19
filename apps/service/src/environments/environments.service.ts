@@ -4,6 +4,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { accountLabel, storedAccount } from '../connections/account-identity';
+import { providersServing } from '../connections/run-as-account';
 import { isIdShape } from '../database/ids';
 import { isUniqueViolation } from '../database/pg-errors';
 import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
@@ -308,6 +309,12 @@ export class EnvironmentsService {
       if (!isIdShape(connectionId)) throw notFound;
       const conn = await em.findOne(ConnectionEntity, { where: { id: connectionId } });
       if (!conn || conn.userId !== callerUserId) throw notFound;
+      if (!providersServing(app).includes(conn.provider)) {
+        throw new DomainError(
+          `That account is for ${conn.provider}, not ${app} — assign a ${app} account to this slot`,
+          422,
+        );
+      }
 
       const existing = await rawQuery<{ connection_id: string }>(
         em,

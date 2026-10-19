@@ -72,8 +72,11 @@ function collectRefs(value: unknown, sink: (ref: string) => void): void {
   }
 }
 
-/** Lint one IR document's data refs into human sentences; the commit still succeeds. */
-export function lintDataRefs(irDoc: Record<string, unknown>): string[] {
+/** Lint one IR document's data refs into human sentences; the commit still succeeds. A node `accountRefsWarnedElsewhere` matches gets no `{{$account…}}` warning here. */
+export function lintDataRefs(
+  irDoc: Record<string, unknown>,
+  accountRefsWarnedElsewhere: (node: LintNode) => boolean = () => false,
+): string[] {
   const nodes = lintableNodes(irDoc);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const loopBindings = collectLoopBindings(nodes);
@@ -81,7 +84,7 @@ export function lintDataRefs(irDoc: Record<string, unknown>): string[] {
   const seen = new Set<string>();
 
   for (const node of nodes) {
-    warnings.push(...lintAccountRefs(node));
+    if (!accountRefsWarnedElsewhere(node)) warnings.push(...lintAccountRefs(node));
     // Trigger parameters configure the trigger; they are never resolved against the run scope.
     if (isTriggerNode(node)) continue;
 
@@ -114,17 +117,13 @@ export function lintDataRefs(irDoc: Record<string, unknown>): string[] {
   return warnings;
 }
 
-/** `{{$account…}}` is filled only for an app step that runs as a connection, and only with a field an account has. */
+/** `{{$account…}}` is filled only on an app step, and only with a field an account has; which account is its run's to decide. */
 function lintAccountRefs(node: LintNode): string[] {
   const fields = [...new Set(accountRefFields(node.parameters))];
   if (fields.length === 0) return [];
-  const ref = accountRefText(fields[0] ?? '');
   if (isTriggerNode(node) || node.node_type.startsWith('orchestr:')) {
+    const ref = accountRefText(fields[0] ?? '');
     return [`"${node.name}" uses ${ref}, but only an app step that runs as a connected account can`];
-  }
-  const connectionId = node.parameters.connectionId;
-  if (typeof connectionId !== 'string' || connectionId === '') {
-    return [`"${node.name}" uses ${ref}, but runs as no connected account, so nothing can fill it`];
   }
   return fields
     .filter((field) => !isAccountRefField(field))

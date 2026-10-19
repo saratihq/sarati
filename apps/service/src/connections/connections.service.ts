@@ -1,17 +1,24 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { ActionError } from '@sarati/actions-sdk';
-import { ILike, IsNull } from 'typeorm';
-import type { DataSource } from 'typeorm';
+import { ILike, In, IsNull } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import { errorMessage } from '../common/error-message';
 import { ConnectionEntity } from '../database/entities/connection.entity';
-import { newId, now } from '../database/ids';
+import { isIdShape, newId, now } from '../database/ids';
 import { type AccountIdentity, storedAccount } from './account-identity';
 import { ComposioProvider, ComposioUpstreamError } from './composio.provider';
 import { OAuthExchangeError, refreshAccessToken, type OAuthTokenSet } from './oauth-token';
+import {
+  type OwnAccount,
+  providersServing,
+  type RunAsAccounts,
+  type ServingAccount,
+  type SlotAccount,
+} from './run-as-account';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 import {
   byoClientToConfig,
@@ -135,7 +142,7 @@ export function scopeOfConnection(row: ConnectionEntity): PlatformKeyScope | nul
 }
 
 @Injectable()
-export class ConnectionsService {
+export class ConnectionsService implements RunAsAccounts {
   private readonly logger = new Logger(ConnectionsService.name);
 
   private activationListener: ((connection: ActivatedConnection) => Promise<void>) | null = null;
@@ -245,36 +252,44 @@ export class ConnectionsService {
     );
   }
 
-  /**
-   * THE env-scoped resolver for `(environment_id, app)` — returns the pool row AND its owner,
-   * since the step must run AS the owner; null on an empty slot, and callers must never fall back to a personal pool.
-   */
-  async resolveSlotConnection(
-    environmentId: string,
-    app: string,
-  ): Promise<{ id: string; ownerUserId: string } | null> {
-    const rows: Array<{ id: string; user_id: string }> = await this.dataSource.query(
-      `SELECT c.id, c.user_id
-         FROM environment_connections ec
-         JOIN connections c ON c.id = ec.connection_id
-        WHERE ec.environment_id = $1 AND ec.app = $2`,
-      [environmentId, app],
-    );
-    const row = rows[0];
-    return row ? { id: row.id, ownerUserId: row.user_id } : null;
+  /** THE env-scoped resolver for `(environment_id, app)`: the slot's account and its owner, whom the step runs AS; null on an empty slot. */
+  resolveSlotConnection(environmentId: string, app: string): Promise<SlotAccount | null> {
+    return slotAccount(this.dataSource.manager, environmentId, app);
   }
 
   /** LEGACY resolution by `(org, env name, app)` for rows carrying an env NAME but no environment_id; new fires use `resolveSlotConnection`. */
-  async resolveClusterConnection(
+  resolveClusterConnection(
     orgId: string,
     environment: string,
     provider: string,
-  ): Promise<{ id: string; ownerUserId: string } | null> {
-    const row = await this.dataSource.manager.findOne(ConnectionEntity, {
-      where: { orgId, environment, provider, status: 'active' },
-      select: { id: true, userId: true },
-    });
-    return row ? { id: row.id, ownerUserId: row.userId } : null;
+  ): Promise<SlotAccount | null> {
+    return clusterAccount(this.dataSource.manager, orgId, environment, provider);
+  }
+
+  /** An environment's name, for a message that names it; null when there is no such environment. */
+  environmentNameOf(environmentId: string): Promise<string | null> {
+    return environmentName(this.dataSource.manager, environmentId);
+  }
+
+  /** Those of `ids` that are `userId`'s connections, in one `(id, owner)` read — the lookup a run makes. */
+  ownConnections(userId: string, ids: readonly string[]): Promise<ReadonlyMap<string, OwnAccount>> {
+    return ownAccounts(this.dataSource.manager, userId, ids);
+  }
+
+  /** The user's active personal accounts serving any of `apps`, newest first, in one read. */
+  accountsServing(userId: string, apps: readonly string[]): Promise<ServingAccount[]> {
+    return servingAccounts(this.dataSource.manager, userId, apps);
+  }
+
+  /** The same reads on `em`, so a check inside a transaction stays on its connection. */
+  accountsOn(em: EntityManager): RunAsAccounts {
+    return {
+      resolveSlotConnection: (environmentId, app) => slotAccount(em, environmentId, app),
+      resolveClusterConnection: (orgId, environment, app) => clusterAccount(em, orgId, environment, app),
+      environmentNameOf: (environmentId) => environmentName(em, environmentId),
+      ownConnections: (userId, ids) => ownAccounts(em, userId, ids),
+      accountsServing: (userId, apps) => servingAccounts(em, userId, apps),
+    };
   }
 
   /** Store a completed OAuth2 flow's tokens under the standard OAuth field names the auth seam reads. */
@@ -372,10 +387,11 @@ export class ConnectionsService {
     return toSummary(row);
   }
 
-  async list(userId: string): Promise<ConnectionSummary[]> {
+  /** The user's PERSONAL connections; with `app`, only those that serve it. */
+  async list(userId: string, app?: string): Promise<ConnectionSummary[]> {
     // PERSONAL only — org cluster rows (orgId set) must not leak into the personal surface.
     const rows = await this.dataSource.manager.find(ConnectionEntity, {
-      where: { userId, orgId: IsNull() },
+      where: { userId, orgId: IsNull(), ...(app ? { provider: In(providersServing(app)) } : {}) },
       order: { createdAt: 'DESC' },
     });
     return rows.map(toSummary);
@@ -821,4 +837,97 @@ function toSummary(e: ConnectionEntity): ConnectionSummary {
     last_checked_at: e.lastCheckedAt ? e.lastCheckedAt.toISOString() : null,
     account: storedAccount(e.account),
   };
+}
+
+async function slotAccount(
+  em: EntityManager,
+  environmentId: string,
+  app: string,
+): Promise<SlotAccount | null> {
+  const rows: Array<{ id: string; user_id: string; status: string; provider: string; auth_type: string }> =
+    await em.query(
+      `SELECT c.id, c.user_id, c.status, c.provider, c.auth_type
+         FROM environment_connections ec
+         JOIN connections c ON c.id = ec.connection_id
+        WHERE ec.environment_id = $1 AND ec.app = $2`,
+      [environmentId, app],
+    );
+  const row = rows[0];
+  return row
+    ? {
+        id: row.id,
+        ownerUserId: row.user_id,
+        status: row.status,
+        provider: row.provider,
+        managed: row.auth_type === 'managed',
+      }
+    : null;
+}
+
+async function clusterAccount(
+  em: EntityManager,
+  orgId: string,
+  environment: string,
+  provider: string,
+): Promise<SlotAccount | null> {
+  const row = await em.findOne(ConnectionEntity, {
+    where: { orgId, environment, provider },
+    select: { id: true, userId: true, status: true, provider: true, authType: true },
+  });
+  return row
+    ? {
+        id: row.id,
+        ownerUserId: row.userId,
+        status: row.status,
+        provider: row.provider,
+        managed: row.authType === 'managed',
+      }
+    : null;
+}
+
+async function environmentName(em: EntityManager, environmentId: string): Promise<string | null> {
+  const rows: Array<{ name: string }> = await em.query(`SELECT name FROM environments WHERE id = $1`, [
+    environmentId,
+  ]);
+  return rows[0]?.name ?? null;
+}
+
+async function ownAccounts(
+  em: EntityManager,
+  userId: string,
+  ids: readonly string[],
+): Promise<Map<string, OwnAccount>> {
+  const shaped = ids.filter(isIdShape);
+  if (shaped.length === 0) return new Map();
+  const rows: Array<{ id: string; provider: string; status: string; auth_type: string }> = await em.query(
+    `SELECT id, provider, status, auth_type FROM connections WHERE user_id = $1 AND id = ANY($2::uuid[])`,
+    [userId, shaped],
+  );
+  const byId = new Map(
+    rows.map((row) => [
+      row.id.toLowerCase(),
+      { provider: row.provider, status: row.status, managed: row.auth_type === 'managed' },
+    ]),
+  );
+  return new Map(
+    shaped.flatMap((id) => {
+      const own = byId.get(id.toLowerCase());
+      return own ? [[id, own] as const] : [];
+    }),
+  );
+}
+
+async function servingAccounts(
+  em: EntityManager,
+  userId: string,
+  apps: readonly string[],
+): Promise<ServingAccount[]> {
+  const providers = [...new Set(apps.flatMap(providersServing))];
+  if (providers.length === 0) return [];
+  const rows = await em.find(ConnectionEntity, {
+    where: { userId, orgId: IsNull(), status: 'active', provider: In(providers) },
+    select: { id: true, provider: true, authType: true },
+    order: { createdAt: 'DESC', id: 'DESC' },
+  });
+  return rows.map((row) => ({ id: row.id, provider: row.provider, managed: row.authType === 'managed' }));
 }

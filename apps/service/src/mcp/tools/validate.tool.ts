@@ -41,7 +41,7 @@ const Output = z.object({
       }),
     )
     .describe(
-      'Steps needing a credential that carry no connectionId. A dry run deliberately does not catch these, so this is the only warning before the first real fire — set parameters.connectionId from orchestr_list_connections.',
+      "Steps needing an account that choose none. Each runs as the runner's only active account for its app (a test, an editor run; only one-click accounts count for a step that runs only through one-click sign-in) or as its environment's account once promoted, and fails naming itself when there is none or several — set parameters.connectionId from orchestr_list_connections only to pin a Default run to one account.",
     ),
 });
 

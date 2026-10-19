@@ -1,3 +1,5 @@
+import type { RunAsRefusalReason } from '../connections/run-as-account';
+
 /** Shapes for pre-merge "Test this branch", stored on `workflow_reviews.last_test`. */
 
 export type TestVerdict = 'green' | 'red';
@@ -44,4 +46,23 @@ export interface ReviewTestSummary {
   base: ReviewTestSide;
   head: ReviewTestSide;
   regression: RunOutputRegression;
+}
+
+/** A step a test would refuse for want of an account, as the review card names it. */
+export interface BlockedStep {
+  node_id: string;
+  node_name: string;
+  /** The app it runs as an account of. */
+  app: string;
+  /** Why it has no account: a `_slot` reason under an environment, any other on Default (see {@link RunAsRefusalReason}). */
+  reason: RunAsRefusalReason;
+  /** What the run would fail with. */
+  message: string;
+}
+
+/** What "Test this branch" already knows before it runs, for the caller and the chosen environment. */
+export interface ReviewTestReadiness {
+  environment: { id: string; name: string } | null;
+  /** The branch head's steps a run would refuse for want of an account — the run-as rule, dry. */
+  blocked: BlockedStep[];
 }

@@ -27,7 +27,24 @@ comment count and approvals.
 - Comments are per review.
 
 Pick the environment to run against, and whether the trigger payload comes from the **latest run**
-or JSON you paste.
+or JSON you paste. On **Default (your connections)** each step runs as the account picked on it, or
+your only active one for its app; under an environment, as that environment's.
+
+Before you run it, the panel names every step on your branch that a run would refuse for want of
+an account, in the words the run would use, and links to where it is fixed. It checks again when
+the branch moves on and when you come back to the tab, so a fix made elsewhere frees the run. It
+checks the workflow's own steps: a step inside a workflow it calls is decided when the run reaches it. Asked
+with an API key, this check takes `connection:read` as well as `workflow:read`, since it reads your
+accounts. A refused AI Agent tool is handed back to its agent as the tool's result, so the agent may
+carry on without it. An environment with no account for one of those apps, whose account can't run
+the step, or whose account for it isn't active, is refused outright rather than run:
+
+> production has no gmail account assigned, so "Email me the report" can't run there — assign one
+> under Integrations → Environments, or test on Default (your connections)
+
+> production's gmail account isn't active, so "Email me the report" can't run there — its owner
+> reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments,
+> or test on Default (your connections)
 
 The result is **Passed**, **Failing** or **Inconclusive** — the target failed too, so it can't tell —
 plus every output field that moved:

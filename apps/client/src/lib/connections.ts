@@ -14,14 +14,6 @@ export function matchingConnections(connections: Connection[], appSlug: string |
   return connections.filter((c) => c.provider === appSlug || appSlug.startsWith(`${c.provider}-`));
 }
 
-/**
- * What the Connection select offers: real matches ONLY — never fall back to every account, since a
- * wrong-app credential hard-errors at run time. Slug-less types can't be matched, so they see them all.
- */
-export function candidateConnections(connections: Connection[], appSlug: string | undefined): Connection[] {
-  return appSlug ? matchingConnections(connections, appSlug) : connections;
-}
-
 /** What a person recognises an account by: its email, else its handle, name or id. */
 export function accountLabel(account: AccountIdentity): string {
   return account.email ?? account.handle ?? account.name ?? account.id ?? "an unnamed account";

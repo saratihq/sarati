@@ -45,15 +45,43 @@ exactly as before.
 
 ## Using one in a step
 
-A step that needs an account names the connection. Without one it refuses up front rather than
-failing mid-run:
+A step that needs an account runs as one, decided when it runs:
+
+- **Under an environment** — a promoted run, or a test you point at one — it runs as the account
+  assigned to that environment for the app, whatever the step names.
+- **Otherwise** — building, testing, a review test on Default — it runs as the account you picked on
+  the step, or, with none picked, as your only active account for that app (only one-click accounts
+  count for a one-click-only step). A `zoho` account serves `zoho-crm` steps, and a `facebook` one
+  serves `facebook-pages` steps.
+
+Some app actions have no built-in action in Sarati and run only through one-click sign-in. A step
+using one runs only as a one-click account: an account you connected with your own key doesn't count
+for it, on the step or in an environment, so with one of each it runs as the one-click one.
+
+Nothing is written into the workflow until you pick: the step's **Account** field says what it will
+run as — *Runs as your only active Gmail account · you@example.com*. Picking one is an ordinary edit
+you save.
+
+When there is no account to run as, the step stops before it calls the app, naming itself:
 
 ```json
-{"detail":"Step \"slack.list_channels\" requires a slack connection — attach one to this step and retry"}
+{"detail":"Step \"List channels\" has no slack account to run as — connect one"}
 ```
 
-With the connection attached, the step runs against the real account and returns real data — a
-Slack `list_channels` comes back with the workspace's actual channels.
+It never guesses between two accounts, never swaps one you picked for another, and never runs as
+one you picked that has stopped working or is for another app:
+
+```
+Step "Email me the report" has no gmail account chosen and you have 2 active gmail accounts — pick one on the step
+Step "Email me the report" runs as a gmail account that no longer exists or isn't yours — pick one of your gmail accounts on the step
+Step "Email me the report" runs as a gmail account that isn't active — pick another of your gmail accounts on the step
+Step "Email me the report" runs as an account for slack, not gmail — pick one of your gmail accounts on the step
+Step "Remind me" runs only on a one-click (managed) slack account, and you have none — connect one under Integrations
+Step "Remind me" runs as an account that uses its own credentials, and it runs only on a one-click (managed) slack account — pick one on the step, or connect one under Integrations
+```
+
+With an account to run as, the step runs against it and returns real data — a Slack
+`list_channels` comes back with the workspace's actual channels.
 
 Where the app can say which account a connection signs in as, the connection is labelled with it —
 `gmail · you@example.com` — so two accounts for the same app are told apart. Sarati asks when the
@@ -63,8 +91,9 @@ that account: see [Your own account](/build/data/#your-own-account).
 ## The AI Agent step needs one too
 
 An **AI Agent** step calls a model, and that model call is a connection like any other: connect
-Claude (or OpenAI, Gemini, Mistral) under **Integrations → Use your own credentials**, then pick the
-account on the step's model. An [environment](/run/environments/) run resolves it from that
+Claude (or OpenAI, Gemini, Mistral) under **Integrations → Use your own credentials**. The model runs
+as that account exactly as any step does — your only active one for the provider, or the one you
+pick on the step's model. An [environment](/run/environments/) run resolves it from that
 environment's slot for the provider instead.
 
 The Anthropic key in **Settings → Platform keys** is a different credential: it powers the

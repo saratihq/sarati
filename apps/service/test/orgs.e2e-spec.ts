@@ -9,6 +9,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ConnectionsService } from '../src/connections/connections.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -1032,16 +1033,14 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     const stagingEnv = (envs.body.environments as Array<{ id: string; name: string }>).find(
       (e) => e.name === 'staging',
     )!;
-    const slackConn = await asA(
-      http()
-        .post('/api/connections')
-        .set('X-Org-Id', orgId)
-        .send({ provider: 'slack', credential: 'a-slack' }),
-    ).expect(201);
+    // slack.send_message runs only on the Composio rail, so only a one-click (managed) account can fill its slot.
+    const connections = app.get(ConnectionsService);
+    const slackConn = await connections.createManaged(userA, 'slack', 'ca_orgs_staging');
+    await connections.setStatus(slackConn.id, 'active');
     await db.query(
       `INSERT INTO environment_connections (environment_id, app, connection_id) VALUES ($1, 'slack', $2)
        ON CONFLICT (environment_id, app) DO UPDATE SET connection_id = EXCLUDED.connection_id`,
-      [stagingEnv.id, slackConn.body.id],
+      [stagingEnv.id, slackConn.id],
     );
     await promoteStagingTo(connWfId);
     await db.query(`DELETE FROM environment_connections WHERE environment_id = $1 AND app = 'slack'`, [
@@ -1058,7 +1057,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       if (!errRow || errRow.status === 'running') await new Promise((r) => setTimeout(r, 50));
     }
     expect(errRow?.status).toBe('error');
-    expect(errRow?.error).toMatch(/staging environment/i);
+    expect(errRow?.error).toMatch(/^staging has no slack account assigned/);
   }, 30_000);
 
   it('delete org: owner-only; personal + non-empty refused; an empty org is removed', async () => {

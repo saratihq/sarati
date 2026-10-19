@@ -12,8 +12,11 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("@/lib/useSessionUserId", () => ({ useSessionUserId: () => "user-1" }));
 vi.mock("@/lib/useComposerAvailable", () => ({ useComposerAvailable: () => ({ available: false }) }));
-// The canvas needs a layout engine jsdom lacks; these specs drive the document through the store.
-vi.mock("./PreviewPanel", () => ({ default: () => null }));
+// The canvas itself needs a layout engine jsdom lacks; the banner is the part that reads the document.
+vi.mock("./PreviewPanel", async () => {
+  const { default: ConnectCaptureBanner } = await import("./ConnectCaptureBanner");
+  return { default: () => <ConnectCaptureBanner /> };
+});
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof api>()),
   getWorkflow: vi.fn(),
@@ -22,6 +25,7 @@ vi.mock("@/api/client", async (importOriginal) => ({
   commitVersion: vi.fn(),
   composeMerge: vi.fn(),
   listNodeTypes: vi.fn(),
+  runAsAccounts: vi.fn(),
 }));
 
 const step = (to: string) => ({
@@ -41,20 +45,41 @@ const unsaved = { ir: docOf("my-unsaved-edit@example.test"), name: "Report", sav
 const recipient = (): unknown =>
   (useWorkflow.getState().workflowJson as ReturnType<typeof docOf>).nodes[0]!.parameters.to;
 const storedDraft = (): unknown => JSON.parse(localStorage.getItem(draftKey) ?? "null");
+const params = (): Record<string, unknown> =>
+  (useWorkflow.getState().workflowJson as ReturnType<typeof docOf>).nodes[0]!.parameters as Record<string, unknown>;
 // Longer than the autosave's idle debounce.
 const pastAutosave = () => act(() => new Promise((resolve) => setTimeout(resolve, 1000)));
+const branchIsProtected = (isProtected: boolean) =>
+  vi.mocked(api.listBranches).mockResolvedValue({
+    branches: [{ name: "main", is_protected: isProtected }],
+  } as Awaited<ReturnType<typeof api.listBranches>>);
+const runsAs = (state: api.StepAccountState, accounts: string[]) =>
+  vi.mocked(api.runAsAccounts).mockResolvedValue({
+    steps: [
+      {
+        node_id: "send_report",
+        node_name: "Email the report",
+        app: "gmail",
+        state,
+        connection_id: state === "only" ? accounts[0]! : null,
+        accounts,
+        managed_only: false,
+        message: state === "only" ? null : 'Step "Email the report" has no gmail account to run as — connect one',
+      },
+    ],
+  });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   useWorkflow.getState().reset();
   vi.mocked(api.getWorkflow).mockResolvedValue({ name: "Report" } as Awaited<ReturnType<typeof api.getWorkflow>>);
   vi.mocked(api.listVersions).mockResolvedValue({
     workflow_id: "wf-1",
     versions: [{ id: "v1", version_number: 1, workflow_json: head }],
   } as Awaited<ReturnType<typeof api.listVersions>>);
-  vi.mocked(api.listBranches).mockResolvedValue({
-    branches: [{ name: "main", is_protected: false }],
-  } as Awaited<ReturnType<typeof api.listBranches>>);
+  branchIsProtected(false);
+  runsAs("only", ["conn-gmail"]);
   vi.mocked(api.listNodeTypes).mockResolvedValue({
     node_types: [
       {
@@ -66,6 +91,36 @@ beforeEach(() => {
         parameters: { to: { type: "STRING", required: true } },
       },
     ],
+  });
+});
+
+describe("WorkflowEditPage writes nothing for the person on open", () => {
+  it.each([false, true])(
+    "a step with no account chosen stays so — no unsaved changes, no draft (protected: %s)",
+    async (isProtected) => {
+      branchIsProtected(isProtected);
+      render(<WorkflowEditPage />);
+      await waitFor(() => expect(api.runAsAccounts).toHaveBeenCalled());
+      await pastAutosave();
+
+      expect(params().connectionId).toBeUndefined();
+      expect(useWorkflow.getState().dirty).toBe(false);
+      expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+      expect(localStorage.getItem(draftKey)).toBeNull();
+    },
+  );
+
+  it("with no account to run as, the banner offers to connect one — and still writes nothing", async () => {
+    runsAs("none", []);
+    render(<WorkflowEditPage />);
+
+    expect(await screen.findByTestId("connect-capture-banner")).toHaveTextContent(
+      "1 app needs connecting — those steps will run as the account you connect.",
+    );
+    expect(screen.getByTestId("connect-app-gmail")).toHaveTextContent("Connect Gmail");
+    await pastAutosave();
+    expect(params().connectionId).toBeUndefined();
+    expect(useWorkflow.getState().dirty).toBe(false);
   });
 });
 
@@ -104,9 +159,7 @@ describe("WorkflowEditPage with a stored draft", () => {
 
 describe("WorkflowEditPage on a protected branch", () => {
   it("tells the store its canvas can't be saved, so nothing writes to it for the person", async () => {
-    vi.mocked(api.listBranches).mockResolvedValue({
-      branches: [{ name: "main", is_protected: true }],
-    } as Awaited<ReturnType<typeof api.listBranches>>);
+    branchIsProtected(true);
     render(<WorkflowEditPage />);
 
     expect(await screen.findByText("main is protected · start a branch and open a review to change it")).toBeInTheDocument();

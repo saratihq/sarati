@@ -179,10 +179,10 @@ describe('env slot preflight (e2e, isolated DB)', () => {
     const refused = await as(
       http().post(`/api/workflows/${wfId}/promote`).send({ environment: 'staging', version_id: versionId }),
     ).expect(428);
-    const detail = String(refused.body.detail);
-    expect(detail).toContain('claude');
-    expect(detail).toContain('slack');
-    expect(detail).toContain('staging');
+    expect(refused.body.detail).toBe(
+      'staging has no claude or slack account assigned, so "agent" and "post" can\'t run there — assign them under Integrations → Environments before promoting here',
+    );
+    expect(refused.body.apps).toEqual(['claude', 'slack']);
   });
 
   it('creating was never blocked — the version exists and only staging was refused', async () => {
@@ -202,8 +202,138 @@ describe('env slot preflight (e2e, isolated DB)', () => {
     const refused = await as(
       http().post(`/api/workflows/${wfId}/promote`).send({ environment: 'staging', version_id: versionId }),
     ).expect(428);
-    expect(String(refused.body.detail)).toContain('claude');
-    expect(String(refused.body.detail)).not.toContain('slack');
+    expect(refused.body.detail).toBe(
+      'staging has no claude account assigned, so "agent" can\'t run there — assign one under Integrations → Environments before promoting here',
+    );
+  });
+
+  // A workflow whose one step emails as its account, chosen or not.
+  const deployEmailing = async (): Promise<{ wf: string; v1: string }> => {
+    const doc = irDoc();
+    const emailing = {
+      ...doc,
+      name: 'emails a digest',
+      nodes: [
+        (doc.nodes as unknown[])[0],
+        {
+          id: 'mail',
+          name: 'Email me the report',
+          node_type: 'gmail.send_email',
+          type_version: 1,
+          parameters: { to: '{{$account.email}}', subject: 'Digest', body: 'x' },
+          position: { x: 200, y: 0 },
+          metadata: {},
+        },
+      ],
+      edges: [{ ...(doc.edges as Array<Record<string, unknown>>)[0], target_node_id: 'mail' }],
+    };
+    const deployed = await as(http().post('/api/deploy').send({ workflow_json: emailing })).expect(201);
+    const wf = deployed.body.workflow_id as string;
+    const versions = await as(http().get(`/api/workflows/${wf}/versions`)).expect(200);
+    return { wf, v1: (versions.body.versions as Array<{ id: string }>)[0]!.id };
+  };
+
+  it('names a step that chooses no account too, and a slot whose account is not active — a run there takes the slot either way', async () => {
+    const { wf, v1 } = await deployEmailing();
+
+    const refused = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(428);
+    expect(refused.body.detail).toBe(
+      'staging has no gmail account assigned, so "Email me the report" can\'t run there — assign one under Integrations → Environments before promoting here',
+    );
+    expect(refused.body.code).toBe('environment_slots_empty');
+
+    const gmailConn = randomUUID();
+    await db.query(
+      `INSERT INTO connections (id, user_id, provider, auth_type, credential, status) VALUES ($1, $2, 'gmail', 'token', 'x', 'expired')`,
+      [gmailConn, userId],
+    );
+    await as(
+      http().put(`/api/environments/${stagingId}/slots/gmail`).send({ connection_id: gmailConn }),
+    ).expect(200);
+    const inactive = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(428);
+    expect(inactive.body.detail).toBe(
+      "staging's gmail account isn't active, so \"Email me the report\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here",
+    );
+    expect(inactive.body.code).toBe('environment_slots_inactive');
+
+    await db.query(`UPDATE connections SET status = 'active' WHERE id = $1`, [gmailConn]);
+    const promoted = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(201);
+    expect(promoted.body.status).toBe('promoted');
+  });
+
+  it("refuses a slot holding another app's account, written before slots checked the app, naming the step", async () => {
+    const { wf, v1 } = await deployEmailing();
+    await db.query(
+      `UPDATE environment_connections SET connection_id = $2 WHERE environment_id = $1 AND app = 'gmail'`,
+      [stagingId, slackConnId],
+    );
+
+    const refused = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(428);
+    expect(refused.body.detail).toBe(
+      'staging\'s gmail account is for another app, so "Email me the report" can\'t run there — reassign it under Integrations → Environments before promoting here',
+    );
+    expect(refused.body.code).toBe('environment_slots_unfit');
+    expect(refused.body.steps).toEqual([
+      { node_id: 'mail', node_name: 'Email me the report', app: 'gmail', reason: 'wrong_app_slot' },
+    ]);
+  });
+
+  it('refuses a slot account with its own credentials for a step only one-click accounts run, and promotes once it is one', async () => {
+    const doc = irDoc();
+    const reminding = {
+      ...doc,
+      name: 'reminds me',
+      nodes: [
+        (doc.nodes as unknown[])[0],
+        {
+          id: 'remind',
+          name: 'Remind me',
+          node_type: 'slack.create_a_reminder',
+          type_version: 1,
+          parameters: { text: 'Standup', time: 'in 5 minutes' },
+          position: { x: 200, y: 0 },
+          metadata: {},
+        },
+      ],
+      edges: [{ ...(doc.edges as Array<Record<string, unknown>>)[0], target_node_id: 'remind' }],
+    };
+    const deployed = await as(http().post('/api/deploy').send({ workflow_json: reminding })).expect(201);
+    const wf = deployed.body.workflow_id as string;
+    const versions = await as(http().get(`/api/workflows/${wf}/versions`)).expect(200);
+    const v1 = (versions.body.versions as Array<{ id: string }>)[0]!.id;
+    await as(
+      http().put(`/api/environments/${stagingId}/slots/slack`).send({ connection_id: slackConnId }),
+    ).expect(200);
+
+    const refused = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(428);
+    expect(refused.body.detail).toBe(
+      'staging\'s slack account uses its own credentials, and "Remind me" runs only on a one-click (managed) one, so it can\'t run there — reassign it under Integrations → Environments before promoting here',
+    );
+    expect(refused.body.code).toBe('environment_slots_unfit');
+
+    const connections = app.get(ConnectionsService);
+    const oneClick = (await connections.createManaged(userId, 'slack', 'ca_slot_preflight')).id;
+    await connections.setStatus(oneClick, 'active');
+    await as(
+      http().put(`/api/environments/${stagingId}/slots/slack`).send({ connection_id: oneClick }),
+    ).expect(200);
+    const promoted = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(201);
+    expect(promoted.body.status).toBe('promoted');
+    await as(
+      http().put(`/api/environments/${stagingId}/slots/slack`).send({ connection_id: slackConnId }),
+    ).expect(200);
   });
 
   it('promotes once every slot the version needs is filled', async () => {
@@ -214,5 +344,49 @@ describe('env slot preflight (e2e, isolated DB)', () => {
       http().post(`/api/workflows/${wfId}/promote`).send({ environment: 'staging', version_id: versionId }),
     ).expect(201);
     expect(promoted.body.status).toBe('promoted');
+  });
+
+  it('refuses an app trigger naming an account whose app has no slot there, in the words it always had', async () => {
+    const gmailConn = randomUUID();
+    await db.query(
+      `INSERT INTO connections (id, user_id, provider, auth_type, credential, status) VALUES ($1, $2, 'gmail', 'token', 'x', 'active')`,
+      [gmailConn, userId],
+    );
+    const doc = irDoc();
+    const watching = {
+      ...doc,
+      name: 'watches mail',
+      nodes: [
+        {
+          id: 'watch',
+          name: 'New email',
+          node_type: 'gmail.new_email',
+          type_version: 1,
+          parameters: { connectionId: gmailConn },
+          position: { x: 0, y: 0 },
+          metadata: { trigger: true },
+        },
+        ...(doc.nodes as unknown[]).slice(1),
+      ],
+      edges: (doc.edges as Array<Record<string, unknown>>).map((edge) =>
+        edge.source_node_id === 'trigger' ? { ...edge, source_node_id: 'watch' } : edge,
+      ),
+    };
+    const deployed = await as(http().post('/api/deploy').send({ workflow_json: watching })).expect(201);
+    const wf = deployed.body.workflow_id as string;
+    const versions = await as(http().get(`/api/workflows/${wf}/versions`)).expect(200);
+    const v1 = (versions.body.versions as Array<{ id: string }>)[0]!.id;
+    await db.query(`DELETE FROM environment_connections WHERE environment_id = $1 AND app = 'gmail'`, [
+      stagingId,
+    ]);
+
+    const refused = await as(
+      http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
+    ).expect(428);
+    expect(refused.body.detail).toBe(
+      "The staging environment has no connection for gmail — assign it to staging's slot before promoting here",
+    );
+    expect(refused.body).not.toHaveProperty('code');
+    expect(refused.body).not.toHaveProperty('steps');
   });
 });

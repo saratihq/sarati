@@ -10,8 +10,8 @@ Get a key from the [Anthropic Console](https://console.anthropic.com/settings/ke
 If you are not an owner or admin, Settings tells you so and names who can add it.
 
 That key powers the composer and nothing else. An **AI Agent** step runs on a Claude
-[connection](/build/connections/#the-ai-agent-step-needs-one-too) you pick on the step, which is a
-separate credential — setting one does not set the other.
+[connection](/build/connections/#the-ai-agent-step-needs-one-too) of your own, which is a separate
+credential — setting one does not set the other.
 
 Without a key, **New workflow** opens a bare canvas. With one, the same entry point opens the
 composer alongside the canvas.
@@ -25,6 +25,10 @@ Asked to post to Slack when a new email arrives, it plans, asks which mail accou
 both steps, and marks what still needs connecting — sped up 4×:
 
 <video class="shot" src="/shots/agent-at-work.mp4" poster="/shots/agent-at-work-poster.webp" width="1128" height="664" autoplay loop muted playsinline aria-label="The composer planning a workflow, asking which email account to watch, then building a Gmail trigger and a Slack step with Connect buttons on both."></video>
+
+A Connect button stays on a step only while the step has no account to run as, so connecting the
+app anywhere in the editor takes it away. While Sarati can't check what a step runs as, the composer
+still places the button and it stays where the composer put it.
 
 Walked through in full, with a different request:
 

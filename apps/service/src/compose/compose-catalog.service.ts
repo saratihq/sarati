@@ -5,6 +5,7 @@ import type { CatalogFacts } from './author-validation';
 import { CONTROL_NODE_SCHEMAS } from '../generation/control-node-types';
 import { VectorStore } from '../generation/vector-store';
 import { MANUAL_TRIGGER, TriggerCatalogService } from '../triggers/trigger-catalog.service';
+import { actionNeedsAccount } from '../providers/sdk-actions.registry';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
 import {
@@ -36,7 +37,7 @@ const COMPOSER_NODE_DESCRIPTIONS: Record<string, string> = {
   'orchestr:loop':
     'Repeat a body sub-flow. Wire the body from source_port 0 (runs each round) and any after-loop steps from source_port 1 (runs once, after the loop); steps after the loop read the per-round results as {{<loop node id>}}. Two modes via the "mode" param: "items" (default) runs the body once per element of a collection — the body reads {{item}}/{{itemIndex}} (params: items = an expression resolving to an array, item_var default "item"); "while" repeats the body do-while a condition holds (it always runs at least once) bounded by a required max_iterations cap — the body reads the round index as {{loopRound}} and the previous round\'s outputs as {{loopPrev}} (params: condition = a {left, op, right} shape like IF, max_iterations = a positive integer).',
   'orchestr:agent':
-    'A durable tool-calling agent — for open-ended work no single action expresses. It runs a model in a loop, calling the tools you wire to its "tools" handle (edges with port_type "tool") until it produces a final answer; that answer becomes this node\'s output (downstream refs read it as {{<agent node id>}}). Wire action nodes (or an orchestr:call_workflow node) to the tools port to give it capabilities. Parameters: system_prompt (how the agent should behave and use its tools), input (the task/user message it works on — usually a trigger field like {{trigger.message}}; defaults to the whole trigger payload if empty), model ({ provider, model } where provider is openai|claude|gemini|mistral and model is that provider\'s model id; default { provider: "claude", model: "claude-opus-4-8" }), max_steps (a positive integer hard cap on model + tool rounds before it must answer — the infinite-loop guard, default 25). No connection is needed — a promoted/environment run resolves the model from that environment\'s connection slot for the provider.',
+    'A durable tool-calling agent — for open-ended work no single action expresses. It runs a model in a loop, calling the tools you wire to its "tools" handle (edges with port_type "tool") until it produces a final answer; that answer becomes this node\'s output (downstream refs read it as {{<agent node id>}}). Wire action nodes (or an orchestr:call_workflow node) to the tools port to give it capabilities. Parameters: system_prompt (how the agent should behave and use its tools), input (the task/user message it works on — usually a trigger field like {{trigger.message}}; defaults to the whole trigger payload if empty), model ({ provider, model } where provider is openai|claude|gemini|mistral and model is that provider\'s model id; default { provider: "claude", model: "claude-opus-4-8" }), max_steps (a positive integer hard cap on model + tool rounds before it must answer — the infinite-loop guard, default 25), connectionId (optional — with none chosen the model runs as the runner\'s only active account for the provider on a Default run, and a promoted run always runs as that environment\'s slot for it; set it only to pin a Default run to an account the person picked).',
   'orchestr:call_workflow':
     'Run another workflow and use its result — how reusable sub-workflows are composed. Place it in the flow like any other step (connect it with main edges; later steps read its result as {{<node id>}}) and set "input" to what the target should receive as its trigger event, read inside it as {{trigger.<key>}}. Alternatively wire it to an agent with a tool edge (port_type "tool") and the agent decides when to call it, producing the input itself — set tool_name / tool_description then. The target must DECLARE itself callable (an orchestr:tool_trigger trigger with a name and description) or the call is refused; it runs its LIVE version for the current environment, AS the caller (its steps resolve connections through the same environment slots), and its terminal step\'s output is the result. A workflow cannot call itself (compile error) and nesting depth is capped. Parameters: workflow_id (required — the id of the workflow to run), input (an object; omit when used as an agent tool).',
 };
@@ -90,19 +91,11 @@ export class ComposeCatalogService {
     return this.controls;
   }
 
-  /**
-   * The catalog facts document validation needs, resolved synchronously: only ACTION nodes carry a
-   * step credential, and actions live in the vector store, so no await is needed to answer this.
-   */
+  /** The catalog facts document validation needs, resolved synchronously; whether a step needs an account is the one answer a run decides by. */
   facts(): CatalogFacts {
-    const auth = new Map(
-      this.vectorStore
-        .entries(COLLECTION)
-        .map((e) => [String(e.type), typeof e.auth === 'string' ? e.auth : 'none'] as const),
-    );
     return {
       controlTypes: this.controlTypes(),
-      authOf: (nodeType: string) => auth.get(nodeType) ?? 'none',
+      authOf: (nodeType: string) => (actionNeedsAccount(nodeType) ? 'connection' : 'none'),
       isTriggerType: (nodeType: string) => this.triggerCatalog.isKnownTriggerType(nodeType),
     };
   }

@@ -8,7 +8,13 @@ import { fillParams, type ParamCompleteFn } from './param-filler';
 import type { PendingAnswers } from './pending-answers';
 import type { BriefData, ComposerEvent, ComposeOp } from './protocol';
 import { type ComposerSession, sessionCaller } from './sessions';
-import type { CatalogEntry, ComposerAccount, RunRecord, WorkflowServiceClient } from './workflow-client';
+import type {
+  CatalogEntry,
+  ComposerAccount,
+  RunRecord,
+  StepRunAs,
+  WorkflowServiceClient,
+} from './workflow-client';
 
 /**
  * The composer's tool surface — thin wrappers over workflow-service plus the
@@ -281,9 +287,10 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
 
   const needConnection = tool(
     'need_connection',
-    'Put a Connect button on a draft step whose app connection is missing. Call it the moment you ' +
-      'know (connections_status, or a test failing on auth), say in ONE sentence which account to ' +
-      'connect and why, then keep going with what you can.',
+    'Put a Connect button on a draft step that has no account to run as, or on an app trigger. Call it the ' +
+      'moment you know (connections_status, or a run saying the step has no <app> account to run as), say in ' +
+      'ONE sentence which account to connect and why, then keep going with what you can. It places nothing ' +
+      'when the step already runs as an account or a Connect would not fix it — its result says what to do instead.',
     {
       node_id: z.string().min(1).describe('The draft step that needs the connection'),
       provider: z
@@ -292,7 +299,7 @@ export function buildComposerServer(ctx: ToolContext): ReturnType<typeof createS
         .describe('The app key — the part of the action type before the dot, e.g. "slack"'),
       provider_label: z.string().min(1).max(60).describe('The app name as a person says it, e.g. "Slack"'),
     },
-    (input) => Promise.resolve(runNeedConnection(ctx, input)),
+    (input) => runNeedConnection(ctx, input),
   );
 
   const fillParamsTool = tool(
@@ -368,6 +375,13 @@ export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<T
   }
 }
 
+function draftNode(ctx: ToolContext, id: unknown): Record<string, unknown> | undefined {
+  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
+    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
+    : [];
+  return nodes.find((n) => n.id === id);
+}
+
 /** The node type an op writes parameters on — its own for an add, the draft's for an update. */
 function opNodeType(ctx: ToolContext, op: ComposeOp): string | null {
   const node = op.node;
@@ -377,24 +391,47 @@ function opNodeType(ctx: ToolContext, op: ComposeOp): string | null {
   }
   if (op.op !== 'update_node') return null;
   if (typeof op.node_type === 'string') return op.node_type;
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
-  const current = nodes.find((n) => n.id === op.node_id);
+  const current = draftNode(ctx, op.node_id);
   return typeof current?.node_type === 'string' ? current.node_type : null;
 }
 
-/** The account a live option loader fetches with: the step's own, else the caller's for that app. */
+// The parameters a node holds once `op` lands: an update merges its patch over the draft's, as apply-ops does, unless it re-types.
+function standingParameters(
+  ctx: ToolContext,
+  op: ComposeOp,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  if (op.op !== 'update_node') return patch;
+  const current = draftNode(ctx, op.node_id);
+  if (typeof op.node_type === 'string' && op.node_type !== current?.node_type) return patch;
+  const before = current?.parameters;
+  return { ...(before && typeof before === 'object' ? (before as Record<string, unknown>) : {}), ...patch };
+}
+
+// A step's options load as the account its run would use; a trigger's as the account it names, else the caller's first active one for its app.
 async function connectionForNode(
   ctx: ToolContext,
+  entry: CatalogEntry,
+  op: ComposeOp,
   nodeType: string,
   parameters: Record<string, unknown>,
 ): Promise<string | null> {
-  const own = parameters.connectionId;
-  if (typeof own === 'string' && own) return own;
-  const provider = nodeType.split('.')[0] ?? '';
-  const connections = await ctx.client.listConnections(sessionCaller(ctx.session));
-  return connections.find((c) => c.provider === provider && c.status === 'active')?.id ?? null;
+  if (entry.kind === 'trigger') {
+    const own = parameters.connectionId;
+    if (typeof own === 'string' && own) return own;
+    const provider = nodeType.split('.')[0] ?? '';
+    const connections = await ctx.client.listConnections(sessionCaller(ctx.session));
+    return connections.find((c) => c.provider === provider && c.status === 'active')?.id ?? null;
+  }
+  const standing = standingParameters(ctx, op, parameters);
+  const step = {
+    id: 'step',
+    name: 'step',
+    node_type: nodeType,
+    parameters: { connectionId: standing.connectionId, model: standing.model },
+  };
+  const [answer] = await ctx.client.runAs({ nodes: [step], edges: [] }, sessionCaller(ctx.session));
+  return answer?.connection_id ?? null;
 }
 
 /** Resolve every option-backed parameter in the batch to a stored VALUE before it is applied. */
@@ -419,7 +456,7 @@ async function settleDropdownValues(
     }
     let connectionId: string | null | undefined;
     const resolution = await resolveDropdownParams(entry.parameters ?? {}, params, async (prop) => {
-      connectionId ??= await connectionForNode(ctx, nodeType, params);
+      connectionId ??= await connectionForNode(ctx, entry, op, nodeType, params);
       return ctx.client.loadOptions(nodeType, prop, connectionId, sessionCaller(ctx.session));
     });
     notes.push(...resolution.notes);
@@ -852,7 +889,7 @@ export async function runConnectionsStatus(ctx: ToolContext): Promise<ToolResult
     }
     const lines = connections.map(
       (c) =>
-        `- ${c.provider}${c.display_name ? ` (${c.display_name})` : ''}: ${c.status} [connection_id: ${c.id}]${accountNote(c.account)}`,
+        `- ${c.provider}${c.display_name ? ` (${c.display_name})` : ''}: ${c.status}${c.one_click ? ', one-click' : ''} [connection_id: ${c.id}]${accountNote(c.account)}`,
     );
     return {
       content: [
@@ -860,9 +897,10 @@ export async function runConnectionsStatus(ctx: ToolContext): Promise<ToolResult
           type: 'text',
           text:
             `Connections:\n${lines.join('\n')}\n\n` +
-            'A step uses a connection via its `connectionId` parameter — if a run fails with ' +
-            '"requires a <app> connection", set that step\'s connectionId to the matching id above ' +
-            'with update_node (never ask the person to reconnect an account that is already active).\n\n' +
+            "A step runs as the account its `connectionId` names, or — naming none — as the person's only " +
+            'active account for its app. If a run fails saying they have several, ask which and set that ' +
+            "step's connectionId to its id above with update_node (never ask the person to reconnect an " +
+            'account that is already active).\n\n' +
             'A step can use the account it runs as: {{$account.email}}, {{$account.handle}}, {{$account.id}} or ' +
             "{{$account.name}}, filled with whichever account runs the step. It works only for a field that step's " +
             'account lists above.',
@@ -958,15 +996,16 @@ export async function runFindTrigger(ctx: ToolContext, query: string): Promise<T
   }
 }
 
-/** The need_connection handler: pin a Connect chip on a draft step (cleared by a green re-test). */
-export function runNeedConnection(
+/** The need_connection handler: pin a Connect chip on a draft step (cleared by a green re-test) — only where the canvas shows one. */
+export async function runNeedConnection(
   ctx: ToolContext,
   input: { node_id: string; provider: string; provider_label: string },
-): ToolResult {
+): Promise<ToolResult> {
   const nodes = Array.isArray(ctx.session.draftIr?.nodes)
     ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
     : [];
-  if (!nodes.some((n) => n.id === input.node_id)) {
+  const node = nodes.find((n) => n.id === input.node_id);
+  if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
     return {
       content: [
@@ -978,22 +1017,84 @@ export function runNeedConnection(
       isError: true,
     };
   }
+  const label = input.provider_label.trim();
+  let placed = 'The Connect button is on the step.';
+  if (!isAppTrigger(node)) {
+    const asked = await askRunAs(ctx, node, input.node_id);
+    // Fail-open, as the canvas shows a composer's Connect while the rule can't be asked.
+    if ('failed' in asked) {
+      placed = `Sarati couldn't check which account the step runs as (${asked.failed}), so the Connect button is on the step.`;
+    } else {
+      const instead = connectIsNoFix(asked.answer, label);
+      if (instead) {
+        resolveStandingNeed(ctx, input.node_id);
+        return { content: [{ type: 'text', text: `No Connect button was placed: ${instead}` }] };
+      }
+    }
+  }
   ctx.emit({
     event: 'connection_needed',
-    data: {
-      node_id: input.node_id,
-      provider: input.provider.trim().toLowerCase(),
-      provider_label: input.provider_label.trim(),
-    },
+    data: { node_id: input.node_id, provider: input.provider.trim().toLowerCase(), provider_label: label },
   });
   return {
     content: [
       {
         type: 'text',
-        text: 'The Connect button is on the step. Say in one sentence which account and why, keep going with what you can, and re-test that step when a note says the connection landed.',
+        text: `${placed} Say in one sentence which account and why, keep going with what you can, and re-test that step when a note says the connection landed.`,
       },
     ],
   };
+}
+
+async function askRunAs(
+  ctx: ToolContext,
+  node: Record<string, unknown>,
+  nodeId: string,
+): Promise<{ answer: StepRunAs | undefined } | { failed: string }> {
+  try {
+    const steps = await ctx.client.runAs({ nodes: [node], edges: [] }, sessionCaller(ctx.session));
+    return { answer: steps.find((step) => step.node_id === nodeId) };
+  } catch (err) {
+    return { failed: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function resolveStandingNeed(ctx: ToolContext, nodeId: string): void {
+  if (ctx.session.snapshot.connectionNeeds.has(nodeId)) {
+    ctx.emit({ event: 'connection_resolved', data: { node_id: nodeId } });
+  }
+}
+
+// The canvas shows a composer's Connect on a step only while it has no account to run as.
+function connectIsNoFix(answer: StepRunAs | undefined, label: string): string | null {
+  if (!answer) return 'the step uses no account, so there is nothing to connect.';
+  if (answer.connection_id) {
+    return `the step already runs as their ${label} account. If it failed on authentication, that sign-in stopped working. Under Integrations, Reconnect shows only on an account marked as needing attention, and signs in again in place of it; one still marked active has none, and connecting ${label} again adds a second account beside it — have them remove the one that stopped working. Then re-test, and if it then fails on its account, call need_connection on it again for what to do.`;
+  }
+  if (answer.state === 'several') {
+    return `${answer.message ?? 'they have several accounts for it'}. Ask which with ask_user and set the step's connectionId to it with update_node.`;
+  }
+  if (answer.state === 'none') return null;
+  return `${answer.message ?? 'its account cannot run it'}. ${pickInstead(answer, label)}`;
+}
+
+// A chosen account the step can't run as is cleared, so the rule decides at run time; an id is written only for a pick they make.
+function pickInstead(answer: StepRunAs, label: string): string {
+  const kind = answer.state === 'needs_managed' ? 'one-click' : 'active';
+  const [only, ...more] = answer.accounts;
+  if (!only) {
+    return `They have no ${kind} ${label} account it can run as: set the step's connectionId to null with update_node, then call need_connection again so they can connect one.`;
+  }
+  if (more.length === 0) {
+    return `Set the step's connectionId to null with update_node: with none chosen it runs as their only ${kind} ${label} account, decided when it runs — never write that account's id into the step.`;
+  }
+  return `They have ${answer.accounts.length} ${kind} ${label} accounts it can run as: ask which with ask_user, then set the step's connectionId to that one with update_node.`;
+}
+
+function isAppTrigger(node: Record<string, unknown>): boolean {
+  const type = typeof node.node_type === 'string' ? node.node_type : '';
+  const metadata = node.metadata as { trigger?: unknown } | undefined;
+  return type.includes('.') && (metadata?.trigger === true || /trigger$/i.test(type));
 }
 
 /**

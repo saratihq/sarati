@@ -6,28 +6,45 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { ConnectionsService } from '../connections/connections.service';
+import { planRunAs } from '../connections/run-as-account';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
 import { ReviewTestResultEntity } from '../database/entities/review-test-result.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
-import { now } from '../database/ids';
+import { isIdShape, now } from '../database/ids';
+import { type NamedEnvironment, slotRefusalError, stepsRefusedIn } from '../environments/env-slot-preflight';
 import type { WorkflowIR } from '../ir/models';
 import { isRunCancelled, RunsService } from '../runs/runs.service';
 import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
 import { lockWorkflowRow } from '../workflows/workflow-row-lock';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
-import type { ReviewTestSide, ReviewTestSummary, TestVerdict } from './review-test.types';
+import type {
+  BlockedStep,
+  ReviewTestReadiness,
+  ReviewTestSide,
+  ReviewTestSummary,
+  TestVerdict,
+} from './review-test.types';
 
-/** What the caller chose for a test run. */
-export interface TestBranchOptions {
+/** Who is testing, and under which environment. */
+export interface TestScope {
   userId: string;
   activeOrgId: string | null;
-  /** Named environment to run under (its slots resolve connections); null = Default (personal). */
+  /** Named environment to run under (its slots supply every account); null = Default (the tester's own). */
   environmentId?: string | null;
-  environmentName?: string | null;
+}
+
+/** What the caller chose for a test run. */
+export interface TestBranchOptions extends TestScope {
   /** Explicit trigger payload; when absent, the workflow's latest completed run's trigger is used. */
   triggerPayload?: unknown;
+}
+
+interface ReviewHeads {
+  source: WorkflowBranchEntity;
+  target: WorkflowBranchEntity;
 }
 
 /** The outcome of running one side (base or head). */
@@ -49,7 +66,39 @@ export class ReviewTestService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly runs: RunsService,
     private readonly reviews: ReviewsService,
+    private readonly connections: ConnectionsService,
   ) {}
+
+  /** The branch head's steps a test would refuse for want of an account — the run-as rule, dry, for this tester and environment. */
+  async readiness(workflowId: string, reviewId: string, scope: TestScope): Promise<ReviewTestReadiness> {
+    const review = await this.reviews.getReviewScoped(workflowId, reviewId);
+    const environment = await this.environmentOf(scope);
+    const em = this.dataSource.manager;
+    const headIr = await this.headIr(em, (await this.headsOf(em, review)).source);
+    const plan = await planRunAs(
+      headIr,
+      {
+        externalUserId: scope.userId,
+        environmentId: environment?.id ?? null,
+        environment: environment?.name ?? null,
+      },
+      this.connections,
+    );
+    const blocked = plan.flatMap((step): BlockedStep[] =>
+      step.decision.kind === 'refused'
+        ? [
+            {
+              node_id: step.node_id,
+              node_name: step.node_name,
+              app: step.app,
+              reason: step.decision.reason,
+              message: step.decision.message,
+            },
+          ]
+        : [],
+    );
+    return { environment, blocked };
+  }
 
   async testBranch(
     workflowId: string,
@@ -60,28 +109,24 @@ export class ReviewTestService {
     if (review.status === 'merged' || review.status === 'closed') {
       throw new DomainError('Cannot test a closed or merged review');
     }
-    // SECURITY (cross-tenant): the caller-supplied environment_id resolves to real connections,
-    // so it MUST be proven to belong to the principal's active org; anything else is a 404.
-    if (opts.environmentId) {
-      const owned: unknown[] = await this.dataSource.query(
-        `SELECT 1 FROM environments WHERE id = $1 AND org_id = $2`,
-        [opts.environmentId, opts.activeOrgId ?? null],
-      );
-      if (owned.length === 0) throw new DomainError('Environment not found', 404);
-    }
+    const environment = await this.environmentOf(opts);
     const em = this.dataSource.manager;
-    const source = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
-    const target = await em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } });
-    if (!source || !target) throw new DomainError('Review branches no longer exist');
+    const { source, target } = await this.headsOf(em, review);
 
     const headIr = await this.headIr(em, source); // source branch head — the change under review
     const baseIr = await this.headIr(em, target); // target branch head — the baseline to compare against
+    if (environment) {
+      const refused = await stepsRefusedIn(headIr, environment, this.connections);
+      if (refused.length > 0) {
+        throw slotRefusalError(environment, refused, ', or test on Default (your connections)');
+      }
+    }
     const payload =
       opts.triggerPayload !== undefined ? opts.triggerPayload : await this.defaultPayload(opts, workflowId);
 
     const [base, head] = await Promise.all([
-      this.runSide(baseIr, payload, workflowId, reviewId, opts),
-      this.runSide(headIr, payload, workflowId, reviewId, opts),
+      this.runSide(baseIr, payload, workflowId, reviewId, opts, environment),
+      this.runSide(headIr, payload, workflowId, reviewId, opts, environment),
     ]);
     // A cancelled run neither passed nor failed, so the test has no result to keep or to gate a merge on.
     if (base.cancelled || head.cancelled) {
@@ -100,7 +145,7 @@ export class ReviewTestService {
     const summary: ReviewTestSummary = {
       verdict,
       tested_at: new Date().toISOString(),
-      environment_id: opts.environmentId ?? null,
+      environment_id: environment?.id ?? null,
       source_version_id: source.headVersionId ?? null,
       target_version_id: target.headVersionId ?? null,
       base: sideSummary(base),
@@ -140,6 +185,26 @@ export class ReviewTestService {
     });
   }
 
+  // SECURITY (cross-tenant): a caller-supplied environment resolves to real connections, so another org's is a 404.
+  private async environmentOf(scope: TestScope): Promise<NamedEnvironment | null> {
+    if (!scope.environmentId) return null;
+    if (!isIdShape(scope.environmentId)) throw new DomainError('Environment not found', 404);
+    const rows: NamedEnvironment[] = await this.dataSource.query(
+      `SELECT id, name FROM environments WHERE id = $1 AND org_id = $2`,
+      [scope.environmentId, scope.activeOrgId ?? null],
+    );
+    const [environment] = rows;
+    if (!environment) throw new DomainError('Environment not found', 404);
+    return environment;
+  }
+
+  private async headsOf(em: EntityManager, review: WorkflowReviewEntity): Promise<ReviewHeads> {
+    const source = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
+    const target = await em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } });
+    if (!source || !target) throw new DomainError('Review branches no longer exist');
+    return { source, target };
+  }
+
   /** The stored head IR (native workflow doc) of a branch. */
   private async headIr(em: EntityManager, branch: WorkflowBranchEntity): Promise<WorkflowIR> {
     if (!branch.headVersionId) {
@@ -157,6 +222,7 @@ export class ReviewTestService {
     workflowId: string,
     reviewId: string,
     opts: TestBranchOptions,
+    environment: NamedEnvironment | null,
   ): Promise<SideRun> {
     const runId = randomUUID();
     try {
@@ -167,8 +233,8 @@ export class ReviewTestService {
         workflowId,
         source: 'review_test',
         reviewId,
-        environment: opts.environmentName ?? null,
-        environmentId: opts.environmentId ?? null,
+        environment: environment?.name ?? null,
+        environmentId: environment?.id ?? null,
         orgId: opts.activeOrgId,
         initialScope: payload !== undefined ? { trigger: payload } : undefined,
       });

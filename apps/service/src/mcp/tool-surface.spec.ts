@@ -175,6 +175,19 @@ describe('MCP tool surface', () => {
     }
   });
 
+  it('says a step with no account chosen runs as your only active one, counting only one-click ones where only those run it', () => {
+    for (const name of ['orchestr_validate', 'orchestr_list_connections']) {
+      const tool = byName.find((t) => t.name === name);
+      const said = `${tool!.description} ${JSON.stringify(z.toJSONSchema(tool!.outputSchema, { io: 'output' }))}`;
+      expect(said).toMatch(/only active account for its app/);
+      expect(said).toContain(
+        'only one-click accounts count for a step that runs only through one-click sign-in',
+      );
+      expect(said).toContain('pin a Default run to');
+      expect(said).not.toMatch(/pin (one|the) account/);
+    }
+  });
+
   /** Save ≠ live (invariant #2): a write tool says so in its own output rather than leaving it implied. */
   it('makes every landing tool state that it did not publish anything', () => {
     for (const name of ['orchestr_commit', 'orchestr_create_workflow']) {

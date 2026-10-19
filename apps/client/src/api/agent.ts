@@ -100,6 +100,8 @@ export type ComposerStreamEvent =
       event: "connection_needed";
       data: { node_id: string; provider: string; provider_label: string };
     }
+  // The node's standing Connect ask is answered: it has an account, or connecting wouldn't give it one.
+  | { event: "connection_resolved"; data: { node_id: string } }
   | { event: "offer"; data: { offer_id: string } }
   | { event: "snapshot"; data: SessionSnapshot }
   // Attach only: every event before it is history, every event after it is live; `turn_base` is a running turn's starting canvas.

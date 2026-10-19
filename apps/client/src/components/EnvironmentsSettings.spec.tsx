@@ -125,3 +125,39 @@ describe("EnvironmentsSettings delete", () => {
     expect(deleteEnvironment).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("EnvironmentsSettings assign picker", () => {
+  it("offers only the accounts the service says serve the app, a family account included", async () => {
+    const account = (id: string, provider: string) =>
+      ({ id, provider, display_name: null, auth_type: "token", status: "active", account: null }) as api.Connection;
+    const zoho = account("c-zoho", "zoho");
+    listEnvironments.mockResolvedValue({
+      environments: [
+        {
+          ...qa,
+          slots: [
+            {
+              app: "zoho-crm",
+              connection_id: "c-old",
+              account_label: "old@e2e.local",
+              owner_user_id: "u1",
+              owner_label: "old@e2e.local",
+              status: "expired",
+            },
+          ],
+        },
+      ],
+    });
+    vi.mocked(api.listConnections).mockImplementation((app?: string) =>
+      Promise.resolve({ connections: app === "zoho-crm" ? [zoho] : [zoho, account("c-slack", "slack")] }),
+    );
+    render(<EnvironmentsSettings />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Replace Zoho Crm in qa" }));
+
+    const picker = await screen.findByRole("group", { name: "Assign Zoho Crm in qa" });
+    expect(await within(picker).findByText("Zoho")).toBeInTheDocument();
+    expect(within(picker).queryByText("Slack")).not.toBeInTheDocument();
+    expect(api.listConnections).toHaveBeenCalledWith("zoho-crm");
+  });
+});

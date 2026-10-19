@@ -1,10 +1,21 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { requirePrincipal } from '../auth/principal';
+import { principalScopes, requirePrincipal } from '../auth/principal';
+import { scopeSatisfied } from '../auth/scopes';
 import type { ApprovalDecision } from '../database/entities/review.entity';
 import type { PolicyAction } from '../policy/policy.service';
 import { MergeResolutionDto } from '../workflows/merge-resolution.dto';
@@ -74,10 +85,6 @@ class TestBranchDto {
   @IsOptional()
   @IsString()
   environment_id?: string;
-
-  @IsOptional()
-  @IsString()
-  environment_name?: string;
 
   /** Explicit trigger payload; omit to use the workflow's latest run's trigger. */
   @IsOptional()
@@ -235,10 +242,31 @@ export class ReviewsController {
       userId: principal.user.id,
       activeOrgId: principal.activeOrgId,
       environmentId: body.environment_id ?? null,
-      environmentName: body.environment_name ?? null,
       triggerPayload: body.trigger_payload,
     });
     return { ...summary };
+  }
+
+  /** What "Test this branch" can tell before it runs: the branch's steps that would have no account to run as; it reads your accounts, so a key needs `connection:read` too. */
+  @Scope('workflow:read')
+  @Get(':reviewId/test/readiness')
+  async testReadiness(
+    @Req() req: Request,
+    @Param('workflowId') workflowId: string,
+    @Param('reviewId') reviewId: string,
+    @Query('environment_id') environmentId?: string,
+  ): Promise<Record<string, unknown>> {
+    const principal = requirePrincipal(req);
+    if (!scopeSatisfied(principalScopes(principal), 'connection:read')) {
+      throw new ForbiddenException({ detail: 'This API key is missing the "connection:read" scope.' });
+    }
+    await this.authorize(req, workflowId, 'read');
+    const readiness = await this.reviewTest.readiness(workflowId, reviewId, {
+      userId: principal.user.id,
+      activeOrgId: principal.activeOrgId,
+      environmentId: environmentId || null,
+    });
+    return { ...readiness };
   }
 
   @Scope('workflow:write')

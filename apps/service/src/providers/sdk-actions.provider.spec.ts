@@ -172,19 +172,20 @@ describe('SdkActionsProvider', () => {
     expect((err as DomainError).status).toBe(404);
   });
 
-  it('fails a step with NO connection as a 422 that names the app', async () => {
+  it('fails a step handed NO account as a 422 that names the step and the app', async () => {
     const provider = new SdkActionsProvider(config(), connections({ ref: null }));
     const err = await provider
       .runAction({
         externalUserId: 'user-1',
         actionId: 'slack.send_channel_message',
         props: { channel: 'general', text: 'hi' },
-        auth: undefined, // no connection attached
+        auth: undefined,
+        stepName: 'Post it',
       })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DomainError);
     expect((err as DomainError).status).toBe(422);
-    expect((err as DomainError).message).toContain('requires a slack connection');
+    expect((err as DomainError).message).toBe('Step "Post it" has no slack account to run as — connect one');
   });
 
   it.each([
@@ -213,12 +214,25 @@ describe('SdkActionsProvider', () => {
       impl,
       platformKeys(),
     );
-    const err = await provider
-      .runAction({ externalUserId: 'user-1', actionId, props, auth: { connectionId: 'conn-x' } })
-      .catch((e: unknown) => e);
+    const run = (stepName?: string) =>
+      provider
+        .runAction({
+          externalUserId: 'user-1',
+          actionId,
+          props,
+          auth: { connectionId: 'conn-x' },
+          ...(stepName ? { stepName } : {}),
+        })
+        .catch((e: unknown) => e);
+    const err = await run('Do the thing');
     expect(err).toBeInstanceOf(DomainError);
     expect((err as DomainError).status).toBe(422);
-    expect((err as DomainError).message).toBe(`Connection conn-x ${reason}`);
+    const app = actionId.split('.')[0]!;
+    expect((err as DomainError).message).toBe(
+      `Step "Do the thing" runs as a ${app} account that ${reason}, or pick another of your ${app} accounts on the step`,
+    );
+    // An account check runs no step, so it names none.
+    expect(((await run()) as DomainError).message).toBe(`This account ${reason}, or pick another one`);
     expect(calls).toEqual([]);
   });
 

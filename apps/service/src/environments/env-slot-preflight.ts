@@ -1,67 +1,171 @@
-import type { EntityManager } from 'typeorm';
-
 import { DomainError } from '../common/domain-error';
 import { isRecord } from '../common/json-util';
+import { isTriggerNode } from '../compiler/compile-ir';
+import {
+  connectionIdOf,
+  planRunAs,
+  type RunAsAccounts,
+  type SlotRefusalReason,
+  type StepRunAs,
+} from '../connections/run-as-account';
 import { validatedAppSlug } from '../providers/sdk-actions.registry';
 
-/** An agent step resolves its slot under the MODEL's provider, not a node-type slug. */
-const AGENT_TYPE = 'orchestr:agent';
-
-/**
- * The apps a version will demand an environment SLOT for — the same set the runtime resolves, so a
- * promote refuses for the reason a run would.
- *
- * The two rails ask differently and this must match both: an ACTION resolves a slot only when the
- * step names a connection, while an AGENT resolves its model provider's slot on every call, with or
- * without one.
- */
-export function appsRequiringSlot(document: unknown): string[] {
-  const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
-  const apps = new Set<string>();
-  for (const node of nodes) {
-    if (!isRecord(node)) continue;
-    const props = isRecord(node.parameters) ? node.parameters : {};
-    if (node.node_type === AGENT_TYPE) {
-      const provider = modelProvider(props);
-      if (provider !== null) apps.add(provider);
-      continue;
-    }
-    if (typeof props.connectionId !== 'string' || props.connectionId === '') continue;
-    const app = typeof node.node_type === 'string' ? validatedAppSlug(node.node_type) : null;
-    if (app !== null) apps.add(app);
-  }
-  return [...apps].sort();
+/** An environment a check predicts a run under. */
+export interface NamedEnvironment {
+  id: string;
+  name: string;
 }
 
-function modelProvider(props: Record<string, unknown>): string | null {
-  const model = isRecord(props.model) ? props.model : {};
-  return typeof model.provider === 'string' && model.provider !== '' ? model.provider : null;
-}
-
-/**
- * Refuse to point an environment at a version it cannot run. Without this the promote succeeds and
- * the workflow reports green until a run happens to reach a connection-bearing step — three
- * schedules can sit "completed" for days because their filter never matched.
- */
-export async function assertEnvSlotsCover(
-  em: EntityManager,
-  environmentId: string,
-  environmentName: string,
+/** The steps of `document` a run under `environment` would refuse — the run-as rule's own answer, dry. */
+export async function stepsRefusedIn(
   document: unknown,
-): Promise<void> {
-  const required = appsRequiringSlot(document);
-  if (required.length === 0) return;
-  const rows: Array<{ app: string }> = await em.query(
-    `SELECT app FROM environment_connections WHERE environment_id = $1 AND app = ANY($2)`,
-    [environmentId, required],
-  );
-  const filled = new Set(rows.map((row) => row.app));
-  const missing = required.filter((app) => !filled.has(app));
-  if (missing.length === 0) return;
-  const one = missing.length === 1;
-  throw new DomainError(
-    `The ${environmentName} environment has no connection for ${missing.join(', ')} — assign ` +
-      `${one ? 'it' : 'them'} to ${environmentName}'s ${one ? 'slot' : 'slots'} before promoting here`,
+  environment: NamedEnvironment,
+  accounts: RunAsAccounts,
+): Promise<StepRunAs[]> {
+  // An environment run takes every account from its slots, so no runner is consulted.
+  const scope = { externalUserId: '', environmentId: environment.id, environment: environment.name };
+  const plan = await planRunAs(document, scope, accounts);
+  return plan.filter((step) => step.decision.kind === 'refused');
+}
+
+// The apps of the app triggers naming an account that find no slot under `environment` — the slot their activation listens as.
+async function triggerAppsUnslottedIn(
+  document: unknown,
+  environment: NamedEnvironment,
+  accounts: Pick<RunAsAccounts, 'resolveSlotConnection'>,
+): Promise<string[]> {
+  const apps = triggerAppsNamingAccounts(document);
+  const slots = await Promise.all(apps.map((app) => accounts.resolveSlotConnection(environment.id, app)));
+  return apps.filter((_app, i) => slots[i] === null);
+}
+
+function triggerAppsNamingAccounts(document: unknown): string[] {
+  const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
+  const apps = nodes.flatMap((node) => {
+    if (!isRecord(node) || typeof node.node_type !== 'string') return [];
+    const metadata = isRecord(node.metadata) ? node.metadata : undefined;
+    if (!isTriggerNode({ node_type: node.node_type, ...(metadata ? { metadata } : {}) })) return [];
+    const app = validatedAppSlug(node.node_type);
+    return app && connectionIdOf(node.parameters) !== null ? [app] : [];
+  });
+  return [...new Set(apps)].sort();
+}
+
+function triggerSlotsEmpty(environment: string, apps: string[]): DomainError {
+  const one = apps.length === 1;
+  return new DomainError(
+    `The ${environment} environment has no connection for ${apps.join(', ')} — assign ${one ? 'it' : 'them'} to ` +
+      `${environment}'s ${one ? 'slot' : 'slots'} before promoting here`,
     428,
   );
+}
+
+// A clause may name a model provider beside an app, so every clause names each by its slug.
+type Clause = (environment: string, steps: StepRunAs[]) => string;
+
+const CLAUSES: ReadonlyArray<[SlotRefusalReason, Clause]> = [
+  [
+    'empty_slot',
+    (env, steps) =>
+      `${env} has no ${listed(appsOf(steps), 'or')} account assigned, so ${namesOf(steps)} can't run there`,
+  ],
+  [
+    'wrong_app_slot',
+    (env, steps) =>
+      `${env}'s ${accountsOf(steps, 'account is', 'accounts are')} for another app, so ${namesOf(steps)} can't run there`,
+  ],
+  [
+    'needs_managed_slot',
+    (env, steps) =>
+      `${env}'s ${accountsOf(steps, 'account uses its', 'accounts use their')} own credentials, and ${namesOf(steps)} ${
+        steps.length === 1 ? 'runs' : 'run'
+      } only on a one-click (managed) one, so ${steps.length === 1 ? 'it' : 'they'} can't run there`,
+  ],
+  [
+    'inactive_slot',
+    (env, steps) =>
+      `${env}'s ${accountsOf(steps, "account isn't", "accounts aren't")} active, so ${namesOf(steps)} can't run there`,
+  ],
+];
+
+/** The 428 a check refuses with, naming the environment, the apps its slots can't run and the steps that need them. */
+export function slotRefusalError(
+  environment: NamedEnvironment,
+  steps: StepRunAs[],
+  fix: string,
+): DomainError {
+  const present = new Set(
+    CLAUSES.map(([reason]) => reason).filter((reason) => withReason(steps, reason).length > 0),
+  );
+  const clauses = CLAUSES.filter(([reason]) => present.has(reason)).map(([reason, clause]) =>
+    clause(environment.name, withReason(steps, reason)),
+  );
+  return new DomainError(`${clauses.join('; ')} — ${remedyFor(present, steps)}${fix}`, 428, {
+    code: codeOf(present),
+    environment: environment.name,
+    apps: appsOf(steps),
+    steps: steps.map((step) => ({
+      node_id: step.node_id,
+      node_name: step.node_name,
+      app: step.app,
+      reason: step.decision.kind === 'refused' ? step.decision.reason : null,
+    })),
+  });
+}
+
+function codeOf(present: ReadonlySet<SlotRefusalReason>): string {
+  if (present.has('empty_slot')) return 'environment_slots_empty';
+  return present.has('inactive_slot') ? 'environment_slots_inactive' : 'environment_slots_unfit';
+}
+
+// A slot is assigned or reassigned under Environments; an account that only isn't active is also mended by reconnecting it.
+function remedyFor(present: ReadonlySet<SlotRefusalReason>, steps: StepRunAs[]): string {
+  if (present.size === 1 && present.has('inactive_slot')) {
+    return appsOf(steps).length > 1
+      ? 'their owners reconnect them under Integrations, or an owner reassigns the slots under Integrations → Environments'
+      : 'its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments';
+  }
+  const empty = present.has('empty_slot');
+  const held = [...present].some((reason) => reason !== 'empty_slot');
+  const actions = [...(empty ? ['assign'] : []), ...(held ? ['reassign'] : [])];
+  const object = appsOf(steps).length > 1 ? 'them' : actions.length === 1 && empty ? 'one' : 'it';
+  return `${actions.join(' or ')} ${object} under Integrations → Environments`;
+}
+
+function accountsOf(steps: StepRunAs[], one: string, many: string): string {
+  const apps = appsOf(steps);
+  return `${listed(apps, 'and')} ${apps.length === 1 ? one : many}`;
+}
+
+function listed(items: string[], conjunction: 'and' | 'or'): string {
+  return items.length < 2
+    ? items.join('')
+    : `${items.slice(0, -1).join(', ')} ${conjunction} ${items.at(-1)}`;
+}
+
+function withReason(steps: StepRunAs[], reason: SlotRefusalReason): StepRunAs[] {
+  return steps.filter((step) => step.decision.kind === 'refused' && step.decision.reason === reason);
+}
+
+function appsOf(steps: StepRunAs[]): string[] {
+  return [...new Set(steps.map((step) => step.app))].sort();
+}
+
+function namesOf(steps: StepRunAs[]): string {
+  return listed(
+    steps.map((step) => `"${step.node_name}"`),
+    'and',
+  );
+}
+
+/** Refuse to point an environment at a version it cannot run — an app trigger naming an account with no slot to listen as, or a step its slots can't run. */
+export async function assertEnvSlotsCover(
+  document: unknown,
+  environment: NamedEnvironment,
+  accounts: RunAsAccounts,
+): Promise<void> {
+  const unslotted = await triggerAppsUnslottedIn(document, environment, accounts);
+  if (unslotted.length > 0) throw triggerSlotsEmpty(environment.name, unslotted);
+  const refused = await stepsRefusedIn(document, environment, accounts);
+  if (refused.length > 0) throw slotRefusalError(environment, refused, ' before promoting here');
 }

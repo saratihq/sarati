@@ -56,6 +56,8 @@ export type ComposerEvent =
       event: 'connection_needed';
       data: { node_id: string; provider: string; provider_label: string };
     }
+  // The node's standing Connect ask is answered: it has an account, or connecting wouldn't give it one.
+  | { event: 'connection_resolved'; data: { node_id: string } }
   // A2 test loop: one bead per step, one line per run.
   | { event: 'step_result'; data: { node_id: string; status: 'passed' | 'failed'; summary?: string } }
   | {

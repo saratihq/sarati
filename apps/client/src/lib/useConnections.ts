@@ -21,7 +21,12 @@ export function useActiveConnections(enabled = true): ActiveConnections {
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
-  useEffect(() => () => void (alive.current = false), []);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   const reload = useCallback(() => {
     api

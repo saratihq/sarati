@@ -181,10 +181,15 @@ describe('lintDataRefs', () => {
       ]);
     });
 
-    it('flags an app step that runs as no connection', () => {
+    it('leaves an app step with no account chosen to the account its run decides', () => {
       const ir = doc([node('mail', 'Email me', 'gmail.send_email', { to: '{{$account.email}}' })]);
+      expect(lintDataRefs(ir)).toEqual([]);
+    });
+
+    it('still flags a field an account does not have on a step with no account chosen', () => {
+      const ir = doc([node('mail', 'Email me', 'gmail.send_email', { to: '{{$account.address}}' })]);
       expect(lintDataRefs(ir)).toEqual([
-        '"Email me" uses {{$account.email}}, but runs as no connected account, so nothing can fill it',
+        '"Email me" uses {{$account.address}}, but an account has only an email, handle, id and name',
       ]);
     });
 

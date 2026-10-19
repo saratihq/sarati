@@ -4,7 +4,6 @@ import {
   accountLabel,
   activeConnections,
   appDisplayName,
-  candidateConnections,
   connectionLabel,
   describeAccount,
   matchingConnections,
@@ -68,19 +67,6 @@ describe("matchingConnections", () => {
 
   it("returns nothing for a slug-less type", () => {
     expect(matchingConnections(rows, undefined)).toEqual([]);
-  });
-});
-
-describe("candidateConnections", () => {
-  const rows = [conn({ id: "1", provider: "google" }), conn({ id: "2", provider: "slack" })];
-
-  /** A wrong-app credential hard-errors at run time, so an empty picker is the honest answer. */
-  it("never falls back to every account when the app has no match", () => {
-    expect(candidateConnections(rows, "notion")).toEqual([]);
-  });
-
-  it("offers everything only when the node type carries no app slug", () => {
-    expect(candidateConnections(rows, undefined)).toBe(rows);
   });
 });
 

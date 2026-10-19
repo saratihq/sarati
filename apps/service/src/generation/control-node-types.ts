@@ -164,7 +164,7 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     type: 'orchestr:agent',
     category: 'control',
     description:
-      'A durable tool-calling agent: it runs a model in a loop, calling the tools wired to its "tools" handle (port_type "tool") until it produces a final answer — that answer becomes this node\'s output. Give it tools by wiring action nodes (or an orchestr:call_workflow node) to its tools port. Parameters: system_prompt (how it should behave), input (the task/user message it works on — defaults to the whole trigger payload if empty), model ({ provider, model }, provider one of openai|claude|gemini|mistral), connectionId (OPTIONAL — a promoted/environment run resolves the model from that environment\'s connection slot for the provider; set it only to run the agent by hand on a Default/test run), max_steps (the hard cap on model + tool rounds before it must answer).',
+      'A durable tool-calling agent: it runs a model in a loop, calling the tools wired to its "tools" handle (port_type "tool") until it produces a final answer — that answer becomes this node\'s output. Give it tools by wiring action nodes (or an orchestr:call_workflow node) to its tools port. Parameters: system_prompt (how it should behave), input (the task/user message it works on — defaults to the whole trigger payload if empty), model ({ provider, model }, provider one of openai|claude|gemini|mistral), connectionId (OPTIONAL — with none chosen the model runs as the runner\'s only active account for the provider on a Default run, and a promoted run always runs as that environment\'s slot for it; set it only to pin a Default run to an account the person picked), max_steps (the hard cap on model + tool rounds before it must answer).',
     auth: 'none',
     parameters: {
       system_prompt: {
@@ -188,7 +188,7 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
       connectionId: {
         type: 'string',
         description:
-          "Optional override for the model's account. A promoted/environment run resolves the model connection from that environment's slot for the provider (the same slot the <provider>.generate_text LLM nodes use) — leave it empty for those. Set it to run the agent by hand on a Default/test run, or to pin a specific account.",
+          "Optional — the model's account. With none chosen the model runs as the runner's only active account for the provider on a Default run, and a promoted run always runs as that environment's slot for the provider (the same slot the <provider>.generate_text LLM nodes use), chosen or not. Set it only to pin a Default run to an account the person picked.",
         required: false,
       },
       max_steps: {

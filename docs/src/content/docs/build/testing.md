@@ -31,6 +31,8 @@ neither touches the version that is live in production.
   call it would have made.
 - Waits are skipped: a delay does not delay, and an approval is not waited for.
 - Steps on a [managed connection](/build/connections/) are not run at all.
+- Every step still decides the account it runs as, and a step with none to run as stops the run
+  there, as it would a real one — a step on a managed connection included.
 - An AI Agent step still calls its model; the tools it picks follow the same rules.
 
 The rule is the HTTP method, not the intent. A search an API exposes as `POST` is withheld, and a

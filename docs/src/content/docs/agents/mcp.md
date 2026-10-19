@@ -72,8 +72,9 @@ the change the head of `main`; production runs it only once it is promoted — t
 
 `orchestr_test_workflow` runs a document to show what it does. By default the run is dry: writes
 over HTTP are stubbed and steps on a managed connection are skipped. Reads are not — a `GET` still
-reaches the real system with real credentials. It uses the key owner's own connections, not an
-environment's, so a passing test does not prove the workflow runs in production.
+reaches the real system with real credentials. Every step still decides the account it runs as, so
+a step with none to run as stops the run, skipped or not. It uses the key owner's own connections,
+not an environment's, so a passing test does not prove the workflow runs in production.
 
 Firing for real takes three things together: the `run:execute` scope, `dry_run: false`, and the
 confirmation token a dry run of that exact document returned. Each person may fire 20 live runs an

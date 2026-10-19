@@ -74,6 +74,12 @@ export function isNativeOrTriggerType(
   return (metadata as { trigger?: unknown } | undefined | null)?.trigger === true;
 }
 
+/** An app's trigger (`gmail.new_email`), whose account is its environment's, not a step's run-as rule's. */
+export function isAppTriggerNode(nodeType: unknown, metadata?: Record<string, unknown> | null): boolean {
+  const type = typeof nodeType === "string" ? nodeType : "";
+  return !type.startsWith("orchestr:") && type.includes(".") && isNativeOrTriggerType(type, metadata);
+}
+
 /** The two-port control nodes (IF then/else, Loop body/after) — one site, so renderer and edges agree. */
 export function hasTwoOutputPorts(nodeType: string): boolean {
   return nodeType === "orchestr:if" || nodeType === "orchestr:loop";

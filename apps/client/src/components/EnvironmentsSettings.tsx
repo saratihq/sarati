@@ -9,11 +9,12 @@ import type { Environment, EnvironmentSlot } from "@/api/environments";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import ConnectAppButton from "@/components/ConnectAppButton";
-import { accountLabel, appDisplayName, matchingConnections } from "@/lib/connections";
+import { accountLabel, appDisplayName } from "@/lib/connections";
 import { toast } from "@/lib/toast";
 import { useNodeIcons } from "@/store/useNodeIcons";
 import NodeIcon from "./NodeIcon";
 import { SaratiLoader } from "./SaratiLogo";
+import { InlineError } from "./ui/inline-error";
 import { useOrgs, activeOrgOf } from "@/store/useOrgs";
 import { isProtectedEnv } from "@/lib/envPresentation";
 
@@ -742,7 +743,26 @@ function AssignPicker({
   onClose: () => void;
 }) {
   const appName = appDisplayName(app);
-  const options = matchingConnections(pool, app);
+  // Which accounts serve this app is the service's rule (a `zoho` account serves `zoho-crm`), never a local copy.
+  const [options, setOptions] = useState<Connection[] | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [asked, setAsked] = useState(0);
+  useEffect(() => {
+    let current = true;
+    api
+      .listConnections(app)
+      .then(({ connections }) => {
+        if (!current) return;
+        setOptions(connections);
+        setOptionsError(null);
+      })
+      .catch((e: unknown) => {
+        if (current) setOptionsError(e instanceof Error ? e.message : `Couldn't load your ${appName} accounts`);
+      });
+    return () => {
+      current = false;
+    };
+  }, [app, appName, pool, asked]);
   return (
     <div
       role="group"
@@ -767,7 +787,15 @@ function AssignPicker({
           <X size={13} />
         </button>
       </div>
-      {options.length === 0 ? (
+      {optionsError ? (
+        <div className="px-1 pb-1.5">
+          <InlineError message={optionsError} onRetry={() => setAsked((n) => n + 1)} />
+        </div>
+      ) : options === null ? (
+        <p className="text-[11px] m-0 px-1 pb-1.5" style={{ color: "var(--orchestr-ink-subtle)" }}>
+          Loading your {appName} accounts…
+        </p>
+      ) : options.length === 0 ? (
         <p className="text-[11px] m-0 px-1 pb-1.5" style={{ color: "var(--orchestr-ink-subtle)" }}>
           No {appName} accounts in Default yet.
         </p>

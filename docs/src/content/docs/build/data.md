@@ -39,7 +39,10 @@ an email recipient field, **Send to me** fills it in with one click.
 It is whichever account runs the step: yours while you build and test, and the account assigned to
 the [environment](/run/environments/) once it is promoted — a workflow promoted to production writes
 to production's account, not yours. When Sarati can't tell which account that is, the step stops
-before it calls the app instead of sending to an empty address.
+before it calls the app instead of sending to an empty address. A step that signs in to nothing —
+joining text, say — has no account to refer to, so `{{$account…}}` there stops it too, whatever
+account it holds, and saving it warns you. A step with no account picked gets no warning: its run
+decides the account.
 
 Sarati knows the account for Gmail, and for Google Sheets, Google Drive and GitHub when they are
 connected with one-click sign-in. Slack names the workspace, not the person, so a Slack step has no

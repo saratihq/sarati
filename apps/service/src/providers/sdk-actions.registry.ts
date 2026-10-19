@@ -261,6 +261,18 @@ export function isComposioCatalogType(type: string): boolean {
   return composioCatalogTypes().has(type);
 }
 
+/** Whether running action `type` takes an account: an SDK action unless its auth is `none`, a Composio action always (that rail runs only on a managed connection). */
+export function actionNeedsAccount(type: string): boolean {
+  const action = REGISTRY.get(type);
+  if (action) return action.auth.type !== 'none';
+  return isComposioCatalogType(type);
+}
+
+/** Whether action `type` runs only on a managed (one-click) account: with no SDK action, only the Composio rail runs it. */
+export function actionNeedsManagedAccount(type: string): boolean {
+  return !REGISTRY.has(type) && isComposioCatalogType(type);
+}
+
 /**
  * Whether SOME execution rail claims this action type — the SINGLE definition both the router (run time) and the
  * version-write commit gate (save time) key on, so commit-reject ⟺ run-400. Deliberately the RUNNABLE set,

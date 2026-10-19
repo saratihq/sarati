@@ -12,7 +12,6 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { WorkflowVersionTagEntity } from '../database/entities/workflow-version-tag.entity';
 import { EventsService } from '../events/events.service';
-import { lintDataRefs } from '../compiler/ref-lint';
 import { assertAuthoredIrValid } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { EnvPointersService, PROD_ENV } from './env-pointers.service';
@@ -110,7 +109,7 @@ export class WorkflowLifecycleService {
     }
     // This route mints a version AND makes it live, so it faces the same author-time gate as commit —
     // otherwise a document refused at save is accepted straight into production here.
-    assertAuthoredIrValid(irDoc, this.catalog.facts());
+    const report = assertAuthoredIrValid(irDoc, this.catalog.facts());
     const name = typeof irDoc.name === 'string' && irDoc.name ? irDoc.name : 'Generated Workflow';
     const userId = principal.user.id;
     const orgId = principal.activeOrgId;
@@ -202,7 +201,7 @@ export class WorkflowLifecycleService {
       activated: activation.activated,
       activation_error: activation.error,
       // Broken data refs surface at save, not at run time.
-      ref_warnings: lintDataRefs(irDoc),
+      ref_warnings: report.ref_warnings,
     };
   }
 

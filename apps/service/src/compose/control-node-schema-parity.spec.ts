@@ -76,6 +76,19 @@ describe('control-node schema parity — palette (node-types controller) vs comp
     expect(params.connectionId?.required).toBe(false);
   });
 
+  it("the agent's copy says a promoted run always runs as its slot, and a person's pick pins only a Default run", async () => {
+    const composer = await catalog.byType(SCOPE, 'orchestr:agent');
+    const palette = CONTROL_NODE_SCHEMAS.find((s) => s.type === 'orchestr:agent');
+    const param = (composer?.parameters as Record<string, { description: string }>).connectionId?.description;
+    for (const copy of [composer?.description, palette?.description, param]) {
+      expect(copy).toContain("the runner's only active account for the provider");
+      expect(copy).toMatch(/a promoted run always runs as that environment's slot/i);
+      expect(copy).toContain('only to pin a Default run to an account the person picked');
+      expect(copy).not.toContain('pin an account');
+      expect(copy).not.toMatch(/Default\/test run|No connection is needed/);
+    }
+  });
+
   it("the IF op seeds a default of 'eq' on both surfaces", async () => {
     const ifNode = await catalog.byType(SCOPE, 'orchestr:if');
     const params = ifNode?.parameters as Record<string, { defaultValue?: unknown }>;

@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
+import { ConnectionsService } from '../connections/connections.service';
 import { isIdShape } from '../database/ids';
 import { rawMutate, rawQuery } from '../database/raw-query';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
@@ -47,6 +48,7 @@ export class EnvPointersService {
     private readonly orgs: OrgsService,
     private readonly environments: EnvironmentsService,
     private readonly triggerSignals: TriggerSignalsService,
+    private readonly connections: ConnectionsService,
   ) {}
 
   /**
@@ -288,12 +290,7 @@ export class EnvPointersService {
     return result;
   }
 
-  /**
-   * Refuse to make a version live somewhere it cannot run: every app its steps resolve a connection
-   * for must have a slot in that environment. Deliberate acts only — publishing and promoting are
-   * where the author asserts "run this here", while CREATING a workflow must never require the
-   * environment to be configured first. Org-less has no env rows, so it passes.
-   */
+  /** Refuse a publish or promote whose steps would find no account in the environment's slots; creating a workflow never asks. */
   async assertEnvCanRun(
     em: EntityManager,
     wf: WorkflowEntity,
@@ -302,7 +299,11 @@ export class EnvPointersService {
   ): Promise<void> {
     if (!wf.orgId) return;
     const env = await this.environments.ensureEnvironment(em, wf.orgId, normalizeEnv(environment));
-    await assertEnvSlotsCover(em, env.id, env.name, version.workflowIr ?? version.workflowJson);
+    await assertEnvSlotsCover(
+      version.workflowIr ?? version.workflowJson,
+      env,
+      this.connections.accountsOn(em),
+    );
   }
 
   /**

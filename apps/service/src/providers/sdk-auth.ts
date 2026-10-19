@@ -9,6 +9,14 @@ import {
 
 import { DomainError } from '../common/domain-error';
 import type { ConnectionsService } from '../connections/connections.service';
+import {
+  connectionIdOf,
+  type CredentialGap,
+  type LostAccount,
+  lostAccountMessage,
+  type RunAsStep,
+  type RunAsWhere,
+} from '../connections/run-as-account';
 import { ComposioProxyTransport } from './composio-proxy-transport';
 
 /**
@@ -26,9 +34,27 @@ export interface SdkAuthContext {
   composioBaseUrl: string;
   /** Test-only fetch; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
   fetchImpl?: FetchLike;
+  /** The step the run-as rule decided this account for, and where it runs; absent where no step runs, e.g. an options picker. */
+  decided?: { step: Pick<RunAsStep, 'name' | 'app' | 'label'>; where: RunAsWhere };
 }
 
-/** The AuthHandle an SDK primitive runs on; a connection's wrong-shaped credential names what to reconnect with, any other miss is `needsConnectionMessage`. */
+const LOST = {
+  removed: "The account chosen here no longer exists or isn't yours — pick another one on the step",
+  inactive: "The account this step runs as isn't active — pick another one",
+};
+
+// An account that failed after the decision is worded as the decision would, where the run is.
+async function lostAccount(ctx: SdkAuthContext, lost: LostAccount): Promise<DomainError> {
+  const message =
+    ctx.decided && ctx.connections
+      ? await lostAccountMessage(lost, ctx.decided.step, ctx.decided.where, ctx.connections)
+      : typeof lost === 'object'
+        ? `This account ${lost.lacks} — ${lost.fix}, or pick another one`
+        : LOST[lost];
+  return new DomainError(message, lost === 'removed' ? 404 : 422);
+}
+
+/** The AuthHandle an SDK primitive runs on; a missing or ill-fitting account fails as the run-as decision words it, else with `needsConnectionMessage`. */
 export async function resolveSdkAuthHandle(
   scheme: AuthScheme,
   ctx: SdkAuthContext,
@@ -46,18 +72,16 @@ export async function resolveSdkAuthHandle(
       throw new Error('Step references a connection, but the connections store is unavailable');
     }
     const ref = await ctx.connections.managedRef(ctx.externalUserId, connectionId);
-    if (!ref) throw new DomainError(`Connection ${connectionId} not found`, 404);
+    if (!ref) throw await lostAccount(ctx, 'removed');
 
     if (ref.authType === 'managed') {
       // A not-yet-runnable managed connection is a step precondition (422), not a 500.
-      if (ref.status !== 'active') {
+      if (ref.status !== 'active') throw await lostAccount(ctx, 'inactive');
+      if (!ref.connectedAccountId) {
         throw new DomainError(
-          `Connection ${connectionId} is not active yet — complete the connect flow, then retry`,
+          'The account this step runs as lost its link to the app — pick another one',
           422,
         );
-      }
-      if (!ref.connectedAccountId) {
-        throw new DomainError(`Connection ${connectionId} has no managed account reference`, 422);
       }
       if (!ctx.composioApiKey) {
         throw new DomainError(
@@ -79,14 +103,7 @@ export async function resolveSdkAuthHandle(
     // BYO/direct connection: decrypt and shape into an SDK DirectCredential.
     const credential = await ctx.connections.getCredential(ctx.externalUserId, connectionId);
     const direct = toDirectCredential(scheme, credential);
-    if (!direct) {
-      throw new DomainError(
-        credential === null
-          ? needsConnectionMessage
-          : `Connection ${connectionId} ${unusableCredential(scheme)}`,
-        422,
-      );
-    }
+    if (!direct) throw await lostAccount(ctx, credential === null ? 'removed' : credentialGap(scheme));
     return createDirectAuth(scheme, direct, fetchOptions);
   }
 
@@ -94,15 +111,6 @@ export async function resolveSdkAuthHandle(
   const inline = toDirectCredential(scheme, ctx.auth);
   if (!inline) throw new DomainError(needsConnectionMessage, 422);
   return createDirectAuth(scheme, inline, fetchOptions);
-}
-
-/** Extract a checkpoint-safe `{ connectionId }` reference, or null. */
-export function connectionIdOf(auth: unknown): string | null {
-  if (auth !== null && typeof auth === 'object' && 'connectionId' in auth) {
-    const id = (auth as Record<string, unknown>).connectionId;
-    if (typeof id === 'string' && id) return id;
-  }
-  return null;
 }
 
 /** Shape a credential into a {@link DirectCredential} for the declared scheme, or `null` → the caller's 422. */
@@ -119,11 +127,20 @@ export function toDirectCredential(scheme: AuthScheme, credential: unknown): Dir
   return scheme.type === 'apiKey' ? { type: 'apiKey', value: token } : { type: 'bearer', token };
 }
 
-/** Why a connected credential can't sign in on this scheme, and what to reconnect it with. */
-export function unusableCredential(scheme: AuthScheme): string {
+/** What a connected credential lacks to sign in on this scheme, and what to reconnect it with. */
+export function credentialGap(scheme: AuthScheme): CredentialGap {
   return scheme.type === 'basic'
-    ? 'has no username and password — reconnect it with an email or username plus an API token or password'
-    : 'has no API key or token — reconnect it with one';
+    ? {
+        lacks: 'has no username and password',
+        fix: 'reconnect it with an email or username plus an API token or password',
+      }
+    : { lacks: 'has no API key or token', fix: 'reconnect it with one' };
+}
+
+/** {@link credentialGap} as one clause. */
+export function unusableCredential(scheme: AuthScheme): string {
+  const gap = credentialGap(scheme);
+  return `${gap.lacks} — ${gap.fix}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

@@ -10,6 +10,7 @@ import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { computeDiff } from '../src/ir/diff';
+import type { WorkflowIR } from '../src/ir/models';
 import { type AgentResult } from '../src/runtime/agent';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import type { DagAgentNode } from '../src/runtime/dag-plan';
@@ -25,6 +26,9 @@ const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const MAILBOXES: Record<string, string> = {
   'tok-authored': 'author@e2e.local',
   'tok-staging': 'staging@e2e.local',
+  'tok-runner': 'runner@e2e.local',
+  'tok-runner-2': 'runner2@e2e.local',
+  'tok-slot': 'slot@e2e.local',
 };
 const gmailSearches: string[] = [];
 const gmailFetch: FetchLike = (input, init) => {
@@ -999,6 +1003,116 @@ describe('domain invariants (the constitution)', () => {
     await http().delete(`/api/workflows/${wf}`).expect(200);
   }, 30_000);
 
+  it("invariant 18: a step with no account chosen runs as the account its run decides — the environment's slot, else the runner's only one — and never a guess", async () => {
+    const connections = app.get(ConnectionsService);
+    const interpreter = app.get(DagInterpreter);
+    const runner = '00000000-0000-4000-8000-000000000018';
+    const slotOwner = '00000000-0000-4000-8000-000000000019';
+    await db.query(
+      `INSERT INTO users (id, email, name) VALUES ($1, 'runner@e2e.local', 'Runner'), ($2, 'slot@e2e.local', 'Slot')`,
+      [runner, slotOwner],
+    );
+    const gmail = (owner: string, token: string) =>
+      connections.createOAuth2(owner, 'gmail', { access_token: token, token_type: 'Bearer', raw: {} });
+    const doc = (connectionId?: string): WorkflowIR => ({
+      ...ir([''], 'inv18'),
+      nodes: [
+        ir([''], 'inv18').nodes[0]!,
+        {
+          id: 'mail',
+          name: 'Find mail to me',
+          node_type: 'gmail.list_messages',
+          type_version: 1,
+          parameters: { query: 'to:{{$account.email}}', ...(connectionId ? { connectionId } : {}) },
+          position: { x: 300, y: 0 },
+          metadata: {},
+        },
+      ],
+      edges: [{ ...ir([''], 'inv18').edges[0]!, target_node_id: 'mail' }],
+    });
+    const run = (document: WorkflowIR, scope: Record<string, unknown> = {}) =>
+      interpreter.run(compileWorkflowIrDag(document), {
+        externalUserId: runner,
+        initialScope: { trigger: {} },
+        ...scope,
+      });
+
+    // Default, one account: the step runs as it, and {{$account}} reads it.
+    const only = await gmail(runner, 'tok-runner');
+    gmailSearches.length = 0;
+    await run(doc());
+    expect(gmailSearches).toEqual(['to:runner@e2e.local']);
+
+    // An environment run takes the slot — chosen account or not — as the slot's owner.
+    const org = '00000000-0000-4000-8000-0000000000b8';
+    const [withSlot, emptyEnv] = [
+      '00000000-0000-4000-8000-0000000000c8',
+      '00000000-0000-4000-8000-0000000000c9',
+    ];
+    await db.query(`INSERT INTO organizations (id, name) VALUES ($1, 'Inv18')`, [org]);
+    await db.query(
+      `INSERT INTO environments (id, org_id, name, is_prod) VALUES ($1, $3, 'inv18-live', false), ($2, $3, 'inv18-empty', false)`,
+      [withSlot, emptyEnv, org],
+    );
+    const slot = await gmail(slotOwner, 'tok-slot');
+    await db.query(
+      `INSERT INTO environment_connections (environment_id, app, connection_id) VALUES ($1, 'gmail', $2)`,
+      [withSlot, slot.id],
+    );
+    for (const document of [doc(), doc(only.id)]) {
+      gmailSearches.length = 0;
+      await run(document, { environmentId: withSlot, environment: 'inv18-live', orgId: org });
+      expect(gmailSearches).toEqual(['to:slot@e2e.local']);
+    }
+
+    // An empty slot refuses before the action, naming the environment even from its id alone.
+    gmailSearches.length = 0;
+    await expect(run(doc(), { environmentId: emptyEnv, orgId: org })).rejects.toThrow(
+      /^inv18-empty has no gmail account assigned, so "Find mail to me" can't run there/,
+    );
+
+    // Two accounts and none chosen: refused naming the step — never a guess.
+    await gmail(runner, 'tok-runner-2');
+    await expect(run(doc())).rejects.toThrow(
+      'Step "Find mail to me" has no gmail account chosen and you have 2 active gmail accounts — pick one on the step',
+    );
+
+    // A chosen account that isn't the runner's is refused — never swapped for one of theirs.
+    await expect(run(doc(slot.id))).rejects.toThrow(
+      `Step "Find mail to me" runs as a gmail account that no longer exists or isn't yours`,
+    );
+    expect(gmailSearches).toEqual([]);
+
+    // Whether a step needs an account is the registry's answer: one stored on a step that needs none is never asked about.
+    const [trigger, mail] = doc().nodes;
+    const join = {
+      ...doc(),
+      nodes: [
+        trigger!,
+        { ...mail!, node_type: 'text.concat', parameters: { texts: ['a', 'b'], connectionId: slot.id } },
+      ],
+    };
+    expect((await run(join)).outputs.mail).toBe('ab');
+
+    // …nor read for {{$account}}, whoever's it is: a step that runs as no account has none to read.
+    for (const held of [slot.id, only.id]) {
+      const reads = {
+        ...join,
+        nodes: [
+          trigger!,
+          {
+            ...mail!,
+            node_type: 'text.concat',
+            parameters: { texts: ['to:', '{{$account.email}}'], connectionId: held },
+          },
+        ],
+      };
+      await expect(run(reads)).rejects.toThrow(
+        'Step "Find mail to me" uses no account, so {{$account.email}} has no value',
+      );
+    }
+  }, 30_000);
+
   it('invariant 14: a tool edge binds a tool, distinct from a main edge, never collapses', () => {
     const node = (id: string, node_type: string, parameters: Record<string, unknown> = {}) => ({
       id,
@@ -1045,6 +1159,7 @@ describe('domain invariants (the constitution)', () => {
         kind: 'action',
         // Sanitized to a provider-legal identifier; actionId keeps the routing id.
         name: 'slack_send_message',
+        stepName: 'search',
         actionId: 'slack.send_message',
         props: { channel: '#ops' },
       },

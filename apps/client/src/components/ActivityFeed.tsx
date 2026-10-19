@@ -387,6 +387,8 @@ function ReviewFeedCard({
             <ReviewTestPanel
               workflowId={workflowId}
               reviewId={review.id}
+              sourceBranch={review.source_branch}
+              sourceHeadVersionId={detail?.source_head_version_id ?? null}
               environments={environments}
               result={testResult}
               current={testIsCurrent(testResult, detail)}

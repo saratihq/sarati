@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import { connectAppWithFeedback } from "@/lib/managedConnect";
+import { reloadStepAccounts } from "@/store/useStepAccounts";
 
-/** THE Connect-an-app button (popup → provider sign-in → poll → toast) — every surface renders this one. */
+/** THE Connect-an-app button (popup → provider sign-in → poll → toast) — every surface renders this one, and every connect asks again what the open canvas's steps run as. */
 export default function ConnectAppButton({
   app,
   appName,
@@ -17,7 +18,7 @@ export default function ConnectAppButton({
   /** Display name for copy ("Connect Slack", "Connected Slack"). */
   appName: string;
   /** Fires on success with the new connection id (refresh lists, attach to steps…). */
-  onConnected: (connectionId: string) => void;
+  onConnected?: (connectionId: string) => void;
 } & Omit<ComponentProps<typeof Button>, "onClick" | "children"> & { children?: React.ReactNode }) {
   const [connecting, setConnecting] = useState(false);
   const mounted = useRef(true);
@@ -34,7 +35,9 @@ export default function ConnectAppButton({
     const connectionId = await connectAppWithFeedback(app, appName);
     // The popup can outlive the surface that opened it, so only touch state while mounted.
     if (mounted.current) setConnecting(false);
-    if (connectionId) onConnected(connectionId);
+    if (!connectionId) return;
+    reloadStepAccounts();
+    onConnected?.(connectionId);
   };
 
   return (
