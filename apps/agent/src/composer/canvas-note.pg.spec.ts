@@ -15,6 +15,7 @@ import { WorkflowServiceClient } from './workflow-client';
 
 const ENV = { composerModel: 'claude-opus-4-8', paramModel: null };
 const never = new AbortController().signal;
+const NO_CALLER = { token: null };
 
 const node = (id: string, name: string): Record<string, unknown> => ({ id, name, parameters: {} });
 const trigger = node('trigger', 'Trigger');
@@ -49,7 +50,10 @@ async function agentProcess(pool: Pool): Promise<{
       { provide: WorkflowServiceClient, useValue: {} },
       { provide: ThreadStore, useValue: threads },
       { provide: QUERY_FN, useValue: query },
-      { provide: PlatformKeysClient, useValue: { anthropicApiKey: () => Promise.resolve('sk-test') } },
+      {
+        provide: PlatformKeysClient,
+        useValue: { readAnthropicKey: () => Promise.resolve({ key: 'sk-test', rateLimited: false }) },
+      },
     ],
   }).compile();
   return { service: moduleRef.get(ComposerService), sessions: moduleRef.get(SessionStore), threads, prompts };
@@ -91,8 +95,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
       before.service.stream(
         { message: 'Email me a daily digest', ir: canvas(trigger), branch: 'main' },
         never,
-        null,
-        null,
+        NO_CALLER,
         user,
       ),
     );
@@ -111,8 +114,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
           branch: 'main',
         },
         never,
-        null,
-        null,
+        NO_CALLER,
         user,
       ),
     );
@@ -129,8 +131,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
       after.service.stream(
         { message: 'Simpler', session_id: rebuilt, ir: canvas(trigger), branch: 'main' },
         never,
-        null,
-        null,
+        NO_CALLER,
         user,
       ),
     );
@@ -147,8 +148,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
       restartedAgain.service.stream(
         { message: 'On my branch', session_id: again, ir: canvas(), branch: 'older' },
         never,
-        null,
-        null,
+        NO_CALLER,
         user,
       ),
     );
@@ -182,8 +182,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
             branch: 'main',
           },
           never,
-          null,
-          null,
+          NO_CALLER,
           user,
         ),
       );
@@ -212,8 +211,7 @@ describe('the canvas note after a restart (e2e, throwaway Postgres database)', (
             branch: 'main',
           },
           never,
-          null,
-          null,
+          NO_CALLER,
           user,
         ),
       );

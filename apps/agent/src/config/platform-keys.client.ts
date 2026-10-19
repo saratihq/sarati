@@ -10,6 +10,14 @@ import type { EnvConfig } from './env.config';
 export interface CallerContext {
   token: string | null;
   orgId?: string | null;
+  /** The visitor's address, sent on as X-Forwarded-For so the service counts their limits, not this process's. */
+  address?: string | null;
+}
+
+/** A key read: the key when there is one, and whether the service turned the caller away for asking too often. */
+export interface AnthropicKeyRead {
+  key: string | null;
+  rateLimited: boolean;
 }
 
 /** Matches workflow-service's internal issuer; its own, so this token is never a user session. */
@@ -45,9 +53,9 @@ export class PlatformKeysClient {
     this.secret = env.serviceSharedSecret;
   }
 
-  /** This caller's Anthropic key, or null when none is set or the service cannot be reached. */
-  async anthropicApiKey(caller: CallerContext): Promise<string | null> {
-    if (!this.secret || !caller.token) return null;
+  /** This caller's Anthropic key — null when none is set or the service cannot be reached, apart from being rate-limited. */
+  async readAnthropicKey(caller: CallerContext): Promise<AnthropicKeyRead> {
+    if (!this.secret || !caller.token) return { key: null, rateLimited: false };
     let res: Response;
     try {
       res = await fetch(`${this.base}/api/internal/platform-keys/anthropic`, {
@@ -55,19 +63,23 @@ export class PlatformKeysClient {
           Authorization: `Bearer ${caller.token}`,
           [INTERNAL_TOKEN_HEADER]: await this.token(this.secret, caller.token),
           ...(caller.orgId ? { 'X-Org-Id': caller.orgId } : {}),
+          ...(caller.address ? { 'X-Forwarded-For': caller.address } : {}),
         },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
       this.logger.warn('workflow-service is unreachable — the composer reports itself unavailable');
-      return null;
+      return { key: null, rateLimited: false };
     }
     if (!res.ok) {
       this.logger.warn(`workflow-service refused the platform-key read (${res.status})`);
-      return null;
+      return { key: null, rateLimited: res.status === 429 };
     }
     const body = (await res.json().catch(() => null)) as { api_key?: unknown } | null;
-    return typeof body?.api_key === 'string' && body.api_key ? body.api_key : null;
+    return {
+      key: typeof body?.api_key === 'string' && body.api_key ? body.api_key : null,
+      rateLimited: false,
+    };
   }
 
   // Bound to the caller it is sent beside, by digest, so a leaked one is no use with any other session.

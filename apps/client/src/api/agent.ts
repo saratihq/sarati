@@ -11,6 +11,7 @@ const AGENT_BASE = agentBaseUrl + "/api";
 export type ComposerDisabledReason =
   | "anthropic_api_key_missing"
   | "caller_auth_unconfigured"
+  | "rate_limited"
   | "unreachable";
 
 export interface ComposerAvailability {

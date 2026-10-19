@@ -1,9 +1,19 @@
 # Same routing as the compose proxy, with the services on loopback instead of a network.
 # Order matters: the composer's routes are a subpath of the service's `/api`.
 
+# The client is the peer, or the right-most address a proxy in SARATI_TRUSTED_PROXIES vouches for; sent on alone.
+{
+	servers {
+		trusted_proxies static {$SARATI_TRUSTED_PROXIES}
+		trusted_proxies_strict
+	}
+}
+
 :8080 {
 	handle /api/composer/* {
-		reverse_proxy 127.0.0.1:8010
+		reverse_proxy 127.0.0.1:8010 {
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	# Service-to-service only: how agent-service reads the stored Anthropic key. No browser needs it.
@@ -12,18 +22,23 @@
 	}
 
 	handle /api/* {
-		reverse_proxy 127.0.0.1:8001
+		reverse_proxy 127.0.0.1:8001 {
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	# The agent-facing MCP endpoint — streams, so no buffering.
 	handle /mcp* {
 		reverse_proxy 127.0.0.1:8001 {
+			header_up X-Forwarded-For {client_ip}
 			flush_interval -1
 		}
 	}
 
 	handle {
-		reverse_proxy 127.0.0.1:3000
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	encode gzip

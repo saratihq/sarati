@@ -60,14 +60,65 @@ TRIGGER_POLL_INTERVAL_SECONDS=60
 THROTTLE_LIMIT=60
 THROTTLE_TTL_MS=60000
 
-# Behind a reverse proxy that sets X-Forwarded-*.
-TRUST_PROXY_HEADERS=false
+# Address ranges of a proxy in front of Sarati's own, space-separated — see "Behind another proxy".
+SARATI_TRUSTED_PROXIES=
 
 MAX_REQUEST_BODY_BYTES=2097152
 
 # The Claude model the AI composer calls — change it when your Anthropic key cannot use this one.
 COMPOSER_MODEL=claude-opus-4-8
 ```
+
+## Behind another proxy
+
+Rate limits count per visitor address — an IPv6 visitor per `/64`, which one subscriber is handed
+whole — the sign-in limit of five attempts a minute included. Sarati's own proxy works that address
+out and hands it on, so nothing needs setting when visitors reach it directly. When another proxy sits
+in front — Cloudflare, a load balancer, your own nginx — every visitor arrives from that proxy's
+addresses and they all share one limit, so one visitor's failed sign-ins lock everyone out. List the
+proxy's addresses so each visitor's own is used:
+
+```bash
+# Cloudflare's published ranges, from https://www.cloudflare.com/ips/ — space-separated.
+SARATI_TRUSTED_PROXIES=173.245.48.0/20 103.21.244.0/22 2400:cb00::/32
+```
+
+- **How the address is read:** from the right of `X-Forwarded-For`, skipping only the listed ranges,
+  so a visitor cannot choose their own by sending the header. `private_ranges` stands for every
+  private range, for a proxy on your own network.
+- **List only proxies you run or pay for:** an address in a listed range can claim to be any visitor.
+- **`CF-Connecting-IP` is never read:** anyone can send it to a server that Cloudflare does not front.
+
+### A Cloudflare Tunnel
+
+`cloudflared` connects to Sarati itself, so tunnel requests arrive from wherever `cloudflared` runs —
+not from Cloudflare's ranges, which change nothing here. Cloudflare has already put the visitor on
+`X-Forwarded-For`; list the address Sarati sees `cloudflared` connect from. To find it, send one request
+through the tunnel and read `remote_ip` on its line in the proxy's log: `cd sarati && docker compose
+logs proxy` for five containers, `cd sarati && docker compose logs sarati` for one.
+
+With `cloudflared` on the same machine as Docker, that is Docker's gateway address, which every other
+connection to the published port from that machine shares — and anything arriving from a listed
+address can name its own. List it only where nobody else reaches that port. Leaving
+`SARATI_TRUSTED_PROXIES` empty is safe: tunnel visitors then share one limit, and nobody can name an
+address.
+
+### The service and agent images without Sarati's proxy
+
+Running the `sarati-service` and `sarati-agent` images behind a proxy of your own instead of the
+bundled one, set the same two values on both:
+
+- **`TRUST_PROXY_HOPS`:** the number of proxies in front that each append to `X-Forwarded-For`. Its
+  default, `0`, uses the connecting address. Counting too few only makes visitors share a limit;
+  counting too many lets any visitor write the address their limits count against, so sign-in attempts
+  become unlimited. The agent sends the address it reads on to the service with every call, so the two
+  must agree.
+- **`LISTEN_HOST`:** the interface each listens on. A trusted hop is believed whoever connects, so bind
+  them where only your proxy can reach — `127.0.0.1` when it runs on the same machine. Unset, they listen
+  on every interface.
+
+The one-container image and `docker-compose.yaml` set `TRUST_PROXY_HOPS=1` for Sarati's own proxy, and
+the one-container image binds both to `127.0.0.1`.
 
 ## Not here: the two platform API keys
 
@@ -155,6 +206,9 @@ Running the Docker stack, not from a clone:
 - **`DBOS_ENABLED` defaults to `true`** and `DBOS_APP_VERSION` to a stable in-code value, so
   [durable resume](/run/runs/#durability) is on without configuring anything.
 - `ENVIRONMENT=production` and `PORT=8001` are baked into the image.
+- **`TRUST_PROXY_HOPS=1`** comes from the one-container image and from `docker-compose.yaml`: Sarati's
+  own proxy is the one hop in front. The one-container image also listens on loopback only
+  (`LISTEN_HOST=127.0.0.1`), so nothing but that proxy reaches the service. Leave both unset in `.env`.
 - If `SECRET_KEY` and `FERNET_KEY` are absent, the entrypoint generates them into
   `/data/secrets.env` on the service's data volume on first boot — so **that volume has to outlive
   the container**.
