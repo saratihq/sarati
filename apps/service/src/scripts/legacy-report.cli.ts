@@ -1,7 +1,14 @@
+import { DBOSClient } from '@dbos-inc/dbos-sdk';
 import { Client } from 'pg';
 
 import { errorMessage } from '../common/error-message';
-import { pendingLegacyRuns, readResumability, type Sql } from '../dbos/recovery-guard';
+import {
+  alreadyEnded,
+  pendingLegacyRuns,
+  readResumability,
+  recordedOps,
+  type Sql,
+} from '../dbos/recovery-guard';
 import { systemDatabaseUrlOf } from '../dbos/system-db-url';
 
 /**
@@ -17,29 +24,38 @@ async function main(): Promise<void> {
     dbosSystemDatabaseUrl: process.env.DBOS_SYSTEM_DATABASE_URL ?? '',
   });
   const app = new Client({ connectionString: databaseUrl });
-  const system = new Client({ connectionString: systemUrl });
+  const system = await DBOSClient.create({ systemDatabaseUrl: systemUrl });
   await app.connect();
-  await system.connect();
   try {
-    const rows =
-      (client: Client): Sql =>
-      async (text, params) =>
-        (await client.query<Record<string, unknown>>(text, params)).rows;
-    const runs = await pendingLegacyRuns(systemUrl);
-    let failing = 0;
+    const rows: Sql = async (text, params) => (await app.query<Record<string, unknown>>(text, params)).rows;
+    const runs = await pendingLegacyRuns(system);
+    const counts = { resume: 0, fail: 0, ended: 0 };
     process.stdout.write('Runs in flight, as of now; each is judged again when it recovers.\n');
-    for (const { runId, plan } of runs) {
-      const verdict = await readResumability(rows(app), rows(system), runId, plan);
+    for (const { runId, run } of runs) {
+      if (await alreadyEnded(rows, runId)) {
+        counts.ended += 1;
+        process.stdout.write(`already ended ${runId}\n`);
+        continue;
+      }
+      const verdict = await readResumability(
+        (read) => read(rows),
+        (id) => recordedOps(system, id),
+        runId,
+        run,
+      );
       if (verdict.resumable) {
+        counts.resume += 1;
         process.stdout.write(`would resume  ${runId}\n`);
       } else {
-        failing += 1;
+        counts.fail += 1;
         process.stdout.write(`would fail    ${runId}  (${verdict.reason})\n`);
       }
     }
-    process.stdout.write(`${runs.length - failing} would resume, ${failing} would fail.\n`);
+    process.stdout.write(
+      `${counts.resume} would resume, ${counts.fail} would fail, ${counts.ended} had already ended.\n`,
+    );
   } finally {
-    await Promise.all([app.end(), system.end()]);
+    await Promise.all([app.end(), system.destroy()]);
   }
 }
 

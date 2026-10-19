@@ -50,9 +50,9 @@ export class DbosLifecycle implements OnApplicationBootstrap, OnApplicationShutd
   private async logRunsInFlight(): Promise<void> {
     if (!this.guard) return;
     try {
-      const { resume, fail } = await this.guard.legacyRuns();
+      const { resume, fail, ended } = await this.guard.legacyRuns();
       this.logger.log(
-        `Runs in flight at boot: ${resume} can resume, ${fail} can't be resumed safely and will fail`,
+        `Runs in flight at boot: ${resume} can resume, ${fail} can't be resumed safely and will fail, ${ended} had already ended`,
       );
     } catch (err) {
       this.logger.warn(`Couldn't judge the runs in flight at boot: ${errorMessage(err)}`);

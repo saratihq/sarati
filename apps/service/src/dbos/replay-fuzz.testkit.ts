@@ -11,8 +11,8 @@ import type {
 import type { AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/agent';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagNode, DagPlan } from '../runtime/dag-plan';
-import { seeded, type FuzzActionProps, type FuzzPlan } from '../runtime/random-dag-plan.testkit';
-import { MODEL_TURN, type RecordedOp, type RecordedRun } from '../runtime/recovery-exposure';
+import { fuzzValue, seeded, type FuzzActionProps, type FuzzPlan } from '../runtime/random-dag-plan.testkit';
+import { MODEL_TURN, type RecordedOp, type RecordedStep } from '../runtime/recovery-exposure';
 import type { RunRecorder } from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { isTimerWait } from '../runtime/timer-wait';
@@ -63,16 +63,25 @@ export interface ReplayVerdict {
   drifted: number;
   /** Waits answered in time that finished as if nobody had answered. */
   answeredNull: number;
-  /** What the killed execution had committed when it died: its op rows, and the step rows whose write had landed. */
-  atCrash: RecordedRun;
+  /** What the killed execution had committed when it died: its op rows, and the step rows as their writes had left them. */
+  atCrash: { ops: RecordedOp[]; steps: RecordedStep[] };
 }
 
 const RESTART_AFTER_MS = 500;
 
-/** Runs `fuzz` once to its end, then again killed at a seeded moment and replayed, and judges the replay. */
-export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<ReplayVerdict> {
+/** The scope every fuzz run starts from, as its workflow checkpoints it. */
+export const FUZZ_SCOPE: Readonly<Record<string, unknown>> = { trigger: { items: [1, 2] } };
+
+/** Marks each execution's scope with which it is, `first`, `crashed` or `replay`; no reference can read it. */
+export const EXECUTION = Symbol('fuzz execution');
+
+/**
+ * Runs `fuzz` once to its end, then again killed at a seeded moment, or at `crashAt` (a share of the first run's
+ * length), and replayed, and judges the replay.
+ */
+export async function crashAndReplay(fuzz: FuzzPlan, seed: number, crashAt?: number): Promise<ReplayVerdict> {
   const probe = new World(fuzz, seed);
-  const first = probe.start(seeded(seed * 7 + 1));
+  const first = probe.start(seeded(seed * 7 + 1), 'first');
   await probe.clock.drive(() => first.settled);
   const firstEnd = probe.clock.now();
   const firstInFlight = first.execution.inFlight;
@@ -80,18 +89,18 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
   const firstAudit = first.settled ? audit(fuzz.plan, probe.wf.rows, first.execution) : [];
 
   const world = new World(fuzz, seed);
-  const crashAt = Math.floor(seeded(seed * 7 + 3)() * Math.max(1, firstEnd));
-  const crashed = world.start(seeded(seed * 7 + 1));
+  const killAt = Math.floor((crashAt ?? seeded(seed * 7 + 3)()) * Math.max(1, firstEnd));
+  const crashed = world.start(seeded(seed * 7 + 1), 'crashed');
   let replay: Execution | undefined;
-  let atCrash: RecordedRun = { steps: [], ops: [] };
-  world.clock.at(crashAt, () => {
+  let atCrash: ReplayVerdict['atCrash'] = { steps: [], ops: [] };
+  world.clock.at(killAt, () => {
     atCrash = {
       steps: [...world.recorder.rows.values()],
       ops: [...world.wf.rows.values()].sort((a, b) => a.id - b.id).map(recordedOp),
     };
     crashed.execution.crash();
     world.clock.at(world.clock.now() + RESTART_AFTER_MS, () => {
-      replay = world.start(seeded(seed * 7 + 4));
+      replay = world.start(seeded(seed * 7 + 4), 'replay');
     });
   });
   await world.clock.drive(() => replay?.settled === true);
@@ -120,9 +129,10 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
 }
 
 function recordedOp(row: OpRow): RecordedOp {
-  if (!MODEL_TURN.test(row.name)) return { name: row.name };
+  const op: RecordedOp = { name: row.name, output: row.output, failed: row.error !== undefined };
+  if (!MODEL_TURN.test(row.name)) return op;
   const turn = row.error ? { toolCalls: [] } : (row.output as ModelTurn);
-  return { name: row.name, toolCalls: turn.toolCalls.map(({ id, name }) => ({ id, name })) };
+  return { ...op, toolCalls: turn.toolCalls.map(({ id, name }) => ({ id, name })) };
 }
 
 function drifted([killed, replay]: Array<Map<string, unknown>>): number {
@@ -162,11 +172,11 @@ class World {
     );
   }
 
-  start(dbLatency: () => number): Execution {
+  start(dbLatency: () => number, label: 'first' | 'crashed' | 'replay'): Execution {
     this.recorder.nextExecution();
     const execution = new SimExecution(this.wf, () => 1 + Math.floor(dbLatency() * 30));
     const run: Execution = { execution, settled: false, completed: false };
-    this.execute(execution).then(
+    this.execute(execution, label).then(
       () => {
         run.completed = true;
         run.settled = true;
@@ -179,7 +189,7 @@ class World {
     return run;
   }
 
-  private execute(execution: SimExecution): Promise<unknown> {
+  private execute(execution: SimExecution, label: string): Promise<unknown> {
     const interpreter = new DagInterpreter(this.provider, undefined, undefined, undefined, this.model);
     interpreter.setSubWorkflowRunner(this.runner);
     return interpreter.run(this.fuzz.plan, {
@@ -193,7 +203,7 @@ class World {
       runId: this.wf.id,
       recorder: this.recorder,
       pins: this.fuzz.pins,
-      initialScope: { trigger: { items: [1, 2] } },
+      initialScope: { ...FUZZ_SCOPE, [EXECUTION]: label },
       subWorkflowBudget: { remaining: this.fuzz.budget },
     });
   }
@@ -235,7 +245,7 @@ class FuzzProvider implements ManagedIntegrationProvider {
     if (props.behaviour === 'fails' || (props.behaviour === 'fails-once' && attempt === 1)) {
       throw new Error(`failure in ${key}`);
     }
-    return { output: { from: key } };
+    return { output: { from: key, ...(props.yields ? { v: fuzzValue(props.yields) } : {}) } };
   }
 
   enableTrigger(): Promise<void> {
@@ -298,7 +308,7 @@ class FuzzRecorder implements RunRecorder {
   readonly answeredNull = new Set<string>();
   readonly finished: Array<Map<string, unknown>> = [];
   /** The step rows written so far, by step key. */
-  readonly rows = new Map<string, RecordedRun['steps'][number]>();
+  readonly rows = new Map<string, RecordedStep>();
   private readonly startedAt = new Map<string, number>();
   budgetRefusals = 0;
   private readonly kinds = new Map<string, RuntimeStepKind>();

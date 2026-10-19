@@ -487,27 +487,6 @@ export async function recordCancel(em: EntityManager, scopedRunId: string): Prom
   ]);
 }
 
-/** End a run that can't be resumed in error, with every step it left running and every claim on them; run it holding {@link lockRunRow}. */
-export async function recordNotResumable(
-  em: EntityManager,
-  scopedRunId: string,
-  message: string,
-): Promise<void> {
-  await em.query(
-    `UPDATE runtime_runs SET status = 'error', error = $2, finished_at = now(), ${CLEAR_SLOT}
-      WHERE id = $1 AND status IN ('running', 'waiting')`,
-    [scopedRunId, message],
-  );
-  await em.query(
-    `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, status = 'error', finished_at = now(), error = COALESCE(error, $2)
-      WHERE run_id = $1 AND status = 'running'`,
-    [scopedRunId, message],
-  );
-  await em.query(`UPDATE runtime_run_steps SET ${CLEAR_CLAIM} WHERE run_id = $1 AND claimed_at IS NOT NULL`, [
-    scopedRunId,
-  ]);
-}
-
 /** End every wait still set on a run's steps, and any claim on them. */
 export async function clearStepWaits(em: EntityManager, scopedRunId: string): Promise<void> {
   await em.query(

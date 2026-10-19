@@ -99,6 +99,14 @@ export const MAX_SUB_WORKFLOW_DEPTH = 8;
 /** Tree-wide cap on total sub-workflow invocations per root run — the breadth guard depth can't give. */
 export const MAX_SUB_WORKFLOW_INVOCATIONS = 64;
 
+/** A leaf whose one durable op returns what the run's scope holds for it. */
+export type SingleOpLeaf = 'action' | 'code' | 'callWorkflow';
+
+/** What the run's scope holds for a leaf whose op returned `recorded`: an action's result carries it as `output`. */
+export function leafScopeValue(kind: SingleOpLeaf, recorded: unknown): unknown {
+  return kind === 'action' ? (recorded as { output?: unknown } | null)?.output : recorded;
+}
+
 /** The action-payload subset the executor needs — shared by `ActionNode` and `DagActionNode`, minus the error lane. */
 export interface ExecutableAction {
   id: string;
@@ -380,7 +388,7 @@ export abstract class BasePlanInterpreter {
     const unresolved = new Set<string>();
     const input = resolveReferences(node.input, scope, (ref) => unresolved.add(ref));
     await this.warn(ctx, stepKey, [...unresolved].map(unresolvedNote));
-    return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
+    const recorded = await ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
       runner.run(
         { workflowId: node.workflowId, input },
         {
@@ -396,6 +404,7 @@ export abstract class BasePlanInterpreter {
         },
       ),
     );
+    return leafScopeValue('callWorkflow', recorded);
   }
 
   /**
@@ -704,23 +713,24 @@ export abstract class BasePlanInterpreter {
       ...[...unresolved].map(unresolvedNote),
       ...(Array.isArray(result.warnings) ? result.warnings : []),
     ]);
-    return result.output;
+    return leafScopeValue('action', result);
   }
 
   /**
    * Execute one (non-pinned) code leaf: hand the sandbox the run scope as `steps`
    * (+ a `trigger` alias). The runner JSON-copies the scope, so the snippet cannot mutate it.
    */
-  private runCode(
+  private async runCode(
     node: ExecutableCode,
     scope: Record<string, unknown>,
     stepKey: string,
     ctx: RunContext,
   ): Promise<unknown> {
     const input: CodeInput = { steps: scope, trigger: scope.trigger };
-    return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
+    const recorded = await ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
       this.runWithRetry(node.retry, stepKey, ctx, () => this.codeRunner.run({ code: node.code, input })),
     );
+    return leafScopeValue('code', recorded);
   }
 
   /**

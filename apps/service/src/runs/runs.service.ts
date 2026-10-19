@@ -951,10 +951,20 @@ export class RunsService {
     const { row } = await this.resolveActionableRun(em, runId, access);
     if (!row) throw new DomainError(`Run ${runId} not found`, 404);
     const scoped = row.id;
+    // A run still waiting whose workflow nothing will resume, as when its recovery gave up, has nothing left to take a decision.
+    const stopped = row.status === 'waiting' && this.dbosEnabled && (await this.dbos.wontResume(scoped));
     // Chosen under the run's lock, so two events never pick the same wait; a claim parks nothing, so nothing is re-derived.
-    const taken = await withRunLock(em, scoped, (tx) =>
-      this.takeWaits(tx, scoped, runId, topic, stepKey, access, payload),
-    );
+    const taken = await withRunLock(em, scoped, async (tx): Promise<WaitTaken> => {
+      // Judged on the row the lock holds, so a run another write has just ended is refused for that instead.
+      if (stopped && (await tx.findOneByOrFail(RuntimeRunEntity, { id: scoped })).status === 'waiting') {
+        const refused = new DomainError(
+          `Run ${runId} has stopped, so a decision can no longer reach it — run it again`,
+          409,
+        );
+        return { refused, decided: undefined };
+      }
+      return this.takeWaits(tx, scoped, runId, topic, stepKey, access, payload);
+    });
     if ('refused' in taken) {
       if (taken.decided) await this.resend(scoped, taken.decided);
       throw taken.refused;

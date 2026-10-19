@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import type { Client } from 'pg';
 
-/** Where the recorded histories live, one `<shape>.json` each. */
+/** Where the recorded histories live, one `<build>/<shape>.json` each, `<build>` the recording commit's short sha. */
 export const GOLDEN_DIR = join(__dirname, '..', 'golden');
 
 type Row = Record<string, unknown>;

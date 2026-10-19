@@ -20,7 +20,8 @@ export type RecvTimeout =
 
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
-const clone = <T>(value: T): T => (value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T));
+// What DBOS's superjson round trip keeps of a value: undefined, NaN, Infinity and a Date among it.
+const clone = <T>(value: T): T => structuredClone(value);
 
 /** A clock whose timers fire in time order once everything already runnable has run; time moves only between timers. */
 export class VirtualClock {

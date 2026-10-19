@@ -7,6 +7,7 @@ import {
   type DurableStep,
 } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
+import type { CodeRunner } from './code-runner';
 import { DagInterpreter } from './dag-interpreter';
 import { eventTopicFor } from './event-wait';
 import type { DagActionNode, DagNode, DagPlan, Guard } from './dag-plan';
@@ -742,5 +743,28 @@ describe('a branch that could not resolve its condition says so', () => {
     );
     expect(result.trace.find((entry) => entry.nodeId === 'check')).toBeUndefined();
     expect(result.outputs.yes).toEqual({ ran: 'act.yes', props: {} });
+  });
+});
+
+describe('what a code step and a called workflow hand the run', () => {
+  it('hands later steps the whole result each returned, never a field of it', async () => {
+    // Each result carries an `output` of its own: only an action's result is unwrapped to it.
+    const fromCode = { shape: 'code', output: 'not the output' };
+    const fromCall = { answer: 42, output: 'not the output' };
+    const interpreter = new DagInterpreter(echoProvider(), undefined, undefined, {
+      run: () => Promise.resolve(fromCode),
+    } as unknown as CodeRunner);
+    interpreter.setSubWorkflowRunner({ run: () => Promise.resolve(fromCall) });
+    const result = await interpreter.run(
+      plan([
+        { kind: 'code', id: 'c', code: 'return 1', guards: [] },
+        { kind: 'callWorkflow', id: 'w', workflowId: 'child', input: {}, guards: [guard('c')] },
+        action('after', { fromCode: '{{c.shape}}', fromCall: '{{w.answer}}' }, [guard('w')]),
+      ]),
+      { externalUserId: 'u' },
+    );
+    expect(result.outputs.c).toEqual(fromCode);
+    expect(result.outputs.w).toEqual(fromCall);
+    expect((result.outputs.after as { props: unknown }).props).toEqual({ fromCode: 'code', fromCall: 42 });
   });
 });

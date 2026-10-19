@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -92,12 +92,13 @@ const plan =
   (post, runId) =>
     post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes } });
 
-// Parked on `n` waits, each with the deadline its receive recorded.
+// Parked on `n` waits, each with the deadline its receive recorded; a build before 033 parks its run's row, not its steps.
 const parked =
   (n: number) =>
   async ({ db, dbos, runKey }: Recording): Promise<boolean> => {
     const rows = await db.query(
-      `SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND waiting_topic IS NOT NULL AND finished_at IS NULL`,
+      `SELECT 1 FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id AND r.status = 'waiting'
+        WHERE s.run_id = $1 AND s.kind IN ('waitForEvent', 'delay') AND s.finished_at IS NULL`,
       [runKey],
     );
     const deadlines = await dbos.query(
@@ -236,7 +237,7 @@ async function record(
   http: string,
   held: () => number,
 ): Promise<GoldenHistory> {
-  const databaseUrl = await createE2eDatabase(ADMIN_URL);
+  const databaseUrl = await createE2eDatabase(ADMIN_URL, join(r0.service, 'db', 'schema.sql'));
   const runId = `golden-${shape.name}`;
   const runKey = `${MOCK_USER_ID}:${runId}`;
   const service = await bootService({ service: r0.service, databaseUrl, earlier: true });
@@ -284,10 +285,12 @@ async function main(): Promise<void> {
   const { server, held } = holdingFixture();
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const http = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const dir = join(GOLDEN_DIR, build.slice(0, 7));
+  mkdirSync(dir, { recursive: true });
   try {
     for (const shape of SHAPES.filter((s) => only.length === 0 || only.includes(s.name))) {
       const history = await record(r0, build, shape, http, held);
-      writeFileSync(join(GOLDEN_DIR, `${shape.name}.json`), `${JSON.stringify(history, null, 2)}\n`);
+      writeFileSync(join(dir, `${shape.name}.json`), `${JSON.stringify(history, null, 2)}\n`);
       console.log(`recorded ${shape.name}`);
     }
   } finally {

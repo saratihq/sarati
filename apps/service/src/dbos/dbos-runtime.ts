@@ -1,5 +1,5 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { DBOS } from '@dbos-inc/dbos-sdk';
+import { DBOS, type WorkflowStatus } from '@dbos-inc/dbos-sdk';
 
 import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
@@ -44,7 +44,14 @@ const runPlanWorkflow = DBOS.registerWorkflow(
       runId && recorder ? new RowGatedDurableStep(durableStep, () => recorder.runStatus(runId)) : null;
     const enter = async (): Promise<void> => {
       await gated?.admit();
-      if (gated && guard) await guard.admit(runId!, args.plan);
+      if (gated && guard) {
+        const checkpointed = {
+          plan: args.plan,
+          pins: args.pins ?? {},
+          initialScope: args.initialScope ?? {},
+        };
+        await guard.admit(runId!, checkpointed, () => gated.admit());
+      }
     };
     await enter().catch(async (err: unknown) => {
       // It never reaches the plan, whose end is what drops a run's file blobs.
@@ -70,6 +77,16 @@ const runPlanWorkflow = DBOS.registerWorkflow(
   },
   { name: RUN_PLAN_WORKFLOW },
 );
+
+// What `canResume` answers, for a workflow that exists.
+function resumable(status: WorkflowStatus): boolean {
+  return (
+    status.status === 'PENDING' &&
+    status.workflowName === RUN_PLAN_WORKFLOW &&
+    status.executorId === DBOS.executorID &&
+    status.applicationVersion === DBOS.applicationVersion
+  );
+}
 
 @Injectable()
 export class DbosRuntime {
@@ -135,12 +152,13 @@ export class DbosRuntime {
   /** Whether this instance can still take a durable run on to its end: pending, a workflow it knows, and its own to recover. */
   async canResume(runId: string): Promise<boolean> {
     const status = await DBOS.getWorkflowStatus(runId);
-    return (
-      status?.status === 'PENDING' &&
-      status.workflowName === RUN_PLAN_WORKFLOW &&
-      status.executorId === DBOS.executorID &&
-      status.applicationVersion === DBOS.applicationVersion
-    );
+    return status !== null && resumable(status);
+  }
+
+  /** Whether the run has a workflow that nothing will take on to its end; `false` for a run that has none. */
+  async wontResume(runId: string): Promise<boolean> {
+    const status = await DBOS.getWorkflowStatus(runId);
+    return status !== null && !resumable(status);
   }
 
   /** Poll a durable run's status (and its outputs once it has completed). */

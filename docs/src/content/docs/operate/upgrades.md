@@ -30,15 +30,19 @@ starts, saying why, and none of its steps runs again. A restart treats it the sa
 runs finish first, or run them again after.
 
 The boot log counts them, for example
-`Runs in flight at boot: 3 can resume, 1 can't be resumed safely and will fail`. From v0.2.24 on,
-you can list them before you restart or upgrade:
+`Runs in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
+and names each one that fails at warn level with its reason, followed by a `RunNotResumable` error
+and its stack trace: that is the run ending, not the service failing. From v0.2.24 on, you can list
+them before you restart or upgrade:
 
 ```bash
 cd sarati && docker compose exec sarati sarati-legacy-report
 ```
 
-It only reads, and prints each run in flight as `would resume` or `would fail` with the reason. A run
-can still move on between the report and the restart, so each is judged again as it resumes. On a five-container install it is `docker compose exec service` instead; running it by hand,
+It only reads, and prints each run in flight as `would resume` or `would fail` with the reason, or
+`already ended` for one that had finished or been cancelled but not yet stopped, which stays as it
+ended. A run can still move on between the report and the restart, so each is judged again as it
+resumes. On a five-container install it is `docker compose exec service` instead; running it by hand,
 `docker exec sarati`.
 
 ### Going back

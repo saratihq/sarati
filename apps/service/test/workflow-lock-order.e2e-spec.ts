@@ -9,6 +9,7 @@ import { EntityManager } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { NOT_RESUMABLE, RecoveryGuard } from '../src/dbos/recovery-guard';
 import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
@@ -1297,6 +1298,53 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       expect(await runOf(id)).toMatchObject({ status: 'error', workflow_id: null });
       expect(await deadlocksSince(before)).toBe(0);
     });
+
+    it.each([
+      ['a workflow', 'workflow'],
+      ['an environment', 'environment'],
+    ])(
+      'a recovery the guard refuses, held at its run update, finishes before %s delete, keeping who decided',
+      async (_, kind) => {
+        const org = await workspace(`Refuse then ${kind} delete`);
+        const wfId = await deploy(org, 'refuse under delete');
+        const env = kind === 'environment' ? await createEnv(org, `refuse-${suffix()}`) : undefined;
+        const id = await parkRun(`held-refuse-${suffix()}`, {
+          workflowId: wfId,
+          environmentId: env,
+          waits: [{ key: 'approve', topic: 'approval', due: OPEN }],
+        });
+        await claimOn(id, 'approve', `'1 second'`);
+        const guard = app.get(RecoveryGuard);
+        // Only its read of the DBOS history is stood in for; the end it writes is the guard's own.
+        const judged = jest
+          .spyOn(guard as never, 'resumability')
+          .mockResolvedValue({ resumable: false, cause: 'side-by-side', reason: 'held' } as never);
+        const held = holdQuery(/SET status = 'error', error = \$2, finished_at = now\(\)/);
+        const before = await deadlocks();
+        try {
+          const refusing = guard.admit(
+            id,
+            { plan: { id: 'plan-held', nodes: [] }, pins: {}, initialScope: {} },
+            () => Promise.resolve(),
+          );
+          await held.arrived;
+          const deleting = statusOf(env ? removeEnv(org, env) : remove(org, wfId));
+          await lockWaiters(1);
+          held.release();
+          await expect(refusing).rejects.toThrow(NOT_RESUMABLE['side-by-side']);
+          expect(await deleting).toBe(200);
+        } finally {
+          held.restore();
+          judged.mockRestore();
+        }
+        expect(await creditOf(id)).toEqual({ step: user, slot: user });
+        expect(await runOf(id)).toMatchObject({
+          status: 'error',
+          ...(env ? { environment_id: null } : { workflow_id: null }),
+        });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
 
     it('a park held at its status re-derive finishes before a workflow delete', async () => {
       const org = await workspace('Park then delete');

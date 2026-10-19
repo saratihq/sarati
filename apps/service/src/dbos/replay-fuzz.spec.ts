@@ -1,19 +1,26 @@
 import { Logger } from '@nestjs/common';
 
+import * as conditions from '../runtime/conditions';
+import type { DagNode } from '../runtime/dag-plan';
+
 import {
   FEATURES,
   FUZZ_ACTION,
   FUZZ_WORKFLOW,
+  ROUTED_MIX,
   randomDagPlan,
   seeded,
   type Feature,
   type FuzzPlan,
+  type Yield,
 } from '../runtime/random-dag-plan.testkit';
-import { resumability } from '../runtime/recovery-exposure';
-import { audit, crashAndReplay, type ReplayVerdict } from './replay-fuzz.testkit';
+import { replayRoutes, verdict as guardVerdict } from '../runtime/recovery-exposure';
+import { EXECUTION, FUZZ_SCOPE, audit, crashAndReplay, type ReplayVerdict } from './replay-fuzz.testkit';
 import { SLEEP, type OpRow } from './sim-dbos.testkit';
 
 const SEEDS = 400;
+const ROUTED_SEEDS = 200;
+const CRASH_POINTS = [0.1, 0.3, 0.5, 0.7, 0.9];
 
 interface Totals {
   loud: number;
@@ -50,6 +57,24 @@ const wentWrong = (verdict: ReplayVerdict): boolean =>
     verdict.drifted +
     verdict.answeredNull >
     0;
+
+// The guard's own verdict on what the crash left, from what the run checkpointed.
+const judgedAtCrash = (fuzz: FuzzPlan, replayed: ReplayVerdict) =>
+  guardVerdict(
+    { plan: fuzz.plan, pins: fuzz.pins, initialScope: FUZZ_SCOPE },
+    replayed.atCrash.ops,
+    replayed.atCrash.steps,
+    fuzz.budget,
+  );
+
+// A fuzz action after `guards`, answering in `latencyMs`, its output carrying `yields` as `v`.
+const step = (id: string, guards: DagNode['guards'], latencyMs = 50, yields?: Yield): DagNode => ({
+  kind: 'action',
+  id,
+  actionId: FUZZ_ACTION,
+  props: { latencyMs, behaviour: 'ok', ...(yields ? { yields } : {}) },
+  guards,
+});
 
 const REASONS: Array<[RegExp, string]> = [
   [/could run beside another step/, 'beside another'],
@@ -101,7 +126,7 @@ async function fuzz(): Promise<Totals> {
     totals.drifted += verdict.drifted;
     totals.answeredNull += verdict.answeredNull;
     if (wentWrong(verdict)) totals.mispaired.push(seed);
-    const judged = resumability(plan.plan, verdict.atCrash);
+    const judged = judgedAtCrash(plan, verdict);
     if (!judged.resumable) {
       totals.refused.push(seed);
       const kind = REASONS.find(([pattern]) => pattern.test(judged.reason))?.[1] ?? judged.reason;
@@ -204,12 +229,125 @@ describe('crash-and-replay fuzz over SimDBOS', () => {
       const verdict = await crashAndReplay(fuzz, seed);
       if (!wentWrong(verdict)) continue;
       wrong.push(seed);
-      const judged = resumability(fuzz.plan, verdict.atCrash);
+      const judged = judgedAtCrash(fuzz, verdict);
       if (judged.resumable || judged.cause !== 'refused-call') missed.push(seed);
     }
     expect(wrong.length).toBeGreaterThan(0);
     expect(missed).toEqual([]);
   }, 120_000);
+
+  it.each([
+    [
+      'a pinned step the run routed away',
+      [
+        { kind: 'if', id: 'gate', condition: { left: '{{trigger.items}}', op: 'truthy' }, guards: [] },
+        step('pinned', [{ source: 'gate', port: 1 }]),
+        step('q', [{ source: 'gate', port: 0 }]),
+        step('join', [
+          { source: 'pinned', port: 0 },
+          { source: 'q', port: 0 },
+        ]),
+      ] as DagNode[],
+      'pinned',
+      'join',
+      { pinned: { v: true } },
+    ],
+    [
+      'a pin on a wait',
+      [{ kind: 'waitForEvent', id: 'pinned', topic: 'approval', timeoutMs: 2_000, guards: [] }] as DagNode[],
+      'pinned',
+      'pinned',
+      { pinned: { v: true } },
+    ],
+    ['a Date a step answered', [step('prep', [], 50, 'date')], 'prep', 'prep', {}],
+  ])(
+    'has the recovery guard refuse every replay that goes wrong past a router reading %s',
+    async (_, head, read, after, pins) => {
+      // What the router reads is false on replay — no pin applies, a Date has no keys — so it takes port 1, where two chains race.
+      const fuzz: FuzzPlan = {
+        plan: {
+          id: 'fuzz',
+          nodes: [
+            ...head,
+            {
+              kind: 'if',
+              id: 'r',
+              condition: { left: `{{${read}.v}}`, op: 'truthy' },
+              guards: [{ source: after, port: 0 }],
+            },
+            step('solo', [{ source: 'r', port: 0 }]),
+            step('fast', [{ source: 'r', port: 1 }], 10),
+            step('fast2', [{ source: 'fast', port: 0 }]),
+            step('slow', [{ source: 'r', port: 1 }], 300),
+            step('slow2', [{ source: 'slow', port: 0 }]),
+          ],
+        },
+        pins,
+        budget: 64,
+        features: new Set(),
+        fatal: new Set(),
+      };
+      const wrong: number[] = [];
+      const missed: number[] = [];
+      for (let seed = 1; seed <= 60; seed++) {
+        const replay = await crashAndReplay(fuzz, seed);
+        if (!wentWrong(replay)) continue;
+        wrong.push(seed);
+        if (judgedAtCrash(fuzz, replay).resumable) missed.push(seed);
+      }
+      expect(wrong.length).toBeGreaterThan(0);
+      expect(missed).toEqual([]);
+    },
+    120_000,
+  );
+
+  it('takes, for every router it judges on a routed plan, the port the replay takes, and refuses every replay that goes wrong', async () => {
+    const routedPort = conditions.routedPort;
+    const replayed = new Map<string, number>();
+    let top = new Set<unknown>();
+    const spy = jest.spyOn(conditions, 'routedPort').mockImplementation((router, scope, sink) => {
+      const port = routedPort(router, scope, sink);
+      if ((scope as Record<symbol, unknown>)[EXECUTION] === 'replay' && top.has(router)) {
+        replayed.set((router as DagNode).id, port);
+      }
+      return port;
+    });
+    const mismatched: string[] = [];
+    const admitted: string[] = [];
+    let judged = 0;
+    let wrong = 0;
+    try {
+      for (let seed = 1; seed <= ROUTED_SEEDS; seed++) {
+        const fuzz = randomDagPlan(seeded(seed), 'fuzz', ROUTED_MIX);
+        top = new Set(fuzz.plan.nodes);
+        for (const crashAt of CRASH_POINTS) {
+          replayed.clear();
+          const replay = await crashAndReplay(fuzz, seed, crashAt);
+          const run = { plan: fuzz.plan, pins: fuzz.pins, initialScope: FUZZ_SCOPE };
+          for (const [id, port] of replayRoutes(run, replay.atCrash.ops)) {
+            if (!replayed.has(id)) continue;
+            judged += 1;
+            if (replayed.get(id) !== port) {
+              mismatched.push(
+                `seed ${seed} at ${crashAt}: ${id} judged ${port}, replayed ${replayed.get(id)}`,
+              );
+            }
+          }
+          if (!wentWrong(replay)) continue;
+          wrong += 1;
+          if (judgedAtCrash(fuzz, replay).resumable) admitted.push(`seed ${seed} at ${crashAt}`);
+        }
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    process.stdout.write(
+      `routed plans: ${judged} routes judged against their replay, ${wrong} replays went wrong, ${admitted.length} let through\n`,
+    );
+    expect(mismatched).toEqual([]);
+    expect(admitted).toEqual([]);
+    expect(judged).toBeGreaterThan(500);
+  }, 600_000);
 
   it('audits a log for a gap, a name the plan never issues, and a row past what the execution reserved', () => {
     const plan = { id: 'p', nodes: [{ kind: 'delay' as const, id: 'pause', ms: 5, guards: [] }] };

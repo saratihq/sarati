@@ -33,7 +33,7 @@ export interface StaleReap {
  * `db/schema.sql`, which the run's globalTeardown drops. Refresh the schema when the live DDL changes:
  *   docker exec orchestr-postgres-1 pg_dump -U orchestr -d orchestr --schema-only > db/schema.sql
  */
-export async function createE2eDatabase(adminUrl: string): Promise<string> {
+export async function createE2eDatabase(adminUrl: string, schemaPath = SCHEMA_PATH): Promise<string> {
   const dbName = e2eDatabaseName();
 
   const admin = new Client({ connectionString: adminUrl });
@@ -46,7 +46,7 @@ export async function createE2eDatabase(adminUrl: string): Promise<string> {
 
   const e2eUrl = withDatabase(adminUrl, dbName);
   // pg_dump emits psql meta-commands ('\' lines) the wire protocol can't execute — strip them.
-  const schema = readFileSync(SCHEMA_PATH, 'utf8')
+  const schema = readFileSync(schemaPath, 'utf8')
     .split('\n')
     .filter((line) => !line.startsWith('\\'))
     .join('\n');

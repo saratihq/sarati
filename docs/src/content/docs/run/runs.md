@@ -56,13 +56,16 @@ resumed safely — run it again.":
 - **"This run had already run steps side by side when it stopped…"** — it had run steps in parallel
   branches, or steps that start at the same time, even if they had all finished.
 - **"This run's AI Agent step was refused a sub-workflow call before it stopped…"** — the step asked
-  to call a workflow after the AI Agent steps in the run, and in the workflows it called, had made 64
-  such calls between them, and carried on.
+  to call a workflow once the run had made 64 such calls, some of them inside the workflows it
+  called, and carried on without it. Resuming would not count those again, so it could make the call
+  it was refused.
 - **"This run's history can't be matched to its workflow…"** — what it recorded does not fit its
   workflow, so there is no telling whether resuming it is safe.
 
-None of its steps runs again, its waits leave the inbox, and a decision it had not taken yet is not
-applied. Run the workflow again. A run that stopped before any of this resumes as usual;
+None of its steps runs again, its waits leave the inbox, and a decision it had not taken yet is
+recorded on its wait, with who made it, but not applied. Each step it had under way ends in `error`
+saying *Stopped when the service did — the run can't be resumed safely*, and none of them is named
+as the step that failed. Run the workflow again. A run that stopped before any of this resumes as usual;
 [Upgrades](/operate/upgrades/#upgrade) says how to list the runs in flight that would end this way.
 
 Killing the service outright during a ten-second HTTP step:

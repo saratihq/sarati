@@ -142,10 +142,9 @@ const PASS_THROUGH: Record<string, 'first argument' | 'autocommit'> = {
 const OPAQUE_READS: Record<string, string> = {
   'service:database/schema-guard.ts#onApplicationBootstrap':
     "runs this file's canary probes, every one a SELECT",
+  'service:dbos/recovery-guard.ts#legacyRuns': "sends alreadyEnded's read of a run's status, a SELECT",
   'service:dbos/recovery-guard.ts#resumability':
     "sends readResumability's reads of a run's history, every one a SELECT",
-  'service:dbos/recovery-guard.ts#system':
-    'reads the DBOS system database, which holds no table under a workflow',
   'service:scripts/legacy-report.cli.ts#main':
     "sends readResumability's reads of a run's history, every one a SELECT",
 };

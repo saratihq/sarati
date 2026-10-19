@@ -1,6 +1,13 @@
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { DagNode, DagPlan, Guard } from './dag-plan';
-import { resumability, type RecordedOp, type RecordedRun } from './recovery-exposure';
+import {
+  replayRoutes,
+  verdict,
+  type CheckpointedRun,
+  type RecordedOp,
+  type RecordedStep,
+  type Resumability,
+} from './recovery-exposure';
 
 const after = (source: string, port = 0): Guard[] => [{ source, port }];
 const action = (id: string, guards: Guard[] = [], extra: Partial<DagNode> = {}): DagNode =>
@@ -19,15 +26,32 @@ const fork = (id: string, branches: DagNode[][], guards: Guard[] = []): DagNode 
   guards,
 });
 const plan = (...nodes: DagNode[]): DagPlan => ({ id: 'p', nodes });
-const step = (stepKey: string, kind: RuntimeStepKind = 'action', pinned = false) => ({
+const step = (stepKey: string, kind: RuntimeStepKind = 'action', pinned = false): RecordedStep => ({
   stepKey,
   kind,
   pinned,
 });
-const ran = (steps: RecordedRun['steps'], ops: Array<string | RecordedOp> = []): RecordedRun => ({
+// An action's op as DBOS returns it on replay: its result, the scope's value under `output`.
+const answered = (name: string, output: unknown): RecordedOp => ({ name, output: { output }, failed: false });
+interface Ran {
+  steps: RecordedStep[];
+  ops: RecordedOp[];
+}
+const ran = (steps: RecordedStep[], ops: Array<string | RecordedOp> = []): Ran => ({
   steps,
   ops: ops.map((op) => (typeof op === 'string' ? { name: op } : op)),
 });
+const resumability = (
+  p: DagPlan,
+  run: Ran,
+  started: Partial<Omit<CheckpointedRun, 'plan'>> & { budget?: number } = {},
+): Resumability =>
+  verdict(
+    { plan: p, pins: started.pins ?? {}, initialScope: started.initialScope ?? {} },
+    run.ops,
+    run.steps,
+    started.budget,
+  );
 const agent = (...tools: Array<'workflow' | 'action'>): DagNode => ({
   kind: 'agent',
   id: 'ag',
@@ -72,7 +96,7 @@ describe('resumability', () => {
   });
 
   it('refuses a step two unordered nodes could run beside, and resumes one only a router outcome apart', () => {
-    expect(resumability(plan(action('a'), action('b')), ran([step('a')]))).toMatchObject({
+    expect(resumability(plan(action('a'), action('b')), ran([step('a')], ['p:a']))).toMatchObject({
       resumable: false,
     });
     const routed = plan(
@@ -141,7 +165,7 @@ describe('resumability', () => {
 
   it('fails closed on a step or an op it can place on no node, or on more than one', () => {
     const p = plan(action('a'), wait('w', after('a')));
-    expect(resumability(p, ran([step('nope')]))).toEqual({
+    expect(resumability(p, ran([step('nope')], ['p:a']))).toEqual({
       resumable: false,
       cause: 'unmatched',
       reason: 'step nope matches no node of its plan',
@@ -152,7 +176,7 @@ describe('resumability', () => {
       reason: 'op other:a matches no node of its plan',
     });
     const clash = plan(action('fork|0/a'), fork('fork', [[action('a')], [action('b')]], after('fork|0/a')));
-    expect(resumability(clash, ran([step('fork|0/a')]))).toEqual({
+    expect(resumability(clash, ran([step('fork|0/a')], ['p:fork|0/a']))).toEqual({
       resumable: false,
       cause: 'unmatched',
       reason: 'step fork|0/a matches 2 nodes of its plan',
@@ -161,7 +185,7 @@ describe('resumability', () => {
       onErrorBranch: { id: `p#${source}:error`, nodes: [action('h')] },
     });
     const copies = plan(action('a', [], shared('a')), action('b', after('a'), shared('b')));
-    expect(resumability(copies, ran([step('h')]))).toMatchObject({ resumable: false });
+    expect(resumability(copies, ran([step('h')], ['p:a']))).toMatchObject({ resumable: false });
   });
 
   it('fails closed on a receive or a sleep no started wait or delay explains', () => {
@@ -213,10 +237,157 @@ describe('resumability', () => {
     });
   });
 
+  it('resumes a run that recorded no op whatever its rows, and refuses one with ops but no run row', () => {
+    const run: CheckpointedRun = { plan: plan(action('a'), action('b')), pins: {}, initialScope: {} };
+    expect(verdict(run, [], null)).toEqual({ resumable: true });
+    expect(verdict(run, [], [step('a'), step('b')])).toEqual({ resumable: true });
+    expect(verdict(run, [{ name: 'p:a' }], null)).toEqual({
+      resumable: false,
+      cause: 'unmatched',
+      reason: 'it has no run row',
+    });
+  });
+
+  it('counts no pinned leaf as a partner, as it replays its pin and issues no op', () => {
+    const p = plan(action('pinned'), action('a'), wait('w', after('a')));
+    const run = ran(
+      [step('pinned', 'action', true), step('a'), step('w', 'waitForEvent')],
+      ['p:a', 'DBOS.recv', 'DBOS.sleep'],
+    );
+    expect(resumability(p, run, { pins: { pinned: { done: true } } })).toEqual({ resumable: true });
+    expect(resumability(p, run)).toMatchObject({ resumable: false, cause: 'side-by-side' });
+  });
+
+  it('refuses a call refused for the budget only while its replay would still have budget to make it', () => {
+    const p = plan(agent('workflow'));
+    const spentThenRefused = ran(
+      [step('ag', 'agent')],
+      [turn(0, 't0'), 'p:ag#0:tool:c0', turn(1, 't0'), turn(2)],
+    );
+    // Its own agent spent the one call there was: a replay spends it again and refuses the same call.
+    expect(resumability(p, spentThenRefused, { budget: 1 })).toEqual({ resumable: true });
+    expect(resumability(p, spentThenRefused, { budget: 2 })).toMatchObject({ cause: 'refused-call' });
+    const sameTurn = ran([step('ag', 'agent')], [turn(0, 't0', 't0'), 'p:ag#0:tool:c0', turn(1)]);
+    expect(resumability(p, sameTurn, { budget: 1 })).toEqual({ resumable: true });
+    expect(resumability(p, sameTurn, { budget: 2 })).toMatchObject({ cause: 'refused-call' });
+  });
+
+  it('judges a router on the port it takes on replay, from the scope it starts with', () => {
+    const p = plan(
+      { kind: 'if', id: 'gate', condition: { left: '{{trigger.go}}', op: 'truthy' }, guards: [] },
+      action('a', after('gate', 0)),
+      action('b'),
+      wait('w', after('b')),
+    );
+    const run = ran([step('b'), step('w', 'waitForEvent')], ['p:b', 'DBOS.recv', 'DBOS.sleep']);
+    expect(resumability(p, run, { initialScope: { trigger: { go: false } } })).toEqual({ resumable: true });
+    expect(resumability(p, run, { initialScope: { trigger: { go: true } } })).toMatchObject({
+      cause: 'side-by-side',
+    });
+    expect(resumability(p, run)).toMatchObject({ cause: 'side-by-side' });
+  });
+
+  it('judges a router on the output its op recorded, decoded as the replay decodes it, else on every port', () => {
+    const fed = plan(
+      action('prep'),
+      { kind: 'if', id: 'gate', condition: { left: '{{prep.go}}', op: 'truthy' }, guards: after('prep') },
+      action('a', after('gate', 0)),
+      action('b', after('prep')),
+      wait('w', after('b')),
+    );
+    const recorded = (prep?: RecordedOp) =>
+      ran(
+        [step('prep'), step('b'), step('w', 'waitForEvent')],
+        [...(prep ? [prep] : []), 'p:b', 'DBOS.recv', 'DBOS.sleep'],
+      );
+    expect(resumability(fed, recorded(answered('p:prep', { go: false })))).toEqual({ resumable: true });
+    expect(resumability(fed, recorded(answered('p:prep', { go: true })))).toMatchObject({
+      cause: 'side-by-side',
+    });
+    // A Date has no keys of its own, so it reads as false; its JSON form, an ISO string, would read as true.
+    expect(resumability(fed, recorded(answered('p:prep', { go: new Date(0) })))).toEqual({ resumable: true });
+    // An output that only looks capped is judged on what it holds.
+    expect(resumability(fed, recorded(answered('p:prep', { truncated: true, go: false })))).toEqual({
+      resumable: true,
+    });
+    expect(resumability(fed, recorded({ name: 'p:prep', failed: true }))).toMatchObject({
+      cause: 'side-by-side',
+    });
+    expect(resumability(fed, recorded())).toMatchObject({ cause: 'side-by-side' });
+  });
+
+  it("judges a router on a code step's and a called workflow's whole result, as the interpreter hands it to scope", () => {
+    const sources: DagNode[] = [
+      { kind: 'code', id: 'prep', code: 'return 1', guards: [] },
+      { kind: 'callWorkflow', id: 'prep', workflowId: 'child', input: {}, guards: [] },
+    ];
+    for (const source of sources) {
+      const fed = plan(
+        source,
+        { kind: 'if', id: 'gate', condition: { left: '{{prep.go}}', op: 'truthy' }, guards: after('prep') },
+        action('a', after('gate', 0)),
+        action('b', after('prep')),
+        wait('w', after('b')),
+      );
+      // Only an action's result is unwrapped to its `output`: here that field is a decoy.
+      const prep: RecordedOp = { name: 'p:prep', output: { go: false, output: { go: true } }, failed: false };
+      const run = ran(
+        [step('prep', source.kind as RuntimeStepKind), step('b'), step('w', 'waitForEvent')],
+        [prep, 'p:b', 'DBOS.recv', 'DBOS.sleep'],
+      );
+      expect(resumability(fed, run)).toEqual({ resumable: true });
+    }
+  });
+
+  it('reads a pinned step a router routed away as undefined, as its replay does, never its pin', () => {
+    const p = plan(
+      { kind: 'if', id: 'gate', condition: { left: '{{trigger.go}}', op: 'truthy' }, guards: [] },
+      action('pinned', after('gate', 1)),
+      action('q', after('gate', 0)),
+      action('join', [...after('pinned'), ...after('q')]),
+      { kind: 'if', id: 'r', condition: { left: '{{pinned.v}}', op: 'truthy' }, guards: after('join') },
+      action('solo', after('r', 0)),
+      action('b1', after('r', 1)),
+      action('b2', after('r', 1)),
+    );
+    const run: CheckpointedRun = {
+      plan: p,
+      pins: { pinned: { v: true } },
+      initialScope: { trigger: { go: true } },
+    };
+    const ops = [answered('p:q', {}), answered('p:join', {}), { name: 'p:b1' }];
+    expect(replayRoutes(run, ops)).toEqual(
+      new Map([
+        ['gate', 0],
+        ['r', 1],
+      ]),
+    );
+    expect(verdict(run, ops, [step('q'), step('join'), step('b1')])).toMatchObject({ cause: 'side-by-side' });
+  });
+
+  it('applies no pin to a step that is no leaf, as its replay applies none', () => {
+    const p = plan(
+      wait('w'),
+      { kind: 'if', id: 'r', condition: { left: '{{w.v}}', op: 'truthy' }, guards: after('w') },
+      action('solo', after('r', 0)),
+      action('b1', after('r', 1)),
+      action('b2', after('r', 1)),
+    );
+    const run: CheckpointedRun = { plan: p, pins: { w: { v: true } }, initialScope: {} };
+    const ops = [{ name: 'DBOS.sleep' }, { name: 'DBOS.recv' }, { name: 'p:b1' }];
+    expect(replayRoutes(run, ops)).toEqual(new Map());
+    expect(verdict(run, ops, [step('w', 'waitForEvent'), step('b1')])).toMatchObject({
+      cause: 'side-by-side',
+    });
+  });
+
   it('passes over pinned and routing rows', () => {
     const p = plan(action('a'));
     expect(
-      resumability(p, ran([step('ghost', 'action', true), step('gate#0:condition', 'if'), step('a')])),
+      resumability(
+        p,
+        ran([step('ghost', 'action', true), step('gate#0:condition', 'if'), step('a')], ['p:a']),
+      ),
     ).toEqual({
       resumable: true,
     });

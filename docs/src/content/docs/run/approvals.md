@@ -67,7 +67,8 @@ refused, once either wait is within two seconds of timing out.
 A run that had already run steps side by side when the service stopped — a wait in a parallel branch,
 or any step beside another that runs at the same time — can't be resumed safely, even with a single
 approval waiting. After a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying
-so: its waits leave the inbox, and a decision made for one that it had not taken yet is not applied.
+so: its waits leave the inbox, and a decision made for one that it had not taken yet is recorded,
+with who made it, but not applied.
 Run it again. Going back to an earlier version is different: there such a run can end in an error or
 put a decision on the wrong wait, so let it finish first, as
 [Upgrades](/operate/upgrades/#going-back) says.

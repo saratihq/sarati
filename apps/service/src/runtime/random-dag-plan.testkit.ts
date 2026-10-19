@@ -1,4 +1,5 @@
 import type { DagAgentTool } from './agent';
+import type { CompareOp, Condition } from './conditions';
 import type { DagNode, DagPlan, Guard } from './dag-plan';
 
 /** Test support, not in the production bundle: seeded random DAG plans covering every shape a durable replay meets. */
@@ -6,11 +7,100 @@ import type { DagNode, DagPlan, Guard } from './dag-plan';
 /** How a fuzz action's fake call ends: `fails-once` fails its first attempt only; `fatal` meets a fatal error at its step's lookup, before its call. */
 export type Behaviour = 'ok' | 'fails' | 'fails-once' | 'fatal';
 
+/** A value a fuzz step can answer with, each of a kind a JSON row would not keep as it is. */
+export const YIELDS = [
+  'date',
+  'undefined',
+  'nan',
+  'infinity',
+  'null',
+  'nested',
+  'array',
+  'true',
+  'false',
+  'zero',
+  'text',
+] as const;
+
+export type Yield = (typeof YIELDS)[number];
+
+/** The value `yields` names. */
+export function fuzzValue(yields: Yield): unknown {
+  switch (yields) {
+    case 'date':
+      return new Date(Date.UTC(2026, 0, 1));
+    case 'undefined':
+      return undefined;
+    case 'nan':
+      return NaN;
+    case 'infinity':
+      return Infinity;
+    case 'null':
+      return null;
+    case 'nested':
+      return { deep: { flag: true, list: [1, 2] } };
+    case 'array':
+      return [0, 'x'];
+    case 'true':
+      return true;
+    case 'false':
+      return false;
+    case 'zero':
+      return 0;
+    case 'text':
+      return 'x';
+  }
+}
+
 /** The props every fuzz action carries. */
 export interface FuzzActionProps {
   latencyMs: number;
   behaviour: Behaviour;
+  /** What its output carries as `v`. */
+  yields?: Yield;
 }
+
+/** How often the generator reaches for each shape that decides a router's route. */
+export interface PlanMix {
+  /** Share of nodes that are routers. */
+  routers: number;
+  /** Chance a router reads an earlier step rather than a constant. */
+  conditions: number;
+  /** Chance an ok action is pinned. */
+  leafPins: number;
+  /** Chance a wait, delay, loop or fan-out carries a pin, which nothing reads. */
+  otherPins: number;
+  /** Chance a node comes after nothing. */
+  roots: number;
+  /** How deep plans nest, and how many nodes the top level has. */
+  depth: number;
+  size: [number, number];
+}
+
+/** The mix every fuzz plan is drawn from. */
+export const FUZZ_MIX: PlanMix = {
+  routers: 0.08,
+  conditions: 0.6,
+  leafPins: 0.06,
+  otherPins: 0.05,
+  roots: 0.25,
+  depth: 2,
+  size: [2, 7],
+};
+
+/** A mix heavy in routers reading earlier steps, joins and pins: what decides a replay's route. */
+export const ROUTED_MIX: PlanMix = {
+  routers: 0.3,
+  conditions: 0.9,
+  leafPins: 0.3,
+  otherPins: 0.3,
+  roots: 0.05,
+  depth: 1,
+  size: [6, 12],
+};
+
+const OPS: CompareOp[] = ['truthy', 'falsy', 'eq', 'ne', 'gt', 'lt', 'contains'];
+const RIGHTS: unknown[] = [null, 0, 'x', true, false, 1];
 
 export const FUZZ_ACTION = 'fuzz.step';
 export const FUZZ_WORKFLOW = 'fuzz-child';
@@ -67,9 +157,9 @@ export function seeded(seed: number): () => number {
 }
 
 /** A random plan; the same `rand` state always yields the same plan. */
-export function randomDagPlan(rand: () => number, id = 'fuzz'): FuzzPlan {
-  const builder = new PlanBuilder(rand, id);
-  const nodes = builder.level(2, builder.int(2, 7), true);
+export function randomDagPlan(rand: () => number, id = 'fuzz', mix: PlanMix = FUZZ_MIX): FuzzPlan {
+  const builder = new PlanBuilder(rand, id, mix);
+  const nodes = builder.level(mix.depth, builder.int(...mix.size), true);
   const budget = builder.features.has('workflow-tool') ? builder.int(1, 2) : 64;
   if (budget < 64) builder.features.add('small-budget');
   return {
@@ -90,6 +180,7 @@ class PlanBuilder {
   constructor(
     private readonly rand: () => number,
     private readonly planId: string,
+    private readonly mix: PlanMix,
   ) {}
 
   int(min: number, max: number): number {
@@ -104,7 +195,10 @@ class PlanBuilder {
     const nodes: DagNode[] = [];
     if (root && this.chance(0.15)) this.wide(nodes);
     if (this.chance(0.12)) this.laneThenFatal(nodes);
-    for (let k = 0; k < size; k++) nodes.push(this.node(depth, this.guards(nodes)));
+    for (let k = 0; k < size; k++) {
+      const guards = this.guards(nodes);
+      nodes.push(this.chance(this.mix.routers) ? this.router(guards, nodes) : this.node(depth, guards));
+    }
     return nodes;
   }
 
@@ -112,15 +206,28 @@ class PlanBuilder {
     const roll = this.rand();
     const nested = depth > 0;
     if (roll < 0.3) return this.action(guards);
-    if (roll < 0.4) return this.delay(guards);
-    if (roll < 0.52) return this.wait(guards);
-    if (roll < 0.6) return this.router(guards);
+    if (roll < 0.4) return this.pinnedOrNot(this.delay(guards));
+    if (roll < 0.52) return this.pinnedOrNot(this.wait(guards));
+    if (roll < 0.6) return this.action(guards);
     if (roll < 0.68) return this.agent(guards, depth);
     if (roll < 0.73) return this.callWorkflow(guards, depth);
-    if (nested && roll < 0.82) return this.parallel(guards, depth);
-    if (nested && roll < 0.9) return this.forEach(guards, depth);
-    if (nested && roll < 0.96) return this.whileLoop(guards, depth);
+    if (nested && roll < 0.82) return this.pinnedOrNot(this.parallel(guards, depth));
+    if (nested && roll < 0.9) return this.pinnedOrNot(this.forEach(guards, depth));
+    if (nested && roll < 0.96) return this.pinnedOrNot(this.whileLoop(guards, depth));
     return this.action(guards);
+  }
+
+  // A pin on a node that is no leaf: the interpreter replays pins on leaves alone, so it changes nothing.
+  private pinnedOrNot(node: DagNode): DagNode {
+    if (this.chance(this.mix.otherPins)) {
+      this.pins[node.id] = { pinned: node.id, v: fuzzValue(this.yields()) };
+      this.features.add('pin');
+    }
+    return node;
+  }
+
+  private yields(): FuzzActionProps['yields'] & {} {
+    return YIELDS[this.int(0, YIELDS.length - 1)]!;
   }
 
   private id(): string {
@@ -133,7 +240,7 @@ class PlanBuilder {
     if (roll < 0.1) behaviour = 'fails';
     else if (roll < 0.18) behaviour = 'fails-once';
     if (behaviour !== 'ok') this.features.add(behaviour);
-    return { latencyMs: this.int(1, 400), behaviour };
+    return { latencyMs: this.int(1, 400), behaviour, yields: this.yields() };
   }
 
   private action(guards: Guard[], props: FuzzActionProps = this.props()): DagNode {
@@ -151,8 +258,8 @@ class PlanBuilder {
         node.onErrorBranch = this.lane(id);
       }
     }
-    if (props.behaviour === 'ok' && this.chance(0.06)) {
-      this.pins[id] = { pinned: id };
+    if (props.behaviour === 'ok' && this.chance(this.mix.leafPins)) {
+      this.pins[id] = { pinned: id, v: fuzzValue(this.yields()) };
       this.features.add('pin');
     }
     return node;
@@ -187,11 +294,28 @@ class PlanBuilder {
     return { kind: 'waitForEvent', id: this.id(), topic, timeoutMs: this.int(2_000, 200_000), guards };
   }
 
-  private router(guards: Guard[]): DagNode {
+  private router(guards: Guard[], earlier: readonly DagNode[]): DagNode {
     this.features.add('router');
-    if (this.chance(0.5)) return { kind: 'if', id: this.id(), condition: ALWAYS, guards };
-    const cases = Array.from({ length: this.int(1, 3) }, () => ({ condition: ALWAYS }));
+    if (this.chance(0.5))
+      return { kind: 'if', id: this.id(), condition: this.condition(guards, earlier), guards };
+    const cases = Array.from({ length: this.int(1, 3) }, () => ({
+      condition: this.condition(guards, earlier),
+    }));
     return { kind: 'switch', id: this.id(), cases, guards };
+  }
+
+  // Reads a step the router comes after, that writes a value to scope; else a constant.
+  private condition(guards: readonly Guard[], earlier: readonly DagNode[]): Condition {
+    const readable = upstream(guards, earlier).filter(
+      (n) => n.kind !== 'if' && n.kind !== 'switch' && n.kind !== 'delay',
+    );
+    if (readable.length === 0 || !this.chance(this.mix.conditions)) return ALWAYS;
+    const source = readable[this.int(0, readable.length - 1)]!;
+    return {
+      left: this.chance(0.7) ? `{{${source.id}.v}}` : `{{${source.id}}}`,
+      op: OPS[this.int(0, OPS.length - 1)]!,
+      right: RIGHTS[this.int(0, RIGHTS.length - 1)],
+    };
   }
 
   private agent(guards: Guard[], depth: number): DagNode {
@@ -303,12 +427,26 @@ class PlanBuilder {
   }
 
   private guards(earlier: DagNode[]): Guard[] {
-    if (earlier.length === 0 || this.chance(0.25)) return [];
+    if (earlier.length === 0 || this.chance(this.mix.roots)) return [];
     return Array.from({ length: this.int(1, 2) }, () => {
       const source = earlier[this.int(0, earlier.length - 1)]!;
       return { source: source.id, port: this.int(0, ports(source) - 1) };
     });
   }
+}
+
+// Every node among `earlier` that a node with `guards` comes after.
+function upstream(guards: readonly Guard[], earlier: readonly DagNode[]): DagNode[] {
+  const byId = new Map(earlier.map((n) => [n.id, n]));
+  const found = new Map<string, DagNode>();
+  const visit = (id: string): void => {
+    const node = byId.get(id);
+    if (!node || found.has(id)) return;
+    found.set(id, node);
+    for (const g of node.guards) visit(g.source);
+  };
+  for (const g of guards) visit(g.source);
+  return [...found.values()];
 }
 
 function ports(node: DagNode): number {
