@@ -5,7 +5,7 @@ import { IsNull, Not, type DataSource, type EntityManager } from 'typeorm';
 import { errorMessage } from '../common/error-message';
 import { newId } from '../database/ids';
 import { TIMER_TOPIC_SQL_PREFIX } from './timer-wait';
-import type { RunSource, RuntimeStepKind } from '../database/entities/runtime-run.entity';
+import type { RunSource, RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
 /** Per-VALUE storage cap: a value whose JSON is longer is stored as a {@link TruncatedValue}. */
 const MAX_STORED_JSON_CHARS = 16_000;
@@ -124,6 +124,8 @@ export interface RunRecorder {
   runUnwoundByCancel(scopedRunId: string, unwindError: string): Promise<void>;
   /** Whether the run's row reads cancelled — the one answer to whether a cancel has landed, on either rail. */
   isCancelled(scopedRunId: string): Promise<boolean>;
+  /** The run row's status; null when there is none or it cannot be read, which never stops a run. */
+  runStatus(scopedRunId: string): Promise<RuntimeRunStatus | null>;
 }
 
 /**
@@ -355,16 +357,20 @@ export class RunRecorderService implements RunRecorder {
   }
 
   async isCancelled(scopedRunId: string): Promise<boolean> {
+    return (await this.runStatus(scopedRunId)) === 'cancelled';
+  }
+
+  async runStatus(scopedRunId: string): Promise<RuntimeRunStatus | null> {
     try {
-      const rows: unknown[] = await this.dataSource.query(
-        `SELECT 1 FROM runtime_runs WHERE id = $1 AND status = 'cancelled'`,
+      const rows: Array<{ status: RuntimeRunStatus }> = await this.dataSource.query(
+        `SELECT status FROM runtime_runs WHERE id = $1`,
         [scopedRunId],
       );
-      return rows.length > 0;
+      return rows[0]?.status ?? null;
     } catch (err) {
-      // Fail open: a history read must never stop or fail a run that nobody cancelled.
-      this.logger.warn(`run history isCancelled failed for ${scopedRunId}: ${errorMessage(err)}`);
-      return false;
+      // Fail open: a history read must never stop or fail a run that nobody ended.
+      this.logger.warn(`run history runStatus failed for ${scopedRunId}: ${errorMessage(err)}`);
+      return null;
     }
   }
 

@@ -13,8 +13,12 @@ export interface DurableStep {
   waitInStep(ms: number): Promise<void>;
   /** Throw this run's own cancel if the substrate already knows of one, mid-step and without a checkpoint. */
   throwIfCancelled(): void;
+  /** The cancel the run's row shows, made this substrate's own, so it unwinds the run as a cancel wherever it is seen. */
+  cancelSeenOnRow(): Error;
   /** Whether `err` is this substrate unwinding its own run's cancel — never a step failure. */
   isCancellation(err: unknown): boolean;
+  /** Whether `err` must end the run whatever would absorb it: its cancel, or its history disagreeing with the run. */
+  isFatal(err: unknown): boolean;
 }
 
 /** Thrown at the next step boundary of an in-process run that was cancelled. */
@@ -22,6 +26,14 @@ export class RunCancelledError extends Error {
   constructor() {
     super('Run was cancelled');
     this.name = 'RunCancelledError';
+  }
+}
+
+/** A run about to issue ops in an order its recorded history does not hold; fatal, and never absorbed. */
+export class DeterminismError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeterminismError';
   }
 }
 
@@ -63,8 +75,17 @@ export class PassThroughDurableStep implements DurableStep {
     return this.cancelled && err instanceof RunCancelledError;
   }
 
+  isFatal(err: unknown): boolean {
+    return this.isCancellation(err) || err instanceof DeterminismError;
+  }
+
   throwIfCancelled(): void {
     if (this.cancelled) throw new RunCancelledError();
+  }
+
+  cancelSeenOnRow(): Error {
+    this.cancel();
+    return new RunCancelledError();
   }
 
   /** Deliver an event to a pending `waitForEvent` on `topic`. Returns false if none is waiting. */

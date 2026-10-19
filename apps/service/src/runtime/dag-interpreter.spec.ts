@@ -1,8 +1,16 @@
-import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
+import type { RuntimeRunStatus } from '../database/entities/runtime-run.entity';
+import { RowGatedDurableStep } from '../dbos/dbos-durable-step';
+import {
+  DeterminismError,
+  PassThroughDurableStep,
+  RunCancelledError,
+  type DurableStep,
+} from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import { DagInterpreter } from './dag-interpreter';
 import { eventTopicFor } from './event-wait';
 import type { DagActionNode, DagNode, DagPlan, Guard } from './dag-plan';
+import { FatalStepDurable } from './fatal-step.testkit';
 
 /**
  * The gating scheduler's OWN semantics, on hand-built DagPlans: run/skip gating, IF port routing,
@@ -143,7 +151,9 @@ describe('DagInterpreter (gating scheduler)', () => {
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      isFatal: () => false,
       throwIfCancelled: () => undefined,
+      cancelSeenOnRow: () => new RunCancelledError(),
     };
     await interpreter.run(
       plan([
@@ -269,7 +279,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         },
         waitInStep: () => Promise.resolve(),
         throwIfCancelled: () => undefined,
+        cancelSeenOnRow: () => new RunCancelledError(),
         isCancellation: () => false,
+        isFatal: () => false,
       };
       const result = await interpreter.run(
         plan([
@@ -310,7 +322,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         },
         waitInStep: () => Promise.resolve(),
         throwIfCancelled: () => undefined,
+        cancelSeenOnRow: () => new RunCancelledError(),
         isCancellation: () => false,
+        isFatal: () => false,
       };
       const result = await interpreter.run(
         plan([
@@ -367,7 +381,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         },
         waitInStep: () => Promise.resolve(),
         throwIfCancelled: () => undefined,
+        cancelSeenOnRow: () => new RunCancelledError(),
         isCancellation: () => false,
+        isFatal: () => false,
       };
       await interpreter.run(
         plan([
@@ -406,7 +422,9 @@ describe('DagInterpreter (gating scheduler)', () => {
             waitForEvent: () => Promise.reject(new Error('Workflow has been cancelled')),
             waitInStep: () => Promise.resolve(),
             throwIfCancelled: () => undefined,
+            cancelSeenOnRow: () => new RunCancelledError(),
             isCancellation: () => false,
+            isFatal: () => false,
           };
           const slowPark = (): Promise<null> => new Promise((r) => setTimeout(() => r(null), 50));
           await expect(
@@ -441,7 +459,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         waitForEvent: () => Promise.resolve(null),
         waitInStep: () => Promise.resolve(),
         throwIfCancelled: () => undefined,
+        cancelSeenOnRow: () => new RunCancelledError(),
         isCancellation: () => false,
+        isFatal: () => false,
       };
       await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
         externalUserId: 'u',
@@ -464,7 +484,9 @@ describe('DagInterpreter (gating scheduler)', () => {
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      isFatal: () => false,
       throwIfCancelled: () => undefined,
+      cancelSeenOnRow: () => new RunCancelledError(),
     };
     const result = await interpreter.run(
       plan([action('fetch'), action('push', { up: '{{fetch.id}}' }, [guard('fetch')])]),
@@ -529,6 +551,130 @@ describe('DagInterpreter (gating scheduler)', () => {
     await expect(interpreter.run(plan([action('a'), action('a')]), { externalUserId: 'u' })).rejects.toThrow(
       /Duplicate node id "a"/,
     );
+  });
+});
+
+describe('a fatal error is never absorbed', () => {
+  const calls: string[] = [];
+  const provider: ManagedIntegrationProvider = {
+    key: 'counting',
+    runAction: (input) => {
+      calls.push(input.actionId);
+      return input.actionId === 'act.boom'
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve({ output: { ran: input.actionId } });
+    },
+    enableTrigger: () => Promise.resolve(),
+    pollTrigger: () => Promise.resolve([]),
+    disableTrigger: () => Promise.resolve(),
+  };
+  const lane: DagPlan = { id: 'dag#doomed:error', nodes: [action('handler')] };
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it.each([
+    ['continue-on-fail', { onError: 'continue' as const }],
+    ['an error lane', { onErrorBranch: lane }],
+  ])('ends the run on a fatal error %s would otherwise absorb', async (_, policy) => {
+    const run = new DagInterpreter(provider).run(
+      plan([action('doomed', {}, [], policy), action('after', {}, [guard('doomed')])]),
+      { externalUserId: 'u', durable: new FatalStepDurable((name) => name.endsWith(':doomed')) },
+    );
+    await expect(run).rejects.toBeInstanceOf(DeterminismError);
+    expect(calls).toEqual([]);
+  });
+
+  it('never retries a fatal error', async () => {
+    const fatal: ManagedIntegrationProvider = {
+      ...provider,
+      runAction: (input) => {
+        calls.push(input.actionId);
+        return Promise.reject(new DeterminismError('fatal in the body'));
+      },
+    };
+    const run = new DagInterpreter(fatal).run(
+      plan([action('a', {}, [], { retry: { maxAttempts: 3, backoffMs: 0 } })]),
+      { externalUserId: 'u' },
+    );
+    await expect(run).rejects.toBeInstanceOf(DeterminismError);
+    expect(calls).toEqual(['act.a']);
+  });
+
+  it.each([
+    ['in process', () => new PassThroughDurableStep()],
+    [
+      'behind the row gate',
+      (row: () => Promise<RuntimeRunStatus | null>) =>
+        new RowGatedDurableStep(new PassThroughDurableStep(), row),
+    ],
+  ])(
+    'unwinds the run as a cancel when its row shows one outside the gate, over an error lane that finished first, %s',
+    async (_, substrate) => {
+      let cancelled = false;
+      const ended: string[] = [];
+      const failing: ManagedIntegrationProvider = {
+        ...provider,
+        runAction: (input) => {
+          calls.push(input.actionId);
+          if (input.actionId !== 'act.handler') return Promise.reject(new Error(`${input.actionId} failed`));
+          cancelled = true;
+          return Promise.resolve({ output: { ran: input.actionId } });
+        },
+      };
+      const recorder = {
+        runStarted: () => Promise.resolve(),
+        runFinished: () => Promise.resolve(void ended.push('finished')),
+        runUnwoundByCancel: () => Promise.resolve(void ended.push('cancelled')),
+        isCancelled: () => Promise.resolve(cancelled),
+        stepStarted: () => Promise.resolve(),
+        stepFinished: () => Promise.resolve(),
+        stepAttempts: () => Promise.resolve(),
+        stepContinued: () => Promise.resolve(),
+        stepWarnings: () => Promise.resolve(),
+      } as unknown as Parameters<DagInterpreter['run']>[1]['recorder'];
+      const run = new DagInterpreter(failing).run(
+        plan([
+          action('boom', {}, [], { onErrorBranch: lane }),
+          action('flaky', {}, [], { retry: { maxAttempts: 3, backoffMs: 20 } }),
+        ]),
+        {
+          externalUserId: 'u',
+          durable: substrate(() => Promise.resolve(cancelled ? 'cancelled' : 'running')),
+          runId: 'run-1',
+          recorder,
+        },
+      );
+      await expect(run).rejects.toBeInstanceOf(RunCancelledError);
+      expect(ended).toEqual(['cancelled']);
+      expect(calls).toEqual(['act.boom', 'act.flaky', 'act.handler']);
+    },
+  );
+
+  const laneThenFatal = (): DagNode[] => [action('boom', {}, [], { onErrorBranch: lane }), action('late')];
+  it.each([
+    ['at the root', plan(laneThenFatal())],
+    [
+      'inside a parallel node',
+      plan([
+        {
+          kind: 'parallel',
+          id: 'fork',
+          branches: [
+            { id: 'dag#0', nodes: [laneThenFatal()[0]!] },
+            { id: 'dag#1', nodes: [laneThenFatal()[1]!] },
+          ],
+          guards: [],
+        },
+      ]),
+    ],
+  ])('lets a fatal error win over an error lane that finished first, %s', async (_, shape) => {
+    const run = new DagInterpreter(provider).run(shape, {
+      externalUserId: 'u',
+      durable: new FatalStepDurable((name) => name.endsWith('late'), 20),
+    });
+    await expect(run).rejects.toBeInstanceOf(DeterminismError);
+    expect(calls).toEqual(['act.boom', 'act.handler']);
   });
 });
 

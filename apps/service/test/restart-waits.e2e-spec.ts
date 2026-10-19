@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 
@@ -384,20 +385,19 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     expect((await json('/api/runs/claimed')).decided_by).toMatchObject({ id: MOCK_USER_ID });
   }, 120_000);
 
-  it('lists the parallel waits of a run from before waits were told apart once; one of them takes the decision and the other ends with none', async () => {
-    const runKey = `${MOCK_USER_ID}:legacy`;
+  /** A run from before waits were told apart: two parallel waits, re-parked after a reboot on one shared receive. */
+  async function sharedReceiveRun(runId: string): Promise<string> {
+    const runKey = `${MOCK_USER_ID}:${runId}`;
     const approval = (id: string) => ({ kind: 'waitForEvent', id, topic: 'approval', timeoutMs: WINDOW_MS });
     const fork = { kind: 'parallel', id: 'fork', branches: [[approval('a1')], [approval('a2')]] };
     expect(
-      (await post('/api/runs/async', { run_id: 'legacy', plan: { id: 'plan-legacy', nodes: [fork] } }))
-        .status,
+      (await post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes: [fork] } })).status,
     ).toBe(201);
     await eventually(
-      () => parkedIn('legacy'),
+      () => parkedIn(runId),
       (p) => p.length === 2,
-      'both legacy waits parked',
+      `both ${runId} waits parked`,
     );
-
     await crash();
     const rewritten = await dbos.query(
       `UPDATE dbos.workflow_status SET inputs = replace(inputs, '"sharedTopicsByStep":true', '"sharedTopicsByStep":false')
@@ -414,9 +414,21 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
           [runKey],
         ),
       (res) => res.rows.length === 2,
-      'both legacy waits re-parked on the topic itself',
+      `both ${runId} waits re-parked on the topic itself`,
     );
+    return runKey;
+  }
 
+  const decide = (runId: string, d: string): Promise<Response> =>
+    post(`/api/runs/${runId}/events`, { topic: 'approval', payload: { d } });
+
+  const waitOutputs = async (runId: string): Promise<unknown[]> => {
+    const outputs = (await completed(runId)).outputs as Record<string, unknown>;
+    return [outputs.a1, outputs.a2];
+  };
+
+  it('lists the parallel waits of a run from before waits were told apart once, and a decision sent by topic is taken by exactly one of them', async () => {
+    const runKey = await sharedReceiveRun('legacy');
     const rows = ((await json('/api/runs/waiting')).runs as Array<Record<string, unknown>>).filter(
       (r) => r.run_id === 'legacy',
     );
@@ -435,12 +447,66 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
         'before waits were told apart, so send the decision with the topic only',
     );
 
-    const decided = await post('/api/runs/legacy/events', { topic: 'approval', payload: { d: 'x' } });
+    const decided = await decide('legacy', 'x');
     expect(decided.status).toBe(200);
     expect(await decided.json()).toEqual({ status: 'sent', step_key: null });
-    const outputs = (await completed('legacy')).outputs as Record<string, unknown>;
-    expect([outputs.a1, outputs.a2].sort()).toEqual([null, { d: 'x' }].sort());
-    expect((await json('/api/runs/legacy')).decided_by).toMatchObject({ id: MOCK_USER_ID });
+    await eventually(
+      () =>
+        db.query(`SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND finished_at IS NOT NULL`, [runKey]),
+      (res) => res.rows.length >= 1,
+      'a wait took the decision',
+    );
+    // Both receives wake on it: the other ends with none if it looked before the first one's take committed, else it
+    // goes on waiting. Ending with none takes it milliseconds, so one still parked after this is parked.
+    await new Promise((r) => setTimeout(r, 5_000));
+    const detail = await json('/api/runs/legacy');
+    const steps = detail.steps as Array<{ output: unknown; finished_at: string | null }>;
+    expect(steps.filter((s) => JSON.stringify(s.output) === JSON.stringify({ d: 'x' }))).toHaveLength(1);
+    const other = steps.find((s) => JSON.stringify(s.output) !== JSON.stringify({ d: 'x' }))!;
+    if (detail.status === 'completed') {
+      expect(other).toMatchObject({ output: null, finished_at: expect.any(String) });
+    } else {
+      // The shared receive was decided once for both waits, so a second decision is refused.
+      expect(other.finished_at).toBeNull();
+      const again = await decide('legacy', 'y');
+      expect(again.status).toBe(409);
+      expect(((await again.json()) as { detail: string }).detail).toBe(
+        'Every wait of run legacy on topic "approval" is already decided',
+      );
+    }
+    expect(detail.decided_by).toMatchObject({ id: MOCK_USER_ID });
+  }, 120_000);
+
+  it('ends the other parallel wait of a run from before waits were told apart with none when it sees the decision before it is taken', async () => {
+    const runKey = await sharedReceiveRun('held-take');
+    const sysUrl = new URL(databaseUrl);
+    sysUrl.pathname = `${sysUrl.pathname}_dbos`;
+    const holder = new Client({ connectionString: sysUrl.toString() });
+    await holder.connect();
+    try {
+      // The first take cannot commit, so the other receive finds the decision still there and queues on its row.
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE dbos.operation_outputs IN EXCLUSIVE MODE');
+      expect((await decide('held-take', 'x')).status).toBe(200);
+      await eventually(
+        () =>
+          dbos.query<{ query: string }>(
+            `SELECT query FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          ),
+        (res) =>
+          res.rows.some((r) => /INSERT INTO\s+"?dbos"?\.operation_outputs/i.test(r.query)) &&
+          res.rows.some((r) => /UPDATE\s+"?dbos"?\.notifications/i.test(r.query)),
+        'the take and the other receive both held',
+      );
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+    expect((await waitOutputs('held-take')).sort()).toEqual([null, { d: 'x' }].sort());
+    const kept = await db.query(`SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND finished_at IS NULL`, [
+      runKey,
+    ]);
+    expect(kept.rows).toEqual([]);
   }, 120_000);
 
   it('never sends a decision again once its wait has given up, so the next wait on the topic is still a person’s', async () => {
@@ -503,6 +569,251 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       (await post('/api/runs/late-claim/events', { topic: 'approval', payload: { d: 'second' } })).status,
     ).toBe(200);
     expect((await completed('late-claim')).outputs).toMatchObject({ first: null, second: { d: 'second' } });
+  }, 120_000);
+
+  it('ends in error a run whose recovery finds another op beside an error lane that finished, running nothing after it', async () => {
+    const hits = new Map<string, number>();
+    const fixture = createHttpServer((req, res) => {
+      hits.set(req.url ?? '', (hits.get(req.url ?? '') ?? 0) + 1);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => fixture.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
+    const get = (id: string) => ({
+      kind: 'action',
+      id,
+      actionId: 'http.send_request',
+      props: { method: 'GET', url: `${base}/${id}` },
+    });
+    const runKey = `${MOCK_USER_ID}:lane-beside`;
+    try {
+      const boom = {
+        kind: 'code',
+        id: 'boom',
+        language: 'js',
+        code: 'throw new Error("boom failed");',
+        onErrorBranch: [get('handled')],
+      };
+      const fork = {
+        kind: 'parallel',
+        id: 'fork',
+        branches: [[boom], [get('first'), { kind: 'delay', id: 'nap', ms: 20_000 }, get('after')]],
+      };
+      const nodes = [fork, get('tail')];
+      expect(
+        (await post('/api/runs/async', { run_id: 'lane-beside', plan: { id: 'plan-lane-beside', nodes } }))
+          .status,
+      ).toBe(201);
+      await eventually(
+        async () => ({
+          steps: (
+            await db.query(
+              `SELECT 1 FROM runtime_run_steps
+                WHERE run_id = $1 AND (step_key = 'fork|1/nap' OR (step_key = 'fork|0/handled' AND finished_at IS NOT NULL))`,
+              [runKey],
+            )
+          ).rows.length,
+          ops: Number(
+            (
+              await dbos.query<{ n: string }>(
+                `SELECT count(*) AS n FROM dbos.operation_outputs WHERE workflow_uuid = $1`,
+                [runKey],
+              )
+            ).rows[0]!.n,
+          ),
+        }),
+        ({ steps, ops }) => steps === 2 && ops === 4,
+        'the lane finished, its sibling napping, and all four ops recorded',
+      );
+      await crash();
+      // The order a replay reaching its ops anew could have recorded: the lane's two steps, then another op in the
+      // sibling's slot.
+      const plan = (key: string) => `plan-lane-beside:${key}`;
+      await dbos.query(
+        `UPDATE dbos.operation_outputs SET function_id = -1 - function_id WHERE workflow_uuid = $1`,
+        [runKey],
+      );
+      const reordered = await dbos.query(
+        `UPDATE dbos.operation_outputs
+            SET function_id = CASE function_name WHEN $2 THEN 0 WHEN $3 THEN 1 WHEN $4 THEN 2 WHEN 'DBOS.sleep' THEN 3 END,
+                function_name = CASE function_name WHEN $4 THEN $5 ELSE function_name END
+          WHERE workflow_uuid = $1`,
+        [runKey, plan('fork|0/boom'), plan('fork|0/handled'), plan('fork|1/first'), plan('elsewhere')],
+      );
+      expect(reordered.rowCount).toBe(4);
+      const handledAt = async (): Promise<Date> =>
+        (
+          await db.query<{ finished_at: Date }>(
+            `SELECT finished_at FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'fork|0/handled'`,
+            [runKey],
+          )
+        ).rows[0]!.finished_at;
+      const before = await handledAt();
+      // The sibling waits on its own step row until the lane has replayed, so the lane finishes first.
+      const holder = new Client({ connectionString: databaseUrl });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(
+          `SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'fork|1/first' FOR UPDATE`,
+          [runKey],
+        );
+        await boot();
+        await eventually(handledAt, (at) => at > before, 'the lane replayed');
+      } finally {
+        await holder.query('ROLLBACK');
+        await holder.end();
+      }
+      const run = await eventually(
+        () =>
+          db.query<{ status: string; error: string | null }>(
+            `SELECT status, error FROM runtime_runs WHERE id = $1`,
+            [runKey],
+          ),
+        (res) => res.rows[0]?.status !== 'running' && res.rows[0]?.status !== 'waiting',
+        'the recovered run ended',
+      );
+      expect(run.rows[0]!.status).toBe('error');
+      expect(run.rows[0]!.error).toMatch(
+        /plan-lane-beside:elsewhere was recorded when plan-lane-beside:fork\|1\/first was expected/,
+      );
+      const workflow = await eventually(
+        () =>
+          dbos.query<{ status: string }>(`SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
+            runKey,
+          ]),
+        (res) => res.rows[0]?.status === 'ERROR' || res.rows[0]?.status === 'SUCCESS',
+        'the recovered workflow ended',
+      );
+      expect(workflow.rows[0]!.status).toBe('ERROR');
+      expect(Object.fromEntries(hits)).toEqual({ '/handled': 1, '/first': 1 });
+    } finally {
+      await new Promise((r) => fixture.close(r));
+    }
+  }, 120_000);
+
+  it('ends in error a run whose recovery finds another op in a continue-on-fail step, running nothing after it', async () => {
+    const hits = new Map<string, number>();
+    const fixture = createHttpServer((req, res) => {
+      hits.set(req.url ?? '', (hits.get(req.url ?? '') ?? 0) + 1);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => fixture.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
+    const get = (id: string, extra: Record<string, unknown> = {}) => ({
+      kind: 'action',
+      id,
+      actionId: 'http.send_request',
+      props: { method: 'GET', url: `${base}/${id}` },
+      ...extra,
+    });
+    const runKey = `${MOCK_USER_ID}:mismatched`;
+    try {
+      const nodes = [
+        get('first', { onError: 'continue' }),
+        { kind: 'delay', id: 'nap', ms: 20_000 },
+        get('after'),
+      ];
+      expect(
+        (await post('/api/runs/async', { run_id: 'mismatched', plan: { id: 'plan-mismatched', nodes } }))
+          .status,
+      ).toBe(201);
+      await eventually(
+        () => db.query(`SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'nap'`, [runKey]),
+        (res) => res.rows.length === 1,
+        'napping',
+      );
+      await crash();
+      // Another op in the step's slot: what a replay that reaches its ops in a new order meets.
+      const moved = await dbos.query(
+        `UPDATE dbos.operation_outputs SET function_name = 'plan-mismatched:elsewhere'
+          WHERE workflow_uuid = $1 AND function_name = 'plan-mismatched:first'`,
+        [runKey],
+      );
+      expect(moved.rowCount).toBe(1);
+
+      await boot();
+      const run = await eventually(
+        () =>
+          db.query<{ status: string; error: string | null }>(
+            `SELECT status, error FROM runtime_runs WHERE id = $1`,
+            [runKey],
+          ),
+        (res) => res.rows[0]?.status !== 'running' && res.rows[0]?.status !== 'waiting',
+        'the recovered run ended',
+      );
+      expect(run.rows[0]!.status).toBe('error');
+      expect(run.rows[0]!.error).toMatch(
+        /plan-mismatched:elsewhere was recorded when plan-mismatched:first was expected/,
+      );
+      expect([hits.get('/first'), hits.get('/after')]).toEqual([1, undefined]);
+    } finally {
+      await new Promise((r) => fixture.close(r));
+    }
+  }, 120_000);
+
+  it('leaves a run that ended while its workflow was down as it ended: recovery writes nothing to it and drops its file blobs', async () => {
+    const ids = [`${MOCK_USER_ID}:finished`, `${MOCK_USER_ID}:reaped`];
+    for (const runId of ['finished', 'reaped']) {
+      const nodes = [{ kind: 'delay', id: 'nap', ms: 20_000 }];
+      expect(
+        (await post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes } })).status,
+      ).toBe(201);
+    }
+    await eventually(
+      () => db.query(`SELECT 1 FROM runtime_run_steps WHERE run_id = ANY($1) AND step_key = 'nap'`, [ids]),
+      (res) => res.rows.length === 2,
+      'both napping',
+    );
+    const attempts = await recoveries(['finished', 'reaped']);
+    await crash();
+    await db.query(`UPDATE runtime_runs SET status = 'completed', finished_at = now() WHERE id = $1`, [
+      ids[0],
+    ]);
+    await db.query(
+      `UPDATE runtime_runs SET status = 'error', error = 'Reaped while the service was down', finished_at = now()
+        WHERE id = $1`,
+      [ids[1]],
+    );
+    const history = async (): Promise<unknown[]> =>
+      (
+        await db.query(
+          `SELECT r.id, r.status, r.error, r.outputs::text, r.finished_at::text, s.step_key, s.status AS step,
+                  s.started_at::text AS step_started, s.finished_at::text AS step_finished
+             FROM runtime_runs r LEFT JOIN runtime_run_steps s ON s.run_id = r.id
+            WHERE r.id = ANY($1) ORDER BY r.id, s.step_key`,
+          [ids],
+        )
+      ).rows;
+    const before = await history();
+    for (const id of ids) {
+      await db.query(
+        `INSERT INTO runtime_blobs (id, run_id, filename, mime_type, size_bytes, data)
+           VALUES (gen_random_uuid(), $1, 'left.txt', 'text/plain', 4, 'left'::bytea)`,
+        [id],
+      );
+    }
+
+    await boot();
+    const workflows = await eventually(
+      () =>
+        dbos.query<{ status: string; error: string | null; recovery_attempts: string }>(
+          `SELECT status, error, recovery_attempts FROM dbos.workflow_status
+            WHERE workflow_uuid = ANY($1) ORDER BY workflow_uuid`,
+          [ids],
+        ),
+      (res) => res.rows.every((w) => w.status === 'SUCCESS' || w.status === 'ERROR'),
+      'both workflows ended',
+    );
+    expect(workflows.rows.map((w) => [w.status, /Run already ended/.test(w.error ?? '')])).toEqual([
+      ['ERROR', true],
+      ['ERROR', true],
+    ]);
+    expect(workflows.rows.map((w, i) => Number(w.recovery_attempts) > attempts[i]!)).toEqual([true, true]);
+    expect(await history()).toEqual(before);
+    expect((await db.query(`SELECT 1 FROM runtime_blobs WHERE run_id = ANY($1)`, [ids])).rows).toEqual([]);
   }, 120_000);
 
   it('ends a run holding a decision its workflow can no longer resume, keeping who decided, and leaves one it can resume', async () => {

@@ -2,9 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { DBOS } from '@dbos-inc/dbos-sdk';
 import type { ConfigService } from '@nestjs/config';
-import { Client } from 'pg';
 
 import type { EnvConfig } from '../src/config/env.config';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
@@ -16,7 +14,7 @@ import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import type { RunPlan } from '../src/runtime/run-plan';
-import { ADMIN_URL, e2eDatabaseName, withDatabase } from './support/test-db';
+import { launchThrowawayDbos, type ThrowawayDbos } from './support/dbos-system-db';
 
 // A ManagedIntegrationProvider backed by the SDK http.send_request action (auth `none`, in-process).
 const sdkConfig = {
@@ -38,7 +36,7 @@ describe('DBOS durable execution (Phase 1b)', () => {
   let server: Server;
   let baseUrl: string;
   let requestCount = 0;
-  let sysDbName: string;
+  let dbos: ThrowawayDbos;
   const runtime = new DbosRuntime(new DagInterpreter(sdkProvider()));
 
   beforeAll(async () => {
@@ -50,31 +48,12 @@ describe('DBOS durable execution (Phase 1b)', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-    // Fresh, empty system database — DBOS builds its own checkpoint schema on launch.
-    sysDbName = `${e2eDatabaseName()}_dbos`;
-    const admin = new Client({ connectionString: ADMIN_URL });
-    await admin.connect();
-    try {
-      await admin.query(`DROP DATABASE IF EXISTS ${sysDbName} WITH (FORCE)`);
-      await admin.query(`CREATE DATABASE ${sysDbName}`);
-    } finally {
-      await admin.end();
-    }
-
-    DBOS.setConfig({ name: 'orchestr-e2e', systemDatabaseUrl: withDatabase(ADMIN_URL, sysDbName) });
-    await DBOS.launch();
+    dbos = await launchThrowawayDbos('orchestr-e2e');
   }, 60_000);
 
   afterAll(async () => {
-    await DBOS.shutdown();
+    await dbos.shutdown();
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-    const admin = new Client({ connectionString: ADMIN_URL });
-    await admin.connect();
-    try {
-      await admin.query(`DROP DATABASE IF EXISTS ${sysDbName} WITH (FORCE)`);
-    } finally {
-      await admin.end();
-    }
   }, 60_000);
 
   const plan = (): RunPlan => ({

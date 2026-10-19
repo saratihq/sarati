@@ -199,6 +199,29 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
     expect(row).toMatchObject({ status: 'cancelled', error: null });
   }, 60_000);
 
+  it('a cancel after an error lane finished beside a parked wait unwinds the run as a cancel, so the wait reads Cancelled before it finished', async () => {
+    const answer = start('lane-then-cancel', [
+      {
+        kind: 'parallel',
+        id: 'fork',
+        branches: [
+          [post('laned', '/flaky', { onErrorBranch: [post('handler', '/handler')] })],
+          [{ kind: 'waitForEvent', id: 'approval', topic: 'approval', timeoutMs: 120_000 }],
+        ],
+      },
+    ]);
+    await untilHit('/handler');
+    await until('lane-then-cancel', 'waiting');
+    await cancel('lane-then-cancel').expect(200);
+    const res = await answer;
+
+    const steps = stepsOf(await until('lane-then-cancel', 'cancelled'));
+    expect({ answer: res.status, approval: steps.get('approval')?.error }).toEqual({
+      answer: 409,
+      approval: 'Cancelled before it finished',
+    });
+  }, 60_000);
+
   it('a run cancelled mid-step finishes that step, then starts no other', async () => {
     const answer = request(app.getHttpServer())
       .post('/api/runs')
