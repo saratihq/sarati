@@ -4,7 +4,9 @@ import { type AgentResult, type ModelTurn } from './agent';
 import { ScriptedAgentModel } from './agent.testkit';
 import type { DagAgentNode } from './dag-plan';
 import { DagInterpreter } from './dag-interpreter';
+import { DeterminismError } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
+import { FatalStepDurable } from './fatal-step.testkit';
 
 /**
  * The `orchestr:agent` engine: the compiler's tool-edge peel plus the durable loop.
@@ -266,6 +268,28 @@ describe('orchestr:agent — durable loop (scripted model)', () => {
     const tool = model.requests[0]!.tools[0]!;
     expect(tool.description).toBe('Runs the bare workflow');
     expect(tool.parameters).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('ends the run on a fatal error at a tool step, never feeding it back to the model', async () => {
+    const calls: ActionCall[] = [];
+    const { model, interpreter, plan } = runWith(
+      chatAgentIr(),
+      [
+        modelTurn({ toolCalls: [{ id: 'c1', name: 'slack_send_message', input: { text: 'hello' } }] }),
+        modelTurn({ text: 'recovered' }),
+      ],
+      recordingProvider(calls),
+    );
+
+    const run = interpreter.run(plan, {
+      externalUserId: 'u',
+      initialScope: { trigger: { chatInput: 'go' } },
+      durable: new FatalStepDurable((name) => name.endsWith(':tool:c1')),
+    });
+
+    await expect(run).rejects.toBeInstanceOf(DeterminismError);
+    expect(model.callCount).toBe(1);
+    expect(calls).toEqual([]);
   });
 
   it('runs the tool via the durable dispatch, returns {text,...}, and records steps[] in the pinned shape', async () => {

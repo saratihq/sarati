@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
 import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
-import { PassThroughDurableStep, RunCancelledError, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import {
   AgentStepsExhausted,
@@ -297,7 +297,7 @@ export abstract class BasePlanInterpreter {
   }
 
   /** Best-effort removal of a run's file blobs; a cleanup failure never fails the run. */
-  private async cleanupBlobs(runId: string): Promise<void> {
+  async cleanupBlobs(runId: string): Promise<void> {
     if (!this.blobStore) return;
     try {
       const removed = await this.blobStore.deleteRun(runId);
@@ -431,10 +431,10 @@ export abstract class BasePlanInterpreter {
       const warnings = ctx.stepWarnings.get(stepKey);
       ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
-      // A cancel unwinds the run: no error lane or continue-on-fail may absorb it, nor a failure after it.
-      if (ctx.durable.isCancellation(err)) throw err;
+      // A fatal error, a cancel among them, unwinds the run: no error lane or continue-on-fail may absorb it.
+      if (ctx.durable.isFatal(err)) throw err;
       ctx.durable.throwIfCancelled();
-      if (await this.rowCancelled(ctx)) throw err;
+      await this.stopIfRowCancelled(ctx);
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
       // read `{{node.text}}` (the partial answer is never discarded).
@@ -632,7 +632,9 @@ export abstract class BasePlanInterpreter {
     const settled = await Promise.allSettled(
       branchScopes.map((branchScope, i) => runBranch(branchScope, i, `${path}${node.id}|${i}/`)),
     );
-    const failed = settled.find((outcome) => outcome.status === 'rejected');
+    const rejected = settled.filter((outcome) => outcome.status === 'rejected');
+    // A fatal failure wins over any other, an error lane's halt included.
+    const failed = rejected.find((outcome) => ctx.durable.isFatal(outcome.reason)) ?? rejected[0];
     if (failed) throw failed.reason;
     // Merge each branch's new outputs back into the shared scope.
     for (const branchScope of branchScopes) {
@@ -784,7 +786,7 @@ export abstract class BasePlanInterpreter {
         try {
           output = await this.invokeAgentTool(node, call, scope, `${stepKey}#${round}`, ctx);
         } catch (err) {
-          if (ctx.durable.isCancellation(err)) throw err;
+          if (ctx.durable.isFatal(err)) throw err;
           // §7: a tool error is fed back as its result — the model may recover within the budget.
           output = { error: { message: errorMessage(err) } };
         }
@@ -986,7 +988,7 @@ export abstract class BasePlanInterpreter {
         if (tries > 1) await this.recordAttempts(ctx, stepKey, tries);
         return result;
       } catch (err) {
-        if (tries >= maxAttempts) {
+        if (tries >= maxAttempts || ctx.durable.isFatal(err)) {
           if (maxAttempts > 1) await this.recordAttempts(ctx, stepKey, tries);
           throw err;
         }
@@ -995,7 +997,7 @@ export abstract class BasePlanInterpreter {
         if (backoffMs > 0) await ctx.durable.waitInStep(backoffMs);
         // No attempt starts after a cancel, on either rail, its caller's included.
         ctx.durable.throwIfCancelled();
-        if (await this.rowCancelled(ctx)) throw err;
+        await this.stopIfRowCancelled(ctx);
       }
     }
   }
@@ -1003,12 +1005,14 @@ export abstract class BasePlanInterpreter {
   private async replayPin(ctx: RunContext, nodeId: string): Promise<unknown> {
     // A replay fires nothing, but nothing replays after a cancel either: it would read as the run going on.
     ctx.durable.throwIfCancelled();
-    if (await this.rowCancelled(ctx)) throw new RunCancelledError();
+    await this.stopIfRowCancelled(ctx);
     return ctx.pins!.get(nodeId);
   }
 
-  private rowCancelled(ctx: RunContext): Promise<boolean> {
-    return ctx.record ? ctx.record.recorder.isCancelled(ctx.record.runId) : Promise.resolve(false);
+  private async stopIfRowCancelled(ctx: RunContext): Promise<void> {
+    if (ctx.record && (await ctx.record.recorder.isCancelled(ctx.record.runId))) {
+      throw ctx.durable.cancelSeenOnRow();
+    }
   }
 
   private async recordAttempts(ctx: RunContext, stepKey: string, attempts: number): Promise<void> {

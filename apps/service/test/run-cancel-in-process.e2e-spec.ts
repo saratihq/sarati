@@ -296,6 +296,27 @@ describe('cancel an in-process run (e2e, isolated DB, DBOS off, mock auth)', () 
     });
   }, 30_000);
 
+  it('a cancel after an error lane finished beside a parked wait unwinds the run as a cancel, so the wait reads Cancelled before it finished', async () => {
+    const answer = start(
+      'lane-then-cancel',
+      ir(
+        [post('laned', '/flaky'), post('handler', '/handler'), waitFor('approval', 120_000)],
+        [edge('laned', 'handler', 'error')],
+      ),
+    );
+    await untilHit('/handler');
+    await untilStepRunning('lane-then-cancel', 'approval');
+    await cancel('lane-then-cancel').expect(200);
+    const res = await answer;
+
+    const { body, steps } = await detail('lane-then-cancel');
+    expect({ answer: res.status, status: body.status, approval: steps.get('approval')?.error }).toEqual({
+      answer: 409,
+      status: 'cancelled',
+      approval: CANCELLED_STEP,
+    });
+  }, 30_000);
+
   it.each([
     ['sleeps in place', 1],
     ['parks on its timer', 2],

@@ -37,12 +37,17 @@ const runPlanWorkflow = DBOS.registerWorkflow(
     if (!activeInterpreter) throw new Error('DbosRuntime is not initialized (no interpreter bound)');
     const { runId } = args;
     const recorder = activeRecorder;
-    return activeInterpreter.run(args.plan, {
+    const interpreter = activeInterpreter;
+    const gated =
+      runId && recorder ? new RowGatedDurableStep(durableStep, () => recorder.runStatus(runId)) : null;
+    await gated?.admit().catch(async (err: unknown) => {
+      // It never reaches the plan, whose end is what drops a run's file blobs.
+      await interpreter.cleanupBlobs(runId!);
+      throw err;
+    });
+    return interpreter.run(args.plan, {
       externalUserId: args.externalUserId,
-      durable:
-        runId && recorder
-          ? new RowGatedDurableStep(durableStep, () => recorder.isCancelled(runId))
-          : durableStep,
+      durable: gated ?? durableStep,
       runId: args.runId,
       recorder: activeRecorder ?? undefined,
       initialScope: args.initialScope,

@@ -194,10 +194,10 @@ export class DagInterpreter extends BasePlanInterpreter {
             settle(node.id);
           })
           .catch((err: unknown) => {
-            // Fatal error OR ErrorLaneHalt: stop launching NEW work and keep the first outcome.
+            // A failure or an ErrorLaneHalt stops NEW work; the first fatal outcome wins, else the first outcome.
             // In-flight siblings are NOT cancelled (a provider call can't be un-fired) — the
             // driver below drains them before rethrowing, so no write is lost.
-            if (!halted) {
+            if (!halted || (ctx.durable.isFatal(err) && !ctx.durable.isFatal(haltError))) {
               halted = true;
               haltError = err;
             }

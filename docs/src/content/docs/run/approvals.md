@@ -59,9 +59,10 @@ before a timer, then whichever is due first — and each step in the run's `step
 Two waits in one run on the **same topic** are both listed, each row naming its step. Deciding one in
 the inbox answers that wait and no other. A run started before this version with two such waits in
 parallel branches is listed once for both, marked as sharing one decision: a decision sent by topic
-answers one of them, whichever the run picks, and the other ends at once with no decision (`null`).
-That entry leaves the inbox, and a decision for it is refused, once either wait is within two seconds
-of timing out.
+answers one of them, whichever the run picks. The other ends with no decision (`null`) if it sees the
+decision before the first one takes it; otherwise it stays parked until it times out, and a second
+decision for it is refused as already decided. That entry leaves the inbox, and a decision for it is
+refused, once either wait is within two seconds of timing out.
 
 Until a fix for how runs resume lands, a run with a wait in a parallel branch, or beside another step
 that runs at the same time, can fail when it resumes after a restart, an upgrade or going back to an

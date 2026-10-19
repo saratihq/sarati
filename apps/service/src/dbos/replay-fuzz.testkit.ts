@@ -1,4 +1,8 @@
-import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
+import { isDeepStrictEqual } from 'node:util';
+
+import { Error as DbosErrors } from '@dbos-inc/dbos-sdk';
+
+import type { RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type {
   ManagedIntegrationProvider,
   RunActionInput,
@@ -7,15 +11,11 @@ import type {
 import type { AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/agent';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagNode, DagPlan } from '../runtime/dag-plan';
-import {
-  FATAL_FAILURE,
-  seeded,
-  type FuzzActionProps,
-  type FuzzPlan,
-} from '../runtime/random-dag-plan.testkit';
+import { seeded, type FuzzActionProps, type FuzzPlan } from '../runtime/random-dag-plan.testkit';
 import type { RunRecorder } from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { isTimerWait } from '../runtime/timer-wait';
+import { RowGatedDurableStep } from './dbos-durable-step';
 import {
   RECV,
   SLEEP,
@@ -56,6 +56,12 @@ export interface ReplayVerdict {
   budgetRefusals: number;
   /** Ops still in flight when a run ended, across the uninterrupted run and the replay; audited once they land. */
   inFlightAtEnd: number;
+  /** Steps whose recorded output names another step: a result handed to the wrong lane. */
+  wrongLane: number;
+  /** Steps the killed execution finished that its replay finished with another output. */
+  drifted: number;
+  /** Waits answered in time that finished as if nobody had answered. */
+  answeredNull: number;
 }
 
 const RESTART_AFTER_MS = 500;
@@ -66,7 +72,7 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
   const first = probe.start(seeded(seed * 7 + 1));
   await probe.clock.drive(() => first.settled);
   const firstEnd = probe.clock.now();
-  const firstInFlight = inFlight(probe.wf.rows, first.execution);
+  const firstInFlight = first.execution.inFlight;
   await probe.clock.drive();
   const firstAudit = first.settled ? audit(fuzz.plan, probe.wf.rows, first.execution) : [];
 
@@ -81,7 +87,7 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
     });
   });
   await world.clock.drive(() => replay?.settled === true);
-  const replayInFlight = replay?.settled ? inFlight(world.wf.rows, replay.execution) : 0;
+  const replayInFlight = replay?.settled ? replay.execution.inFlight : 0;
   await world.clock.drive();
   const replayAudit = replay?.settled ? audit(fuzz.plan, world.wf.rows, replay.execution) : [];
   return {
@@ -93,25 +99,28 @@ export async function crashAndReplay(fuzz: FuzzPlan, seed: number): Promise<Repl
     reruns: world.wf.stats.reruns.length,
     misdelivered: world.recorder.misdelivered.size,
     fatalLost:
-      (first.completed && probe.provider.fatal > 0) ||
-      (replay?.completed === true && world.provider.fatal > 0),
+      (first.completed && probe.fatalRaised > 0) ||
+      (replay?.completed === true && (world.fatalRaised > 0 || world.wf.stats.loud > 0)),
     stuck: replay?.settled !== true,
     budgetRefusals: world.recorder.budgetRefusals,
     inFlightAtEnd: firstInFlight + replayInFlight,
+    wrongLane: probe.recorder.wrongLane.size + world.recorder.wrongLane.size,
+    drifted: drifted(world.recorder.finished),
+    answeredNull: probe.recorder.answeredNull.size + world.recorder.answeredNull.size,
   };
 }
 
-function inFlight(rows: ReadonlyMap<number, OpRow>, execution: SimExecution): number {
-  const rowless = new Set(execution.rowless.map((slot) => slot.id));
-  let count = 0;
-  for (let id = 0; id < execution.reserved; id++) if (!rows.has(id) && !rowless.has(id)) count++;
-  return count;
+function drifted([killed, replay]: Array<Map<string, unknown>>): number {
+  if (!killed || !replay) return 0;
+  return [...killed].filter(([key, output]) => replay.has(key) && !isDeepStrictEqual(replay.get(key), output))
+    .length;
 }
 
 interface Execution {
   execution: SimExecution;
   settled: boolean;
   completed: boolean;
+  error?: unknown;
 }
 
 /** One durable workflow and the outside world its plan talks to, on one virtual clock. */
@@ -120,6 +129,7 @@ class World {
   readonly wf: SimWorkflow;
   readonly provider: FuzzProvider;
   readonly recorder: FuzzRecorder;
+  fatalRaised = 0;
   private readonly model: FuzzModel;
   private readonly runner: FuzzRunner;
 
@@ -138,37 +148,65 @@ class World {
   }
 
   start(dbLatency: () => number): Execution {
+    this.recorder.nextExecution();
     const execution = new SimExecution(this.wf, () => 1 + Math.floor(dbLatency() * 30));
     const run: Execution = { execution, settled: false, completed: false };
+    this.execute(execution).then(
+      () => {
+        run.completed = true;
+        run.settled = true;
+      },
+      (error: unknown) => {
+        run.error = error;
+        run.settled = true;
+      },
+    );
+    return run;
+  }
+
+  private execute(execution: SimExecution): Promise<unknown> {
     const interpreter = new DagInterpreter(this.provider, undefined, undefined, undefined, this.model);
     interpreter.setSubWorkflowRunner(this.runner);
-    interpreter
-      .run(this.fuzz.plan, {
-        externalUserId: 'fuzz',
-        durable: new SimDbosDurableStep(execution),
-        runId: this.wf.id,
-        recorder: this.recorder,
-        pins: this.fuzz.pins,
-        initialScope: { trigger: { items: [1, 2] } },
-        subWorkflowBudget: { remaining: this.fuzz.budget },
-      })
-      .then(
-        () => {
-          run.completed = true;
-        },
-        () => undefined,
-      )
-      .finally(() => {
-        run.settled = true;
-      });
-    return run;
+    return interpreter.run(this.fuzz.plan, {
+      externalUserId: 'fuzz',
+      durable: new RowGatedDurableStep(
+        new FatalAtLookup(execution, this.clock, this.fuzz.fatal, () => {
+          this.fatalRaised += 1;
+        }),
+        () => this.recorder.runStatus(),
+      ),
+      runId: this.wf.id,
+      recorder: this.recorder,
+      pins: this.fuzz.pins,
+      initialScope: { trigger: { items: [1, 2] } },
+      subWorkflowBudget: { remaining: this.fuzz.budget },
+    });
+  }
+}
+
+/** Today's substrate, raising a fatal error at a `fatal` action's step lookup, before the body, as DBOS raises them. */
+class FatalAtLookup extends SimDbosDurableStep {
+  constructor(
+    execution: SimExecution,
+    clock: VirtualClock,
+    private readonly fatal: ReadonlySet<string>,
+    private readonly raised: () => void,
+  ) {
+    super(execution, clock);
+  }
+
+  override run<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    if (!this.fatal.has(/[:/]([^:/]+)$/.exec(name)?.[1] ?? '')) return super.run(name, fn);
+    this.raised();
+    return this.execution.failStepAtLookup(
+      new DbosErrors.DBOSUnexpectedStepError(name, -1, name, 'a fatal fuzz step'),
+    );
   }
 }
 
 /** Actions answer after their own latency, carrying the step that asked; failures follow their props. */
 class FuzzProvider implements ManagedIntegrationProvider {
   readonly key = 'fuzz';
-  fatal = 0;
   private readonly attempts = new Map<string, number>();
 
   constructor(private readonly clock: VirtualClock) {}
@@ -179,10 +217,6 @@ class FuzzProvider implements ManagedIntegrationProvider {
     const attempt = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, attempt);
     await this.clock.sleep(props.latencyMs);
-    if (props.behaviour === 'fatal') {
-      this.fatal += 1;
-      throw Object.assign(new Error(`fatal failure in ${key}`), { name: FATAL_FAILURE });
-    }
     if (props.behaviour === 'fails' || (props.behaviour === 'fails-once' && attempt === 1)) {
       throw new Error(`failure in ${key}`);
     }
@@ -211,10 +245,13 @@ class FuzzModel implements AgentModelPort {
 
   async call(req: ModelCallRequest): Promise<ModelTurn> {
     await this.clock.sleep(1 + Math.floor(this.latency() * 200));
+    const node = /node=(\S+)/.exec(req.system)?.[1] ?? '';
     const [, rounds = 0, calls = 0] = /rounds=(\d+) calls=(\d+)/.exec(req.system)?.map(Number) ?? [];
     const round = req.messages.filter((m) => m.role === 'assistant').length;
-    if (round >= rounds || req.tools.length === 0) return { text: 'done', toolCalls: [] };
+    const text = `${node}#${round}`;
+    if (round >= rounds || req.tools.length === 0) return { text, toolCalls: [] };
     return {
+      text,
       toolCalls: Array.from({ length: calls }, (_, k) => ({
         id: `r${round}c${k}`,
         name: req.tools[(round + k) % req.tools.length]!.name,
@@ -230,8 +267,11 @@ class FuzzRunner implements SubWorkflowRunner {
     private readonly latency: () => number,
   ) {}
 
-  async run(_call: unknown, ctx: { callKey: string }): Promise<unknown> {
+  async run(_call: unknown, ctx: { callKey: string; budget: { remaining: number } }): Promise<unknown> {
     await this.clock.sleep(1 + Math.floor(this.latency() * 300));
+    // The child's own sub-workflow calls, spent from whatever allowance it was handed, as a real child run spends them.
+    const calls = [...ctx.callKey].reduce((sum, c) => sum + c.charCodeAt(0), 0) % 3;
+    ctx.budget.remaining -= Math.min(calls, Math.max(0, ctx.budget.remaining));
     return { child: ctx.callKey };
   }
 }
@@ -239,9 +279,13 @@ class FuzzRunner implements SubWorkflowRunner {
 /** Run history with write latency, answering most waits it sees park with a payload naming that wait. */
 class FuzzRecorder implements RunRecorder {
   readonly misdelivered = new Set<string>();
+  readonly wrongLane = new Set<string>();
+  readonly answeredNull = new Set<string>();
+  readonly finished: Array<Map<string, unknown>> = [];
   budgetRefusals = 0;
   private readonly kinds = new Map<string, RuntimeStepKind>();
   private readonly answered = new Set<string>();
+  private readonly decidedInTime = new Set<string>();
 
   constructor(
     private readonly clock: VirtualClock,
@@ -263,12 +307,22 @@ class FuzzRecorder implements RunRecorder {
     await this.write();
   }
 
-  async stepFinished(_runId: string, stepKey: string, output: unknown): Promise<void> {
+  /** Starts a new execution's record of what each step finished with. */
+  nextExecution(): void {
+    this.finished.push(new Map());
+  }
+
+  async stepFinished(runId: string, stepKey: string, output: unknown, error: string | null): Promise<void> {
     await this.write();
+    this.finished.at(-1)?.set(stepKey, structuredClone(output));
     const kind = this.kinds.get(stepKey);
     if (kind === 'waitForEvent' && output !== null && (output as { for?: string }).for !== stepKey) {
       this.misdelivered.add(stepKey);
     }
+    if (kind === 'waitForEvent' && output === null && error === null && this.decidedInTime.has(stepKey)) {
+      this.answeredNull.add(stepKey);
+    }
+    if (namesAnotherStep(output, stepKey, runId)) this.wrongLane.add(stepKey);
     if (kind === 'agent') this.budgetRefusals += refusals(output);
   }
 
@@ -285,6 +339,8 @@ class FuzzRecorder implements RunRecorder {
       if (this.decide() < 0.75) {
         const at = this.clock.now() + 10 + Math.floor(this.decide() * 3_000);
         this.clock.at(at, () => this.send(deliveryTopic ?? topic, { for: stepKey }, stepKey));
+        // The receive began a few writes before this park was written, so its deadline is a little earlier.
+        if (at < this.clock.now() + durationMs - 500) this.decidedInTime.add(stepKey);
       }
     }
     return new Date(this.clock.now() + durationMs);
@@ -313,6 +369,35 @@ class FuzzRecorder implements RunRecorder {
   runUnwoundByCancel(): Promise<void> {
     return this.write();
   }
+
+  async isCancelled(): Promise<boolean> {
+    return (await this.runStatus()) === 'cancelled';
+  }
+
+  async runStatus(): Promise<RuntimeRunStatus> {
+    await this.write();
+    return 'running';
+  }
+}
+
+// Each step an output names — an action's `from`, a child run's `child`, a decision's `for`, a model turn's text —
+// must be the step itself or one of its own sub-steps.
+function namesAnotherStep(output: unknown, stepKey: string, runId: string): boolean {
+  const node = stepKey.slice(stepKey.lastIndexOf('/') + 1);
+  const own = (key: string): boolean => key === stepKey || key.startsWith(`${stepKey}#`);
+  const foreign = (field: string, value: string): boolean => {
+    if (field === 'from') return !own(value.replace(`${runId}:`, ''));
+    if (field === 'child' || field === 'for') return !own(value);
+    return field === 'text' && /^n\d+#\d+$/.test(value) && value.split('#')[0] !== node;
+  };
+  const visit = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(visit);
+    if (!value || typeof value !== 'object') return false;
+    return Object.entries(value).some(([field, inner]) =>
+      typeof inner === 'string' ? foreign(field, inner) : visit(inner),
+    );
+  };
+  return visit(output);
 }
 
 function refusals(agentOutput: unknown): number {
@@ -348,9 +433,8 @@ export function audit(
 
 function stepNames(plan: DagPlan): RegExp {
   const ids = [...nodeIds(plan.nodes)].map(escapeRegExp).join('|');
-  const segment = `(?:${ids})(?:#\\d+|\\|\\d+)/`;
-  const suffix = '(?:#\\d+:model|#final:model|#\\d+:tool:r\\d+c\\d+)?';
-  return new RegExp(`^${escapeRegExp(plan.id)}:(?:${segment})*(?:${ids})${suffix}$`);
+  const key = `(?:(?:${ids})(?:#\\d+|\\|\\d+)/)*(?:${ids})`;
+  return new RegExp(`^${escapeRegExp(plan.id)}:${key}(?:#\\d+:model|#final:model|#\\d+:tool:r\\d+c\\d+)?$`);
 }
 
 function nodeIds(nodes: readonly DagNode[], into = new Set<string>()): Set<string> {

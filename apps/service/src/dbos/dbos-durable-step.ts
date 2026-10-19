@@ -1,6 +1,7 @@
 import { DBOS, Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
-import { RunCancelledError, type DurableStep } from '../providers/durable-step';
+import type { RuntimeRunStatus } from '../database/entities/runtime-run.entity';
+import { DeterminismError, RunCancelledError, type DurableStep } from '../providers/durable-step';
 
 /** Whether a run's rejection is the cancel someone asked for, on either rail — not a failure. */
 export function isDurableCancellation(err: unknown): boolean {
@@ -38,8 +39,29 @@ export class DbosDurableStep implements DurableStep {
     return err instanceof DbosErrors.DBOSWorkflowCancelledError;
   }
 
+  // Only `instanceof` on the live throw: DBOS names a step mismatch plain `Error`, and replays a recorded error as one.
+  isFatal(err: unknown): boolean {
+    return (
+      this.isCancellation(err) ||
+      err instanceof DbosErrors.DBOSUnexpectedStepError ||
+      err instanceof DeterminismError
+    );
+  }
+
   // DBOS raises a cancel only at its next call.
   throwIfCancelled(): void {}
+
+  cancelSeenOnRow(): Error {
+    return new DbosErrors.DBOSWorkflowCancelledError(DBOS.workflowID ?? '');
+  }
+}
+
+/** A workflow entered after its run ended: it stops before running anything, so it cannot rewrite that run. */
+export class RunAlreadyEnded extends Error {
+  constructor(status: RuntimeRunStatus) {
+    super(`Run already ended ${status}`);
+    this.name = 'RunAlreadyEnded';
+  }
 }
 
 /**
@@ -50,9 +72,16 @@ export class RowGatedDurableStep implements DurableStep {
   private cancelled = false;
 
   constructor(
-    private readonly inner: DbosDurableStep,
-    private readonly cancelledRow: () => Promise<boolean>,
+    private readonly inner: DurableStep,
+    private readonly rowStatus: () => Promise<RuntimeRunStatus | null>,
   ) {}
+
+  /** The gate at the workflow's entry, before the run writes anything: a run that already ended stays as it ended. */
+  async admit(): Promise<void> {
+    const status = await this.rowStatus();
+    if (status === 'completed' || status === 'error') throw new RunAlreadyEnded(status);
+    this.stopIf(status === 'cancelled');
+  }
 
   async run<T>(name: string, fn: () => Promise<T>): Promise<T> {
     await this.gate();
@@ -77,13 +106,26 @@ export class RowGatedDurableStep implements DurableStep {
     if (this.cancelled) throw new RunCancelledError();
   }
 
+  cancelSeenOnRow(): Error {
+    this.cancelled = true;
+    return new RunCancelledError();
+  }
+
   isCancellation(err: unknown): boolean {
     return this.inner.isCancellation(err) || (this.cancelled && err instanceof RunCancelledError);
   }
 
-  // Thrown outside any step: DBOS records the workflow ERROR, terminal, so no recovery runs it again.
+  isFatal(err: unknown): boolean {
+    return this.isCancellation(err) || this.inner.isFatal(err);
+  }
+
   private async gate(): Promise<void> {
-    if (!this.cancelled && !(await this.cancelledRow())) return;
+    this.stopIf(this.cancelled || (await this.rowStatus()) === 'cancelled');
+  }
+
+  // Thrown outside any step: DBOS records the workflow ERROR, terminal, so no recovery runs it again.
+  private stopIf(cancelled: boolean): void {
+    if (!cancelled) return;
     this.cancelled = true;
     throw new RunCancelledError();
   }

@@ -1,4 +1,4 @@
-import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, RunCancelledError, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagActionNode, DagForEachNode, DagIfNode, DagParallelNode, DagPlan } from '../runtime/dag-plan';
@@ -360,7 +360,9 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      isFatal: () => false,
       throwIfCancelled: () => undefined,
+      cancelSeenOnRow: () => new RunCancelledError(),
     };
     const plan: RunPlan = {
       id: 'd',
@@ -381,7 +383,9 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      isFatal: () => false,
       throwIfCancelled: () => undefined,
+      cancelSeenOnRow: () => new RunCancelledError(),
     };
     const plan: RunPlan = {
       id: 'pin',
@@ -408,7 +412,9 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
       waitForEvent: () => Promise.resolve(null),
       waitInStep: () => Promise.resolve(),
       isCancellation: () => false,
+      isFatal: () => false,
       throwIfCancelled: () => undefined,
+      cancelSeenOnRow: () => new RunCancelledError(),
     };
     const plan: RunPlan = {
       id: 'p',

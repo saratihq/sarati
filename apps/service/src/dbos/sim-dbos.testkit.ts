@@ -1,6 +1,6 @@
 import { Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
-import type { DurableStep } from '../providers/durable-step';
+import { DbosDurableStep } from './dbos-durable-step';
 
 /**
  * Test support, not in the production bundle: a model of DBOS 4.23.6's per-workflow op log, held to the real SDK by
@@ -9,6 +9,14 @@ import type { DurableStep } from '../providers/durable-step';
 
 export const SLEEP = 'DBOS.sleep';
 export const RECV = 'DBOS.recv';
+
+// DBOS's own defaults: a recv with no timeout waits 60 s and polls every 10 s.
+const DEFAULT_RECV_TIMEOUT_S = 60;
+const DEFAULT_POLL_MS = 10_000;
+
+/** `DBOS.recv`'s second argument: seconds, or its `RecvOptions`. */
+export type RecvTimeout =
+  number | { timeoutSeconds?: number; deadlineEpochMS?: number; pollingIntervalMs?: number };
 
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
@@ -88,6 +96,8 @@ export interface SimStats {
 export class SimWorkflow {
   readonly rows = new Map<number, OpRow>();
   readonly stats: SimStats = { loud: 0, silent: [], reruns: [] };
+  /** `DBOS.cancelWorkflow`: every later lookup, recv poll and sleep end throws {@link DbosErrors.DBOSWorkflowCancelledError}. */
+  cancelled = false;
   private readonly notifications: Array<{
     topic: string;
     message: unknown;
@@ -139,6 +149,10 @@ export class SimWorkflow {
     });
   }
 
+  hasWaiting(topic: string): boolean {
+    return this.waiting(topic);
+  }
+
   consume(topic: string): unknown {
     const next = this.notifications.find((n) => n.topic === topic && !n.consumed);
     if (!next) return null;
@@ -152,7 +166,24 @@ export class SimWorkflow {
 }
 
 /** Reserved ids with no row by design: a `sleepms(<=0)`, or a recv timeout already due. */
-export type RowlessSlot = { id: number; why: 'zero sleep' | 'timeout already due' };
+export type RowlessSlot = { id: number; why: 'zero sleep' | 'timeout already due' | 'fatal at lookup' };
+
+/** A write DBOS attempted and the database refused outside every retried class: the op rejects and records no row. */
+export class SimDbFault extends Error {
+  readonly code = '55P03';
+
+  constructor() {
+    super('lock not available');
+    this.name = 'SimDbFault';
+  }
+}
+
+/** The op a write belongs to, for choosing which write to refuse. */
+export interface FaultSlot {
+  kind: 'step' | 'sleep' | 'recv';
+  name: string;
+  topic?: string;
+}
 
 /**
  * One execution of a workflow body: its own function-id counter, taken synchronously at call time as DBOS does, and
@@ -160,26 +191,43 @@ export type RowlessSlot = { id: number; why: 'zero sleep' | 'timeout already due
  */
 export class SimExecution {
   private counter = 0;
+  private live = 0;
   private alive = true;
   readonly rowless: RowlessSlot[] = [];
 
   constructor(
     private readonly wf: SimWorkflow,
     private readonly dbLatency: () => number,
+    private readonly refuses: (slot: FaultSlot) => boolean = () => false,
   ) {}
 
   get reserved(): number {
     return this.counter;
   }
 
+  /** Ops this execution issued that have not settled yet. */
+  get inFlight(): number {
+    return this.live;
+  }
+
   crash(): void {
     this.alive = false;
   }
 
+  /** A step whose lookup raises `error`, as DBOS raises a fatal one: it takes its id, records nothing and never runs. */
+  failStepAtLookup(error: Error): Promise<never> {
+    const id = this.reserve();
+    this.rowless.push({ id, why: 'fatal at lookup' });
+    return this.track(async () => {
+      await this.lookup();
+      throw error;
+    });
+  }
+
   runStep<T>(fn: () => Promise<T>, name: string, intent: string = name): Promise<T> {
-    const id = this.counter++;
-    return (async () => {
-      await this.db();
+    const id = this.reserve();
+    return this.track(async () => {
+      await this.lookup();
       const row = this.wf.rows.get(id);
       if (row) {
         this.checkSlot(id, name, row);
@@ -191,7 +239,8 @@ export class SimExecution {
       try {
         output = await fn();
       } catch (err) {
-        await this.db();
+        await this.write();
+        this.refuse({ kind: 'step', name });
         const e = err instanceof Error ? err : new Error(String(err));
         this.wf.record({
           id,
@@ -202,59 +251,88 @@ export class SimExecution {
         });
         throw err;
       }
-      await this.db();
+      await this.write();
+      this.refuse({ kind: 'step', name });
       this.wf.record({ id, name, output: clone(output), intent, recordedAt: this.now() });
       return clone(output);
-    })();
+    });
   }
 
   sleepms(ms: number, intent?: string): Promise<void> {
-    const id = this.counter++;
+    const id = this.reserve();
     if (ms <= 0) {
       this.rowless.push({ id, why: 'zero sleep' });
       return Promise.resolve();
     }
-    return (async () => {
+    return this.track(async () => {
       const end = await this.durableSleep(id, ms, intent);
       await this.wf.clock.sleep(end - this.now());
       if (!this.alive) return never<void>();
-    })();
+      this.throwIfCancelled();
+    });
   }
 
-  /** `timeout` in seconds, as `DBOS.recv` takes it, or an absolute `deadlineEpochMS`. */
-  recv<T>(topic: string, timeout: number | { deadlineEpochMS: number }, intent?: string): Promise<T | null> {
-    const id = this.counter++;
-    const timeoutId = this.counter++;
-    return (async () => {
-      await this.db();
+  recv<T>(topic: string, timeout?: RecvTimeout, intent?: string): Promise<T | null> {
+    const id = this.reserve();
+    const timeoutId = this.reserve();
+    return this.track(async () => {
+      await this.lookup();
       const row = this.wf.rows.get(id);
       if (row) {
         this.checkSlot(id, RECV, row, intent);
         return clone((row.output ?? null) as T | null);
       }
-      const timeoutMs =
-        typeof timeout === 'number' ? timeout * 1000 : Math.max(0, timeout.deadlineEpochMS - this.now());
+      const timeoutMs = this.timeoutMs(timeout);
       let finish = this.now() + timeoutMs;
       if (timeoutMs > 0)
         finish = await this.durableSleep(timeoutId, timeoutMs, intent && `${intent}#timeout`);
       else this.rowless.push({ id: timeoutId, why: 'timeout already due' });
-      await this.wf.arrival(topic, finish);
-      if (!this.alive) return never<T | null>();
-      await this.db();
+      const poll =
+        typeof timeout === 'object' ? (timeout.pollingIntervalMs ?? DEFAULT_POLL_MS) : DEFAULT_POLL_MS;
+      for (;;) {
+        this.throwIfCancelled();
+        if (this.wf.hasWaiting(topic) || this.now() >= finish) break;
+        await this.wf.arrival(topic, Math.min(finish, this.now() + poll));
+        if (!this.alive) return never<T | null>();
+      }
+      this.throwIfCancelled();
+      await this.write();
+      this.refuse({ kind: 'recv', name: RECV, topic });
       const message = this.wf.consume(topic);
       this.wf.record({ id, name: RECV, output: message, intent, recordedAt: this.now() });
       return clone(message as T | null);
-    })();
+    });
+  }
+
+  private track<T>(op: () => Promise<T>): Promise<T> {
+    this.live += 1;
+    const running = op();
+    const settled = (): void => {
+      this.live -= 1;
+    };
+    running.then(settled, settled);
+    return running;
+  }
+
+  private reserve(): number {
+    return this.counter++;
+  }
+
+  private timeoutMs(timeout: RecvTimeout | undefined): number {
+    if (typeof timeout === 'number') return timeout * 1000;
+    if (timeout?.deadlineEpochMS !== undefined) return Math.max(0, timeout.deadlineEpochMS - this.now());
+    return (timeout?.timeoutSeconds ?? DEFAULT_RECV_TIMEOUT_S) * 1000;
   }
 
   private async durableSleep(id: number, ms: number, intent?: string): Promise<number> {
     const end = this.now() + ms;
-    await this.db();
+    await this.lookup();
     const row = this.wf.rows.get(id);
     if (row) {
       this.checkSlot(id, SLEEP, row, intent);
       return row.output as number;
     }
+    this.refuse({ kind: 'sleep', name: SLEEP });
     this.wf.record({ id, name: SLEEP, output: end, intent, recordedAt: this.now() });
     return end;
   }
@@ -270,9 +348,23 @@ export class SimExecution {
     }
   }
 
-  private async db(): Promise<void> {
+  // A read of the op log, which DBOS refuses once the workflow is cancelled.
+  private async lookup(): Promise<void> {
+    await this.write();
+    this.throwIfCancelled();
+  }
+
+  private async write(): Promise<void> {
     await this.wf.clock.sleep(this.dbLatency());
     if (!this.alive) await never<void>();
+  }
+
+  private refuse(slot: FaultSlot): void {
+    if (this.refuses(slot)) throw new SimDbFault();
+  }
+
+  private throwIfCancelled(): void {
+    if (this.wf.cancelled) throw new DbosErrors.DBOSWorkflowCancelledError(this.wf.id);
   }
 
   private now(): number {
@@ -280,19 +372,28 @@ export class SimExecution {
   }
 }
 
-/** Today's `DbosDurableStep` over the model: the same three calls, each passing its name as the intent. */
-export class SimDbosDurableStep implements DurableStep {
-  constructor(private readonly execution: SimExecution) {}
+/** Today's `DbosDurableStep` over the model: the same calls, each passing its name as the intent. */
+export class SimDbosDurableStep extends DbosDurableStep {
+  constructor(
+    protected readonly execution: SimExecution,
+    private readonly clock: VirtualClock,
+  ) {
+    super();
+  }
 
-  run<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  override run<T>(name: string, fn: () => Promise<T>): Promise<T> {
     return this.execution.runStep(fn, name);
   }
 
-  sleep(name: string, ms: number): Promise<void> {
+  override sleep(name: string, ms: number): Promise<void> {
     return this.execution.sleepms(ms, name);
   }
 
-  waitForEvent<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null> {
+  override waitForEvent<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return this.execution.recv<T>(topic, timeoutMs / 1000, name);
+  }
+
+  override waitInStep(ms: number): Promise<void> {
+    return this.clock.sleep(ms);
   }
 }

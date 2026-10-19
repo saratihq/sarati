@@ -3,7 +3,7 @@ import type { DagNode, DagPlan, Guard } from './dag-plan';
 
 /** Test support, not in the production bundle: seeded random DAG plans covering every shape a durable replay meets. */
 
-/** How a fuzz action's fake call ends: `fails-once` fails its first attempt only; `fatal` throws {@link FATAL_FAILURE}. */
+/** How a fuzz action's fake call ends: `fails-once` fails its first attempt only; `fatal` meets a fatal error at its step's lookup, before its call. */
 export type Behaviour = 'ok' | 'fails' | 'fails-once' | 'fatal';
 
 /** The props every fuzz action carries. */
@@ -14,7 +14,6 @@ export interface FuzzActionProps {
 
 export const FUZZ_ACTION = 'fuzz.step';
 export const FUZZ_WORKFLOW = 'fuzz-child';
-export const FATAL_FAILURE = 'FuzzFatalFailure';
 const TOPICS = ['approval', 'legal', 'finance'];
 const ALWAYS = { left: true, op: 'truthy' } as const;
 
@@ -22,6 +21,7 @@ const ALWAYS = { left: true, op: 'truthy' } as const;
 export const FEATURES = [
   'zero-delay',
   'short-delay',
+  'mid-delay',
   'long-delay',
   'wait',
   'agent',
@@ -51,6 +51,8 @@ export interface FuzzPlan {
   /** The sub-workflow invocation budget the run starts with: small whenever an agent can call a workflow. */
   budget: number;
   features: ReadonlySet<Feature>;
+  /** The ids of the actions whose step meets a fatal error at its lookup. */
+  fatal: ReadonlySet<string>;
 }
 
 /** A seeded uniform generator in [0, 1). */
@@ -70,12 +72,19 @@ export function randomDagPlan(rand: () => number, id = 'fuzz'): FuzzPlan {
   const nodes = builder.level(2, builder.int(2, 7), true);
   const budget = builder.features.has('workflow-tool') ? builder.int(1, 2) : 64;
   if (budget < 64) builder.features.add('small-budget');
-  return { plan: { id, nodes }, pins: builder.pins, budget, features: builder.features };
+  return {
+    plan: { id, nodes },
+    pins: builder.pins,
+    budget,
+    features: builder.features,
+    fatal: builder.fatal,
+  };
 }
 
 class PlanBuilder {
   readonly features = new Set<Feature>();
   readonly pins: Record<string, unknown> = {};
+  readonly fatal = new Set<string>();
   private next = 0;
 
   constructor(
@@ -164,6 +173,9 @@ class PlanBuilder {
     } else if (roll < 0.4) {
       ms = this.int(60_001, 180_000);
       feature = 'long-delay';
+    } else if (roll < 0.6) {
+      ms = this.int(10_001, 60_000);
+      feature = 'mid-delay';
     }
     this.features.add(feature);
     return { kind: 'delay', id: this.id(), ms, guards };
@@ -198,7 +210,7 @@ class PlanBuilder {
     return {
       kind: 'agent',
       id,
-      systemPrompt: `fuzz rounds=${rounds} calls=${this.int(1, 2)}`,
+      systemPrompt: `fuzz node=${id} rounds=${rounds} calls=${this.int(1, 2)}`,
       model: { provider: 'claude', model: 'fuzz' },
       maxSteps: this.int(rounds, rounds + 1),
       tools,
@@ -257,7 +269,7 @@ class PlanBuilder {
     }
   }
 
-  // An error lane that finishes first, beside a sibling that then throws a fatal failure.
+  // An error lane that finishes first, beside a sibling already running whose next step then meets a fatal error.
   private laneThenFatal(nodes: DagNode[]): void {
     this.features.add('lane-then-fatal');
     const failing = this.id();
@@ -272,7 +284,22 @@ class PlanBuilder {
       },
       guards: [],
     });
-    nodes.push(this.action([], { latencyMs: 900, behaviour: 'fatal' }));
+    const sibling = this.id();
+    const gate: DagNode = {
+      kind: 'action',
+      id: this.id(),
+      actionId: FUZZ_ACTION,
+      props: { latencyMs: 900, behaviour: 'ok' },
+      guards: [],
+    };
+    const fatal = this.action([{ source: gate.id, port: 0 }], { latencyMs: 5, behaviour: 'fatal' });
+    this.fatal.add(fatal.id);
+    nodes.push({
+      kind: 'parallel',
+      id: sibling,
+      branches: [{ id: `${this.planId}#${sibling}|0`, nodes: [gate, fatal] }],
+      guards: [],
+    });
   }
 
   private guards(earlier: DagNode[]): Guard[] {
