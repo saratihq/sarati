@@ -237,7 +237,6 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
 
   beforeAll(async () => {
     process.env.DATABASE_URL = await createE2eDatabase(ADMIN_URL);
-    // Held open for the whole sleep: a database with no live backend is reaped by other suites.
     db = new Client({ connectionString: process.env.DATABASE_URL });
     await db.connect();
     process.env.PGBOSS_ENABLED = 'false';
