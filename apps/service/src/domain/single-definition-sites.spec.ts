@@ -55,7 +55,7 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(offenders).toEqual([]);
   });
 
-  /** Constitution #17: only the action router fills `{{$account…}}`, after the environment has chosen the account. */
+  /** Constitution #17: only the action router fills `{{$account…}}`, after the run has decided the account through `decideRunAs` (#18). */
   it('only the action router fills {{$account…}}', () => {
     const fills = sources()
       .filter((f) => f.rel !== 'runtime/account-ref.ts' && /\bfillAccountRefs\s*\(/.test(f.text))
