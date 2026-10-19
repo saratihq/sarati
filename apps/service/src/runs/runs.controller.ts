@@ -88,6 +88,11 @@ class SendEventDto {
   @IsString()
   topic!: string;
 
+  /** The parked step to answer; without it, the oldest undecided wait on `topic` more than 2 s from timing out. */
+  @IsOptional()
+  @IsString()
+  step_key?: string;
+
   /** Arbitrary event payload (e.g. an approval decision). */
   @Allow()
   payload?: unknown;
@@ -337,7 +342,7 @@ export class RunsController {
     return { sample: await this.runs.sampleFor(await this.access(req), parsed) };
   }
 
-  /** The approvals inbox: runs parked on a `waitForEvent` node. Must stay declared before `:runId` so the literal path wins. */
+  /** The approvals inbox: one entry per parked `waitForEvent` step. Must stay declared before `:runId` so the literal path wins. */
   @Scope('workflow:read')
   @Get('waiting')
   async listWaiting(
@@ -391,9 +396,15 @@ export class RunsController {
     @Req() req: Request,
     @Param('runId') runId: string,
     @Body() body: SendEventDto,
-  ): Promise<{ status: string }> {
-    await this.runs.sendEvent(runId, body.topic, body.payload, await this.access(req));
-    return { status: 'sent' };
+  ): Promise<{ status: string; step_key: string | null }> {
+    const decided = await this.runs.sendEvent(
+      runId,
+      body.topic,
+      body.payload,
+      await this.access(req),
+      body.step_key,
+    );
+    return { status: 'sent', step_key: decided };
   }
 
   /** Cancel a run — DBOS interrupts durable runs, direct runs are best-effort. Idempotent when already terminal. */

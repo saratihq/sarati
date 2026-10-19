@@ -204,7 +204,7 @@ export default function EditorRunButton() {
             </div>
           )}
 
-          {view.status === "waiting" && view.waiting && (
+          {view.status === "waiting" && view.waiting && view.waiting.kind !== "decided" && (
             <p className="text-[11px] m-0 mt-2" style={{ color: "var(--orchestr-ink-muted)" }}>
               <RunWaitingNote waiting={view.waiting} />
             </p>
