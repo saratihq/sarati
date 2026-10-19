@@ -446,78 +446,94 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
     }).toEqual({ refused: [409, 'called_run'], answer: 201, called: 'completed', afterCalls: 1 });
   }, 60_000);
 
-  it('a pre-merge test whose run is cancelled has no result, and leaves the merge gate as it was', async () => {
-    const trigger = node('trigger', 'orchestr:trigger', {});
-    const announce = (text: string) => node('announce', 'text.concat', { texts: [text], separator: '' });
-    const mainDoc = doc([trigger, announce('v1')], [edge('trigger', 'announce')]);
-    const laneDoc = doc(
-      [
-        trigger,
-        node('gate', 'http.send_request', { method: 'POST', url: `${base}/gate-test`, body: {} }),
-        announce('lane'),
-      ],
-      [edge('trigger', 'gate'), edge('gate', 'announce')],
-    );
-    const wf = (await http().post('/api/deploy').send({ workflow_json: mainDoc }).expect(201)).body
-      .workflow_id as string;
-    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
-    await http()
-      .post(`/api/workflows/${wf}/commit`)
-      .send({ workflow_ir: laneDoc, branch: 'lane' })
-      .expect(201);
-    await http()
-      .patch(`/api/workflows/${wf}/branches/main/protection`)
-      .send({ is_protected: true })
-      .expect(200);
-    const review = (
+  it.each([
+    ['source', 'lane'],
+    ['target', 'main'],
+  ])(
+    'a pre-merge test whose run is cancelled has no result, and leaves the merge gate as it was, on the %s side',
+    async (_side, gated) => {
+      const trigger = node('trigger', 'orchestr:trigger', {});
+      const announce = (text: string) => node('announce', 'text.concat', { texts: [text], separator: '' });
+      const docOn = (branch: string, text: string) =>
+        branch === gated
+          ? doc(
+              [
+                trigger,
+                node('gate', 'http.send_request', { method: 'POST', url: `${base}/gate-test`, body: {} }),
+                announce(text),
+              ],
+              [edge('trigger', 'gate'), edge('gate', 'announce')],
+            )
+          : doc([trigger, announce(text)], [edge('trigger', 'announce')]);
+      const wf = (
+        await http()
+          .post('/api/deploy')
+          .send({ workflow_json: docOn('main', 'v1') })
+          .expect(201)
+      ).body.workflow_id as string;
+      await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
       await http()
-        .post(`/api/workflows/${wf}/reviews`)
-        .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
-        .expect(201)
-    ).body.id as string;
-    await http()
-      .post(`/api/workflows/${wf}/reviews/${review}/approve`)
-      .send({ decision: 'approved' })
-      .expect(201);
-    const heads = await db.query<{ name: string; head_version_id: string }>(
-      `SELECT name, head_version_id FROM workflow_branches WHERE workflow_id = $1`,
-      [wf],
-    );
-    const head = (name: string) => heads.rows.find((r) => r.name === name)!.head_version_id;
-    await db.query(
-      `INSERT INTO review_test_results
-         (id, workflow_id, review_id, source_version_id, target_version_id, verdict, decisive, tested_at, summary)
-       VALUES ($1, $2, $3, $4, $5, 'green', true, now() - interval '1 minute', '{}'::json)`,
-      [randomUUID(), wf, review, head('lane'), head('main')],
-    );
-    const blocked = async () =>
-      (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body.merge_blocked_by_test;
-    expect(await blocked()).toBeNull();
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: docOn('lane', 'lane'), branch: 'lane' })
+        .expect(201);
+      await http()
+        .patch(`/api/workflows/${wf}/branches/main/protection`)
+        .send({ is_protected: true })
+        .expect(200);
+      const review = (
+        await http()
+          .post(`/api/workflows/${wf}/reviews`)
+          .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+          .expect(201)
+      ).body.id as string;
+      await http()
+        .post(`/api/workflows/${wf}/reviews/${review}/approve`)
+        .send({ decision: 'approved' })
+        .expect(201);
+      const heads = await db.query<{ name: string; head_version_id: string }>(
+        `SELECT name, head_version_id FROM workflow_branches WHERE workflow_id = $1`,
+        [wf],
+      );
+      const head = (name: string) => heads.rows.find((r) => r.name === name)!.head_version_id;
+      await db.query(
+        `INSERT INTO review_test_results
+           (id, workflow_id, review_id, source_version_id, target_version_id, verdict, decisive, tested_at, summary)
+         VALUES ($1, $2, $3, $4, $5, 'green', true, now() - interval '1 minute', '{}'::json)`,
+        [randomUUID(), wf, review, head('lane'), head('main')],
+      );
+      const shown = async () => {
+        const body = (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body;
+        return { blocked: body.merge_blocked_by_test, lastTest: body.last_test };
+      };
+      expect(await shown()).toEqual({ blocked: null, lastTest: null });
 
-    const tested = http()
-      .post(`/api/workflows/${wf}/reviews/${review}/test`)
-      .send({ trigger_payload: {} })
-      .then((res) => res);
-    await untilHit('/gate-test');
-    const run = await db.query<{ run_id: string }>(
-      `SELECT r.run_id FROM runtime_runs r JOIN runtime_run_steps s ON s.run_id = r.id
-        WHERE r.review_id = $1 AND s.node_id = 'gate'`,
-      [review],
-    );
-    await cancel(run.rows[0]!.run_id).expect(200);
-    openGate();
-    const res = await tested;
+      const tested = http()
+        .post(`/api/workflows/${wf}/reviews/${review}/test`)
+        .send({ trigger_payload: {} })
+        .then((res) => res);
+      await untilHit('/gate-test');
+      const run = await db.query<{ run_id: string }>(
+        `SELECT r.run_id FROM runtime_runs r JOIN runtime_run_steps s ON s.run_id = r.id
+          WHERE r.review_id = $1 AND s.node_id = 'gate'`,
+        [review],
+      );
+      await cancel(run.rows[0]!.run_id).expect(200);
+      openGate();
+      const res = await tested;
 
-    const kept = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM review_test_results WHERE workflow_id = $1`,
-      [wf],
-    );
-    expect({ test: [res.status, res.body.code], kept: kept.rows[0]!.n, blocked: await blocked() }).toEqual({
-      test: [409, 'test_cancelled'],
-      kept: 1,
-      blocked: null,
-    });
-  }, 60_000);
+      const kept = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM review_test_results WHERE workflow_id = $1`,
+        [wf],
+      );
+      expect({ test: [res.status, res.body.code], kept: kept.rows[0]!.n, ...(await shown()) }).toEqual({
+        test: [409, 'test_cancelled'],
+        kept: 1,
+        blocked: null,
+        lastTest: null,
+      });
+    },
+    60_000,
+  );
 
   it('a cancel during a retry wait still records every attempt that went out', async () => {
     const answer = start('counted', [post('flaky', '/flaky', { retry: { maxAttempts: 6, backoffMs: 400 } })]);

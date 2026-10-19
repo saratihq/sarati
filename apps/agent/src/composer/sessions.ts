@@ -47,12 +47,7 @@ export interface ComposerSession {
   buffer: SequencedComposerEvent[];
   /** The one live SSE consumer (stream OR attach) — replaced on reconnect. */
   subscriber: EventChannel<SequencedComposerEvent> | null;
-  /**
-   * The caller's bearer token, refreshed on every /stream and /answer request
-   * — tool calls execute against workflow-service AS THE USER. Clerk session
-   * JWTs are short-lived, so the freshest one wins (an expiry mid-turn
-   * surfaces as a friendly tool error; the next interaction refreshes it).
-   */
+  /** The caller's bearer, which tool calls run as: the latest one a turn's /stream, a /token or an accepted /answer carried. */
   callerToken: string | null;
   /** The org the caller is acting in — decides whose platform keys the turn resolves. */
   callerOrgId: string | null;
@@ -81,7 +76,6 @@ interface MutableSnapshot {
   offerPending: boolean;
 }
 
-/** The wire-shaped snapshot for POST /api/composer/attach. */
 /** The caller a session's tool calls run as: the freshest bearer, org and address it was given. */
 export function sessionCaller(session: ComposerSession): CallerContext {
   return { token: session.callerToken, orgId: session.callerOrgId, address: session.callerAddress };
@@ -98,6 +92,7 @@ export function refreshCaller(session: ComposerSession, caller: CallerContext): 
   session.callerAddress = caller.address ?? session.callerAddress;
 }
 
+/** The wire-shaped snapshot for POST /api/composer/attach. */
 export function snapshotOf(session: ComposerSession): SessionSnapshot {
   return {
     brief: session.snapshot.brief,

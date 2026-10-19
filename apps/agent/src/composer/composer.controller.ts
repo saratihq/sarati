@@ -111,7 +111,6 @@ export class ComposerController {
     );
   }
 
-  /** Reattach after a refresh/restart: replay the thread, then continue a live turn. */
   /** Clear the caller's conversation for a workflow (or the scratch thread). */
   @Post('clear')
   async clear(
@@ -126,6 +125,7 @@ export class ComposerController {
     return this.composer.clearThread(sub, body.workflow_id ?? null);
   }
 
+  /** Reattach after a refresh/restart: replay the thread, then continue a live turn. */
   @Post('attach')
   async attach(@Req() req: Request, @Res() res: Response, @Body() body: AttachDto): Promise<void> {
     if (!body.session_id && !body.workflow_id && body.scratch !== true) {

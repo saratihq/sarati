@@ -1,7 +1,4 @@
-/**
- * `{{$account.<field>}}` — the account a step RUNS AS. The interpreter leaves `$`-refs alone; the action
- * router fills this one once the environment has decided which connection that is (constitution #17).
- */
+/** `{{$account.<field>}}`: the account a step RUNS AS, filled by the action router once `decideRunAs` has decided it (constitution #17, #18). */
 
 /** The reserved root — persisted in saved workflows, so renaming it is a data migration. */
 export const ACCOUNT_REF_ROOT = '$account';
