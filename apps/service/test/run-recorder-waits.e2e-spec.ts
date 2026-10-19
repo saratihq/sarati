@@ -35,7 +35,7 @@ describe('run recorder waits (e2e, isolated DB)', () => {
   const run = async (runId: string): Promise<{ status: string; decided_by: string | null }> =>
     (
       await db.query<{ status: string; decided_by: string | null }>(
-        `SELECT status, decided_by FROM runtime_runs WHERE id = $1`,
+        `SELECT r.status, (SELECT string_agg(s.decided_by::text, ',') FROM runtime_run_steps s WHERE s.run_id = r.id) AS decided_by FROM runtime_runs r WHERE r.id = $1`,
         [runId],
       )
     ).rows[0]!;
@@ -144,5 +144,19 @@ describe('run recorder waits (e2e, isolated DB)', () => {
     }
     expect(await run('r-taken')).toEqual({ status: 'running', decided_by: USER });
     expect(await run('r-timed-out')).toEqual({ status: 'running', decided_by: null });
+    const slot = async (runId: string): Promise<unknown> =>
+      (await db.query(`SELECT decided_by FROM runtime_runs WHERE id = $1`, [runId])).rows[0];
+    expect(await slot('r-taken')).toEqual({ decided_by: USER });
+    expect(await slot('r-timed-out')).toEqual({ decided_by: null });
+
+    const resumedAt = async (runId: string): Promise<unknown> =>
+      (await db.query(`SELECT resumed_at FROM runtime_run_steps WHERE run_id = $1`, [runId])).rows[0];
+    const resumed = await resumedAt('r-taken');
+    expect(resumed).toEqual({ resumed_at: expect.any(Date) });
+
+    await recorder.stepResumed('r-taken', 'approve', true);
+    expect(await run('r-taken')).toEqual({ status: 'running', decided_by: USER });
+    expect(await slot('r-taken')).toEqual({ decided_by: USER });
+    expect(await resumedAt('r-taken')).toEqual(resumed);
   });
 });

@@ -282,15 +282,93 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     );
     const result = await reaper.reapStale();
     expect(result.strandedDecisions).toBeGreaterThanOrEqual(1);
-    const row = await db.query(`SELECT status, error, decided_by FROM runtime_runs WHERE id = $1`, [
-      stranded,
-    ]);
+    const row = await db.query(
+      `SELECT r.status, r.error, r.decided_by AS slot,
+              (SELECT string_agg(s.decided_by::text, ',') FROM runtime_run_steps s WHERE s.run_id = r.id) AS decided_by
+         FROM runtime_runs r WHERE r.id = $1`,
+      [stranded],
+    );
     expect(row.rows[0]).toEqual({
       status: 'error',
       error: 'Decided by Reaper, but the run could not resume to take the decision — run it again',
+      slot: userId,
       decided_by: userId,
     });
     expect(await stepsOf(stranded)).toEqual([{ status: 'error', waiting_topic: null }]);
+  });
+
+  it('names the latest of a stranded run’s decisions on the run, unless the run already holds a later one', async () => {
+    const other = randomUUID();
+    const strand = async (slotAgo: string | null): Promise<string> => {
+      const id = await insertRun({
+        status: 'waiting',
+        startedAgo: '3 hours',
+        parked: [
+          { stepKey: 'legal', topic: 'legal', timeoutAt: `now() - interval '2 hours'` },
+          { stepKey: 'finance', topic: 'finance', timeoutAt: `now() - interval '2 hours'` },
+        ],
+      });
+      await db.query(
+        `UPDATE runtime_run_steps
+            SET claimed_at = date_trunc('milliseconds', now() - CASE step_key WHEN 'legal' THEN interval '150 minutes'
+                                                                              ELSE interval '140 minutes' END),
+                claimed_by = CASE step_key WHEN 'legal' THEN $2::uuid ELSE $3::uuid END, claimed_payload = '{"d":1}'
+          WHERE run_id = $1`,
+        [id, userId, other],
+      );
+      if (slotAgo) {
+        await db.query(
+          `UPDATE runtime_runs SET decided_by = $2, decided_at = now() - $3::interval WHERE id = $1`,
+          [id, userId, slotAgo],
+        );
+      }
+      return id;
+    };
+    const latest = await strand(null);
+    const kept = await strand('1 minute');
+    expect((await reaper.reapStale()).strandedDecisions).toBeGreaterThanOrEqual(2);
+    const runRow = async (id: string): Promise<unknown> =>
+      (await db.query(`SELECT error, decided_by FROM runtime_runs WHERE id = $1`, [id])).rows[0];
+    const stepRows = async (id: string): Promise<unknown> =>
+      (
+        await db.query(
+          `SELECT step_key, decided_by FROM runtime_run_steps WHERE run_id = $1 ORDER BY step_key`,
+          [id],
+        )
+      ).rows;
+    const error = 'Decided by someone, but the run could not resume to take the decision — run it again';
+    expect(await runRow(latest)).toEqual({ error, decided_by: other });
+    expect(await runRow(kept)).toEqual({ error, decided_by: userId });
+    expect(await stepRows(latest)).toEqual([
+      { step_key: 'finance', decided_by: other },
+      { step_key: 'legal', decided_by: userId },
+    ]);
+  });
+
+  it('credits one decision held by waits sharing one receive to the wait that leads it, and no other', async () => {
+    const stranded = await insertRun({
+      status: 'waiting',
+      startedAgo: '3 hours',
+      parked: [
+        { stepKey: 'fork|1/a2', timeoutAt: `now() - interval '2 hours'` },
+        { stepKey: 'fork|0/a1', timeoutAt: `now() - interval '2 hours'` },
+      ],
+    });
+    await db.query(
+      `UPDATE runtime_run_steps SET claimed_at = now() - interval '150 minutes', claimed_by = $2, claimed_payload = '{"d":1}',
+                                    waiting_since = now() - interval '3 hours'
+        WHERE run_id = $1`,
+      [stranded, userId],
+    );
+    expect((await reaper.reapStale()).strandedDecisions).toBeGreaterThanOrEqual(1);
+    const steps = await db.query(
+      `SELECT step_key, status, decided_by FROM runtime_run_steps WHERE run_id = $1 ORDER BY step_key`,
+      [stranded],
+    );
+    expect(steps.rows).toEqual([
+      { step_key: 'fork|0/a1', status: 'error', decided_by: userId },
+      { step_key: 'fork|1/a2', status: 'error', decided_by: null },
+    ]);
   });
 
   it('never reaps a run over a lapsed wait left on a step that already finished', async () => {

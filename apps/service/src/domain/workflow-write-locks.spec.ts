@@ -23,7 +23,7 @@ const ENV_POINTERS =
 const RUN_HISTORY =
   "one statement on a run's history row; a workflow delete only clears its workflow_id, and it holds no lock before its foreign-key check";
 const RUN_LOCK =
-  "a run's own rows under that run's row lock, taken first; nothing in it reaches the workflow row, so a workflow delete waiting on the run's row only waits for it to commit, never a cycle";
+  "a run's own rows under that run's row lock, taken first, updating the run's row at most once; nothing in it reaches the workflow row, so a workflow delete waiting on the run's row only waits for it to commit, never a cycle";
 const THREAD =
   'one autocommit statement on a thread row: it holds no other lock while it waits, so it finishes before a workflow delete or waits for it, never a cycle';
 
@@ -107,7 +107,7 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
     why: ACTIVATION,
   },
   'service:runtime/run-recorder.service.ts#insertRun#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
-  'service:runtime/run-recorder.service.ts#stepResumed#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#stepResumed#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#runFinished#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
   'service:runtime/run-recorder.service.ts#withRunLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#withWaitLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },

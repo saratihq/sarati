@@ -134,6 +134,17 @@ function StepRow({ step, dry }: { step: RunStepInfo; dry: boolean }) {
             {waitingLabel(step.waiting)}
           </p>
         )}
+        {step.decided_by && (
+          <p
+            className="text-[11px] m-0 mt-1 flex items-center gap-1"
+            style={{ color: "var(--orchestr-ink-subtle)" }}
+            data-testid="run-step-decider"
+          >
+            <User size={11} className="shrink-0" />
+            Resolved by {step.decided_by.name || step.decided_by.email || "a teammate"}
+            {step.decided_at ? ` · ${timeAgo(step.decided_at)}` : ""}
+          </p>
+        )}
         {step.error && (
           <p className="text-[12px] m-0 mt-1 break-words" style={{ color: "var(--orchestr-danger)" }}>
             {step.error}
@@ -291,14 +302,16 @@ function RunDetailPanel({ detail, error }: { detail: RunDetail | null; error: st
             ))}
           </ul>
         )}
-        {detail.decided_by && (
+        {detail.unattributed_decision && (
           <p
-            className="text-[11px] m-0 mt-2 inline-flex items-center gap-1"
+            className="text-[11px] m-0 mt-2 flex items-center gap-1"
             style={{ color: "var(--orchestr-ink-subtle)" }}
+            data-testid="run-decider"
           >
-            <User size={11} />
-            Resolved by {detail.decided_by.name || detail.decided_by.email || "a teammate"}
-            {detail.decided_at ? ` · ${timeAgo(detail.decided_at)}` : ""}
+            <User size={11} className="shrink-0" />
+            Resolved by{" "}
+            {detail.unattributed_decision.decided_by?.name || detail.unattributed_decision.decided_by?.email || "a teammate"}
+            {detail.unattributed_decision.decided_at ? ` · ${timeAgo(detail.unattributed_decision.decided_at)}` : ""}
           </p>
         )}
         <SubWorkflowLinks detail={detail} />

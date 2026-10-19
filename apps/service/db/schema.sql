@@ -359,7 +359,9 @@ CREATE TABLE public.runtime_run_steps (
     delivery_topic character varying(500),
     claimed_by uuid,
     claimed_payload json,
-    resumed_at timestamp with time zone
+    resumed_at timestamp with time zone,
+    decided_by uuid,
+    decided_at timestamp with time zone
 );
 
 

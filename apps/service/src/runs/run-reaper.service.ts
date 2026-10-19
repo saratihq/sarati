@@ -7,8 +7,9 @@ import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import { rawMutate, rawQuery } from '../database/raw-query';
 import { DbosRuntime } from '../dbos/dbos-runtime';
-import { CLEAR_SLOT, CLEAR_WAIT, lockRunRow, parkedStep } from '../runtime/run-recorder.service';
+import { CLEAR_CLAIM, CLEAR_SLOT, CLEAR_WAIT, lockRunRow, parkedStep } from '../runtime/run-recorder.service';
 import { TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
+import { claimLeads, parkedSteps } from './run-waits';
 
 const REAPED_STEP_ERROR = 'Step did not complete — the run was reaped.';
 
@@ -118,6 +119,15 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
           )`,
       [seconds, REAPED_STEP_ERROR],
     );
+    // A claim a cancel left for its wait's resume, on a run ended so long ago that the resume never came.
+    await rawMutate(
+      em,
+      `UPDATE runtime_run_steps s SET ${CLEAR_CLAIM}
+         FROM runtime_runs r
+        WHERE r.id = s.run_id AND s.claimed_at IS NOT NULL
+          AND r.status NOT IN ('running', 'waiting') AND r.finished_at < ${cutoff}`,
+      [seconds],
+    );
 
     const strandedDecisions = await this.reapStrandedDecisions(seconds);
 
@@ -209,7 +219,7 @@ async function reapLapsedRun(em: EntityManager, runId: string, seconds: number):
     [seconds, TIMER_TOPIC_SQL_PREFIX, runId],
   );
   if (!lapsed) return 0;
-  await endParkedSteps(em, runId);
+  await endParkedSteps(em, runId, []);
   return rawMutate(
     em,
     `UPDATE runtime_runs SET status = 'error', finished_at = now(), error = COALESCE(error, $2), ${CLEAR_SLOT}
@@ -225,14 +235,22 @@ async function reapStrandedRun(em: EntityManager, runId: string, seconds: number
        FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id AND r.status = 'waiting'
        LEFT JOIN users u ON u.id = s.claimed_by
       WHERE s.run_id = $2 AND ${strandedClaim('s')}
-      ORDER BY s.claimed_at LIMIT 1`,
+      ORDER BY s.claimed_at DESC LIMIT 1`,
     [seconds, runId],
   );
   if (!claim) return 0;
-  await endParkedSteps(em, runId);
+  const claimed = (await parkedSteps(em, runId)).filter((s) => s.claimedAt !== null);
+  await endParkedSteps(
+    em,
+    runId,
+    claimLeads(claimed).map((s) => s.stepKey),
+  );
   return rawMutate(
     em,
-    `UPDATE runtime_runs SET status = 'error', finished_at = now(), decided_by = $2, decided_at = $3, error = $4, ${CLEAR_SLOT}
+    `UPDATE runtime_runs
+        SET status = 'error', finished_at = now(), error = $4, ${CLEAR_SLOT},
+            decided_by = CASE WHEN decided_at > $3::timestamptz THEN decided_by ELSE $2::uuid END,
+            decided_at = GREATEST(decided_at, $3::timestamptz)
       WHERE id = $1 AND status = 'waiting'`,
     [
       runId,
@@ -243,11 +261,14 @@ async function reapStrandedRun(em: EntityManager, runId: string, seconds: number
   );
 }
 
-// Every wait still parked on the run ends as an errored step.
-async function endParkedSteps(em: EntityManager, runId: string): Promise<void> {
+// Every wait still parked on the run ends as an errored step; one decision credits only the wait that leads its receive.
+async function endParkedSteps(em: EntityManager, runId: string, credited: string[]): Promise<void> {
   await em.query(
-    `UPDATE runtime_run_steps s SET status = 'error', finished_at = now(), error = COALESCE(s.error, $2), ${CLEAR_WAIT}
+    `UPDATE runtime_run_steps s
+        SET status = 'error', finished_at = now(), error = COALESCE(s.error, $2),
+            decided_by = CASE WHEN s.step_key = ANY($3) THEN s.claimed_by END,
+            decided_at = CASE WHEN s.step_key = ANY($3) THEN s.claimed_at END, ${CLEAR_WAIT}
       WHERE s.run_id = $1 AND ${parkedStep('s')}`,
-    [runId, REAPED_STEP_ERROR],
+    [runId, REAPED_STEP_ERROR, credited],
   );
 }

@@ -5,7 +5,7 @@ import type { ApiScope } from '../../auth/scopes';
 import { DomainError } from '../../common/domain-error';
 import { PolicyService } from '../../policy/policy.service';
 import { runAccessOf } from '../../runs/run-access';
-import type { RunWaiting } from '../../runs/run-waits';
+import type { Decider as DeciderShape, RunWaiting } from '../../runs/run-waits';
 import { RunsService } from '../../runs/runs.service';
 import { failedNodeIdOf } from '../../runs/run-failure';
 import type { McpCallContext, McpTool } from '../mcp-tool';
@@ -23,13 +23,16 @@ const Input = z.object({
     ),
 });
 
+const Decider = z.object({
+  id: z.string(),
+  name: z.string().nullable(),
+  email: z.string().nullable(),
+}) satisfies z.ZodType<DeciderShape>;
+
 const Waiting = z.object({
   kind: z.enum(['timer', 'event', 'decided']),
   until: z.string().nullable(),
-  decided_by: z
-    .object({ id: z.string(), name: z.string().nullable(), email: z.string().nullable() })
-    .nullable()
-    .optional(),
+  decided_by: Decider.nullable().optional(),
 }) satisfies z.ZodType<RunWaiting>;
 
 const Step = z.object({
@@ -49,6 +52,10 @@ const Step = z.object({
   finished_at: z.string().nullable(),
   /** Set while this step is parked — a run can wait on several steps at once. */
   waiting: Waiting.nullable(),
+  /** Who answered this wait — each approval names its own; null until the run takes an answer. */
+  decided_by: Decider.nullable(),
+  /** When that answer was made. */
+  decided_at: z.string().nullable(),
   output: z.unknown().optional(),
 });
 
@@ -101,6 +108,7 @@ function warningsOf(steps: readonly StepRow[]): Array<{ node_id: string; message
 
 function toStep(row: StepRow, includeOutputs: boolean): z.infer<typeof Step> {
   const waiting = Waiting.safeParse(row.waiting);
+  const decider = Decider.safeParse(row.decided_by);
   return {
     step_key: str(row, 'step_key'),
     node_id: str(row, 'node_id'),
@@ -113,6 +121,8 @@ function toStep(row: StepRow, includeOutputs: boolean): z.infer<typeof Step> {
     started_at: nullableStr(row, 'started_at'),
     finished_at: nullableStr(row, 'finished_at'),
     waiting: waiting.success ? waiting.data : null,
+    decided_by: decider.success ? decider.data : null,
+    decided_at: nullableStr(row, 'decided_at'),
     ...(includeOutputs ? { output: row.output ?? null } : {}),
   };
 }
@@ -123,7 +133,7 @@ export class GetRunTool implements McpTool {
   readonly scope: ApiScope = 'workflow:read';
   readonly title = 'Get a run';
   readonly description =
-    'Run status, per-step log, the failing node and any warnings — and, for a waiting run, whether it resumes on its own, waits for someone to answer it, or has a decision on its way. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
+    'Run status, per-step log — each answered wait names who answered it — the failing node and any warnings — and, for a waiting run, whether it resumes on its own, waits for someone to answer it, or has a decision on its way. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

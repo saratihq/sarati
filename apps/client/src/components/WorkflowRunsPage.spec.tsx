@@ -191,6 +191,97 @@ describe("WorkflowRunsPage", () => {
     expect(screen.queryByRole("link", { name: /approvals inbox/ })).not.toBeInTheDocument();
   });
 
+  it("a run whose approvals different members answered names each one on the step they answered", async () => {
+    const decidedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-two" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-two" }),
+      decided_by: { id: "u-bo", name: "Bo Member", email: "bo@example.com" },
+      decided_at: decidedAt,
+      steps: [
+        {
+          node_id: "legal",
+          status: "completed",
+          decided_by: { id: "u-bo", name: "Bo Member", email: "bo@example.com" },
+          decided_at: decidedAt,
+        },
+        {
+          node_id: "finance",
+          status: "completed",
+          decided_by: { id: "u-ada", name: null, email: "ada@example.com" },
+          decided_at: decidedAt,
+        },
+        { node_id: "audit", status: "completed", decided_by: { id: "u-gone", name: null, email: null } },
+        { node_id: "notify", status: "completed", decided_by: null, decided_at: null },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    const lines = (await screen.findAllByTestId("run-step-decider")).map((line) => line.textContent);
+    expect(lines).toEqual([
+      "Resolved by Bo Member · 5m ago",
+      "Resolved by ada@example.com · 5m ago",
+      "Resolved by a teammate",
+    ]);
+    expect(screen.getAllByText(/^Resolved by/)).toHaveLength(3);
+    expect(screen.queryByTestId("run-decider")).not.toBeInTheDocument();
+  });
+
+  it("a run decided before steps kept their own deciders names its last decider on the run", async () => {
+    const bo = { id: "u-bo", name: "Bo Member", email: "bo@example.com" };
+    const decidedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-old" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-old" }),
+      decided_by: bo,
+      decided_at: decidedAt,
+      unattributed_decision: { decided_by: bo, decided_at: decidedAt },
+      steps: [
+        { node_id: "legal", status: "completed", decided_by: null, decided_at: null },
+        { node_id: "finance", status: "completed", decided_by: null, decided_at: null },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect((await screen.findByTestId("run-decider")).textContent).toBe("Resolved by Bo Member · 2h ago");
+    expect(screen.queryAllByTestId("run-step-decider")).toHaveLength(0);
+  });
+
+  it("a decision no step holds is still named on the run beside the steps that are credited", async () => {
+    const decidedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    listRuns.mockResolvedValue({ runs: [run({ run_id: "r-back" })] });
+    getRun.mockResolvedValue({
+      ...run({ run_id: "r-back" }),
+      decided_by: null,
+      decided_at: null,
+      unattributed_decision: { decided_by: { id: "u-ada", name: "Ada Owner", email: null }, decided_at: decidedAt },
+      steps: [
+        {
+          node_id: "legal",
+          status: "completed",
+          decided_by: { id: "u-bo", name: "Bo Member", email: null },
+          decided_at: decidedAt,
+        },
+        { node_id: "finance", status: "completed", decided_by: null, decided_at: null },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<WorkflowRunsPage />);
+
+    await user.click((await screen.findAllByRole("button", { expanded: false }))[0]!);
+
+    expect((await screen.findAllByTestId("run-step-decider")).map((l) => l.textContent)).toEqual([
+      "Resolved by Bo Member · 5m ago",
+    ]);
+    expect(screen.getByTestId("run-decider").textContent).toBe("Resolved by Ada Owner · 5m ago");
+  });
+
   it("a real run's step that returns an object shaped like a marker is shown as its output", async () => {
     listRuns.mockResolvedValue({ runs: [run({ run_id: "r-live" })] });
     getRun.mockResolvedValue({

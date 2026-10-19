@@ -383,6 +383,48 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
     expect(detail.body.decided_at).toBeTruthy();
   }, 40_000);
 
+  it('over MCP, each approval names the member who answered it', async () => {
+    const both = { ...approvalIr('legal'), nodes: [] as unknown[] };
+    both.nodes = ['legal', 'finance'].map((topic, i) => ({
+      ...(approvalIr(topic).nodes as Array<Record<string, unknown>>)[0],
+      id: topic,
+      name: topic,
+      position: { x: 0, y: i * 120 },
+    }));
+    const run = asSessionA(
+      http()
+        .post('/api/runs/from-ir')
+        .set('X-Org-Id', orgId)
+        .send({ workflow_ir: both, workflow_id: workflowId, run_id: 'mcp-two' }),
+    ).then((r) => r);
+    const ref = encodeURIComponent(`${userA}:mcp-two`);
+    for (let i = 0; i < 100; i++) {
+      const res = await asSessionB(http().get('/api/runs/waiting').set('X-Org-Id', orgId)).expect(200);
+      if ((res.body.runs as Array<{ run_id: string }>).filter((r) => r.run_id === 'mcp-two').length === 2)
+        break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    const decide = (as: (r: request.Test) => request.Test, topic: string) =>
+      as(http().post(`/api/runs/${ref}/events`).set('X-Org-Id', orgId).send({ topic, payload: { topic } }));
+    await decide(asSessionB, 'legal').expect(200);
+    await decide(asSessionA, 'finance').expect(200);
+    expect((await run).status).toBe(201);
+
+    const result = await call(keyA, 'orchestr_get_run', { run_id: `${userA}:mcp-two` });
+    expect(result.isError).toBeFalsy();
+    const steps = (result.structuredContent as { steps: Array<Record<string, unknown>> }).steps;
+    const byKey = Object.fromEntries(steps.map((s) => [s.step_key, s]));
+    expect(byKey.legal).toMatchObject({
+      decided_by: { id: userB, name: 'Member B', email: 'member-b@mcp.local' },
+      decided_at: expect.any(String),
+    });
+    expect(byKey.finance).toMatchObject({
+      decided_by: { id: userA, name: 'Owner A', email: 'owner-a@mcp.local' },
+      decided_at: expect.any(String),
+    });
+  }, 40_000);
+
   it('says what a waiting run waits for: a Wait step its own clock, an approval a person', async () => {
     const raw = (runId: string, node: Record<string, unknown>): Promise<request.Response> =>
       asSessionA(

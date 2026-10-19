@@ -96,7 +96,8 @@ after it starts. A caller still waiting on the run's answer gets `409` with the 
 `run_cancelled`.
 
 Every wait or delay the run is parked on ends and says *Cancelled before it finished*, and a
-decision someone sent that the run had not yet taken is dropped. On a durable run
+decision someone sent that the run had not yet taken is dropped. One the run had already taken
+stands, and its wait records who made it. On a durable run
 (the default) that can take up to about ten seconds, and a delay of a minute or less runs out first.
 On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
 workflow the run is calling; a durable run's called workflow finishes first.
@@ -120,8 +121,8 @@ terminal `error`:
 - a run whose approval window has passed, or whose **Wait** step is past its wake by that long, with
   no decision on its way to it;
 - a run holding a decision whose wait is past its window by `RUN_MAX_DURATION_SECONDS`, when this
-  instance can no longer resume it to take the decision. Its error names who decided, and the run
-  records them.
+  instance can no longer resume it to take the decision. Its error names who decided, and the wait
+  they decided records them.
 
 A run with a decision on its way that can still resume is left to take it. Set
 `RUN_MAX_DURATION_SECONDS=0` to turn the reaper off.

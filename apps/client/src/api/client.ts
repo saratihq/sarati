@@ -1350,6 +1350,9 @@ export interface RunStepInfo {
   warnings?: string[] | null;
   /** Set while this step is parked — a run can wait on several steps at once. */
   waiting?: RunWaiting | null;
+  /** Who answered this wait, and when — each approval names its own; null until the run takes an answer. */
+  decided_by?: RunDecider | null;
+  decided_at?: string | null;
 }
 
 /** One end of a sub-workflow call — the run that called this one, or one it called. */
@@ -1362,21 +1365,30 @@ export interface SubWorkflowRunLink {
   status: string;
 }
 
+/** Someone who decided a wait; `name` and `email` are null once their account is gone. */
+export interface RunDecider {
+  id: string;
+  name: string | null;
+  email: string | null;
+}
+
 /** What a waiting run waits for — the service's call: its own clock, someone deciding, or a decision on its way. */
 export interface RunWaiting {
   kind: "timer" | "event" | "decided";
   /** When a timer wakes, or when an event wait times out. */
   until: string | null;
   /** Who made the decision the run has yet to take — only on `decided`. */
-  decided_by?: { id: string; name: string | null; email: string | null } | null;
+  decided_by?: RunDecider | null;
 }
 
 export interface RunDetail extends RunSummary {
   steps: RunStepInfo[];
   outputs?: Record<string, unknown> | null;
-  /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
-  decided_by?: { id: string; name: string | null; email: string | null } | null;
+  /** The one person every decision on the run names, at the latest — null when they differ. */
+  decided_by?: RunDecider | null;
   decided_at?: string | null;
+  /** A decision the run recorded that no step holds, made on a version before steps kept their deciders. */
+  unattributed_decision?: { decided_by: RunDecider | null; decided_at: string | null } | null;
   /** Set while the run is waiting: a decision a person owes before a timer, then whichever is due first. */
   waiting?: RunWaiting | null;
   /** The run that called this one, when another workflow started it. */

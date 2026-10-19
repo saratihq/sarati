@@ -12,7 +12,7 @@ import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
-import { isDurableCancellation } from '../dbos/dbos-durable-step';
+import { isDurableCancellation, isUnknownDurableRun } from '../dbos/dbos-durable-step';
 import { DbosRuntime } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
 import { PassThroughDurableStep, RunCancelledError } from '../providers/durable-step';
@@ -189,6 +189,45 @@ function runLink(row: SubWorkflowRunRow): SubWorkflowRunLink {
   };
 }
 
+function undeliveredIfUnknown(err: unknown): false {
+  if (isUnknownDurableRun(err)) return false;
+  throw err;
+}
+
+interface Decision {
+  by: string;
+  at: Date | null;
+}
+
+// A slot decision no step holds was made where steps did not keep their deciders, and only the slot knows who.
+function unattributedDecisionOf(run: RuntimeRunEntity, steps: RuntimeRunStepEntity[]): Decision | null {
+  if (!run.decidedBy) return null;
+  const at = run.decidedAt?.getTime() ?? null;
+  const held = steps.some((s) => s.decidedBy === run.decidedBy && (s.decidedAt?.getTime() ?? null) === at);
+  return held ? null : { by: run.decidedBy, at: run.decidedAt };
+}
+
+function runDecisionOf(steps: RuntimeRunStepEntity[], unattributed: Decision | null): Decision | null {
+  const decisions: Decision[] = steps
+    .filter((s) => s.decidedBy !== null)
+    .map((s) => ({ by: s.decidedBy!, at: s.decidedAt }));
+  if (unattributed) decisions.push(unattributed);
+  const [by, ...others] = new Set(decisions.map((d) => d.by));
+  if (by === undefined || others.length > 0) return null;
+  const at = Math.max(...decisions.map((d) => d.at?.getTime() ?? 0));
+  return { by, at: at > 0 ? new Date(at) : null };
+}
+
+function decisionView(
+  decision: Decision | null,
+  deciders: Map<string, Decider>,
+): { decided_by: Decider | null; decided_at: string | null } {
+  return {
+    decided_by: decision ? (deciders.get(decision.by) ?? null) : null,
+    decided_at: decision?.at?.toISOString() ?? null,
+  };
+}
+
 /** A run's detail shape: status + provenance + the per-step log. */
 export type RunDetail = RunStatus & {
   /** The run that called this one, when a sub-workflow call started it. */
@@ -206,9 +245,11 @@ export type RunDetail = RunStatus & {
   /** Dry run (preview): this run fired no state-changing external call. */
   dry_run: boolean;
   duration_ms: number | null;
-  /** Who resolved a waitForEvent (approve/reject), and when — null if none. */
-  decided_by: { id: string; name: string | null; email: string | null } | null;
+  /** The one person every decision on the run names, at the latest — null when they differ; each step carries its own. */
+  decided_by: Decider | null;
   decided_at: string | null;
+  /** A decision the run recorded that no step holds, made on a version before steps kept their deciders. */
+  unattributed_decision: { decided_by: Decider | null; decided_at: string | null } | null;
   /** Set while the run is `waiting`: what it waits for, and until when. */
   waiting: RunWaiting | null;
 };
@@ -339,7 +380,8 @@ export class RunsService {
         where: { runId: scoped },
         order: { startedAt: 'ASC' },
       });
-      const steps = rows.map((s) => stepLog(s, false));
+      const deciders = await decidersOf(em, rows);
+      const steps = rows.map((s) => stepLog(s, false, deciders));
       return { run_id: runId, failed_node_id: failedNodeIdOf(steps), steps };
     } catch (err) {
       // A history read must never replace the run's own failure with a server fault.
@@ -678,6 +720,7 @@ export class RunsService {
         duration_ms: null,
         decided_by: null,
         decided_at: null,
+        unattributed_decision: null,
         waiting: null,
         called_by: null,
         calls: [],
@@ -697,22 +740,15 @@ export class RunsService {
 
     const workflow =
       row.workflowId && em ? await em.findOne(WorkflowEntity, { where: { id: row.workflowId } }) : null;
-    const deciderRows =
-      row.decidedBy && em
-        ? await em.query<Array<{ id: string; name: string | null; email: string | null }>>(
-            `SELECT id, name, email FROM users WHERE id = $1`,
-            [row.decidedBy],
-          )
-        : [];
-    const decider = deciderRows[0];
     const steps = em
       ? await em.find(RuntimeRunStepEntity, { where: { runId: scoped }, order: { startedAt: 'ASC' } })
       : [];
-    const deciders = em ? await decidersOf(em, steps) : new Map<string, Decider>();
+    const deciders = em ? await decidersOf(em, steps, row.decidedBy) : new Map<string, Decider>();
+    const unattributed = unattributedDecisionOf(row, steps);
     return {
       ...status,
-      decided_by: decider ? { id: decider.id, name: decider.name, email: decider.email } : null,
-      decided_at: row.decidedAt?.toISOString() ?? null,
+      ...decisionView(runDecisionOf(steps, unattributed), deciders),
+      unattributed_decision: unattributed ? decisionView(unattributed, deciders) : null,
       waiting: runWaitingOf(row.status, steps, deciders),
       steps: steps.map((s) => stepLog(s, opts.includeStepOutputs !== false, deciders)),
       ...(em ? await this.subWorkflowLinks(em, row, scoped, access) : { called_by: null, calls: [] }),
@@ -1005,11 +1041,12 @@ export class RunsService {
     topic: string,
     payload: unknown,
   ): Promise<void> {
-    if (this.dbosEnabled) {
-      await this.dbos.sendEvent(scoped, topic, eventMessage(payload), claimKey(scoped, lead));
-      return;
-    }
-    if (this.waiters.get(scoped)?.deliver(topic, eventMessage(payload))) return;
+    const delivered = this.dbosEnabled
+      ? await this.dbos
+          .sendEvent(scoped, topic, eventMessage(payload), claimKey(scoped, lead))
+          .then(() => true, undeliveredIfUnknown)
+      : (this.waiters.get(scoped)?.deliver(topic, eventMessage(payload)) ?? false);
+    if (delivered) return;
     const run = await em.findOneBy(RuntimeRunEntity, { id: scoped });
     if (run?.status === 'cancelled') throw new DomainError(`Run ${runId} was cancelled`, 409);
     throw new DomainError(
@@ -1156,7 +1193,7 @@ function findAgentNode(plan: DagPlan, nodeId: string): DagAgentNode | null {
 function stepLog(
   s: RuntimeRunStepEntity,
   includeOutputs: boolean,
-  deciders = new Map<string, Decider>(),
+  deciders: Map<string, Decider>,
 ): Record<string, unknown> {
   return {
     step_key: s.stepKey,
@@ -1181,6 +1218,8 @@ function stepLog(
     // Non-fatal reference warnings: full-string `{{ref}}`s that resolved to nothing on this step.
     warnings: s.warnings ?? null,
     waiting: stepWaitingOf(s, deciders),
+    decided_by: s.decidedBy ? (deciders.get(s.decidedBy) ?? null) : null,
+    decided_at: s.decidedAt?.toISOString() ?? null,
     started_at: s.startedAt?.toISOString() ?? null,
     finished_at: s.finishedAt?.toISOString() ?? null,
   };

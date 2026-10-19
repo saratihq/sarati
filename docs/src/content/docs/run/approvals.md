@@ -95,8 +95,20 @@ on that topic, if there is one — so in a workflow with several approvals on on
 decision with its `step_key`, as the inbox does. An entry with no `step_key` is answered by topic only,
 and is refused while any of its waits is within two seconds of timing out.
 
-The steps after the wait execute, and the run reads `waiting` until no other wait is left. The run
-records **who** decided and **when**, and the wait drops out of the inbox.
+The steps after the wait execute, and the run reads `waiting` until no other wait is left. The wait
+drops out of the inbox, and once the run takes the decision its step records **who** decided and
+**when** — in a run with several approvals, each step keeps its own. Each step in
+`GET /api/runs/<run-id>` and in the MCP tool `orchestr_get_run` carries its `decided_by` and
+`decided_at`. The run's own `decided_by` in `GET /api/runs/<run-id>` names the person when every
+decision on the run was theirs, with `decided_at` the latest of them; both are `null` when different
+people decided, or nobody has yet.
+
+A run decided on a version before this one kept only its last decider. Upgrading puts that decision
+on its step only when the run has a single approval it could have answered. Otherwise the decision
+stays on the run: `GET /api/runs/<run-id>` reports it as `unattributed_decision`, the run's own
+`decided_by` counts it, and **Runs** names its decider on the run rather than on a step. The run
+keeps one such decision, the latest by the time recorded with it, so a wait answered on the run after
+the upgrade can take its place.
 
 The payload is available to later steps, so the decision itself can drive what happens next. A
 decision sent without one reaches them as `null`.
