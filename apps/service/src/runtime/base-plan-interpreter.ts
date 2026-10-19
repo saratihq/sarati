@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
 import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
-import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, RunCancelledError, type DurableStep } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import {
   AgentStepsExhausted,
@@ -278,7 +278,11 @@ export abstract class BasePlanInterpreter {
         }
         // Terminal state is written HERE, not by the caller, so a DBOS crash-resume
         // that finishes the workflow also finishes the record.
-        await ctx.record?.recorder.runFinished(ctx.record.runId, null, errorMessage(err));
+        if (ctx.durable.isCancellation(err)) {
+          await ctx.record?.recorder.runUnwoundByCancel(ctx.record.runId, errorMessage(err));
+        } else {
+          await ctx.record?.recorder.runFinished(ctx.record.runId, null, errorMessage(err));
+        }
         throw err;
       }
       await ctx.record?.recorder.runFinished(ctx.record.runId, scope, null);
@@ -418,13 +422,17 @@ export abstract class BasePlanInterpreter {
         stepKey,
         node.id,
         kind,
-        () => (isPinned ? Promise.resolve(ctx.pins!.get(node.id)) : run(stepKey)),
+        () => (isPinned ? this.replayPin(ctx, node.id) : run(stepKey)),
         isPinned,
       );
       scope[node.id] = output;
       const warnings = ctx.stepWarnings.get(stepKey);
       ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
+      // A cancel unwinds the run: no error lane or continue-on-fail may absorb it, nor a failure after it.
+      if (ctx.durable.isCancellation(err)) throw err;
+      ctx.durable.throwIfCancelled();
+      if (await this.rowCancelled(ctx)) throw err;
       // Capture the error into scope so `{{node.error.message}}` resolves. An agent that
       // exhausted `max_steps` carries its partial result — merge it so the lane can still
       // read `{{node.text}}` (the partial answer is never discarded).
@@ -618,9 +626,12 @@ export abstract class BasePlanInterpreter {
     runBranch: (branchScope: Record<string, unknown>, index: number, childPath: string) => Promise<void>,
   ): Promise<void> {
     const branchScopes = Array.from({ length: branchCount }, () => ({ ...scope }));
-    await Promise.all(
+    // Every branch settles before one's failure ends the node, so nothing is still running as the run unwinds.
+    const settled = await Promise.allSettled(
       branchScopes.map((branchScope, i) => runBranch(branchScope, i, `${path}${node.id}|${i}/`)),
     );
+    const failed = settled.find((outcome) => outcome.status === 'rejected');
+    if (failed) throw failed.reason;
     // Merge each branch's new outputs back into the shared scope.
     for (const branchScope of branchScopes) {
       for (const key of Object.keys(branchScope)) {
@@ -770,6 +781,7 @@ export abstract class BasePlanInterpreter {
         try {
           output = await this.invokeAgentTool(node, call, scope, `${stepKey}#${round}`, ctx);
         } catch (err) {
+          if (ctx.durable.isCancellation(err)) throw err;
           // §7: a tool error is fed back as its result — the model may recover within the budget.
           output = { error: { message: errorMessage(err) } };
         }
@@ -963,9 +975,7 @@ export abstract class BasePlanInterpreter {
   ): Promise<T> {
     const maxAttempts = retry?.maxAttempts ?? 1;
     const backoffMs = retry?.backoffMs ?? 0;
-    let tries = 0;
-    for (;;) {
-      tries += 1;
+    for (let tries = 1; ; tries++) {
       try {
         const result = await attempt();
         if (tries > 1) await this.recordAttempts(ctx, stepKey, tries);
@@ -975,9 +985,25 @@ export abstract class BasePlanInterpreter {
           if (maxAttempts > 1) await this.recordAttempts(ctx, stepKey, tries);
           throw err;
         }
-        if (backoffMs > 0) await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        // Counted before the wait, so a cancel that ends the retries still leaves how many went out.
+        await this.recordAttempts(ctx, stepKey, tries);
+        if (backoffMs > 0) await ctx.durable.waitInStep(backoffMs);
+        // No attempt starts after a cancel, on either rail, its caller's included.
+        ctx.durable.throwIfCancelled();
+        if (await this.rowCancelled(ctx)) throw err;
       }
     }
+  }
+
+  private async replayPin(ctx: RunContext, nodeId: string): Promise<unknown> {
+    // A replay fires nothing, but nothing replays after a cancel either: it would read as the run going on.
+    ctx.durable.throwIfCancelled();
+    if (await this.rowCancelled(ctx)) throw new RunCancelledError();
+    return ctx.pins!.get(nodeId);
+  }
+
+  private rowCancelled(ctx: RunContext): Promise<boolean> {
+    return ctx.record ? ctx.record.recorder.isCancelled(ctx.record.runId) : Promise.resolve(false);
   }
 
   private async recordAttempts(ctx: RunContext, stepKey: string, attempts: number): Promise<void> {

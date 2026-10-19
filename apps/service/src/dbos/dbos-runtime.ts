@@ -1,12 +1,11 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { DBOS, Error as DbosErrors } from '@dbos-inc/dbos-sdk';
+import { DBOS } from '@dbos-inc/dbos-sdk';
 
-import { errorMessage } from '../common/error-message';
 import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import { RunRecorderService } from '../runtime/run-recorder.service';
 import type { RunResult, RunStatus } from '../runtime/run-plan';
-import { DbosDurableStep } from './dbos-durable-step';
+import { DbosDurableStep, RowGatedDurableStep } from './dbos-durable-step';
 
 /**
  * Runs the `DagInterpreter` as the one registered DBOS workflow; registration is at module load
@@ -31,43 +30,32 @@ interface PlanWorkflowArgs {
   sharedTopicsByStep?: boolean;
 }
 
-/** Whether a durable run's rejection is the cancel someone asked for, not a failure. */
-export function isDurableCancellation(err: unknown): boolean {
-  return (
-    err instanceof DbosErrors.DBOSWorkflowCancelledError ||
-    err instanceof DbosErrors.DBOSAwaitedWorkflowCancelledError
-  );
-}
-
 const RUN_PLAN_WORKFLOW = 'orchestr.runPlan';
 
 const runPlanWorkflow = DBOS.registerWorkflow(
   async (args: PlanWorkflowArgs): Promise<RunResult> => {
     if (!activeInterpreter) throw new Error('DbosRuntime is not initialized (no interpreter bound)');
-    try {
-      return await activeInterpreter.run(args.plan, {
-        externalUserId: args.externalUserId,
-        durable: durableStep,
-        runId: args.runId,
-        recorder: activeRecorder ?? undefined,
-        initialScope: args.initialScope,
-        // Pins ride the checkpointed args so a crash-resume replays the same pinned steps.
-        pins: args.pins,
-        // Checkpointed too, so a crash-resume rehydrates the env and re-resolves the slot connection.
-        environment: args.environment,
-        environmentId: args.environmentId,
-        orgId: args.orgId,
-        // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
-        chatChannelKey: args.chatChannelKey,
-        sharedTopicsByStep: args.sharedTopicsByStep === true,
-      });
-    } catch (err) {
-      // The interpreter records any unwinding as the run's failure; a cancel is not one.
-      if (isDurableCancellation(err) && args.runId) {
-        await activeRecorder?.runUnwoundByCancel(args.runId, errorMessage(err));
-      }
-      throw err;
-    }
+    const { runId } = args;
+    const recorder = activeRecorder;
+    return activeInterpreter.run(args.plan, {
+      externalUserId: args.externalUserId,
+      durable:
+        runId && recorder
+          ? new RowGatedDurableStep(durableStep, () => recorder.isCancelled(runId))
+          : durableStep,
+      runId: args.runId,
+      recorder: activeRecorder ?? undefined,
+      initialScope: args.initialScope,
+      // Pins ride the checkpointed args so a crash-resume replays the same pinned steps.
+      pins: args.pins,
+      // Checkpointed too, so a crash-resume rehydrates the env and re-resolves the slot connection.
+      environment: args.environment,
+      environmentId: args.environmentId,
+      orgId: args.orgId,
+      // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
+      chatChannelKey: args.chatChannelKey,
+      sharedTopicsByStep: args.sharedTopicsByStep === true,
+    });
   },
   { name: RUN_PLAN_WORKFLOW },
 );
@@ -103,7 +91,7 @@ export class DbosRuntime {
     return DBOS.send(runId, payload, topic, key);
   }
 
-  /** Cancel a durable run at its next step boundary; throws `DBOSNonExistentWorkflowError` if unknown. */
+  /** Cancel a durable run at its next step boundary; a no-op for a run DBOS does not know or has finished. */
   cancelWorkflow(runId: string): Promise<void> {
     return DBOS.cancelWorkflow(runId);
   }

@@ -85,7 +85,8 @@ versions holding that content, run from any review. Every result is kept, even a
 ran from is deleted, so putting failing content back on a branch doesn't lift the failure. The
 refusal and the review card name the review that ran it and what failed. A passing re-test, or a
 commit that changes either side, lifts it. A test where the target fails too shows as **Inconclusive**: it decides nothing,
-so an earlier failure still stands.
+so an earlier failure still stands. A test whose run someone cancels has no result at all: it is not
+kept, and neither blocks nor lifts a merge.
 
 After a successful merge the target branch has a new version — the merge commit — and the review is
 marked merged in the feed.
