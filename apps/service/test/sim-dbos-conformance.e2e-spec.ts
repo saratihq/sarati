@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { Client } from 'pg';
 
+import { StepBodyError } from '../src/dbos/run-sequencer';
 import {
   SimExecution,
   SimWorkflow,
@@ -14,13 +15,15 @@ import { launchThrowawayDbos, type ThrowawayDbos } from './support/dbos-system-d
 
 /** One scripted op; a group of them is issued together, in order, before any of them is awaited. */
 type Op =
-  | { op: 'step'; name: string; ms?: number; fails?: true }
+  | { op: 'step'; name: string; ms?: number; fails?: true | 'marked' | 'refused' }
   | { op: 'sleep'; ms: number }
   | { op: 'recv'; topic: string; timeout: number | 'due'; poll?: number };
 type Script = Array<Op | Op[]>;
 
 /** A sleep also says whether it woke before its own length — what a replayed deadline does. */
-type OpResult = { value: unknown; early?: boolean } | { error: { name: string; message: string } };
+type OpResult =
+  | { value: unknown; early?: boolean }
+  | { error: { name: string; message: string; status?: unknown; details?: unknown } };
 
 /** An op's result the moment it settled: its place in the script, and how long after the start. */
 interface Settled {
@@ -88,6 +91,9 @@ function runScript(
       call = port.step(op.name, async () => {
         invocations.set(op.name, (invocations.get(op.name) ?? 0) + 1);
         await port.pause(op.ms ?? 0);
+        if (op.fails === 'marked') throw new StepBodyError(`boom in ${op.name}`);
+        if (op.fails === 'refused')
+          throw new StepBodyError(`refused in ${op.name}`, 428, { code: 'no_account' });
         if (op.fails) throw new Error(`boom in ${op.name}`);
         return { from: op.name };
       });
@@ -102,7 +108,13 @@ function runScript(
     }
     return call.then(
       (value) => ({ value: value ?? null }),
-      (err: Error) => ({ error: { name: err.name, message: err.message } }),
+      (err: Error & { status?: unknown; details?: unknown }) => ({
+        error: {
+          name: err.name,
+          message: err.message,
+          ...(err.status === undefined ? {} : { status: err.status, details: err.details }),
+        },
+      }),
     );
   };
   return (async () => {
@@ -403,6 +415,40 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
       { id: 3, name: 'DBOS.recv', value: { early: true } },
       { id: 5, name: 'DBOS.recv', value: null },
       { id: 7, name: 'end', value: { from: 'end' } },
+    ]);
+  }, 30_000);
+
+  it('replays a step body’s marked failure with its name, so a replay sees it as the same failure', async () => {
+    const seen = await both(async (backend, name) => {
+      const script: Script = [{ op: 'step', name: `${name}-marked`, fails: 'marked' }];
+      return {
+        first: await backend.start(name, script).result(),
+        replay: await backend.fork(name, 1, script).result(),
+      };
+    });
+    expect(seen.first).toEqual([
+      { error: { name: 'StepBodyError', message: expect.stringMatching(/^boom in /) } },
+    ]);
+    expect(seen.replay).toEqual(seen.first);
+  }, 30_000);
+
+  it('replays a step body’s recorded refusal with its status and details', async () => {
+    const seen = await both(async (backend, name) => {
+      const script: Script = [{ op: 'step', name: `${name}-refused`, fails: 'refused' }];
+      return {
+        first: await backend.start(name, script).result(),
+        replay: await backend.fork(name, 1, script).result(),
+      };
+    });
+    expect(seen.replay).toEqual([
+      {
+        error: {
+          name: 'StepBodyError',
+          message: expect.stringMatching(/^refused in /),
+          status: 428,
+          details: { code: 'no_account' },
+        },
+      },
     ]);
   }, 30_000);
 

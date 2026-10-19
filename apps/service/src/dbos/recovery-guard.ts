@@ -118,6 +118,27 @@ export async function pendingLegacyRuns(
   return pending.map((workflow) => ({ runId: workflow.workflowID, run: checkpointedRun(workflow.input) }));
 }
 
+/** What the legacy engine has in flight, read from outside any workflow. */
+export interface LegacyHistory {
+  /** Its runs in flight, each with what it checkpointed. */
+  pending: () => Promise<Array<{ runId: string; run: CheckpointedRun }>>;
+  /** Every op a run recorded, decoded as its replay decodes it. */
+  opsOf: (scopedRunId: string) => Promise<RecordedOp[]>;
+}
+
+/** Read the legacy engine's history over `systemDatabaseUrl` until `read` settles. */
+export async function readLegacyHistory<T>(
+  systemDatabaseUrl: string,
+  read: (history: LegacyHistory) => Promise<T>,
+): Promise<T> {
+  const client = await DBOSClient.create({ systemDatabaseUrl });
+  try {
+    return await read({ pending: () => pendingLegacyRuns(client), opsOf: (id) => recordedOps(client, id) });
+  } finally {
+    await client.destroy();
+  }
+}
+
 /** Whether the run's row has already ended, which stops its workflow before the guard judges it. */
 export async function alreadyEnded(app: Sql, scopedRunId: string): Promise<boolean> {
   const [row] = await app(`SELECT status FROM runtime_runs WHERE id = $1`, [scopedRunId]);

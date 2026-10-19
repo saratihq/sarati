@@ -40,6 +40,11 @@ export function waitsRoutedByStep(plan: DagPlan): ReadonlySet<DagWaitForEventNod
   return routed;
 }
 
+/** Every wait in `plan`, nested ones included: a run on the sequenced engine receives each on its own step's topic. */
+export function everyWait(plan: DagPlan): ReadonlySet<DagWaitForEventNode> {
+  return new Set([...waitsIn(plan.nodes).values()].flat());
+}
+
 function scan(plan: DagPlan, routed: Set<DagWaitForEventNode>): void {
   const waits = plan.nodes.map((n) => waitsIn([n]));
   const holding = waits.flatMap((w, i) => (w.size > 0 ? [i] : []));

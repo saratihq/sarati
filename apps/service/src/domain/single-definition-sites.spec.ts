@@ -124,6 +124,15 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(offenders).toEqual([]);
   });
 
+  /** Constitution #19: a recorded history is replayed as it ran, never patched into another one. */
+  it('no module patches a durable workflow', () => {
+    const offenders = sources()
+      .filter((f) => f.text.includes('@dbos-inc/dbos-sdk') && /\b(patch|deprecatePatch)\s*\(/.test(f.text))
+      .map((f) => f.rel);
+
+    expect(offenders).toEqual([]);
+  });
+
   /**
    * Constitution #4's other half: byte-comparing two documents is banned — key order and
    * absent-vs-undefined make it answer a different question than `computeDiff`.

@@ -6,6 +6,7 @@ import type { Response } from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { eventTopicFor } from '../src/runtime/event-wait';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -565,7 +566,11 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
     };
   }
 
-  it('receives approvals one after another on one topic on the topic itself, mirrored for an earlier version', async () => {
+  it('receives approvals one after another on one topic on the topic itself in process, mirrored for an earlier version, and each on its own step’s topic on the sequenced engine', async () => {
+    const parked = (stepKey: string) =>
+      rail.dbos
+        ? { slot: null, delivery: { [stepKey]: eventTopicFor(stepKey) } }
+        : { slot: stepKey, delivery: { [stepKey]: null } };
     const waits: Wait[] = [
       { id: 'manager', topic: 'approval' },
       { id: 'director', topic: 'approval' },
@@ -576,7 +581,7 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       (r) => 'manager' in r.delivery,
       'the manager parked',
     );
-    expect(await receivesOf('seq')).toEqual({ slot: 'manager', delivery: { manager: null } });
+    expect(await receivesOf('seq')).toEqual(parked('manager'));
 
     await answer('seq', 'approval', { by: 'manager' }).expect(200);
     await eventually(
@@ -584,7 +589,7 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       (r) => 'director' in r.delivery,
       'the director parked',
     );
-    expect(await receivesOf('seq')).toEqual({ slot: 'director', delivery: { director: null } });
+    expect(await receivesOf('seq')).toEqual(parked('director'));
 
     await answer('seq', 'approval', { by: 'director' }).expect(200);
     const done = await seq;

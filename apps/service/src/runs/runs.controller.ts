@@ -230,6 +230,7 @@ export class RunsController {
       activeOrgId: principal.activeOrgId,
       source,
       initialScope: body.trigger_payload ? { trigger: body.trigger_payload } : undefined,
+      authored: true,
     };
   }
 
@@ -243,6 +244,7 @@ export class RunsController {
       runId: this.requestedRunId(req, body.run_id),
       source: 'api',
       dryRun: body.dry_run,
+      authored: true,
     });
   }
 

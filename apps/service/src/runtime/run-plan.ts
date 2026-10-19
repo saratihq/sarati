@@ -101,7 +101,10 @@ export interface RunPlan {
 
 /** One executed action, in execution order (observability). `nodeId` includes the loop/branch path. */
 export interface TraceEntry {
+  /** The step's key, its node's id under the path of the branch, loop round or error lane it ran in. */
   nodeId: string;
+  /** The node's own id, whatever path its step ran under. */
+  node: string;
   output: unknown;
   /** Non-fatal honesty notes from the action's rail — observational, the step still succeeded. */
   warnings?: string[];

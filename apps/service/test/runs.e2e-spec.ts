@@ -223,7 +223,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
   });
 
   it('run history: a from-ir COMPILE failure is still recorded as a failed run', async () => {
-    // An IR the compiler rejects (unmapped node type) — the 400 must still leave a run row.
+    // An IR the compiler rejects (a code step with no snippet) — the 400 must still leave a run row.
     const workflow_ir = {
       version: '1',
       name: 'uncompilable',
@@ -232,9 +232,9 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
         {
           id: 'mystery',
           name: 'Mystery Step',
-          node_type: 'mystery',
+          node_type: 'orchestr:code',
           type_version: 1,
-          parameters: {},
+          parameters: { language: 'js', code: '' },
           position: { x: 0, y: 0 },
           metadata: {},
         },
@@ -247,9 +247,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
       .post('/api/runs/from-ir')
       .send({ workflow_ir, run_id: 'hist-run-compile-fail' })
       .expect(400);
-    expect(String(res.body.detail)).toContain(
-      'Step "Mystery Step" isn\'t runnable on this engine yet (mystery)',
-    );
+    expect(String(res.body.detail)).toContain('Code node "Mystery Step" needs a non-empty "code" snippet');
 
     // The attempt survives in run history with the humanized error.
     const list = await request(app.getHttpServer()).get('/api/runs').expect(200);
@@ -257,7 +255,7 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
       (r) => r.run_id === 'hist-run-compile-fail',
     );
     expect(mine?.status).toBe('error');
-    expect(String(mine?.error)).toContain('Step "Mystery Step" isn\'t runnable on this engine yet');
+    expect(String(mine?.error)).toContain('Code node "Mystery Step" needs a non-empty "code" snippet');
     expect(mine?.source).toBe('manual');
 
     const detail = await request(app.getHttpServer()).get('/api/runs/hist-run-compile-fail').expect(200);
@@ -265,9 +263,8 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(detail.body.finished_at).toBeTruthy();
   });
 
-  it('true pinning: a pinned step REPLAYS its output — the provider is never called', async () => {
-    // The pinned node's action would FAIL if executed, so the run can only succeed if the pin
-    // short-circuits the provider call entirely.
+  it('true pinning: a pinned step REPLAYS its output — the step itself never runs', async () => {
+    // The pinned node FAILS if it runs, so the run can only succeed if the pin short-circuits it entirely.
     const workflow_ir = {
       version: '1',
       name: 'pinned',
@@ -276,9 +273,9 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
         {
           id: 'boom',
           name: 'boom',
-          node_type: 'nope.do', // unregistered → throws if the provider is called
+          node_type: 'orchestr:code',
           type_version: 1,
-          parameters: {},
+          parameters: { language: 'js', code: 'throw new Error("boom failed")' },
           position: { x: 0, y: 0 },
           metadata: {},
         },
@@ -310,12 +307,12 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
       .post('/api/runs/from-ir')
       .send({ workflow_ir, pins: { boom: { value: 'PINNED' } }, run_id: 'pin-run-1' })
       .expect(201);
-    // The pinned step replayed its captured output (the provider was never called)...
+    // The pinned step replayed its captured output (it never ran)...
     expect(res.body.outputs.boom).toEqual({ value: 'PINNED' });
     // ...and the downstream step composed against the replayed value (scope wiring).
     expect(res.body.outputs.after).toBe('got-PINNED');
 
-    // CONTROL: without the pin, the same IR FAILS — because the provider IS called.
+    // CONTROL: without the pin, the same IR FAILS — because the step DOES run.
     const control = await request(app.getHttpServer())
       .post('/api/runs/from-ir')
       .send({ workflow_ir, run_id: 'pin-run-control' });
@@ -336,9 +333,9 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     const boom = (parameters: Record<string, unknown>) => ({
       id: 'boom',
       name: 'boom',
-      node_type: 'nope.do', // unregistered → throws when executed
+      node_type: 'orchestr:code',
       type_version: 1,
-      parameters,
+      parameters: { language: 'js', code: 'throw new Error("boom failed")', ...parameters },
       position: { x: 0, y: 0 },
       metadata: {},
     });
@@ -402,9 +399,9 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     const boom = (parameters: Record<string, unknown>) => ({
       id: 'boom',
       name: 'boom',
-      node_type: 'nope.do', // unregistered → throws every attempt
+      node_type: 'orchestr:code',
       type_version: 1,
-      parameters,
+      parameters: { language: 'js', code: 'throw new Error("boom failed")', ...parameters },
       position: { x: 0, y: 0 },
       metadata: {},
     });
@@ -479,9 +476,9 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
         {
           id: 'boom',
           name: 'boom',
-          node_type: 'nope.do',
+          node_type: 'orchestr:code',
           type_version: 1,
-          parameters: {},
+          parameters: { language: 'js', code: 'throw new Error("boom failed")' },
           position: { x: 0, y: 0 },
           metadata: {},
         },

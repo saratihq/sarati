@@ -31,11 +31,19 @@ export interface SubWorkflowContext {
   /** The PARENT's call depth; the runner enters at `depth + 1` and rejects beyond the fixed cap. */
   depth: number;
   /**
-   * The tree-wide invocation counter, inherited by the nested run so every agent under it shares one
+   * The legacy engine's in-memory invocation counter, inherited by the nested run so every agent under it shares one
    * budget. Charged by the AGENT path only, where the number of calls is the model's choice — an
    * authored step's fan-out is the loop the author wrote.
    */
   budget: { remaining: number };
   /** Parent-run dry-run flag — a preview parent runs the sub-workflow dry too. */
   dryRun: boolean;
+  /** The parent's error-lane keying, which the child runs under too, so a legacy parent's child keeps its keys. */
+  ownErrorLanePaths: boolean;
+  /** The parent's budget mode, which the child runs under too. */
+  budgetCharged: boolean;
+  /** The root of the run tree, which the child's agents' sub-workflow calls are charged to as well. */
+  rootRunId: string;
+  /** The runs between the root and the caller, the caller last; empty when the root calls. */
+  lineage: readonly string[];
 }

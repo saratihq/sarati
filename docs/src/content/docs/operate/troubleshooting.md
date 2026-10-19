@@ -76,14 +76,14 @@ from a wait, within five minutes.
 
 ## A run reads "…so it can't be resumed safely — run it again."
 
-The service stopped — a restart, a crash or an upgrade — and resuming the run could have put a step's
-result or a decision in the wrong place: it had run steps side by side, an AI Agent step in it was
-refused a sub-workflow call and carried on, or what it recorded does not fit its workflow. The
-message says which. Nothing in it ran again: each step it had under way reads *Stopped when the
-service did*, and a decision it had not taken yet is recorded on its wait, with who made it, but not
-applied. Run the workflow again. The service log names the run at
-warn level with the reason, followed by a `RunNotResumable` error and its stack trace: that is the
-run ending, not a fault in the service.
+The service stopped — a restart, a crash or an upgrade — and resuming the run, which an earlier
+version started, could have put a step's result or a decision in the wrong place: it had run steps
+side by side, an AI Agent step in it was refused a sub-workflow call and carried on, or what it
+recorded does not fit its workflow. The message says which. Nothing in it ran again: each step it had
+under way reads *Stopped when the service did*, and a decision it had not taken yet is recorded on
+its wait, with who made it, but not applied. Run the workflow again. The service log names the run
+at warn level with the reason, followed by a `RunNotResumable` error and its stack trace: that is
+the run ending, not a fault in the service.
 [Durability](/run/runs/#durability) says which runs this happens to, and
 [Upgrades](/operate/upgrades/#upgrade) how to list them before a restart.
 

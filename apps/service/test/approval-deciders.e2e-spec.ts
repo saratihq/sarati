@@ -553,17 +553,28 @@ describe.each([
       await answer(asB, 'sibling-fails', 'legal', { decision: 'approved' }).expect(200);
       await resume.entered;
       await answer(asA, 'sibling-fails', 'finance', { decision: 'approved' }).expect(200);
-      await eventually(
-        () => detailOf('sibling-fails'),
-        (d) => stepOf(d, 'boom')?.status === 'error',
-        'the sibling branch failing',
-      );
-      let endedFirst = false;
-      for (let i = 0; i < 30 && !endedFirst; i++) {
-        endedFirst = isTerminal(await detailOf('sibling-fails'));
-        if (!endedFirst) await new Promise((r) => setTimeout(r, 50));
+      if (dbos) {
+        // On the sequenced engine the resume write holds the run's turn: nothing else in the run moves until it lands.
+        await new Promise((r) => setTimeout(r, 1_500));
+        const held = await detailOf('sibling-fails');
+        expect([isTerminal(held), stepOf(held, 'finance').status, stepOf(held, 'boom')?.status]).toEqual([
+          false,
+          'running',
+          undefined,
+        ]);
+      } else {
+        await eventually(
+          () => detailOf('sibling-fails'),
+          (d) => stepOf(d, 'boom')?.status === 'error',
+          'the sibling branch failing',
+        );
+        let endedFirst = false;
+        for (let i = 0; i < 30 && !endedFirst; i++) {
+          endedFirst = isTerminal(await detailOf('sibling-fails'));
+          if (!endedFirst) await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(endedFirst).toBe(false);
       }
-      expect(endedFirst).toBe(false);
       resume.release();
       const res = await run;
       expect([res.status, res.body.failed_node_id]).toEqual([422, 'boom']);
@@ -651,19 +662,20 @@ describe.each([
       await answer(asA, 'recorded-late', 'legal', { decision: 'approved' }).expect(200);
       await resume.entered;
       await answer(asB, 'recorded-late', 'finance', { decision: 'approved' }).expect(200);
-      const finance = stepOf(
+      // In process the later decision is taken first; the sequenced engine's held turn keeps the order they came in.
+      if (!dbos) {
         await eventually(
           () => detailOf('recorded-late'),
           (d) => stepOf(d, 'finance').status === 'completed',
           'the run taking the finance decision',
-        ),
-        'finance',
-      );
+        );
+      }
       resume.release();
       expect((await run).status).toBe(201);
 
       const detail = await detailOf('recorded-late');
       const legal = stepOf(detail, 'legal');
+      const finance = stepOf(detail, 'finance');
       expect([legal.decided_by, stepOf(detail, 'finance').decided_by]).toEqual([ada, bo]);
       expect(Date.parse(legal.decided_at!)).toBeLessThan(Date.parse(finance.decided_at!));
       expect(await runSlotOf('recorded-late')).toEqual({

@@ -1,11 +1,12 @@
 import type { RuntimeRunStatus } from '../database/entities/runtime-run.entity';
-import { RowGatedDurableStep } from '../dbos/dbos-durable-step';
+import { DbosDurableStep, RowGatedDurableStep } from '../dbos/dbos-durable-step';
 import {
   DeterminismError,
   PassThroughDurableStep,
   RunCancelledError,
   type DurableStep,
 } from '../providers/durable-step';
+import { substrate } from '../providers/durable-step.testkit';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import type { CodeRunner } from './code-runner';
 import { DagInterpreter } from './dag-interpreter';
@@ -143,19 +144,13 @@ describe('DagInterpreter (gating scheduler)', () => {
 
   it('delay: pauses via the DurableStep with a plan-scoped, path-scoped key', async () => {
     const sleeps: Array<{ name: string; ms: number }> = [];
-    const recording: DurableStep = {
-      run: (_n, fn) => fn(),
+    const recording = substrate({
       sleep: (name, ms) => {
         sleeps.push({ name, ms });
         return Promise.resolve();
       },
-      waitForEvent: () => Promise.resolve(null),
-      waitInStep: () => Promise.resolve(),
-      isCancellation: () => false,
-      isFatal: () => false,
-      throwIfCancelled: () => undefined,
-      cancelSeenOnRow: () => new RunCancelledError(),
-    };
+      receive: () => Promise.resolve(null),
+    });
     await interpreter.run(
       plan([
         action('before'),
@@ -271,19 +266,13 @@ describe('DagInterpreter (gating scheduler)', () => {
 
     it('receives a single wait inside a loop on its topic every round, the rounds one after another', async () => {
       const topics: string[] = [];
-      const recording: DurableStep = {
-        run: (_n, fn) => fn(),
+      const recording = substrate({
         sleep: () => Promise.resolve(),
-        waitForEvent: <T>(_n: string, topic: string): Promise<T | null> => {
+        receive: <T>(_n: string, topic: string): Promise<T | null> => {
           topics.push(topic);
           return Promise.resolve({ round: topics.length } as T);
         },
-        waitInStep: () => Promise.resolve(),
-        throwIfCancelled: () => undefined,
-        cancelSeenOnRow: () => new RunCancelledError(),
-        isCancellation: () => false,
-        isFatal: () => false,
-      };
+      });
       const result = await interpreter.run(
         plan([
           {
@@ -314,19 +303,13 @@ describe('DagInterpreter (gating scheduler)', () => {
 
     it('receives waits one after another on one topic on the topic itself, where an earlier version sends', async () => {
       const topics: string[] = [];
-      const recording: DurableStep = {
-        run: (_n, fn) => fn(),
+      const recording = substrate({
         sleep: () => Promise.resolve(),
-        waitForEvent: <T>(_n: string, topic: string): Promise<T | null> => {
+        receive: <T>(_n: string, topic: string): Promise<T | null> => {
           topics.push(topic);
           return Promise.resolve({ round: topics.length } as T);
         },
-        waitInStep: () => Promise.resolve(),
-        throwIfCancelled: () => undefined,
-        cancelSeenOnRow: () => new RunCancelledError(),
-        isCancellation: () => false,
-        isFatal: () => false,
-      };
+      });
       const result = await interpreter.run(
         plan([
           { kind: 'waitForEvent', id: 'manager', topic: 'approval', timeoutMs: 5_000, guards: [] },
@@ -373,19 +356,13 @@ describe('DagInterpreter (gating scheduler)', () => {
 
     it('receives every wait on its topic in a run recovered from before shared topics were routed by step', async () => {
       const topics: string[] = [];
-      const recording: DurableStep = {
-        run: (_n, fn) => fn(),
+      const recording = substrate({
         sleep: () => Promise.resolve(),
-        waitForEvent: <T>(_n: string, topic: string): Promise<T | null> => {
+        receive: <T>(_n: string, topic: string): Promise<T | null> => {
           topics.push(topic);
           return Promise.resolve({} as T);
         },
-        waitInStep: () => Promise.resolve(),
-        throwIfCancelled: () => undefined,
-        cancelSeenOnRow: () => new RunCancelledError(),
-        isCancellation: () => false,
-        isFatal: () => false,
-      };
+      });
       await interpreter.run(
         plan([
           { kind: 'waitForEvent', id: 'first', topic: 'approval', timeoutMs: 5_000, guards: [] },
@@ -417,16 +394,10 @@ describe('DagInterpreter (gating scheduler)', () => {
         };
         process.on('unhandledRejection', onUnhandled);
         try {
-          const cancelled: DurableStep = {
-            run: (_n, fn) => fn(),
+          const cancelled = substrate({
             sleep: () => Promise.resolve(),
-            waitForEvent: () => Promise.reject(new Error('Workflow has been cancelled')),
-            waitInStep: () => Promise.resolve(),
-            throwIfCancelled: () => undefined,
-            cancelSeenOnRow: () => new RunCancelledError(),
-            isCancellation: () => false,
-            isFatal: () => false,
-          };
+            receive: () => Promise.reject(new Error('Workflow has been cancelled')),
+          });
           const slowPark = (): Promise<null> => new Promise((r) => setTimeout(() => r(null), 50));
           await expect(
             interpreter.run(plan([node]), {
@@ -454,16 +425,10 @@ describe('DagInterpreter (gating scheduler)', () => {
           return Promise.resolve();
         },
       } as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
-      const woke: DurableStep = {
-        run: (_n, fn) => fn(),
+      const woke = substrate({
         sleep: () => Promise.resolve(),
-        waitForEvent: () => Promise.resolve(null),
-        waitInStep: () => Promise.resolve(),
-        throwIfCancelled: () => undefined,
-        cancelSeenOnRow: () => new RunCancelledError(),
-        isCancellation: () => false,
-        isFatal: () => false,
-      };
+        receive: () => Promise.resolve(null),
+      });
       await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
         externalUserId: 'u',
         durable: woke,
@@ -476,19 +441,14 @@ describe('DagInterpreter (gating scheduler)', () => {
 
   it('pinning: a pinned action replays its output and never calls the provider', async () => {
     const seen: string[] = [];
-    const recording: DurableStep = {
+    const recording = substrate({
       run: <T>(name: string, fn: () => Promise<T>) => {
         seen.push(name);
         return fn();
       },
       sleep: () => Promise.resolve(),
-      waitForEvent: () => Promise.resolve(null),
-      waitInStep: () => Promise.resolve(),
-      isCancellation: () => false,
-      isFatal: () => false,
-      throwIfCancelled: () => undefined,
-      cancelSeenOnRow: () => new RunCancelledError(),
-    };
+      receive: () => Promise.resolve(null),
+    });
     const result = await interpreter.run(
       plan([action('fetch'), action('push', { up: '{{fetch.id}}' }, [guard('fetch')])]),
       { externalUserId: 'u', durable: recording, pins: { fetch: { id: 99 } } },
@@ -511,6 +471,30 @@ describe('DagInterpreter (gating scheduler)', () => {
     expect((result.outputs.handler as { props: { msg: string } }).props.msg).toContain('boom:act.boom');
     expect(result.outputs.after).toBeUndefined(); // main successor skipped — never both lanes
     expect((result.outputs.boom as { __errored: boolean }).__errored).toBe(true);
+  });
+
+  it('keys each copy of a handler two failing steps share under its own source, and under their path on the legacy engine', async () => {
+    const failing = new DagInterpreter(echoProvider((id) => id === 'act.a' || id === 'act.b'));
+    const shared = (source: string): Partial<DagActionNode> => ({
+      onErrorBranch: { id: `dag#${source}:error`, nodes: [action('handler')] },
+    });
+    const keysOf = async (ownErrorLanePaths?: boolean): Promise<string[]> => {
+      const seen: string[] = [];
+      await failing.run(plan([action('a', {}, [], shared('a')), action('b', {}, [], shared('b'))]), {
+        externalUserId: 'u',
+        ownErrorLanePaths,
+        durable: substrate({
+          run: <T>(name: string, fn: () => Promise<T>) => {
+            seen.push(name);
+            return fn();
+          },
+        }),
+      });
+      return seen.filter((name) => name.endsWith('handler')).sort();
+    };
+
+    expect(await keysOf()).toEqual(['dag:a#error/handler', 'dag:b#error/handler']);
+    expect(await keysOf(false)).toEqual(['dag:handler', 'dag:handler']);
   });
 
   it('continue-on-fail: a tolerated throw captures the error and lets the run go on', async () => {
@@ -766,5 +750,53 @@ describe('what a code step and a called workflow hand the run', () => {
     expect(result.outputs.c).toEqual(fromCode);
     expect(result.outputs.w).toEqual(fromCall);
     expect((result.outputs.after as { props: unknown }).props).toEqual({ fromCode: 'code', fromCall: 42 });
+  });
+});
+
+// The legacy engine's substrate as a recovered run gets it, its steps run in place of DBOS's.
+class LegacyLanes extends DbosDurableStep {
+  override run<T>(_name: string, fn: () => Promise<T>): Promise<T> {
+    return fn();
+  }
+}
+
+describe('a failure and a success that land together', () => {
+  const substrates: Record<string, () => DurableStep> = {
+    'in process': () => new PassThroughDurableStep(),
+    'on the legacy engine': () =>
+      new RowGatedDurableStep(new LegacyLanes(), () => Promise.resolve('running')),
+  };
+
+  it.each([
+    ['in process', 'ahead of', ['fails', 'passes']],
+    ['in process', 'behind', ['passes', 'fails']],
+    ['on the legacy engine', 'ahead of', ['fails', 'passes']],
+    ['on the legacy engine', 'behind', ['passes', 'fails']],
+  ])('%s, starts no step after the success when the failure is planned %s it', async (on, _, order) => {
+    let open!: () => void;
+    const together = new Promise<void>((resolve) => (open = resolve));
+    const ran: string[] = [];
+    const provider: ManagedIntegrationProvider = {
+      key: 'echo',
+      runAction: async (input) => {
+        ran.push(input.actionId);
+        if (input.actionId === 'act.after') return { output: {} };
+        await together;
+        if (input.actionId === 'act.fails') throw new Error('boom:fails');
+        return { output: { ran: input.actionId } };
+      },
+      enableTrigger: () => Promise.resolve(),
+      pollTrigger: () => Promise.resolve([]),
+      disableTrigger: () => Promise.resolve(),
+    };
+    const nodes = [...order.map((id) => action(id)), action('after', {}, [guard('passes')])];
+    const running = new DagInterpreter(provider).run(plan(nodes), {
+      externalUserId: 'u',
+      durable: substrates[on]!(),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    open();
+    await expect(running).rejects.toThrow('boom:fails');
+    expect(ran).not.toContain('act.after');
   });
 });

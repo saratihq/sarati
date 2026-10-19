@@ -8,6 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
+import { eventTopicFor } from '../src/runtime/event-wait';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -116,6 +117,17 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
     return res.rows[0] as Record<string, unknown> | undefined;
   }
 
+  // The sequenced engine parks a wait on its own step's topic and never in the run's slot.
+  async function parkedOn(runId: string): Promise<Record<string, unknown>[]> {
+    const res = await db.query(
+      `SELECT s.step_key, s.waiting_topic, s.delivery_topic FROM runtime_run_steps s
+         JOIN runtime_runs r ON r.id = s.run_id
+        WHERE r.run_id = $1 AND s.waiting_topic IS NOT NULL`,
+      [runId],
+    );
+    return res.rows as Record<string, unknown>[];
+  }
+
   async function stepsOf(runId: string): Promise<unknown[]> {
     const res = await db.query(
       `SELECT s.node_id, s.status, s.error, s.output
@@ -191,13 +203,16 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
       .expect(201);
     await until('parked', 'waiting');
     const before = await row('parked');
-    expect(before).toMatchObject({ status: 'waiting', waiting_topic: 'go' });
+    expect(before).toMatchObject({ status: 'waiting', waiting_topic: null });
+    const parked = [{ step_key: 'ask', waiting_topic: 'go', delivery_topic: eventTopicFor('ask') }];
+    expect(await parkedOn('parked')).toEqual(parked);
 
     for (const route of ['/api/runs', '/api/runs/async']) {
       const refused = await http().post(route).send({ plan: UNCOMPILABLE_PLAN, run_id: 'parked' });
       expect(refused.status).toBe(400);
       expect(refused.body.code).toBe('compile_failed');
       expect(await row('parked')).toEqual(before);
+      expect(await parkedOn('parked')).toEqual(parked);
     }
     expect(await inboxRunIds()).toContain('parked');
 
@@ -238,9 +253,12 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
           status: 'waiting',
           error: null,
           finished_at: null,
-          waiting_node_id: 'ask',
-          waiting_topic: 'go',
+          waiting_node_id: null,
+          waiting_topic: null,
         });
+        expect(await parkedOn(runId)).toEqual([
+          { step_key: 'ask', waiting_topic: 'go', delivery_topic: eventTopicFor('ask') },
+        ]);
         expect(await inboxRunIds()).toContain(runId);
 
         if (ending === 'answered') {
@@ -337,6 +355,36 @@ describe('a refused run start touches no other run (e2e, isolated DB, DBOS on, m
     expect(await row('twice')).toMatchObject({ status: 'error', error: second.body.detail, dry_run: true });
     const detail = await until('twice', 'error');
     expect(detail.error).toBe(second.body.detail);
+  });
+
+  it('refuses a document whose node id could name another step, before it compiles, on every route a caller hands one to', async () => {
+    const plan = (id: string) => ({
+      id: 'plan-ids',
+      nodes: [{ kind: 'action', id, actionId: 'text.concat', props: { texts: ['x'], separator: '' } }],
+    });
+    const ir = (id: string) => {
+      const doc = deployableIr('ids');
+      return { ...doc, nodes: (doc.nodes as Array<Record<string, unknown>>).map((n) => ({ ...n, id })) };
+    };
+    const cases = [
+      ['/api/runs', { plan: plan('a|b') }, 'a|b'],
+      ['/api/runs/async', { plan: plan('two words') }, 'two words'],
+      ['/api/runs/from-ir', { workflow_ir: ir('a:b') }, 'a:b'],
+      ['/api/runs/async', { workflow_ir: ir('a#b') }, 'a#b'],
+    ] as const;
+    for (const [i, [route, body, id]] of cases.entries()) {
+      const runId = `ids-${i}`;
+      const refused = await http()
+        .post(route)
+        .send({ ...body, run_id: runId });
+      expect(refused.status).toBe(400);
+      expect(refused.body).toMatchObject({
+        code: 'compile_failed',
+        detail: `Workflow can't run: Node id "${id}" is invalid — use a short identifier (letters, digits, _ or -, max 60 chars).`,
+      });
+      expect(await row(runId)).toMatchObject({ status: 'error', error: refused.body.detail });
+      expect(await stepsOf(runId)).toEqual([]);
+    }
   });
 
   it('records a refused dry run as the dry run it was', async () => {
