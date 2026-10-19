@@ -13,8 +13,10 @@ FROM node:24-alpine
 # No global PORT: each service sets its own in supervisord, exactly as its own image does.
 # Setting one here leaked 8001 into the agent and the two fought over the port.
 # ENV does not carry over from the images above, so production mode is switched on here again.
+# The bundled Caddy is the one proxy hop in front of the service, and the only one it trusts.
 ENV NODE_ENV=production \
     ENVIRONMENT=production \
+    TRUST_PROXY_HOPS=1 \
     PGDATA=/data/postgres \
     SARATI_SERVICE_DIR=/opt/sarati/service \
     PATH=/usr/libexec/postgresql16:$PATH

@@ -5,6 +5,7 @@ import { Logger } from 'nestjs-pino';
 
 import { AppModule } from './app.module';
 import { genRequestId } from './common/request-id';
+import { trustProxies } from './common/trust-proxies';
 import type { EnvConfig } from './config/env.config';
 
 async function bootstrap(): Promise<void> {
@@ -33,6 +34,8 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  trustProxies(app, env.trustProxyHops);
+
   // Request id first — logs and error responses all see the same id.
   app.use((req: Request, res: Response, next: NextFunction) => {
     (req as unknown as { id: string }).id = genRequestId(req, res);
@@ -47,7 +50,7 @@ async function bootstrap(): Promise<void> {
   });
 
   app.enableShutdownHooks();
-  await app.listen(env.port);
+  await (env.listenHost ? app.listen(env.port, env.listenHost) : app.listen(env.port));
 }
 
 void bootstrap();

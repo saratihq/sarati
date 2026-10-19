@@ -50,5 +50,7 @@ export function composerDisabledHint(a: ComposerAvailability): string {
     ? "AI composer needs an Anthropic API key — add one under Settings"
     : a.reason === "caller_auth_unconfigured"
       ? "AI composer isn't configured on this instance — see docs"
-      : "AI composer isn't available on this instance";
+      : a.reason === "rate_limited"
+        ? "AI composer: too many requests — try again in a minute"
+        : "AI composer isn't available on this instance";
 }

@@ -3,12 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { jwtVerify, SignJWT } from 'jose';
 import request from 'supertest';
 
 import { AppModule } from '../app.module';
+import { trustProxies } from '../common/trust-proxies';
+import type { EnvConfig } from '../config/env.config';
 import { LOCAL_ISSUER } from './composer-auth.guard';
 
 /**
@@ -30,6 +33,10 @@ let serviceStub: Server;
 let serviceUrl: string;
 /** Every internal token the stub saw, so it can be asserted rather than assumed. */
 let internalAuth: string[] = [];
+/** The X-Forwarded-For each key read carried — the address workflow-service counts its limits against. */
+let forwardedFor: string[] = [];
+/** Whether the stub answers key reads as workflow-service does once a caller's limit is spent. */
+let rateLimited = false;
 
 /** A signed-in caller — the composer answers about THEM, so every probe carries one. */
 let callerToken = '';
@@ -50,6 +57,12 @@ beforeAll(async () => {
       const caller = req.headers.authorization ?? '';
       const internal = (req.headers['x-internal-token'] as string | undefined) ?? '';
       internalAuth.push(internal);
+      forwardedFor.push((req.headers['x-forwarded-for'] as string | undefined) ?? '');
+      if (rateLimited) {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ detail: 'Rate limit exceeded. Please try again later.' }));
+        return;
+      }
       if (!caller.startsWith('Bearer ')) {
         res.writeHead(401).end();
         return;
@@ -103,6 +116,10 @@ async function boot(overrides: Record<string, string>): Promise<INestApplication
   process.env = { PATH: process.env.PATH, ...BASE_ENV, WORKFLOW_SERVICE_URL: serviceUrl, ...overrides };
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication();
+  trustProxies(
+    app,
+    app.get(ConfigService<{ env: EnvConfig }, true>).get('env', { infer: true }).trustProxyHops,
+  );
   // An exclusive loopback port: supertest's own listen(0) on the IPv6 wildcard can collide with a 127.0.0.1 socket.
   await app.listen(0, '127.0.0.1');
   return app;
@@ -115,6 +132,8 @@ describe('composer availability', () => {
   beforeEach(async () => {
     storedKey = null;
     internalAuth = [];
+    forwardedFor = [];
+    rateLimited = false;
     callerToken = await localToken();
   });
 
@@ -310,6 +329,53 @@ describe('composer availability', () => {
       app = await boot(SELF_HOST);
 
       await asCaller(request(app.getHttpServer()).get('/api/composer/status')).expect(200, { status: 'ok' });
+    });
+
+    it("sends each visitor's address on behind Sarati's proxy, so the service counts their limits apart", async () => {
+      app = await boot({ ...SELF_HOST, TRUST_PROXY_HOPS: '1' });
+
+      for (const visitor of ['203.0.113.1', '2001:db8:a:b::7']) {
+        await asCaller(request(app.getHttpServer()).get('/api/composer/status'))
+          .set('X-Forwarded-For', visitor)
+          .expect(200, { status: 'ok' });
+      }
+      expect(forwardedFor).toEqual(['203.0.113.1', '2001:db8:a:b::7']);
+    });
+
+    it('says a rate-limited caller asked too often — never that they lack a key — and the endpoints answer 429', async () => {
+      storedKey = 'sk-test';
+      rateLimited = true;
+      app = await boot(SELF_HOST);
+
+      const status = await asCaller(request(app.getHttpServer()).get('/api/composer/status')).expect(200);
+      expect(status.body).toEqual({
+        status: 'disabled',
+        reason: 'rate_limited',
+        message: 'Too many requests from your address — try again in a minute.',
+        docs: expect.any(String),
+      });
+      const token = await asCaller(request(app.getHttpServer()).post('/api/composer/token'))
+        .send({ session_id: randomUUID() })
+        .expect(429);
+      expect(token.body).toMatchObject({ reason: 'rate_limited' });
+    });
+
+    it('sends on only the entry the trusted proxy added, never one the visitor wrote before it', async () => {
+      app = await boot({ ...SELF_HOST, TRUST_PROXY_HOPS: '1' });
+
+      await asCaller(request(app.getHttpServer()).get('/api/composer/status'))
+        .set('X-Forwarded-For', '198.51.100.66, 203.0.113.1')
+        .expect(200, { status: 'ok' });
+      expect(forwardedFor).toEqual(['203.0.113.1']);
+    });
+
+    it('trusting no proxy, sends on the connecting address, never one a caller wrote', async () => {
+      app = await boot(SELF_HOST);
+
+      await asCaller(request(app.getHttpServer()).get('/api/composer/status'))
+        .set('X-Forwarded-For', '198.51.100.66')
+        .expect(200, { status: 'ok' });
+      expect(forwardedFor).toEqual([expect.stringMatching(/^(::ffff:)?127\.0\.0\.1$/)]);
     });
 
     it('authenticates a local session token', async () => {
