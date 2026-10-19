@@ -20,9 +20,14 @@ export interface ReapResult {
   strandedDecisions: number;
 }
 
+// When a run last went into flight: its start, or the latest of its waits to end, since it flips back to running only as its last wait ends.
+function inFlightSince(alias: string): string {
+  return `GREATEST(${alias}.started_at, (SELECT max(w.resumed_at) FROM runtime_run_steps w WHERE w.run_id = ${alias}.id))`;
+}
+
 // A run in flight past the max ($1 seconds) lost its worker — counting a `waiting` run nothing is parked on, even in an older image's slot.
 function crashedRun(alias: string): string {
-  return `${alias}.started_at < now() - ($1 || ' seconds')::interval
+  return `${inFlightSince(alias)} < now() - ($1 || ' seconds')::interval
     AND (${alias}.status = 'running' OR (${alias}.status = 'waiting' AND ${alias}.waiting_topic IS NULL AND NOT EXISTS (
       SELECT 1 FROM runtime_run_steps p WHERE p.run_id = ${alias}.id AND ${parkedStep('p')}
     )))`;
@@ -101,9 +106,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
     // (B) a parked wait past its window means nothing will resume the run — unless a decision is on its way to it.
     const timedOutWaits = await this.reapLapsedWaits(seconds);
 
-    // (C) orphan steps left `running` past the window. A step whose run is PARKED is not stale —
-    //     the wait step stays `running` for as long as the run is deliberately asleep, and reaping
-    //     it would mark a healthy run's step failed while the run itself waits on.
+    // (C) a step outlives only a run that has ended; a live run's step can span its park.
     const orphanSteps = await rawMutate(
       em,
       `UPDATE runtime_run_steps s
@@ -111,7 +114,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
               error = COALESCE(s.error, $2)
         WHERE s.status = 'running' AND s.started_at < ${cutoff}
           AND NOT EXISTS (
-            SELECT 1 FROM runtime_runs r WHERE r.id = s.run_id AND r.status = 'waiting'
+            SELECT 1 FROM runtime_runs r WHERE r.id = s.run_id AND r.status IN ('running', 'waiting')
           )`,
       [seconds, REAPED_STEP_ERROR],
     );

@@ -49,7 +49,8 @@ PUBLIC_BASE_URL=https://your-tunnel.example.com
 # trace | debug | info | warn | error. Empty → info.
 LOG_LEVEL=
 
-# How long a run may stay in flight before it is declared dead. 0 disables the reaper.
+# How long a run may stay in flight since it started or last resumed from a wait before it is
+# declared dead. 0 disables the reaper.
 RUN_MAX_DURATION_SECONDS=3600
 
 # Schedule and polling cadence. 0 disables; pg-boss will not go below 60.

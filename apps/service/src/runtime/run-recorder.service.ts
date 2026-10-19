@@ -245,10 +245,11 @@ export class RunRecorderService implements RunRecorder {
     // A wait still set here lost its unpark write; clearing it now keeps the run from reading `waiting`.
     if (finished?.[0][0]?.waiting_topic) {
       await this.writeWait('stepFinished', scopedRunId, (em) =>
-        em.query(`UPDATE runtime_run_steps SET ${CLEAR_WAIT} WHERE run_id = $1 AND step_key = $2`, [
-          scopedRunId,
-          stepKey,
-        ]),
+        em.query(
+          `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = COALESCE(resumed_at, now())
+            WHERE run_id = $1 AND step_key = $2`,
+          [scopedRunId, stepKey],
+        ),
       );
     }
   }
@@ -319,7 +320,7 @@ export class RunRecorderService implements RunRecorder {
     }
     await this.writeWait('stepResumed', scopedRunId, (em) =>
       em.query(
-        `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = now() WHERE run_id = $1 AND step_key = $2`,
+        `UPDATE runtime_run_steps SET ${CLEAR_WAIT}, resumed_at = COALESCE(resumed_at, now()) WHERE run_id = $1 AND step_key = $2`,
         [scopedRunId, stepKey],
       ),
     );

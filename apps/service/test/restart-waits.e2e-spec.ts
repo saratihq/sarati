@@ -187,6 +187,61 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     expect((await fetch(url('/api/health'))).ok).toBe(true);
   }, 120_000);
 
+  it('keeps when a wait ended across a crash and its replay, so recovery never restarts the run’s time in flight', async () => {
+    const runKey = `${MOCK_USER_ID}:clock`;
+    const approval = (id: string) => ({ kind: 'waitForEvent', id, topic: 'approval', timeoutMs: WINDOW_MS });
+    const first = async (): Promise<{ resumed_at: string | null; finished_at: string | null }> =>
+      (
+        await db.query(
+          `SELECT resumed_at::text, finished_at::text FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'first'`,
+          [runKey],
+        )
+      ).rows[0];
+    expect(
+      (
+        await post('/api/runs/async', {
+          run_id: 'clock',
+          plan: { id: 'plan-clock', nodes: [approval('first'), approval('second')] },
+        })
+      ).status,
+    ).toBe(201);
+    await eventually(
+      () => parkedIn('clock'),
+      (p) => p[0]?.step_key === 'first',
+      'first parked',
+    );
+    expect((await post('/api/runs/clock/events', { topic: 'approval', payload: { d: 'one' } })).status).toBe(
+      200,
+    );
+    await eventually(
+      () => parkedIn('clock'),
+      (p) => p[0]?.step_key === 'second',
+      'second parked',
+    );
+    const before = await first();
+    expect(before.resumed_at).not.toBeNull();
+    const attempts = await recoveries(['clock']);
+
+    await crash();
+    await boot();
+    await eventually(
+      () => recoveries(['clock']),
+      (now) => now[0]! > attempts[0]!,
+      'clock recovered',
+    );
+    await eventually(
+      first,
+      (row) => row.finished_at !== null && row.finished_at !== before.finished_at,
+      'first finished on replay',
+    );
+    expect((await first()).resumed_at).toBe(before.resumed_at);
+
+    expect((await post('/api/runs/clock/events', { topic: 'approval', payload: { d: 'two' } })).status).toBe(
+      200,
+    );
+    expect((await completed('clock')).outputs).toMatchObject({ first: { d: 'one' }, second: { d: 'two' } });
+  }, 120_000);
+
   it('never lists or takes a decision for a wait that resumed just before the crash, while its replay is held', async () => {
     const approval = (id: string) => ({ kind: 'waitForEvent', id, topic: 'approval', timeoutMs: WINDOW_MS });
     const runKey = `${MOCK_USER_ID}:replayed`;

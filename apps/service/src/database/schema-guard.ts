@@ -163,6 +163,10 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '037_env_pointer_unique.sql',
     probe: "SELECT 1 FROM pg_indexes WHERE indexname='uq_workflow_env_pointers_workflow_env'",
   },
+  {
+    migration: '039_run_step_resumed_backfill.sql',
+    probe: "SELECT 1 FROM pg_indexes WHERE indexname='ix_runtime_run_steps_resumed'",
+  },
 ];
 
 /**

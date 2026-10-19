@@ -97,7 +97,10 @@ Durable resume covers a worker that comes back. A worker that does not come back
 leave runs stuck `running` forever, so a reaper sweeps at boot and every five minutes, and moves to a
 terminal `error`:
 
-- a run still in flight past `RUN_MAX_DURATION_SECONDS`;
+- a run in flight for longer than `RUN_MAX_DURATION_SECONDS` since it started or last resumed from a
+  wait. Time a run spends parked — on an approval, or on a **Wait** longer than a minute — never
+  counts. A shorter **Wait** sleeps in flight and does count, and so does a **Wait** inside a called
+  sub-workflow, against the run that called it;
 - a run whose approval window has passed, or whose **Wait** step is past its wake by that long, with
   no decision on its way to it;
 - a run holding a decision whose wait is past its window by `RUN_MAX_DURATION_SECONDS`, when this

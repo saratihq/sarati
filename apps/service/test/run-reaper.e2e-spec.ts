@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -8,7 +10,9 @@ import { EntityManager } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { RunReaperService } from '../src/runs/run-reaper.service';
-import { CLEAR_WAIT } from '../src/runtime/run-recorder.service';
+import { CLEAR_WAIT, RunRecorderService } from '../src/runtime/run-recorder.service';
+import { listenOnLoopback } from './support/listen';
+import { expectLastWaitStartsTheClock, expectResumedRunFinishes } from './support/resumed-run';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** The reaper errors out crashed non-terminal runs; RUN_MAX_DURATION_SECONDS defaults to 3600. */
@@ -86,6 +90,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
+    process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'true';
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
@@ -95,6 +100,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     );
     app = await createApp();
     await app.init();
+    await listenOnLoopback(app);
     reaper = app.get(RunReaperService);
     await reaper.booted();
   }, 30_000);
@@ -429,6 +435,62 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
       { status: 'running', waiting_topic: null },
       { status: 'running', waiting_topic: 'legal' },
     ]);
+  });
+
+  it('counts only the time in flight since a run resumed: one approved after a long wait finishes, never reaped', () =>
+    expectResumedRunFinishes(app, db, reaper, 'resumed-1'));
+
+  it('counts a run with two waits from the later one to end, never the first', () =>
+    expectLastWaitStartsTheClock(app, db, reaper, 'two-waits-1'));
+
+  it('still reaps a run in flight past the max since it resumed — the worker died after the wait', async () => {
+    const run = await insertRun({ status: 'running', startedAgo: '5 hours' });
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at, finished_at, resumed_at)
+       VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'completed',
+               now() - interval '5 hours', now() - interval '2 hours', now() - interval '2 hours'),
+              (gen_random_uuid(), $1, 'next', 'next', 'action', 'running', now() - interval '2 hours', NULL, NULL)`,
+      [run],
+    );
+    await reaper.reapStale();
+    expect(await statusOf(run)).toMatchObject({ status: 'error', finished: true });
+    expect((await stepsOf(run)).map((s) => s.status)).toEqual(['completed', 'error']);
+  });
+
+  it('records when a wait ended even if its unpark write was lost, so the run is not reaped once it resumes', async () => {
+    const run = await insertRun({
+      status: 'waiting',
+      startedAgo: '2 hours',
+      parked: [{ stepKey: 'approve', timeoutAt: `now() + interval '1 hour'` }],
+    });
+    await app.get(RunRecorderService).stepFinished(run, 'approve', { ok: true }, null);
+    const step = await db.query(
+      `SELECT waiting_topic, resumed_at > now() - interval '1 minute' AS just_resumed FROM runtime_run_steps WHERE run_id = $1`,
+      [run],
+    );
+    expect(step.rows[0]).toEqual({ waiting_topic: null, just_resumed: true });
+    expect((await statusOf(run)).status).toBe('running');
+    await reaper.reapStale();
+    expect((await statusOf(run)).status).toBe('running');
+    await db.query(`UPDATE runtime_runs SET status = 'completed', finished_at = now() WHERE id = $1`, [run]);
+  });
+
+  it('after an upgrade, never reaps a run an older image resumed — its wait counts from where its step ended', async () => {
+    const run = await insertRun({ status: 'running', startedAgo: '2 hours' });
+    await db.query(
+      `INSERT INTO runtime_run_steps (id, run_id, step_key, node_id, kind, status, started_at, finished_at, output)
+       VALUES (gen_random_uuid(), $1, 'approve', 'approve', 'waitForEvent', 'completed',
+               now() - interval '2 hours', now() - interval '3 minutes', CAST('{}' AS json)),
+              (gen_random_uuid(), $1, 'next', 'next', 'action', 'running', now() - interval '3 minutes', NULL, NULL)`,
+      [run],
+    );
+    await db.query(
+      readFileSync(join(__dirname, '..', 'db', 'migrations', '039_run_step_resumed_backfill.sql'), 'utf8'),
+    );
+    await reaper.reapStale();
+    expect((await statusOf(run)).status).toBe('running');
+    expect((await stepsOf(run)).map((s) => s.status)).toEqual(['completed', 'running']);
+    await db.query(`UPDATE runtime_runs SET status = 'completed', finished_at = now() WHERE id = $1`, [run]);
   });
 
   it('is idempotent — a second sweep reaps nothing new', async () => {
