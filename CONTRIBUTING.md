@@ -128,6 +128,10 @@ its fixtures on `127.0.0.1` or injects a fake. Child processes and worker thread
 guard. The agent's `test:pg`, which its `check` runs after the unit tests, needs the same database;
 its plain `test` does not.
 
+Each of those suites builds its own throwaway `orchestr_e2e_*` database, and the run drops every one
+it made when it ends. A run killed before then leaves its databases behind, and each later run starts
+by dropping, oldest first, the ones over two hours old that nothing is connected to.
+
 ## The vault
 
 Every load-bearing invariant has one definition site and a named guarding test, enforced by
