@@ -141,6 +141,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         return Promise.resolve();
       },
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
+      isCancellation: () => false,
+      throwIfCancelled: () => undefined,
     };
     await interpreter.run(
       plan([
@@ -180,6 +183,8 @@ describe('DagInterpreter (gating scheduler)', () => {
       ({
         runStarted: () => Promise.resolve(),
         runFinished: () => Promise.resolve(),
+        runUnwoundByCancel: () => Promise.resolve(),
+        isCancelled: () => Promise.resolve(false),
         stepStarted: () => Promise.resolve(),
         stepFinished: () => Promise.resolve(),
         stepWaiting: (_runId: string, stepKey: string, topic: string) => {
@@ -262,6 +267,9 @@ describe('DagInterpreter (gating scheduler)', () => {
           topics.push(topic);
           return Promise.resolve({ round: topics.length } as T);
         },
+        waitInStep: () => Promise.resolve(),
+        throwIfCancelled: () => undefined,
+        isCancellation: () => false,
       };
       const result = await interpreter.run(
         plan([
@@ -300,6 +308,9 @@ describe('DagInterpreter (gating scheduler)', () => {
           topics.push(topic);
           return Promise.resolve({ round: topics.length } as T);
         },
+        waitInStep: () => Promise.resolve(),
+        throwIfCancelled: () => undefined,
+        isCancellation: () => false,
       };
       const result = await interpreter.run(
         plan([
@@ -354,6 +365,9 @@ describe('DagInterpreter (gating scheduler)', () => {
           topics.push(topic);
           return Promise.resolve({} as T);
         },
+        waitInStep: () => Promise.resolve(),
+        throwIfCancelled: () => undefined,
+        isCancellation: () => false,
       };
       await interpreter.run(
         plan([
@@ -390,6 +404,9 @@ describe('DagInterpreter (gating scheduler)', () => {
             run: (_n, fn) => fn(),
             sleep: () => Promise.resolve(),
             waitForEvent: () => Promise.reject(new Error('Workflow has been cancelled')),
+            waitInStep: () => Promise.resolve(),
+            throwIfCancelled: () => undefined,
+            isCancellation: () => false,
           };
           const slowPark = (): Promise<null> => new Promise((r) => setTimeout(() => r(null), 50));
           await expect(
@@ -422,6 +439,9 @@ describe('DagInterpreter (gating scheduler)', () => {
         run: (_n, fn) => fn(),
         sleep: () => Promise.resolve(),
         waitForEvent: () => Promise.resolve(null),
+        waitInStep: () => Promise.resolve(),
+        throwIfCancelled: () => undefined,
+        isCancellation: () => false,
       };
       await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
         externalUserId: 'u',
@@ -442,6 +462,9 @@ describe('DagInterpreter (gating scheduler)', () => {
       },
       sleep: () => Promise.resolve(),
       waitForEvent: () => Promise.resolve(null),
+      waitInStep: () => Promise.resolve(),
+      isCancellation: () => false,
+      throwIfCancelled: () => undefined,
     };
     const result = await interpreter.run(
       plan([action('fetch'), action('push', { up: '{{fetch.id}}' }, [guard('fetch')])]),

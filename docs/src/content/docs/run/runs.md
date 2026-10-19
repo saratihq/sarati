@@ -86,10 +86,26 @@ step boom  : error — http.send_request failed: HTTP 500
 curl -X POST http://localhost:8080/api/runs/<run-id>/cancel
 ```
 
-Idempotent — cancelling an already-finished run is not an error.
+Idempotent — cancelling an already-finished run is not an error, and answers with the status it
+finished in.
 
-The run is listed as **Cancelled**, and the step it was on says *Cancelled before it finished*. A
-caller still waiting on the run's answer gets `409` with the code `run_cancelled`.
+The run is listed as **Cancelled** at once and stops at its next step. A step already making its
+call finishes, because a request that has gone out can't be taken back, and that includes the HTTP
+client retrying that one request. The step's own retry setting makes no further attempt, and nothing
+after it starts. A caller still waiting on the run's answer gets `409` with the code
+`run_cancelled`.
+
+Every wait or delay the run is parked on ends and says *Cancelled before it finished*, and a
+decision someone sent that the run had not yet taken is dropped. On a durable run
+(the default) that can take up to about ten seconds, and a delay of a minute or less runs out first.
+On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
+workflow the run is calling; a durable run's called workflow finishes first.
+
+If the engine can't be told of a durable run's cancel, the cancel answers `500` and changes nothing,
+so it is safe to try again.
+
+A run that another run's step started can't be cancelled on its own (`409`, code `called_run`).
+Cancel the run that called it.
 
 ## When a worker dies
 
