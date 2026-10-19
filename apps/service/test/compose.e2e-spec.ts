@@ -5,6 +5,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** The composer surface over HTTP: catalog search + draft apply-ops, with no LLM involved. */
@@ -29,6 +30,7 @@ describe('compose slice (e2e, mock auth)', () => {
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
+    await listenOnLoopback(app);
   }, 30_000);
 
   afterAll(async () => {

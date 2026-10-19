@@ -5,7 +5,8 @@ import type { ApiScope } from '../../auth/scopes';
 import { DomainError } from '../../common/domain-error';
 import { PolicyService } from '../../policy/policy.service';
 import { runAccessOf } from '../../runs/run-access';
-import { RunsService, type RunWaiting } from '../../runs/runs.service';
+import type { RunWaiting } from '../../runs/run-waits';
+import { RunsService } from '../../runs/runs.service';
 import { failedNodeIdOf } from '../../runs/run-failure';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
@@ -22,7 +23,18 @@ const Input = z.object({
     ),
 });
 
+const Waiting = z.object({
+  kind: z.enum(['timer', 'event', 'decided']),
+  until: z.string().nullable(),
+  decided_by: z
+    .object({ id: z.string(), name: z.string().nullable(), email: z.string().nullable() })
+    .nullable()
+    .optional(),
+}) satisfies z.ZodType<RunWaiting>;
+
 const Step = z.object({
+  /** Unique per step in the run — a node inside a loop or a branch runs under several. */
+  step_key: z.string(),
   node_id: z.string(),
   kind: z.string(),
   status: z.string(),
@@ -35,13 +47,10 @@ const Step = z.object({
   error: z.string().nullable(),
   started_at: z.string().nullable(),
   finished_at: z.string().nullable(),
+  /** Set while this step is parked — a run can wait on several steps at once. */
+  waiting: Waiting.nullable(),
   output: z.unknown().optional(),
 });
-
-const Waiting = z.object({
-  kind: z.enum(['timer', 'event']),
-  until: z.string().nullable(),
-}) satisfies z.ZodType<RunWaiting>;
 
 const Output = z.object({
   run_id: z.string(),
@@ -57,7 +66,7 @@ const Output = z.object({
   finished_at: z.string().nullable(),
   duration_ms: z.number().nullable(),
   error: z.string().nullable(),
-  /** Set while `waiting`: `timer` resumes on its own at `until`; `event` waits for someone to answer it. */
+  /** Set while `waiting`: `timer` resumes on its own at `until`; `event` waits for someone to answer it; `decided` has `decided_by`'s answer on its way. */
   waiting: Waiting.nullable(),
   /** The node whose failure ended the run; null when it completed or every failure was tolerated. */
   failed_node_id: z.string().nullable(),
@@ -91,7 +100,9 @@ function warningsOf(steps: readonly StepRow[]): Array<{ node_id: string; message
 }
 
 function toStep(row: StepRow, includeOutputs: boolean): z.infer<typeof Step> {
+  const waiting = Waiting.safeParse(row.waiting);
   return {
+    step_key: str(row, 'step_key'),
     node_id: str(row, 'node_id'),
     kind: str(row, 'kind'),
     status: str(row, 'status'),
@@ -101,6 +112,7 @@ function toStep(row: StepRow, includeOutputs: boolean): z.infer<typeof Step> {
     error: nullableStr(row, 'error'),
     started_at: nullableStr(row, 'started_at'),
     finished_at: nullableStr(row, 'finished_at'),
+    waiting: waiting.success ? waiting.data : null,
     ...(includeOutputs ? { output: row.output ?? null } : {}),
   };
 }
@@ -111,7 +123,7 @@ export class GetRunTool implements McpTool {
   readonly scope: ApiScope = 'workflow:read';
   readonly title = 'Get a run';
   readonly description =
-    'Run status, per-step log, the failing node and any warnings — and, for a waiting run, whether it resumes on its own or waits for someone to answer it. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
+    'Run status, per-step log, the failing node and any warnings — and, for a waiting run, whether it resumes on its own, waits for someone to answer it, or has a decision on its way. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

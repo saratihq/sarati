@@ -21,6 +21,32 @@ cd sarati && docker compose pull && docker compose up -d
 
 Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`.
 
+Sarati runs as one instance. An upgrade stops it and starts the new version on the same data, and runs
+in flight carry on where they were: a run waiting for an approval or on a **Wait** step keeps waiting.
+The exception, until a fix for how runs resume lands, is a run with a wait in a parallel branch or
+beside another step that runs at the same time: it can fail when it resumes, as
+[Approvals](/run/approvals/#more-than-one-wait-at-once) describes. Let those finish before upgrading.
+
+### Going back
+
+Set `SARATI_VERSION` to the earlier version and upgrade again.
+
+On the earlier version, a run keeps its waits only if none of them runs beside another step: approvals
+that come one after another, even on the same topic, and a wait inside a loop. Let any run with
+parallel branches, or with steps that start side by side, finish before going back, even when only
+one of its approvals shows in the inbox. There it can lose that approval, put a decision on the wrong
+wait, or end in an error. So can a run with two approvals on one topic, neither waiting for the other,
+when the **If** and **Switch** steps before either of them have more than 4096 combinations of routes,
+even if the two never wait at the same time.
+
+For a run that keeps its waits:
+
+- Its approval stays listed and answerable on the earlier version, and a **Wait** step still wakes.
+- A decision made here that the run had not taken yet is applied there, but the earlier version does
+  not record who made it. If it had not even gone out, because the service stopped as it was made,
+  its wait is listed there to decide again.
+- Coming back to this version picks it up where the earlier version left it.
+
 Running it by hand, without the installer:
 
 ```bash

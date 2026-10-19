@@ -28,14 +28,7 @@ export class RunReaperJob implements OnModuleInit {
     try {
       const on = await this.jobs.register(async (boss) => {
         await boss.createQueue(QUEUE);
-        await boss.work(QUEUE, async () => {
-          const r = await this.reaper.reapStale();
-          if (r.crashedRuns + r.timedOutWaits + r.orphanSteps > 0) {
-            this.logger.warn(
-              `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ${r.orphanSteps} orphan step(s)`,
-            );
-          }
-        });
+        await boss.work(QUEUE, () => this.tick());
         await boss.schedule(QUEUE, '*/5 * * * *');
       });
       this.logger.log(
@@ -44,6 +37,22 @@ export class RunReaperJob implements OnModuleInit {
     } catch (err) {
       // The reaper must never take the API down — log and continue serving.
       this.logger.error(`run reaper setup failed: ${errorMessage(err)}`);
+    }
+  }
+
+  // A failed pass is logged and still fails the job, so pg-boss records it.
+  private async tick(): Promise<void> {
+    try {
+      const r = await this.reaper.reapStale();
+      if (r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
+        this.logger.warn(
+          `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
+            `${r.orphanSteps} orphan step(s), ${r.strandedDecisions} stranded decision(s)`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`run reap failed: ${errorMessage(err)}`);
+      throw err;
     }
   }
 }
