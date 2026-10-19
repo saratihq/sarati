@@ -6,6 +6,7 @@ import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
 import { edgePortType, type WorkflowIR } from '../ir/models';
 import { isRoutableActionType } from '../providers/sdk-actions.registry';
+import { accountRefFields, accountRefText } from '../runtime/account-ref';
 
 /** A node id is a caller-assigned stable identifier (invariant #13) — this is its ONE format rule. */
 export const NODE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,59}$/;
@@ -269,12 +270,26 @@ export function connectionRequirements(
     }));
 }
 
-/** The subset that will 422 on its first real fire — a dry run deliberately does not catch these. */
+/** The subset that chooses no account — which one it runs as is decided when it runs (`connections/run-as-account.ts`). */
 export function unconfiguredConnections(
   ir: Record<string, unknown>,
   facts: CatalogFacts,
 ): ConnectionRequirement[] {
   return connectionRequirements(ir, facts).filter((req) => !req.configured);
+}
+
+/** Every save-time warning about a document's data refs: {@link lintDataRefs}, and one for `{{$account…}}` on a step whose action signs in to nothing. */
+export function refWarningsOf(ir: Record<string, unknown>, facts: CatalogFacts): string[] {
+  const signsInToNothing = (node: Pick<DocNode, 'node_type' | 'metadata'>): boolean =>
+    !isTriggerNode(node) && isRoutableActionType(node.node_type) && facts.authOf(node.node_type) === 'none';
+  const accountless = nodesOf(ir).flatMap((node) => {
+    const [field] = accountRefFields(node.parameters);
+    if (field === undefined || !signsInToNothing(node)) return [];
+    return [
+      `"${node.name}" uses ${accountRefText(field)}, but its action signs in to nothing, so nothing can fill it`,
+    ];
+  });
+  return [...lintDataRefs(ir, signsInToNothing), ...accountless];
 }
 
 /**
@@ -307,7 +322,7 @@ export function validateAuthoredIr(
     valid: errors.length === 0,
     errors,
     warnings,
-    ref_warnings: lintDataRefs(ir),
+    ref_warnings: refWarningsOf(ir, facts),
     unconfigured_connections: unconfiguredConnections(ir, facts),
   };
 }

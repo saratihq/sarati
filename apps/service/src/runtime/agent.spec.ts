@@ -100,6 +100,8 @@ describe('orchestr:agent — compiler tool-edge peel (invariant #14)', () => {
         // The model-facing name is sanitized to a provider-legal identifier (the dotted
         // `slack.send_message` node_type would 400 the model call); actionId is untouched.
         name: 'slack_send_message',
+        // What a refusal names: the step as the canvas shows it, never the model-facing name.
+        stepName: 'search',
         actionId: 'slack.send_message',
         props: { channel: '#ops' },
       },

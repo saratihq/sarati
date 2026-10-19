@@ -511,28 +511,74 @@ describe("the Connect chip", () => {
     { event: "connection_needed", data: { node_id: "send_report", provider: "gmail", provider_label: "Gmail" }, seq: 1 },
   ];
 
-  it("on a protected branch writes nothing to the canvas, and still has the composer re-test", async () => {
-    await openEditor(withReport, { log: needsGmail });
-    useWorkflow.setState({ editBranchProtected: true });
+  it.each([true, false])(
+    "writes nothing to the canvas, and still has the composer re-test (protected: %s)",
+    async (isProtected) => {
+      await openEditor(withReport, { log: needsGmail });
+      useWorkflow.setState({ editBranchProtected: isProtected });
+      listConnections.mockResolvedValue({
+        connections: [{ id: "conn-gmail", provider: "gmail", status: "active", created_at: "2026-10-12T00:00:00Z" }],
+      } as unknown as Awaited<ReturnType<typeof api.listConnections>>);
+
+      await useComposer.getState().notifyConnected("gmail", "Gmail");
+
+      expect(irContentKey(canvas())).toBe(irContentKey(withReport));
+      expect(paramsOf(canvas(), "send_report")?.connectionId).toBeUndefined();
+      expect(useWorkflow.getState().dirty).toBe(false);
+      expect(listConnections).not.toHaveBeenCalled();
+      expect(useComposer.getState().connectionNeeds).toEqual({});
+      expect(lastSent().message).toBe("(canvas note) Gmail is now connected — re-test the step that needed it.");
+    },
+  );
+
+  const watch = { ...node("watch", "New email", "gmail.new_email", {}, 60), metadata: { trigger: true } };
+  const watching = docOf([watch, report], [edge("watch", "send_report")]);
+  const bothNeedGmail: agent.SequencedComposerEvent[] = [
+    { event: "connection_needed", data: { node_id: "watch", provider: "gmail", provider_label: "Gmail" }, seq: 1 },
+    { event: "connection_needed", data: { node_id: "send_report", provider: "gmail", provider_label: "Gmail" }, seq: 2 },
+  ];
+  const gmailAccounts = () =>
+    listConnections.mockResolvedValue({
+      connections: [
+        { id: "conn-old", provider: "gmail", status: "active", created_at: "2026-10-01T00:00:00Z" },
+        { id: "conn-gmail", provider: "gmail", status: "active", created_at: "2026-10-12T00:00:00Z" },
+        { id: "conn-failed", provider: "gmail", status: "failed", created_at: "2026-10-13T00:00:00Z" },
+        { id: "conn-slack", provider: "slack", status: "active", created_at: "2026-10-14T00:00:00Z" },
+      ],
+    } as unknown as Awaited<ReturnType<typeof api.listConnections>>);
+
+  it("names the account it connected on a waiting app trigger, and on no step, without arming Save", async () => {
+    await openEditor(watching, { log: bothNeedGmail });
+    gmailAccounts();
 
     await useComposer.getState().notifyConnected("gmail", "Gmail");
 
-    expect(irContentKey(canvas())).toBe(irContentKey(withReport));
+    expect(paramsOf(canvas(), "watch")?.connectionId).toBe("conn-gmail");
     expect(paramsOf(canvas(), "send_report")?.connectionId).toBeUndefined();
     expect(useWorkflow.getState().dirty).toBe(false);
-    expect(listConnections).not.toHaveBeenCalled();
     expect(useComposer.getState().connectionNeeds).toEqual({});
     expect(lastSent().message).toBe("(canvas note) Gmail is now connected — re-test the step that needed it.");
   });
 
-  it("elsewhere still attaches the account it connected to the waiting step", async () => {
-    await openEditor(withReport, { log: needsGmail });
-    listConnections.mockResolvedValue({
-      connections: [{ id: "conn-gmail", provider: "gmail", status: "active", created_at: "2026-10-12T00:00:00Z" }],
-    } as unknown as Awaited<ReturnType<typeof api.listConnections>>);
+  it("keeps an account the trigger already names", async () => {
+    const named = docOf([{ ...watch, parameters: { connectionId: "conn-picked" } }, report], [edge("watch", "send_report")]);
+    await openEditor(named, { log: bothNeedGmail });
+    gmailAccounts();
 
     await useComposer.getState().notifyConnected("gmail", "Gmail");
 
-    expect(paramsOf(canvas(), "send_report")?.connectionId).toBe("conn-gmail");
+    expect(irContentKey(canvas())).toBe(irContentKey(named));
+  });
+
+  it("on a protected branch names no account on the trigger either", async () => {
+    await openEditor(watching, { log: bothNeedGmail });
+    useWorkflow.setState({ editBranchProtected: true });
+    gmailAccounts();
+
+    await useComposer.getState().notifyConnected("gmail", "Gmail");
+
+    expect(irContentKey(canvas())).toBe(irContentKey(watching));
+    expect(listConnections).not.toHaveBeenCalled();
+    expect(useComposer.getState().connectionNeeds).toEqual({});
   });
 });

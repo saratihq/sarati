@@ -35,7 +35,7 @@ import { PlatformKeysClient } from '../config/platform-keys.client';
 import { ComposerService, QUERY_FN, type QueryFn } from './composer.service';
 import { EventChannel } from './event-channel';
 import { PendingAnswers } from './pending-answers';
-import type { AttachEvent, ComposerEvent, SequencedComposerEvent } from './protocol';
+import type { AttachEvent, ComposeOp, ComposerEvent, SequencedComposerEvent, WorkflowIr } from './protocol';
 import { emitToSession, SessionStore, type ComposerSession } from './sessions';
 import { ThreadStore, type ThreadRecord } from './thread-store';
 import { WorkflowServiceClient } from './workflow-client';
@@ -862,11 +862,9 @@ describe('tool handlers (workflow-service wrappers)', () => {
         type: 'slack.send_channel_message',
         parameters: { channel: { type: 'DROPDOWN' }, text: { type: 'LONG_TEXT' } },
       }),
-      listConnections: jest
+      runAs: jest
         .fn()
-        .mockResolvedValue([
-          { id: 'conn-1', provider: 'slack', status: 'active', display_name: null, account: null },
-        ]),
+        .mockResolvedValue([{ node_id: 'step', state: 'only', connection_id: 'conn-1', message: null }]),
       loadOptions: jest.fn().mockResolvedValue([{ label: '#social', value: 'C0BFN9NKRUH' }]),
     });
 
@@ -887,13 +885,161 @@ describe('tool handlers (workflow-service wrappers)', () => {
       channel: 'C0BFN9NKRUH',
       text: 'hi',
     });
-    // The step's own account is absent, so the picker is loaded with the caller's Slack connection.
+    // The step's own account is absent, so the picker is loaded as the account a run would use.
     expect(context.client.loadOptions).toHaveBeenCalledWith(
       'slack.send_channel_message',
       'channel',
       'conn-1',
       SESSION_CALLER,
     );
+    expect(context.client.runAs).toHaveBeenCalledWith(
+      {
+        nodes: [
+          {
+            id: 'step',
+            name: 'step',
+            node_type: 'slack.send_channel_message',
+            parameters: { connectionId: undefined },
+          },
+        ],
+        edges: [],
+      },
+      SESSION_CALLER,
+    );
+  });
+
+  it('runApplyOps: with several accounts for the app, options load as none of them — never a guess', async () => {
+    const loadOptions = jest.fn().mockResolvedValue([]);
+    const { context } = makeCtx({
+      applyOps: jest.fn().mockResolvedValue({ ok: true, ir: { nodes: [], edges: [] } }),
+      getActionSchema: jest.fn().mockResolvedValue({
+        type: 'slack.send_channel_message',
+        parameters: { channel: { type: 'DROPDOWN' } },
+      }),
+      runAs: jest
+        .fn()
+        .mockResolvedValue([
+          { node_id: 'step', state: 'several', connection_id: null, message: 'you have 2 slack accounts' },
+        ]),
+      loadOptions,
+    });
+
+    await runApplyOps(context, [
+      {
+        op: 'add_node',
+        node: { id: 'post', node_type: 'slack.send_channel_message', parameters: { channel: '#social' } },
+      },
+    ]);
+
+    expect(loadOptions).toHaveBeenCalledWith('slack.send_channel_message', 'channel', null, SESSION_CALLER);
+  });
+
+  it('runApplyOps: changing one field of a step that chose an account loads its options as that account', async () => {
+    const applyOps = jest.fn().mockResolvedValue({ ok: true, ir: { nodes: [], edges: [] } });
+    const accounts = ['conn-work', 'conn-personal'];
+    const runAs = jest.fn((document: WorkflowIr) => {
+      const [node] = document.nodes as Array<{ parameters: { connectionId?: unknown } }>;
+      return Promise.resolve(
+        node!.parameters.connectionId === 'conn-work'
+          ? [{ node_id: 'step', state: 'chosen', connection_id: 'conn-work', accounts, message: null }]
+          : [
+              {
+                node_id: 'step',
+                state: 'several',
+                connection_id: null,
+                accounts,
+                message: 'you have 2 accounts',
+              },
+            ],
+      );
+    });
+    const loadOptions = jest.fn((_type: string, _prop: string, connectionId: string | null) =>
+      Promise.resolve(connectionId === 'conn-work' ? [{ label: 'Backend', value: 'team-42' }] : null),
+    );
+    const { context } = makeCtx(
+      {
+        applyOps,
+        runAs,
+        loadOptions,
+        getActionSchema: jest.fn().mockResolvedValue({
+          type: 'linear.create_issue',
+          parameters: { teamId: { type: 'DROPDOWN' }, title: { type: 'SHORT_TEXT' } },
+        }),
+      },
+      [
+        {
+          id: 'file_issue',
+          node_type: 'linear.create_issue',
+          parameters: { connectionId: 'conn-work', title: 'Bug' },
+        },
+      ],
+    );
+
+    await runApplyOps(context, [
+      { op: 'update_node', node_id: 'file_issue', parameters: { teamId: 'Backend' } },
+    ]);
+
+    expect(loadOptions).toHaveBeenCalledWith('linear.create_issue', 'teamId', 'conn-work', SESSION_CALLER);
+    const [, sentOps] = applyOps.mock.calls[0] as [unknown, Array<Record<string, unknown>>];
+    expect(sentOps[0]!.parameters).toEqual({ teamId: 'team-42' });
+  });
+
+  it("runApplyOps: a trigger's options load as the account it names, else the caller's first active one for its app — never as a step's", async () => {
+    const applyOps = jest.fn().mockResolvedValue({ ok: true, ir: { nodes: [], edges: [] } });
+    const runAs = jest.fn();
+    const loadOptions = jest.fn((_type: string, _prop: string, connectionId: string | null) =>
+      Promise.resolve(connectionId === 'asana-work' ? [{ label: 'Marketing', value: '1201' }] : null),
+    );
+    const { context } = makeCtx(
+      {
+        applyOps,
+        runAs,
+        loadOptions,
+        listConnections: jest.fn().mockResolvedValue([
+          {
+            id: 'slack-1',
+            provider: 'slack',
+            status: 'active',
+            display_name: null,
+            one_click: false,
+            account: null,
+          },
+          {
+            id: 'asana-old',
+            provider: 'asana',
+            status: 'expired',
+            display_name: null,
+            one_click: false,
+            account: null,
+          },
+          {
+            id: 'asana-work',
+            provider: 'asana',
+            status: 'active',
+            display_name: null,
+            one_click: false,
+            account: null,
+          },
+        ]),
+        getActionSchema: jest.fn().mockResolvedValue({
+          type: 'asana.new_task',
+          kind: 'trigger',
+          parameters: { project: { type: 'DROPDOWN' } },
+        }),
+      },
+      [{ id: 'trigger', node_type: 'orchestr:trigger', metadata: { trigger: true } }],
+    );
+    const retype = (parameters: Record<string, unknown>): ComposeOp[] => [
+      { op: 'update_node', node_id: 'trigger', node_type: 'asana.new_task', parameters },
+    ];
+
+    await runApplyOps(context, retype({ project: 'Marketing' }));
+    await runApplyOps(context, retype({ project: 'Marketing', connectionId: 'asana-named' }));
+
+    expect(loadOptions.mock.calls.map((call) => call[2])).toEqual(['asana-work', 'asana-named']);
+    expect(runAs).not.toHaveBeenCalled();
+    const [, sent] = applyOps.mock.calls[0] as [unknown, Array<Record<string, unknown>>];
+    expect(sent[0]!.parameters).toEqual({ project: '1201' });
   });
 
   it('runApplyOps: rejection → isError with detail, draft untouched, nothing emitted', async () => {
@@ -1083,6 +1229,7 @@ describe('A3 accept + evolve tools and bounds', () => {
             provider: 'slack',
             status: 'active',
             display_name: null,
+            one_click: true,
             account: { subject: 'workspace', name: 'orchestr', id: 'T0BFMNPDEQ2', email: null, handle: null },
           },
           {
@@ -1090,6 +1237,7 @@ describe('A3 accept + evolve tools and bounds', () => {
             provider: 'sheets',
             status: 'expired',
             display_name: 'Team sheet',
+            one_click: false,
             account: null,
           },
           {
@@ -1097,13 +1245,14 @@ describe('A3 accept + evolve tools and bounds', () => {
             provider: 'gmail',
             status: 'active',
             display_name: null,
+            one_click: false,
             account: { subject: 'user', name: null, id: 'me@e2e.local', email: 'me@e2e.local', handle: null },
           },
         ]),
     });
     const text = (await runConnectionsStatus(context)).content[0]!.text;
     expect(text).toContain(
-      'slack: active [connection_id: conn-slack-1] — in the workspace orchestr (no person to address)',
+      'slack: active, one-click [connection_id: conn-slack-1] — in the workspace orchestr (no person to address)',
     );
     expect(text).toContain('sheets (Team sheet): expired [connection_id: conn-sheets-1]\n');
     expect(text).toContain(
@@ -1148,11 +1297,19 @@ describe('A4 tools: find_trigger / need_connection / fill_params', () => {
     expect(result.content[0]!.text).toContain('orchestr:webhook');
   });
 
-  it('need_connection pins the chip, folds into the snapshot, and clears on a green re-test', () => {
-    const { context, emitted, session } = makeCtx({}, [
+  it('need_connection pins the chip, folds into the snapshot, and clears on a green re-test', async () => {
+    const runAs = jest.fn().mockResolvedValue([
+      {
+        node_id: 'post_slack',
+        state: 'none',
+        connection_id: null,
+        message: 'Step "Post" has no slack account',
+      },
+    ]);
+    const { context, emitted, session } = makeCtx({ runAs }, [
       { id: 'post_slack', node_type: 'slack.send_channel_message' },
     ]);
-    const missing = runNeedConnection(context, {
+    const missing = await runNeedConnection(context, {
       node_id: 'nope',
       provider: 'slack',
       provider_label: 'Slack',
@@ -1160,7 +1317,7 @@ describe('A4 tools: find_trigger / need_connection / fill_params', () => {
     expect(missing.isError).toBe(true);
     expect(missing.content[0]!.text).toContain('post_slack');
 
-    const result = runNeedConnection(context, {
+    const result = await runNeedConnection(context, {
       node_id: 'post_slack',
       provider: ' Slack ',
       provider_label: 'Slack',
@@ -1172,9 +1329,164 @@ describe('A4 tools: find_trigger / need_connection / fill_params', () => {
     });
     expect([...session.snapshot.connectionNeeds.keys()]).toEqual(['post_slack']);
 
+    expect(result.content[0]!.text).toContain('The Connect button is on the step');
+    expect(runAs).toHaveBeenCalledWith(
+      { nodes: [{ id: 'post_slack', node_type: 'slack.send_channel_message' }], edges: [] },
+      SESSION_CALLER,
+    );
+
     // A green re-test on that step clears the standing ask from the snapshot.
     emitToSession(session, { event: 'step_result', data: { node_id: 'post_slack', status: 'passed' } });
     expect(session.snapshot.connectionNeeds.size).toBe(0);
+  });
+
+  it.each([
+    [
+      'the step already runs as an account — an auth failure there is a new sign-in, not a Connect',
+      { state: 'only', connection_id: 'conn-1', message: null },
+      'already runs as their Gmail account. If it failed on authentication, that sign-in stopped working. Under Integrations, Reconnect shows only on an account marked as needing attention, and signs in again in place of it; one still marked active has none, and connecting Gmail again adds a second account beside it — have them remove the one that stopped working',
+    ],
+    [
+      'the person has several accounts for it',
+      {
+        state: 'several',
+        connection_id: null,
+        message:
+          'Step "Mail" has no gmail account chosen and you have 2 active gmail accounts — pick one on the step',
+      },
+      'you have 2 active gmail accounts — pick one on the step. Ask which with ask_user',
+    ],
+    [
+      'its chosen account is not active, and they hold one that can run it',
+      {
+        state: 'inactive',
+        connection_id: null,
+        accounts: ['conn-a'],
+        message:
+          'Step "Mail" runs as a gmail account that isn\'t active — pick another of your gmail accounts on the step',
+      },
+      "isn't active — pick another of your gmail accounts on the step. Set the step's connectionId to null with update_node: with none chosen it runs as their only active Gmail account, decided when it runs — never write that account's id into the step.",
+    ],
+    [
+      'its chosen account is gone, and they hold several that can run it',
+      {
+        state: 'stale',
+        connection_id: null,
+        accounts: ['conn-a', 'conn-b'],
+        message: 'Step "Mail" runs as a gmail account that no longer exists or isn\'t yours',
+      },
+      "They have 2 active Gmail accounts it can run as: ask which with ask_user, then set the step's connectionId to that one with update_node.",
+    ],
+    [
+      'it holds an own-credentials account and runs only on one-click ones, of which they have one',
+      {
+        state: 'needs_managed',
+        connection_id: null,
+        accounts: ['conn-one-click'],
+        message:
+          'Step "Mail" runs as an account that uses its own credentials, and it runs only on a one-click (managed) gmail account — pick one on the step, or connect one under Integrations',
+      },
+      "Set the step's connectionId to null with update_node: with none chosen it runs as their only one-click Gmail account, decided when it runs — never write that account's id into the step.",
+    ],
+    [
+      'it holds an own-credentials account and runs only on one-click ones, which they lack',
+      {
+        state: 'needs_managed',
+        connection_id: null,
+        accounts: [],
+        message: 'Step "Mail" runs as an account that uses its own credentials',
+      },
+      "They have no one-click Gmail account it can run as: set the step's connectionId to null with update_node, then call need_connection again so they can connect one.",
+    ],
+  ])(
+    'need_connection places no Connect where %s, and says what to do instead',
+    async (_case, answer, says) => {
+      const runAs = jest.fn().mockResolvedValue([{ node_id: 'mail', ...answer }]);
+      const { context, emitted } = makeCtx({ runAs }, [{ id: 'mail', node_type: 'gmail.send_email' }]);
+      const result = await runNeedConnection(context, {
+        node_id: 'mail',
+        provider: 'gmail',
+        provider_label: 'Gmail',
+      });
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0]!.text).toMatch(/^No Connect button was placed: /);
+      expect(result.content[0]!.text).toContain(says);
+      expect(result.content[0]!.text).not.toMatch(/to one of their (active|one-click) accounts/);
+      expect(emitted).toEqual([]);
+    },
+  );
+
+  it('need_connection puts Connect on an app trigger without asking what it runs as, and never on a step that uses none', async () => {
+    const runAs = jest.fn().mockResolvedValue([]);
+    const { context, emitted } = makeCtx({ runAs }, [
+      { id: 'trigger', node_type: 'gmail.gmail_new_email_received', metadata: { trigger: true } },
+      { id: 'join', node_type: 'text.concat' },
+    ]);
+    const trigger = await runNeedConnection(context, {
+      node_id: 'trigger',
+      provider: 'gmail',
+      provider_label: 'Gmail',
+    });
+    expect(trigger.content[0]!.text).toContain('The Connect button is on the step');
+    expect(emitted).toEqual([
+      {
+        event: 'connection_needed',
+        data: { node_id: 'trigger', provider: 'gmail', provider_label: 'Gmail' },
+      },
+    ]);
+
+    const join = await runNeedConnection(context, {
+      node_id: 'join',
+      provider: 'text',
+      provider_label: 'Text',
+    });
+    expect(join.content[0]!.text).toBe(
+      'No Connect button was placed: the step uses no account, so there is nothing to connect.',
+    );
+    expect(emitted).toHaveLength(1);
+    expect(runAs).toHaveBeenCalledTimes(1);
+  });
+
+  it("need_connection that places nothing answers the step's standing ask", async () => {
+    const runAs = jest
+      .fn()
+      .mockResolvedValue([
+        { node_id: 'mail', state: 'only', connection_id: 'conn-1', accounts: ['conn-1'], message: null },
+      ]);
+    const { context, emitted, session } = makeCtx({ runAs }, [{ id: 'mail', node_type: 'gmail.send_email' }]);
+    emitToSession(session, {
+      event: 'connection_needed',
+      data: { node_id: 'mail', provider: 'gmail', provider_label: 'Gmail' },
+    });
+
+    const result = await runNeedConnection(context, {
+      node_id: 'mail',
+      provider: 'gmail',
+      provider_label: 'Gmail',
+    });
+
+    expect(result.content[0]!.text).toMatch(
+      /^No Connect button was placed: the step already runs as their Gmail account/,
+    );
+    expect(emitted).toEqual([{ event: 'connection_resolved', data: { node_id: 'mail' } }]);
+    expect(session.snapshot.connectionNeeds.size).toBe(0);
+  });
+
+  it('need_connection places the Connect when the account check fails, as the canvas shows it, and says the check failed', async () => {
+    const runAs = jest.fn().mockRejectedValue(new Error('check accounts failed: 503'));
+    const { context, emitted } = makeCtx({ runAs }, [{ id: 'mail', node_type: 'gmail.send_email' }]);
+    const result = await runNeedConnection(context, {
+      node_id: 'mail',
+      provider: 'gmail',
+      provider_label: 'Gmail',
+    });
+    expect(result.isError).toBeUndefined();
+    expect(emitted).toEqual([
+      { event: 'connection_needed', data: { node_id: 'mail', provider: 'gmail', provider_label: 'Gmail' } },
+    ]);
+    expect(result.content[0]!.text).toBe(
+      "Sarati couldn't check which account the step runs as (check accounts failed: 503), so the Connect button is on the step. Say in one sentence which account and why, keep going with what you can, and re-test that step when a note says the connection landed.",
+    );
   });
 
   it('fill_params is a hard error when PARAM_MODEL is unset and for control steps', async () => {

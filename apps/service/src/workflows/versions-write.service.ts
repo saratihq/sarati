@@ -14,8 +14,7 @@ import { WorkflowVersionEntity } from '../database/entities/workflow-version.ent
 import { EventsService } from '../events/events.service';
 import { computeDiff, type IRDiff } from '../ir/diff';
 import type { WorkflowIR } from '../ir/models';
-import { lintDataRefs } from '../compiler/ref-lint';
-import { assertAuthoredIrValid } from '../compose/author-validation';
+import { assertAuthoredIrValid, refWarningsOf } from '../compose/author-validation';
 import { composerMerge } from '../compose/compose-merge';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { BranchService } from './branch.service';
@@ -303,7 +302,7 @@ export class VersionsWriteService {
       if (branch.headVersionId) {
         const head = await em.findOne(WorkflowVersionEntity, { where: { id: branch.headVersionId } });
         if (head?.workflowIr && diffAgainstHead(head.workflowIr, irData).entries.length === 0) {
-          return { version: head, refWarnings: lintDataRefs(irData), noChanges: true };
+          return { version: head, refWarnings: refWarningsOf(irData, this.catalog.facts()), noChanges: true };
         }
       }
 

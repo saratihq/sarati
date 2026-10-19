@@ -5,6 +5,7 @@ import { OrganizationEntity } from '../database/entities/organization.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowEnvPointerEntity } from '../database/entities/workflow-env-pointer.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
+import type { ConnectionsService } from '../connections/connections.service';
 import type { EnvironmentsService } from '../environments/environments.service';
 import type { EventsService } from '../events/events.service';
 import type { OrgsService } from '../orgs/orgs.service';
@@ -70,14 +71,16 @@ function build(state: FakeState, opts: { role?: 'owner' | 'admin' | 'member' | n
     );
   const byIdForOrg = jest.fn().mockRejectedValue(new DomainError('Environment not found', 404));
   const enqueue = jest.fn().mockResolvedValue(undefined);
+  const accountsOn = jest.fn(() => ({}));
   const svc = new EnvPointersService(
     dataSource,
     { emit } as unknown as EventsService,
     { roleOf } as unknown as OrgsService,
     { ensureEnvironment, byIdForOrg } as unknown as EnvironmentsService,
     { enqueue } as unknown as TriggerSignalsService,
+    { accountsOn } as unknown as ConnectionsService,
   );
-  return { svc, em, emit, roleOf, ensureEnvironment, enqueue };
+  return { svc, em, emit, roleOf, ensureEnvironment, enqueue, accountsOn };
 }
 
 const WF = 'wf-1';
@@ -232,6 +235,8 @@ describe('EnvPointersService.promote', () => {
 
     const admin = build({ wf: orgWf, versions, org }, { role: 'admin' });
     await expect(admin.svc.promote(WF, 'staging', V2, USER)).resolves.toMatchObject({ status: 'promoted' });
+    // The slot preflight reads on the promote's own transaction, never a second pooled connection.
+    expect(admin.accountsOn).toHaveBeenCalledWith(admin.em);
 
     // prod is not exempt — the most consequential move is gated too.
     const memberProd = build({ wf: orgWf, versions, org }, { role: 'member' });

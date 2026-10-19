@@ -254,9 +254,13 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
 
     beforeAll(async () => {
       // Spied BEFORE deploy so the inline reconcile resolves a slot and subscribes with no live call.
-      slotSpy = jest
-        .spyOn(app.get(ConnectionsService), 'resolveSlotConnection')
-        .mockResolvedValue({ id: connId, ownerUserId: userId });
+      slotSpy = jest.spyOn(app.get(ConnectionsService), 'resolveSlotConnection').mockResolvedValue({
+        id: connId,
+        ownerUserId: userId,
+        status: 'active',
+        provider: 'acmecrm',
+        managed: true,
+      });
       refSpy = jest.spyOn(app.get(ConnectionsService), 'managedRef').mockResolvedValue({
         id: connId,
         authType: 'managed',

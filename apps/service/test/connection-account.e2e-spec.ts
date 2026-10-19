@@ -108,11 +108,11 @@ describe('a connection knows which account it is (e2e, isolated DB, stubbed Gmai
     await http().delete(`/api/environments/${staging.id}/slots/gmail`).expect(200);
   });
 
-  it('warns on save when {{$account…}} cannot be filled', async () => {
-    const step = (id: string, parameters: Record<string, unknown>) => ({
+  it('warns on save when {{$account…}} cannot be filled, and never for a step with no account chosen', async () => {
+    const step = (id: string, parameters: Record<string, unknown>, nodeType = 'gmail.list_messages') => ({
       id,
       name: id,
-      node_type: 'gmail.list_messages',
+      node_type: nodeType,
       type_version: 1,
       parameters,
       position: { x: 0, y: 0 },
@@ -128,7 +128,8 @@ describe('a connection knows which account it is (e2e, isolated DB, stubbed Gmai
           nodes: [
             step('mine', { connectionId, query: 'to:{{$account.email}}' }),
             step('typo', { connectionId, query: 'to:{{$account.mail}}' }),
-            step('nobody', { query: 'to:{{$account.email}}' }),
+            step('unchosen', { query: 'to:{{$account.email}}' }),
+            step('signs-in-to-nothing', { connectionId, texts: ['{{$account.email}}'] }, 'text.concat'),
           ],
           edges: [],
           settings: { execution_order: 'v1', extra: {} },
@@ -138,7 +139,7 @@ describe('a connection knows which account it is (e2e, isolated DB, stubbed Gmai
       .expect(201);
     expect(res.body.ref_warnings).toEqual([
       '"typo" uses {{$account.mail}}, but an account has only an email, handle, id and name',
-      '"nobody" uses {{$account.email}}, but runs as no connected account, so nothing can fill it',
+      '"signs-in-to-nothing" uses {{$account.email}}, but its action signs in to nothing, so nothing can fill it',
     ]);
   });
 });

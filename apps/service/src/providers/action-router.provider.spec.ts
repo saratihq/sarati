@@ -29,14 +29,47 @@ function build(opts: {
   clusterConn?: { id: string; ownerUserId: string } | null;
   /** The env SLOT connection resolveSlotConnection returns (; default: none). */
   slotConn?: { id: string; ownerUserId: string } | null;
+  /** The runner's own accounts for the step's app (default: none). */
+  accounts?: string[];
+  /** The app a chosen account is for (default: the app of the step being run). */
+  chosenFor?: string;
 }) {
   // Bare jest.fn()s so assertions reference the mock directly — the linter forbids an unbound class method.
   const execute = jest.fn().mockResolvedValue({ output: { via: 'composio' } });
   const executeBySlug = jest.fn().mockResolvedValue({ messages: [] });
   const runOurs = jest.fn().mockResolvedValue({ output: { via: 'sdk-actions' } });
   const managedRef = jest.fn().mockResolvedValue(opts.managedRef ?? null);
-  const resolveClusterConnection = jest.fn().mockResolvedValue(opts.clusterConn ?? null);
-  const resolveSlotConnection = jest.fn().mockResolvedValue(opts.slotConn ?? null);
+  let running = '';
+  const managedRow = (opts.managedRef?.authType ?? 'managed') === 'managed';
+  // A slot's account is for the step's app, and as one-click as the managed row the test gives.
+  const slotAccount = (conn: { id: string; ownerUserId: string }, status: string) => ({
+    status,
+    provider: running,
+    managed: managedRow,
+    ...conn,
+  });
+  const resolveClusterConnection = jest.fn(() =>
+    Promise.resolve(opts.clusterConn ? slotAccount(opts.clusterConn, 'active') : null),
+  );
+  const resolveSlotConnection = jest.fn(() =>
+    Promise.resolve(opts.slotConn ? slotAccount(opts.slotConn, opts.managedRef?.status ?? 'active') : null),
+  );
+  // A chosen account is the runner's exactly when its managed row resolves for them, with that row's status.
+  const ownConnections = jest.fn((_userId: string, ids: string[]) =>
+    Promise.resolve(
+      new Map(
+        opts.managedRef
+          ? ids.map((id) => [
+              id,
+              { provider: opts.chosenFor ?? running, status: opts.managedRef!.status, managed: managedRow },
+            ])
+          : [],
+      ),
+    ),
+  );
+  const accountsServing = jest.fn((_userId: string, apps: readonly string[]) =>
+    Promise.resolve((opts.accounts ?? []).map((id) => ({ id, provider: apps[0], managed: managedRow }))),
+  );
 
   const orchestrActions = {
     has: isSdkActionType,
@@ -51,8 +84,16 @@ function build(opts: {
     managedRef,
     resolveClusterConnection,
     resolveSlotConnection,
+    ownConnections,
+    accountsServing,
+    environmentNameOf: jest.fn().mockResolvedValue(null),
   } as unknown as ConnectionsService;
   const router = new ActionRouterProvider(orchestrActions, composio, connections, platformKeysStub());
+  const runAction = router.runAction.bind(router);
+  jest.spyOn(router, 'runAction').mockImplementation((step) => {
+    running = step.actionId.split('.')[0] ?? '';
+    return runAction(step);
+  });
   return {
     router,
     execute,
@@ -61,6 +102,7 @@ function build(opts: {
     managedRef,
     resolveClusterConnection,
     resolveSlotConnection,
+    accountsServing,
   };
 }
 
@@ -162,12 +204,24 @@ describe('ActionRouterProvider', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('a googleapis step with NO connection falls through to the SDK rail (its honest 422)', async () => {
-    const { router, execute, runOurs, managedRef } = build({});
+  it('a googleapis step with no account chosen runs as the runner’s only one, on the rail that account takes', async () => {
+    const { router, execute, runOurs } = build({
+      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
+      accounts: ['only-gmail'],
+    });
     const out = await router.runAction(input('gmail.get_profile'));
     expect(out).toEqual({ output: { via: 'sdk-actions' } });
-    expect(runOurs).toHaveBeenCalledTimes(1);
-    expect(managedRef).not.toHaveBeenCalled(); // no connection id → no lookup
+    expect(runOurs).toHaveBeenCalledWith(
+      expect.objectContaining({ auth: { connectionId: 'only-gmail' }, externalUserId: 'user-1' }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('a step with no account to run as is refused naming it, before any rail runs', async () => {
+    const { router, execute, runOurs } = build({});
+    const refused = router.runAction({ ...input('gmail.get_profile'), stepName: 'Who am I' });
+    await expect(refused).rejects.toThrow('Step "Who am I" has no gmail account to run as — connect one');
+    expect(runOurs).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -224,32 +278,52 @@ describe('ActionRouterProvider', () => {
     expect(execute).toHaveBeenCalledWith(expect.not.objectContaining({ idempotencyKey: expect.anything() }));
   });
 
-  it('a dry run skips Composio typed execution — returns a stub, execute not called, no connection needed', async () => {
-    const { router, execute } = build({}); // no managed connection at all
-    const dry: RunActionInput = { ...input(COMPOSIO_ONLY), dryRun: true };
+  it('a dry run skips Composio typed execution — returns a stub, execute not called', async () => {
+    const { router, execute } = build({ managedRef: managed() });
+    const dry: RunActionInput = { ...input(COMPOSIO_ONLY, 'conn-1'), dryRun: true };
     const out = await router.runAction(dry);
     expect(out.output).toMatchObject({ dry_run: true, withheld: 'managed_step' });
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('refuses a managed connection that is not active yet', async () => {
-    const { router } = build({ managedRef: managed({ status: 'pending' }) });
-    await expect(router.runAction(input(TRELLO_CATALOG, 'conn-1'))).rejects.toThrow(/not active/i);
-  });
-
-  it('gives a Composio-only action on a BYO connection the honest managed-only error', async () => {
-    const { router, execute } = build({
-      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
-    });
-    await expect(router.runAction(input(COMPOSIO_ONLY, 'conn-1'))).rejects.toThrow(
-      /needs a managed connection/i,
+  it('a dry run predicts the real one: a step with no account to run as is refused there too', async () => {
+    const { router, execute } = build({});
+    const dry: RunActionInput = { ...input(COMPOSIO_ONLY), dryRun: true };
+    await expect(router.runAction(dry)).rejects.toThrow(
+      /runs only on a one-click \(managed\) asana account, and you have none/,
     );
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('asks for a managed connection when a Composio-only action references none', async () => {
-    const { router, execute } = build({});
-    await expect(router.runAction(input(COMPOSIO_ONLY))).rejects.toThrow(/managed connection/i);
+  it('refuses a managed connection that is not active yet, naming the step and the fix — never its id', async () => {
+    const { router, execute } = build({ managedRef: managed({ status: 'pending' }) });
+    const err = await router.runAction(input(TRELLO_CATALOG, 'conn-1')).catch((e: unknown) => e);
+    expect((err as Error).message).toBe(
+      'Step "trello.add_boards" runs as a trello account that isn\'t active — pick another of your trello accounts on the step',
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Composio-only action on an own-credentials account before any rail, naming the step', async () => {
+    const { router, execute } = build({
+      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
+    });
+    await expect(
+      router.runAction({ ...input(COMPOSIO_ONLY, 'conn-1'), stepName: 'Who am I' }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        'Step "Who am I" runs as an account that uses its own credentials, and it runs only on a one-click (managed) asana account — pick one on the step, or connect one under Integrations',
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('asks for a one-click account when a Composio-only action has none to run as', async () => {
+    const { router, execute, accountsServing } = build({});
+    await expect(router.runAction(input(COMPOSIO_ONLY))).rejects.toThrow(
+      'Step "asana.get_current_user" runs only on a one-click (managed) asana account, and you have none — connect one under Integrations',
+    );
+    expect(accountsServing).toHaveBeenCalledWith('user-1', ['asana']);
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -324,12 +398,14 @@ describe('ActionRouterProvider', () => {
     const { router, runOurs } = build({ clusterConn: null });
     await expect(
       router.runAction(input('slack.send_channel_message', 'personal-conn', PROD)),
-    ).rejects.toThrow(/No "slack" connection in the prod environment/i);
+    ).rejects.toThrow(/^prod has no slack account assigned/);
     expect(runOurs).not.toHaveBeenCalled();
   });
 
   it('a TEST run (no environment) keeps the step personal connection + identity untouched', async () => {
-    const { router, runOurs, resolveClusterConnection } = build({});
+    const { router, runOurs, resolveClusterConnection } = build({
+      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
+    });
     await router.runAction(input('slack.send_channel_message', 'personal-conn'));
     expect(resolveClusterConnection).not.toHaveBeenCalled();
     expect(runOurs).toHaveBeenCalledWith(
@@ -337,11 +413,24 @@ describe('ActionRouterProvider', () => {
     );
   });
 
-  it('an env run for a step that references NO connection is left untouched (no cluster lookup)', async () => {
+  it('an env run takes the slot for a step that names NO account too, run AS its owner', async () => {
+    const { router, runOurs, resolveClusterConnection, accountsServing } = build({
+      clusterConn: { id: 'cluster-conn', ownerUserId: 'owner-9' },
+      accounts: ['runner-gmail'],
+    });
+    await router.runAction(input('gmail.get_profile', undefined, PROD));
+    expect(resolveClusterConnection).toHaveBeenCalledWith('org-1', 'prod', 'gmail');
+    expect(accountsServing).not.toHaveBeenCalled();
+    expect(runOurs).toHaveBeenCalledWith(
+      expect.objectContaining({ auth: { connectionId: 'cluster-conn' }, externalUserId: 'owner-9' }),
+    );
+  });
+
+  it('a step that needs no account and names none is left untouched under an environment', async () => {
     const { router, runOurs, resolveClusterConnection } = build({
       clusterConn: { id: 'cluster-conn', ownerUserId: 'owner-9' },
     });
-    await router.runAction(input('slack.send_channel_message', undefined, PROD));
+    await router.runAction(input('text.concat', undefined, PROD));
     expect(resolveClusterConnection).not.toHaveBeenCalled();
     expect(runOurs).toHaveBeenCalledWith(
       expect.objectContaining({ auth: undefined, externalUserId: 'user-1' }),
@@ -362,6 +451,26 @@ describe('ActionRouterProvider', () => {
     );
   });
 
+  it.each<[string, typeof STAGING_SLOT | undefined, Parameters<typeof build>[0]]>([
+    ['Default, with an only account', undefined, { accounts: ['mine'] }],
+    ['Default, with no account', undefined, {}],
+    ['an environment, with a slot', STAGING_SLOT, { slotConn: { id: 'slot-conn', ownerUserId: 'owner-7' } }],
+  ])(
+    'a credential handed inline runs as handed on %s — never swapped for an account',
+    async (_label, env, opts) => {
+      const { router, runOurs, accountsServing, resolveSlotConnection } = build(opts);
+      await router.runAction({
+        ...input('slack.send_channel_message', undefined, env),
+        auth: { token: 'inline' },
+      });
+      expect(runOurs).toHaveBeenCalledWith(
+        expect.objectContaining({ auth: { token: 'inline' }, externalUserId: 'user-1' }),
+      );
+      expect(accountsServing).not.toHaveBeenCalled();
+      expect(resolveSlotConnection).not.toHaveBeenCalled();
+    },
+  );
+
   it('a MISSING slot is a hard 428 naming the env + app — never the pool', async () => {
     const { router, runOurs } = build({
       slotConn: null,
@@ -370,7 +479,7 @@ describe('ActionRouterProvider', () => {
     });
     await expect(
       router.runAction(input('slack.send_channel_message', 'personal-conn', STAGING_SLOT)),
-    ).rejects.toThrow(/No "slack" connection in the staging environment/i);
+    ).rejects.toThrow(/^staging has no slack account assigned/);
     await expect(
       router.runAction(input('slack.send_channel_message', 'personal-conn', STAGING_SLOT)),
     ).rejects.toMatchObject({ status: 428 });
@@ -387,9 +496,41 @@ describe('ActionRouterProvider', () => {
     expect(managedRef).not.toHaveBeenCalled();
   });
 
+  it("an environment's account that isn't active is refused before any rail, naming the environment, the step and the fix", async () => {
+    const { router, execute, managedRef } = build({
+      slotConn: { id: 'slot-conn', ownerUserId: 'owner-7' },
+      managedRef: managed({ id: 'slot-conn', status: 'expired' }),
+    });
+    const err = await router
+      .runAction({ ...input(TRELLO_CATALOG, 'personal-conn', STAGING_SLOT), stepName: 'Add a board' })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      status: 428,
+      message:
+        "staging's trello account isn't active, so \"Add a board\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments",
+    });
+    expect(managedRef).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('a chosen account for another app is refused before any rail, naming both apps', async () => {
+    const { router, execute, runOurs } = build({ managedRef: managed(), chosenFor: 'slack' });
+    const err = await router
+      .runAction({ ...input('gmail.get_profile', 'conn-1'), stepName: 'Who am I' })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      status: 422,
+      message:
+        'Step "Who am I" runs as an account for slack, not gmail — pick one of your gmail accounts on the step',
+    });
+    expect(runOurs).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('a Default run (no env context) never touches slot or cluster resolution', async () => {
     const { router, runOurs, resolveSlotConnection, resolveClusterConnection } = build({
       slotConn: { id: 'slot-conn', ownerUserId: 'owner-7' },
+      managedRef: managed({ authType: 'oauth2', connectedAccountId: null }),
     });
     await router.runAction(input('slack.send_channel_message', 'personal-conn'));
     expect(resolveSlotConnection).not.toHaveBeenCalled();

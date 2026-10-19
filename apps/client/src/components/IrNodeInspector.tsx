@@ -15,11 +15,12 @@ import SupportBadge from "./SupportBadge";
 import { defaultParamsFromSchema, getNodeTypeLabel, isNativeOrTriggerType, opDropsRight, opLabel } from "@/lib/constants";
 import { listEnvironments, type EnvironmentSlot } from "@/api/environments";
 import { accountFields, accountRefToken, accountRefValue, isAccountRef, isEmailRecipientField } from "@/lib/accountRef";
-import { activeConnections, appDisplayName, candidateConnections, connectionLabel, describeAccount, matchingConnections } from "@/lib/connections";
+import { accountLabel, activeConnections, appDisplayName, connectionLabel, describeAccount, matchingConnections } from "@/lib/connections";
 import { humanizeKey } from "@/lib/format";
 import { REAL_RUN_CONSEQUENCE, REAL_RUN_STEP_NOTE } from "@/lib/realRun";
 import { toast } from "@/lib/toast";
 import { useActiveConnections } from "@/lib/useConnections";
+import { refusalFor, useStepAccount } from "@/store/useStepAccounts";
 import { isEmpty as isFieldEmpty } from "@/lib/workflow-validation";
 import ConnectAppButton from "./ConnectAppButton";
 import { SaratiLoader } from "./SaratiLogo";
@@ -3451,92 +3452,150 @@ function ConnectionAccountLine({ connectionId }: { connectionId: string }) {
   );
 }
 
-/**
- * THE connection picker — never fork a second one. Purely presentational: the host owns loading,
- * auto-select, and the connectionId commit; `connections === null` means still loading.
- */
+interface RunAsCopy {
+  account: api.StepAccount;
+  appName: string;
+  /** "one-click " for a step only one-click accounts run, else "". */
+  kind: string;
+  /** " · <account>" naming the only account it runs as, else "". */
+  only: string;
+}
+
+// What the field says a step runs as, by the service's answer; a stored account it can't run as is also what its select shows.
+const RUN_AS_COPY: Record<Exclude<api.StepAccountState, "chosen">, (copy: RunAsCopy) => string> = {
+  only: ({ kind, appName, only }) => `Runs as your only active ${kind}${appName} account${only}`,
+  none: ({ kind, appName }) => `No ${kind}${appName} account — connect one`,
+  several: ({ account, kind, appName }) => `You have ${account.accounts.length} active ${kind}${appName} accounts — pick one`,
+  inactive: ({ appName }) => `This step's ${appName} account isn't active — pick another of your ${appName} accounts`,
+  stale: () => "This step's account was removed or isn't yours — pick one",
+  wrong_app: ({ appName }) => `This step's account is for another app, not ${appName} — pick one`,
+  needs_managed: ({ appName }) =>
+    `This step's account uses its own credentials, and it runs only on a one-click ${appName} account — pick one`,
+};
+
+const HELD_STATES: ReadonlySet<api.StepAccountState> = new Set(["stale", "wrong_app", "needs_managed"]);
+
+// THE account picker — never fork a second one; what the step runs as is the service's answer, and a pick the only write.
 function ConnectionSelectField({
   connections,
+  account,
+  settling,
   error,
   onRetry,
   appSlug,
+  appName,
   value,
   onChange,
   onConnected,
   helpText,
 }: {
+  /** Your active accounts, for their labels; null while loading. */
   connections: Connection[] | null;
+  /** What the step runs as for you now; null when the service names no account for it. */
+  account: api.StepAccount | null | undefined;
+  /** `account` predates the step's latest change, whose answer is on its way. */
+  settling: boolean;
   error: string | null;
   onRetry: () => void;
   appSlug: string | undefined;
+  appName: string;
   value: string;
   onChange: (id: string) => void;
-  onConnected: (id: string) => void;
+  onConnected: () => void;
   helpText?: ReactNode;
 }) {
-  const shown = connections ? candidateConnections(connections, appSlug) : null;
-  const strict = connections ? matchingConnections(connections, appSlug) : null;
-  // No strict-matching account yet (fallback options don't count) → offer the one-click connect.
-  const offerConnect = Boolean(appSlug) && strict !== null && strict.length === 0;
+  const byId = new Map((connections ?? []).map((c) => [c.id, c]));
+  const offered = (account?.accounts ?? []).flatMap((id) => {
+    const found = byId.get(id);
+    return found ? [found] : [];
+  });
+  // While a change settles, only the accounts offered are known; what the step runs as waits for the answer.
+  const settled = settling ? undefined : account;
+  const inactive = settled?.state === "inactive";
+  // A step only the managed rail runs counts only one-click accounts, so every line says which kind.
+  const kind = account?.managed_only ? "one-click " : "";
+  const only = settled?.state === "only" ? byId.get(settled.connection_id ?? "") : undefined;
+  const runAs =
+    settled && settled.state !== "chosen"
+      ? RUN_AS_COPY[settled.state]({
+          account: settled,
+          appName,
+          kind,
+          only: only?.account ? ` · ${accountLabel(only.account)}` : "",
+        })
+      : null;
+  // A stored account the step can't run as shows as what it is, never as one of your live ones.
+  const held = settled && HELD_STATES.has(settled.state) ? runAs : null;
+  // A chosen account of yours that isn't offered (an inactive one, or one not in your personal list) still shows as what the step holds.
+  const unoffered =
+    (settled?.state === "chosen" || inactive) && value !== "" && !offered.some((c) => c.id === value);
   return (
     <div data-testid="connection-field">
-      {/* No "*": a connection is deliberately not gated by collectMissingRequired. */}
+      {/* No "*": a step with no account chosen is decided when it runs. */}
       <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
-        Connection
+        Account
       </label>
       {error ? (
         <InlineError message={error} onRetry={onRetry} />
-      ) : shown === null ? (
+      ) : connections === null || account === undefined ? (
         <div className="flex items-center gap-2 text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
-          <SaratiLoader size={14} /> Loading connections…
+          <SaratiLoader size={14} /> Checking your accounts…
         </div>
       ) : (
         <>
-          {offerConnect && appSlug && (
-            <ConnectAppButton
-              app={appSlug}
-              appName={appDisplayName(appSlug)}
-              onConnected={onConnected}
-              size="sm"
-              className="w-full"
-              data-testid="connect-app-inline"
-            />
-          )}
-          {shown.length === 0 ? (
-            !offerConnect && (
-              <div className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
-                No connections yet —{" "}
-                <Link href="/integrations" target="_blank" className="underline" style={{ color: "var(--orchestr-ink)" }}>
-                  connect one in Integrations
-                </Link>
-                , then pick it here.
-              </div>
-            )
-          ) : (
+          {(offered.length > 0 || value !== "") && (
             <select
               value={value}
               onChange={(e) => onChange(e.target.value)}
-              aria-label="Connection"
-              className={`w-full h-8 px-2 rounded-lg text-[12px] outline-none${offerConnect ? " mt-1.5" : ""}`}
+              aria-label="Account"
+              className="w-full h-8 px-2 rounded-lg text-[12px] outline-none"
               style={{ background: "var(--orchestr-field)", border: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink)" }}
+              data-testid="connection-select"
             >
-              {value === "" && (
-                <option value="">{offerConnect ? "Or pick an existing account…" : "Select a connection…"}</option>
+              {held && (
+                <option value={value} disabled>
+                  {held}
+                </option>
               )}
-              {shown.map((c) => (
+              {unoffered && (
+                <option value={value}>{`The ${appName} account chosen here${inactive ? " (not active)" : ""}`}</option>
+              )}
+              <option value="">Not chosen — decided when it runs</option>
+              {offered.map((c) => (
                 <option key={c.id} value={c.id} style={{ background: "var(--orchestr-surface-card)" }}>
                   {connectionLabel(c)}
                 </option>
               ))}
             </select>
           )}
+          {runAs && (
+            <p
+              className="text-[11px] m-0 mt-1.5 leading-snug"
+              style={{ color: settled?.state === "only" ? "var(--orchestr-ink-muted)" : "var(--orchestr-warning)" }}
+              data-testid="connection-run-as"
+            >
+              {runAs}
+            </p>
+          )}
+          {settled?.state === "none" && appSlug && (
+            <ConnectAppButton
+              app={appSlug}
+              appName={appName}
+              onConnected={onConnected}
+              size="sm"
+              className="w-full mt-1.5"
+              data-testid="connect-app-inline"
+            />
+          )}
         </>
       )}
-      {value && <ConnectionAccountLine connectionId={value} />}
+      {settled?.state === "chosen" && value && <ConnectionAccountLine connectionId={value} />}
       <p className="text-[10px] m-0 mt-1 leading-snug" style={{ color: "var(--orchestr-ink-subtle)" }}>
         {helpText ?? (
           <>
-            The account this step runs as — needed before it can run. Manage accounts in{" "}
+            The account this step runs as. With none chosen it runs as your only active {kind}
+            {appName}{" "}
+            account, and a promoted run uses its environment&apos;s. Manage accounts in{" "}
             <Link href="/integrations" target="_blank" className="underline">
               Integrations
             </Link>
@@ -3564,7 +3623,12 @@ function AgentEditor({
   onMaxStepsChange,
   onInputChange,
   onConnectionChange,
-  onConnectionAutoSelect,
+  connections,
+  account,
+  accountSettling,
+  accountsError,
+  onAccountsRetry,
+  onConnected,
   upstream,
   samples,
   onTriggerSample,
@@ -3579,7 +3643,12 @@ function AgentEditor({
   onMaxStepsChange: (value: number | undefined) => void;
   onInputChange: (value: string) => void;
   onConnectionChange: (id: string) => void;
-  onConnectionAutoSelect: (id: string) => void;
+  connections: Connection[] | null;
+  account: api.StepAccount | null | undefined;
+  accountSettling: boolean;
+  accountsError: string | null;
+  onAccountsRetry: () => void;
+  onConnected: () => void;
   upstream: UpstreamStep[];
   samples: Record<string, unknown>;
   onTriggerSample: (payload: unknown) => void;
@@ -3588,27 +3657,9 @@ function AgentEditor({
   // An unlisted current model stays selectable rather than snapping to a known option.
   const modelKnown = AGENT_MODEL_GROUPS.some((g) => g.models.includes(selectedModel));
   const stepsValue = typeof maxSteps === "number" ? maxSteps : "";
-  // The model's optgroup doubles as the connection picker's app slug, so one account matches both.
-  const provider =
-    AGENT_MODEL_GROUPS.find((g) => g.models.includes(selectedModel))?.providerId ??
-    model?.provider ??
-    DEFAULT_AGENT_PROVIDER;
-
-  // The model connection is an OPTIONAL override: an environment run resolves the provider from
-  // that environment's slot, so an account is only needed for a by-hand Default/test run.
-  const { connections, error: connectionsError, reload: reloadConnections } = useActiveConnections();
-
-  // Exactly one account for this provider → pre-select it without dirtying the workflow.
-  useEffect(() => {
-    if (!connections || connectionId) return;
-    const strict = matchingConnections(connections, provider);
-    if (strict.length === 1) onConnectionAutoSelect(strict[0].id);
-  }, [connections, provider, connectionId, onConnectionAutoSelect]);
-
-  const handleConnected = (id: string) => {
-    onConnectionChange(id);
-    reloadConnections();
-  };
+  // The model's optgroup doubles as the account picker's app slug, so one account matches both.
+  const group = AGENT_MODEL_GROUPS.find((g) => g.models.includes(selectedModel));
+  const provider = group?.providerId ?? model?.provider ?? DEFAULT_AGENT_PROVIDER;
 
   return (
     <div className="space-y-2" data-testid="agent-editor">
@@ -3684,17 +3735,20 @@ function AgentEditor({
 
       <ConnectionSelectField
         connections={connections}
-        error={connectionsError}
-        onRetry={reloadConnections}
+        account={account}
+        settling={accountSettling}
+        error={accountsError}
+        onRetry={onAccountsRetry}
         appSlug={provider}
+        appName={group?.provider ?? appDisplayName(provider)}
         value={connectionId}
         onChange={onConnectionChange}
-        onConnected={handleConnected}
+        onConnected={onConnected}
         helpText={
           <>
-            Optional — a promoted run resolves the model from this environment&apos;s {provider}{" "}
-            slot (the same kind of connection the LLM steps use). Pick an account to run the agent
-            by hand on a Default/test run, or to pin a specific one. Manage accounts in{" "}
+            Optional — with none chosen the model runs on your only active {group?.provider ?? provider}{" "}
+            account, and a promoted run always on its environment&apos;s {provider}{" "}
+            slot (the same kind of connection the LLM steps use). Picking one pins only a Default run. Manage accounts in{" "}
             <Link href="/integrations" target="_blank" className="underline">
               Integrations
             </Link>
@@ -4177,31 +4231,14 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
   // Params edited this session: an emptied optional field must stay on screen, not vanish.
   const [touchedKeys, setTouchedKeys] = useState<Set<string>>(() => new Set());
 
-  // `auth: "connection"` means the run needs a `connectionId` param, so offer the account select.
+  // `auth: "connection"` means the step runs as an account, so offer the account select.
   const needsConnection = schema?.auth === "connection";
-  const { connections, error: connectionsError, reload: reloadConnections } = useActiveConnections(needsConnection);
-
-  // The step's app slug. Auto-select must only ever act on STRICT matches, never the
-  // fall-back-to-everything list.
+  const runsAsAccount = needsConnection || node?.node_type === "orchestr:agent";
+  const { connections, error: connectionsError, reload: reloadConnections } = useActiveConnections(runsAsAccount);
   const appSlug = node?.node_type?.includes(".") ? node.node_type.split(".")[0] : undefined;
-  const strictMatches = useMemo(
-    () => (connections ? matchingConnections(connections, appSlug) : null),
-    [connections, appSlug],
-  );
 
-  // Exactly one connection for this app → pre-select it (zero decisions on the
-  // happy path). Reads the live node from the store so a stale render can't
-  // clobber parameters someone else just wrote.
-  useEffect(() => {
-    if (!strictMatches || strictMatches.length !== 1) return;
-    const doc = useWorkflow.getState().workflowJson as { nodes?: IrNodeShape[] } | null;
-    const live = doc?.nodes?.find((n) => n.id === nodeId);
-    if (!live) return;
-    const p = live.parameters ?? {};
-    if (typeof p.connectionId === "string" && p.connectionId !== "") return;
-    // markDirty: false — auto-select is a default, not a user edit, so opening a node can't dirty it.
-    updateIrNode(nodeId, { parameters: { ...p, connectionId: strictMatches[0].id } }, { markDirty: false });
-  }, [nodeId, strictMatches, updateIrNode]);
+  // What the step runs as is the service's answer; opening a step never writes one.
+  const { account, settling, error: runAsError, reload: reloadRunAs } = useStepAccount(nodeId, runsAsAccount);
 
   // "Test this step" runs this one node for real; `missing` names referenced steps with no sample.
   const [test, setTest] = useState<
@@ -4255,10 +4292,9 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
   });
   const hasRequiredEmpty = requiredEmptyKeys.length > 0;
 
-  // A single-step test hits the provider NOW with these exact params — there is no environment-slot
-  // resolution — so an empty connectionId can only fail. The deploy gate deliberately doesn't block.
-  const connectionMissing =
-    needsConnection && !(typeof params.connectionId === "string" && params.connectionId !== "");
+  // A single-step test runs as you on Default, so a step the service can give no account can only fail.
+  const accountRefusal =
+    needsConnection && account && !settling ? refusalFor(account, node.name || node.id) : null;
 
   const commit = (key: string, value: unknown) => {
     // Touched params stay visible for the session even if the edit emptied them.
@@ -4296,12 +4332,21 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .slice(0, 64);
 
-  // In-flow connect succeeded: attach the new account to this step and refresh
-  // the list so the select shows it by name.
-  const handleConnected = (connectionId: string) => {
-    commit("connectionId", connectionId);
-    reloadConnections();
+  // "Not chosen" removes the key, so the step is decided when it runs, exactly as one never chosen.
+  const chooseAccount = (id: string) => {
+    if (id !== "") return commit("connectionId", id);
+    const next = { ...params };
+    delete next.connectionId;
+    updateIrNode(node.id, { parameters: next });
   };
+
+  const reloadAccounts = () => {
+    reloadConnections();
+    reloadRunAs();
+  };
+
+  // A new account changes what the step runs as without writing to it; the Connect button asks that again itself.
+  const handleConnected = () => reloadConnections();
 
   const nodeType = node.node_type ?? "";
   // Broken = the lookup RESOLVED to no entry and the type isn't native — a removed or renamed action.
@@ -4367,9 +4412,11 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
       ? "trigger payload"
       : (upstream.find((u) => u.refKey === refKey)?.name ?? refKey);
 
-  // The account this step runs as on a Default run — what "Me" means while editing.
+  // The account this step runs as on a Default run, chosen or its only one — what "Me" means while editing.
   const stepAccount =
-    connections?.find((c) => c.id === params.connectionId)?.account ?? null;
+    !settling && account?.connection_id
+      ? (connections?.find((c) => c.id === account.connection_id)?.account ?? null)
+      : null;
 
   // The default control, the dropdown's degrade path, and the fx-mode widget; objects render as JSON.
   const textInputFor = (key: string, multiline = false) => {
@@ -4470,8 +4517,8 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     }
     // No inlined options: load them live, falling back to the text field when that can't run.
     if (family === "dropdown" && node.node_type) {
-      const connId =
-        typeof params.connectionId === "string" && params.connectionId ? params.connectionId : undefined;
+      // The account the step runs as, chosen or not, so its live options are that account's.
+      const connId = account?.connection_id ?? undefined;
       return (
         <DynamicOptionsField
           nodeType={node.node_type}
@@ -4484,7 +4531,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
           fallback={textInputFor(key)}
           connectionHint={
             needsConnection && !connId
-              ? "Select a connection above to pick from your account instead of typing an id."
+              ? "Connect or pick an account above to choose from it instead of typing an id."
               : undefined
           }
         />
@@ -4724,11 +4771,14 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
         {needsConnection && (
           <ConnectionSelectField
             connections={connections}
-            error={connectionsError}
-            onRetry={reloadConnections}
+            account={account}
+            settling={settling}
+            error={connectionsError ?? runAsError}
+            onRetry={reloadAccounts}
             appSlug={appSlug}
+            appName={appDisplayName(appSlug ?? "")}
             value={typeof params.connectionId === "string" ? params.connectionId : ""}
-            onChange={(id) => commit("connectionId", id)}
+            onChange={chooseAccount}
             onConnected={handleConnected}
           />
         )}
@@ -4812,10 +4862,13 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
               else next.input = v;
               updateIrNode(node.id, { parameters: next });
             }}
-            onConnectionChange={(id) => commit("connectionId", id)}
-            onConnectionAutoSelect={(id) =>
-              updateIrNode(node.id, { parameters: { ...params, connectionId: id } }, { markDirty: false })
-            }
+            onConnectionChange={chooseAccount}
+            connections={connections}
+            account={account}
+            accountSettling={settling}
+            accountsError={connectionsError ?? runAsError}
+            onAccountsRetry={reloadAccounts}
+            onConnected={handleConnected}
             upstream={upstream}
             samples={samples}
             onTriggerSample={(payload) => setSample(scopeKey, "trigger", payload)}
@@ -5089,7 +5142,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
             <button
               type="button"
               onClick={runTest}
-              disabled={test.phase === "running" || hasRequiredEmpty || isBroken || connectionMissing}
+              disabled={test.phase === "running" || hasRequiredEmpty || isBroken || accountRefusal !== null}
               title={
                 isBroken
                   ? "This step's type isn't in the action catalog, so it can't run."
@@ -5097,9 +5150,7 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
                     ? `Fill the required field${requiredEmptyKeys.length === 1 ? "" : "s"} first: ${requiredEmptyKeys
                         .map(humanizeKey)
                         .join(", ")}`
-                    : connectionMissing
-                      ? "Connect an account first."
-                      : undefined
+                    : (accountRefusal ?? undefined)
               }
               className="w-full h-8 flex items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
               style={{
@@ -5129,14 +5180,14 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
                 Fill {requiredEmptyKeys.map(humanizeKey).join(", ")} before testing this step.
               </p>
             )}
-            {/* Without an account the real provider call can only fail, so point at the select above. */}
-            {connectionMissing && !hasRequiredEmpty && (
+            {/* Without an account the real provider call can only fail, so say why, as the run would. */}
+            {accountRefusal !== null && !hasRequiredEmpty && (
               <p
                 className="text-[10px] m-0 mt-1 leading-snug"
                 style={{ color: "var(--orchestr-warning)" }}
                 data-testid="test-step-connection-block"
               >
-                Connect an account above before testing this step.
+                {accountRefusal}
               </p>
             )}
             {!isBroken && (

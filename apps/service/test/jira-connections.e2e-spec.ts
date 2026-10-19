@@ -375,7 +375,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
 
       expect(run.status).toBe(422);
       expect(run.body.detail).toBe(
-        `Connection ${connectionId} has no username and password — reconnect it with an email or username plus an API token or password`,
+        'Step "issue" runs as a jira account that has no username and password — reconnect it with an email or username plus an API token or password, or pick another of your jira accounts on the step',
       );
     });
   });

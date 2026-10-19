@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { ComposeModule } from '../compose/compose.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import { EnvironmentsModule } from '../environments/environments.module';
 import { GenerationModule } from '../generation/generation.module';
 import { RunsModule } from '../runs/runs.module';
@@ -31,6 +32,7 @@ import { WorkflowsWriteController } from './workflows-write.controller';
   imports: [
     AuthModule,
     ComposeModule,
+    ConnectionsModule,
     EnvironmentsModule,
     GenerationModule,
     RunsModule,

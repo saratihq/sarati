@@ -1042,6 +1042,23 @@ export interface ReviewTestSummary {
   regression: ReviewTestRegression;
 }
 
+/** A step a test would refuse for want of an account. */
+export interface BlockedStep {
+  node_id: string;
+  node_name: string;
+  app: string;
+  /** A `_slot` reason under an environment; a {@link StepAccountRefusal} on Default. */
+  reason: "empty_slot" | "wrong_app_slot" | "needs_managed_slot" | "inactive_slot" | StepAccountRefusal;
+  /** What the run would fail with. */
+  message: string;
+}
+
+/** What "Test this branch" already knows before it runs, for you and the chosen environment. */
+export interface ReviewTestReadiness {
+  environment: { id: string; name: string } | null;
+  blocked: BlockedStep[];
+}
+
 export interface ReviewDetail extends ReviewSummary {
   description?: string | null;
   comments: ReviewComment[];
@@ -1182,7 +1199,6 @@ export async function testReviewBranch(
   reviewId: string,
   body: {
     environment_id?: string;
-    environment_name?: string;
     trigger_payload?: unknown;
   } = {},
 ): Promise<ReviewTestSummary> {
@@ -1190,6 +1206,16 @@ export async function testReviewBranch(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** The branch's steps a test would refuse for want of an account — asked before anything runs. */
+export async function getReviewTestReadiness(
+  workflowId: string,
+  reviewId: string,
+  environmentId?: string,
+): Promise<ReviewTestReadiness> {
+  const query = environmentId ? `?environment_id=${encodeURIComponent(environmentId)}` : "";
+  return request(`/workflows/${workflowId}/reviews/${reviewId}/test/readiness${query}`);
 }
 
 // ── Built-in engine runs (the Sarati runtime) ──
@@ -1619,11 +1645,43 @@ export async function connectionAccount(id: string, refresh = false): Promise<Co
   return request<ConnectionAccount>(`/connections/${encodeURIComponent(id)}/account${query}`);
 }
 
-export async function listConnections(): Promise<{
+/** Your connections; with `app`, only those that serve it — the service's matching rule, never a local copy. */
+export async function listConnections(app?: string): Promise<{
   connections: Connection[];
 }> {
-  const connections = await request<Connection[]>("/connections");
+  const query = app ? `?app=${encodeURIComponent(app)}` : "";
+  const connections = await request<Connection[]>(`/connections${query}`);
   return { connections };
+}
+
+/** Why a step has no account to run as on a Default run. */
+export type StepAccountRefusal = "none" | "several" | "stale" | "inactive" | "wrong_app" | "needs_managed";
+
+/** How a step gets its account on a Default run, or why it has none. */
+export type StepAccountState = "chosen" | "only" | StepAccountRefusal;
+
+/** One step's account on a Default run, as the run would decide it. */
+export interface StepAccount {
+  node_id: string;
+  node_name: string;
+  app: string;
+  state: StepAccountState;
+  /** The account it runs as; null when it has none. */
+  connection_id: string | null;
+  /** Your active accounts that can run it, newest first — what a pick may offer. */
+  accounts: string[];
+  /** It runs only on a one-click (managed) account. */
+  managed_only: boolean;
+  /** What a run would fail with; null when it runs. */
+  message: string | null;
+}
+
+/** What each step of a canvas runs as for you — the service decides, so the canvas never guesses. */
+export async function runAsAccounts(workflowJson: Record<string, unknown>): Promise<{ steps: StepAccount[] }> {
+  return request("/connections/run-as", {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflowJson }),
+  });
 }
 
 /** Whether the managed rail is configured here — the managed-first vs BYO-only switch for the connect UI. */

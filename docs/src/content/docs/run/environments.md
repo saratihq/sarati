@@ -53,9 +53,34 @@ So the path to production runs through `main`, and through whatever review gate 
 ## Connections belong to the environment
 
 A step names the app it needs; the environment supplies the account. Staging hits the sandbox
-account, production hits the real one, and the workflow document never contains a credential.
+account, production hits the real one, and the workflow document never contains a credential. A
+step runs as its environment's account whether or not it names one of its own. Sharing a workflow
+therefore never shares a credential.
 
-Sharing a workflow therefore never shares a credential.
+An environment's slot for an app takes only an account for that app — assigning another app's is
+refused. Promoting or publishing to an environment that has no account for a step's app, whose
+account can't run the step, or whose account for it isn't active, is refused up front, naming the
+step:
+
+> staging has no gmail account assigned, so "Email me the report" can't run there — assign one
+> under Integrations → Environments before promoting here
+
+A step whose action runs only through one-click sign-in can't run on a slot account connected with
+its own key:
+
+> staging's slack account uses its own credentials, and "Remind me" runs only on a one-click
+> (managed) one, so it can't run there — reassign it under Integrations → Environments before
+> promoting here
+
+An account that isn't active is refused the same way, and its owner reconnecting it mends it as well
+as an owner reassigning the slot:
+
+> staging's gmail account isn't active, so "Email me the report" can't run there — its owner
+> reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments
+> before promoting here
+
+A run already there stops before that step calls the app, naming the step and the environment as it
+is called now.
 
 ## Rename and delete
 

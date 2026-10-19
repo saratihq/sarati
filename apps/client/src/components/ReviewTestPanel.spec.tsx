@@ -1,7 +1,22 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import type { ReviewTestSummary } from "@/api/client";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as api from "@/api/client";
+import type { BlockedStep, ReviewTestReadiness, ReviewTestSummary } from "@/api/client";
+import type { EnvironmentSummary } from "@/api/environments";
 import ReviewTestPanel from "@/components/ReviewTestPanel";
+
+vi.mock("@/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof api>()),
+  getReviewTestReadiness: vi.fn(),
+}));
+
+const getReviewTestReadiness = vi.mocked(api.getReviewTestReadiness);
+const clean: ReviewTestReadiness = { environment: null, blocked: [] };
+
+beforeEach(() => {
+  getReviewTestReadiness.mockReset();
+  getReviewTestReadiness.mockResolvedValue(clean);
+});
 
 const summary = (changed: ReviewTestSummary["regression"]["changed"]): ReviewTestSummary => ({
   verdict: "green",
@@ -19,6 +34,7 @@ const renderPanel = (result: ReviewTestSummary) =>
     <ReviewTestPanel
       workflowId="wf"
       reviewId="rev"
+      sourceBranch="add-email"
       environments={null}
       result={result}
       onResult={vi.fn()}
@@ -56,6 +72,7 @@ describe("ReviewTestPanel — where a result stands for merging", () => {
       <ReviewTestPanel
         workflowId="wf"
         reviewId="rev"
+        sourceBranch="add-email"
         environments={null}
         result={r}
         onResult={vi.fn()}
@@ -100,3 +117,233 @@ describe("ReviewTestPanel — where a result stands for merging", () => {
   });
 });
 
+
+describe("ReviewTestPanel — what the test would refuse, before it runs", () => {
+  const blocked = (over: Partial<BlockedStep>): BlockedStep => ({
+    node_id: "send_report",
+    node_name: "Email me the report",
+    app: "gmail",
+    reason: "none",
+    message: 'Step "Email me the report" has no gmail account to run as — connect one',
+    ...over,
+  });
+  const production = { id: "env-prod", name: "production", is_prod: true } as unknown as EnvironmentSummary;
+  const renderRunnable = () =>
+    render(
+      <ReviewTestPanel
+        workflowId="wf"
+        reviewId="rev"
+        sourceBranch="add-email"
+        environments={[production]}
+        result={null}
+        onResult={vi.fn()}
+        canRun
+      />,
+    );
+
+  it("names nothing when every step has an account to run as", async () => {
+    renderRunnable();
+    expect(await screen.findByRole("button", { name: "Test this branch" })).toBeEnabled();
+    expect(getReviewTestReadiness).toHaveBeenCalledWith("wf", "rev", undefined);
+    expect(screen.queryByTestId("test-readiness")).not.toBeInTheDocument();
+  });
+
+  it("says, in the run's own words, a step with no account, and where to connect one", async () => {
+    getReviewTestReadiness.mockResolvedValue({ environment: null, blocked: [blocked({})] });
+    renderRunnable();
+    const box = await screen.findByTestId("test-readiness");
+    expect(box).toHaveTextContent('Step "Email me the report" has no gmail account to run as — connect one');
+    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.queryByRole("link", { name: /Open add-email/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeEnabled();
+  });
+
+  it("sends a step with several accounts, or a stale one, to the branch to pick", async () => {
+    getReviewTestReadiness.mockResolvedValue({
+      environment: null,
+      blocked: [
+        blocked({
+          reason: "several",
+          message: 'Step "Email me the report" has no gmail account chosen and you have 2 active gmail accounts — pick one on the step',
+        }),
+      ],
+    });
+    renderRunnable();
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent("you have 2 active gmail accounts — pick one on the step");
+    expect(screen.getByRole("link", { name: "Open add-email to pick its account" })).toHaveAttribute(
+      "href",
+      "/workflows/wf/edit?branch=add-email",
+    );
+  });
+
+  it("sends a step whose chosen account isn't active to its branch to pick another", async () => {
+    getReviewTestReadiness.mockResolvedValue({
+      environment: null,
+      blocked: [
+        blocked({
+          reason: "inactive",
+          message:
+            "Step \"Email me the report\" runs as a gmail account that isn't active — pick another of your gmail accounts on the step",
+        }),
+      ],
+    });
+    renderRunnable();
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent("isn't active — pick another of your gmail accounts");
+    expect(screen.getByRole("link", { name: "Open add-email to pick its account" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open Integrations" })).not.toBeInTheDocument();
+  });
+
+  it("asks again for the picked environment, names its empty slot, and holds the run", async () => {
+    renderRunnable();
+    await screen.findByRole("button", { name: "Test this branch" });
+    getReviewTestReadiness.mockResolvedValue({
+      environment: { id: "env-prod", name: "production" },
+      blocked: [
+        blocked({
+          reason: "empty_slot",
+          message:
+            'production has no gmail account assigned, so "Email me the report" can\'t run there — an owner assigns one under Integrations → Environments',
+        }),
+      ],
+    });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "env-prod" } });
+
+    const box = await screen.findByTestId("test-readiness");
+    expect(getReviewTestReadiness).toHaveBeenLastCalledWith("wf", "rev", "env-prod");
+    expect(box).toHaveTextContent(/^production has no gmail account assigned/);
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeDisabled();
+  });
+
+  it("sends a step whose chosen account is for another app to the branch to pick one", async () => {
+    getReviewTestReadiness.mockResolvedValue({
+      environment: null,
+      blocked: [
+        blocked({
+          reason: "wrong_app",
+          message:
+            'Step "Email me the report" runs as an account for slack, not gmail — pick one of your gmail accounts on the step',
+        }),
+      ],
+    });
+    renderRunnable();
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent("runs as an account for slack, not gmail");
+    expect(screen.getByRole("link", { name: "Open add-email to pick its account" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open Integrations" })).not.toBeInTheDocument();
+  });
+
+  it("names an environment whose account isn't active, sends it to Integrations, and holds the run", async () => {
+    renderRunnable();
+    await screen.findByRole("button", { name: "Test this branch" });
+    getReviewTestReadiness.mockResolvedValue({
+      environment: { id: "env-prod", name: "production" },
+      blocked: [
+        blocked({
+          reason: "inactive_slot",
+          message:
+            'production\'s gmail account isn\'t active, so "Email me the report" can\'t run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments',
+        }),
+      ],
+    });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "env-prod" } });
+
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent(/^production's gmail account isn't active/);
+    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeDisabled();
+  });
+
+  it("sends a step holding an own-credentials account it can't run on to pick a one-click one, or connect one", async () => {
+    getReviewTestReadiness.mockResolvedValue({
+      environment: null,
+      blocked: [
+        blocked({
+          node_name: "Remind me",
+          app: "slack",
+          reason: "needs_managed",
+          message:
+            'Step "Remind me" runs as an account that uses its own credentials, and it runs only on a one-click (managed) slack account — pick one on the step, or connect one under Integrations',
+        }),
+      ],
+    });
+    renderRunnable();
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent("runs only on a one-click (managed) slack account");
+    expect(screen.getByRole("link", { name: "Open add-email to pick its account" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+  });
+
+  it.each([
+    ["wrong_app_slot", 'production\'s gmail account is for slack, so "Email me the report" can\'t run there — an owner assigns a gmail account under Integrations → Environments'],
+    [
+      "needs_managed_slot",
+      'production\'s gmail account uses its own credentials, and "Email me the report" runs only on a one-click (managed) one, so it can\'t run there — an owner assigns a one-click gmail account under Integrations → Environments',
+    ],
+  ] as const)("names an environment whose account can't run a step (%s), sends it to Integrations, and holds the run", async (reason, message) => {
+    renderRunnable();
+    await screen.findByRole("button", { name: "Test this branch" });
+    getReviewTestReadiness.mockResolvedValue({
+      environment: { id: "env-prod", name: "production" },
+      blocked: [blocked({ reason, message })],
+    });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "env-prod" } });
+
+    expect(await screen.findByTestId("test-readiness")).toHaveTextContent(message);
+    expect(screen.getByRole("link", { name: "Open Integrations" })).toHaveAttribute("href", "/integrations");
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeDisabled();
+  });
+
+  it("asks again once the window has focus back, so a slot assigned elsewhere frees the run", async () => {
+    getReviewTestReadiness.mockResolvedValue({
+      environment: { id: "env-prod", name: "production" },
+      blocked: [
+        blocked({
+          reason: "empty_slot",
+          message:
+            'production has no gmail account assigned, so "Email me the report" can\'t run there — an owner assigns one under Integrations → Environments',
+        }),
+      ],
+    });
+    renderRunnable();
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "env-prod" } });
+    await screen.findByTestId("test-readiness");
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeDisabled();
+
+    getReviewTestReadiness.mockResolvedValue({ environment: { id: "env-prod", name: "production" }, blocked: [] });
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("test-readiness")).not.toBeInTheDocument());
+    expect(getReviewTestReadiness).toHaveBeenLastCalledWith("wf", "rev", "env-prod");
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeEnabled();
+  });
+
+  it("asks again when the branch under review moves on", async () => {
+    getReviewTestReadiness.mockResolvedValue({ environment: null, blocked: [blocked({ reason: "several" })] });
+    const panel = (sourceHead: string) => (
+      <ReviewTestPanel
+        workflowId="wf"
+        reviewId="rev"
+        sourceBranch="add-email"
+        sourceHeadVersionId={sourceHead}
+        environments={[production]}
+        result={null}
+        onResult={vi.fn()}
+        canRun
+      />
+    );
+    const { rerender } = render(panel("v-1"));
+    await screen.findByTestId("test-readiness");
+
+    getReviewTestReadiness.mockResolvedValue(clean);
+    rerender(panel("v-2"));
+
+    await waitFor(() => expect(screen.queryByTestId("test-readiness")).not.toBeInTheDocument());
+    expect(getReviewTestReadiness).toHaveBeenCalledTimes(2);
+  });
+
+  it("says when it couldn't check, and leaves the run available", async () => {
+    getReviewTestReadiness.mockRejectedValue(new Error("network down"));
+    renderRunnable();
+    expect(await screen.findByText(/Couldn't check this branch's accounts before running \(network down\)/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test this branch" })).toBeEnabled();
+  });
+});

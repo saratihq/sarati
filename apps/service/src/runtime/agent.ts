@@ -8,6 +8,14 @@
 /** The provider families the agent's model call supports (set). */
 export type AgentProvider = 'openai' | 'claude' | 'gemini' | 'mistral';
 
+/** How each provider is written to a person — a message names the app, not the enum value. */
+export const AGENT_PROVIDER_LABEL: Readonly<Record<AgentProvider, string>> = {
+  claude: 'Claude',
+  openai: 'OpenAI',
+  mistral: 'Mistral',
+  gemini: 'Gemini',
+};
+
 /** A permissive JSON-schema shape — the tool `parameters` the model call is handed. */
 export type JsonSchema = Record<string, unknown>;
 
@@ -64,14 +72,9 @@ export interface ModelCallRequest {
   maxTokens?: number;
 }
 
-/**
- * The auth context the model call resolves its credential from: the opaque connection
- * reference, the run's tenant (the lookup is user-scoped), and the run's env scope. In an
- * env-scoped run the env slot WINS; `connection` is only the Default/manual override. The loop never
- * reads the raw key — only the SDK transport does.
- */
+/** What the model call's account is decided from (`connections/run-as-account.ts`); only the SDK transport reads the key. */
 export interface AgentModelAuth {
-  /** The model's connection reference (opaque; `{ connectionId }` or an inline credential) — the Default/manual override. */
+  /** The account chosen on the step (`{ connectionId }`, else decided by the run-as rule), or an inline credential the model is called with as handed. */
   connection: unknown;
   /** The run's tenant — scopes the connection credential lookup. */
   externalUserId: string;
@@ -81,6 +84,8 @@ export interface AgentModelAuth {
   environmentId?: string | null;
   /** The run's org — the legacy `(org, env, app)` cluster key with `environment`; null on a Default run. */
   orgId?: string | null;
+  /** The agent step's name, for a message that has to name it. */
+  stepName?: string;
 }
 
 /**
@@ -125,6 +130,8 @@ export interface DagAgentActionTool {
   kind: 'action';
   /** Tool name the model calls — the node's alias, else `<slug>.<action>` (the actionId). */
   name: string;
+  /** The name a person knows the tool's step by — what a refusal names; absent on a plan compiled before it existed. */
+  stepName?: string;
   /** The action to run (`<slug>.<action>`). */
   actionId: string;
   /** Base props configured on the tool node; the model's call input overlays these. */

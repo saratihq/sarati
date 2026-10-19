@@ -364,6 +364,27 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
         .set('X-Org-Id', orgId)
         .send({ connection_id: c1 }),
     ).expect(400);
+
+    // A slot takes only an account that serves its app — the run-as rule's own matching, families included.
+    const wrongApp = await asA(
+      http()
+        .put(`/api/environments/${stagingId}/slots/gmail`)
+        .set('X-Org-Id', orgId)
+        .send({ connection_id: c1 }),
+    ).expect(422);
+    expect(wrongApp.body.detail).toBe(
+      'That account is for slack, not gmail — assign a gmail account to this slot',
+    );
+    const zoho = await mk(asA(http().post('/api/connections').send({ provider: 'zoho', credential: 'tz' })));
+    await asA(
+      http()
+        .put(`/api/environments/${stagingId}/slots/zoho-crm`)
+        .set('X-Org-Id', orgId)
+        .send({ connection_id: zoho }),
+    ).expect(200);
+    await asA(http().delete(`/api/environments/${stagingId}/slots/zoho-crm`).set('X-Org-Id', orgId)).expect(
+      200,
+    );
     await asA(
       http()
         .put(`/api/environments/${randomUUID()}/slots/slack`)
@@ -472,7 +493,9 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     const brokenFire = await http().post(envHookPath).send({}).expect(202);
     const brokenRun = await awaitRun(brokenFire.body.run_id as string);
     expect(brokenRun.status).toBe('error');
-    expect(String(brokenRun.error)).toMatch(/No "gmail" connection in the staging environment/i);
+    expect(String(brokenRun.error)).toMatch(
+      /^staging has no gmail account assigned, so "Profile" can't run there/,
+    );
     expect(toolCalls).toHaveLength(0); // nothing executed anywhere
   }, 30_000);
 

@@ -8,6 +8,7 @@ import type { NodeProps } from "@xyflow/react";
 import { DIFF_COLORS, getNodeTypeLabel, hasTwoOutputPorts, opDropsRight, opLabel, outputPortCount } from "@/lib/constants";
 import { triggerKindLabel } from "@/lib/triggerKind";
 import { pendingQuestionFor, useComposer } from "@/store/useComposer";
+import { useComposerConnectShows } from "@/store/useStepAccounts";
 import { useStepSamples } from "@/store/useStepSamples";
 import { ComposerConnectChip, QuestionChip } from "./ComposerBar";
 import NodeIcon, { nodeIconKind } from "./NodeIcon";
@@ -163,7 +164,9 @@ function WorkflowNodeComponent({ id, data, selected }: NodeProps) {
   // Pinned for runs: a Run replays this step's captured output
   // instead of executing it.
   const pinned = useStepSamples((s) => Boolean(s.pinned[id]));
-  const connectionNeed = useComposer((s) => s.connectionNeeds[id]);
+  // The composer's Connect ask shows on a step only once its answer says it has no account to run as.
+  const composerNeed = useComposer((s) => s.connectionNeeds[id]);
+  const connectionNeed = useComposerConnectShows(id) === true ? composerNeed : undefined;
   const requestPrefill = useComposer((s) => s.requestPrefill);
   const {
     label,

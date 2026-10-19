@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as agent from "@/api/agent";
+import * as api from "@/api/client";
 import { useComposer } from "@/store/useComposer";
 import { UNTITLED_WORKFLOW, useWorkflow } from "@/store/useWorkflow";
 
@@ -11,8 +12,9 @@ vi.mock("@/api/agent", async (importOriginal) => ({
 }));
 
 vi.mock("@/api/client", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/api/client")>()),
+  ...(await importOriginal<typeof api>()),
   listNodeTypes: vi.fn().mockResolvedValue({ node_types: [] }),
+  listConnections: vi.fn(),
 }));
 
 const composerAttach = vi.mocked(agent.composerAttach);
@@ -149,6 +151,39 @@ describe("useComposer on any canvas", () => {
     expect(saveDeployedEdits).toHaveBeenCalled();
     expect(composerStream.mock.calls.at(-1)![0].message).toBe(
       "Saved a new version on lane. It reaches what runs only after a merge into main and a publish, or a promotion.",
+    );
+  });
+});
+
+describe("a step's account is never written for the person", () => {
+  it("connecting from a Connect chip writes nothing to the canvas: it stays clean and the composer is told to re-test", async () => {
+    const doc = {
+      version: "1",
+      name: "Digest",
+      nodes: [{ id: "send_report", name: "Email me the report", node_type: "gmail.send_email", parameters: { to: "x" } }],
+      edges: [],
+    };
+    useWorkflow.setState({
+      workflowId: "wf-1",
+      workflowJson: doc,
+      workflowIr: structuredClone(doc),
+      lastGeneratedJson: structuredClone(doc),
+      dirty: false,
+    });
+    useComposer.setState({ connectionNeeds: { send_report: { provider: "gmail", providerLabel: "Gmail" } } });
+    vi.mocked(api.listConnections).mockResolvedValue({
+      connections: [{ id: "conn-new", provider: "gmail", status: "active", auth_type: "managed" }],
+    } as Awaited<ReturnType<typeof api.listConnections>>);
+
+    await useComposer.getState().notifyConnected("gmail", "Gmail");
+
+    const nodes = (useWorkflow.getState().workflowJson as typeof doc).nodes as Array<{ parameters: Record<string, unknown> }>;
+    expect(nodes[0]!.parameters).toEqual({ to: "x" });
+    expect(useWorkflow.getState().dirty).toBe(false);
+    expect(useComposer.getState().connectionNeeds).toEqual({});
+    expect(api.listConnections).not.toHaveBeenCalled();
+    expect(composerStream.mock.calls.at(-1)![0].message).toBe(
+      "(canvas note) Gmail is now connected — re-test the step that needed it.",
     );
   });
 });

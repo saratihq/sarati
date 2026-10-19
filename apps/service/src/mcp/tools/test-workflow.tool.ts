@@ -31,7 +31,7 @@ const Input = z.object({
     .boolean()
     .optional()
     .describe(
-      'Defaults to TRUE. A dry run stubs mutating HTTP on the SDK rail and skips Composio execution entirely — but GET and HEAD still hit real third-party systems with real credentials.',
+      'Defaults to TRUE. A dry run stubs mutating HTTP on the SDK rail and skips Composio execution entirely — but GET and HEAD still hit real third-party systems with real credentials, and every step still needs an account to run as.',
     ),
   confirmation_token: z
     .string()
@@ -91,7 +91,7 @@ export class TestWorkflowTool implements McpTool {
   readonly scope: ApiScope = 'run:dry';
   readonly title = 'Test a workflow';
   readonly description =
-    'Run a workflow to see what it does. Dry by default: mutating HTTP on the SDK rail is stubbed and Composio execution is skipped entirely — but GET and HEAD still hit real third-party systems with real credentials. It resolves connections from your own pool, not an environment, so a passing test does not prove the workflow will run in production. Firing for real needs dry_run: false plus the confirmation_token from a dry run of the same document.';
+    'Run a workflow to see what it does. Dry by default: mutating HTTP on the SDK rail is stubbed and Composio execution is skipped entirely — but GET and HEAD still hit real third-party systems with real credentials, and a step with no account to run as stops the run, as it would a real one. It resolves connections from your own pool, not an environment, so a passing test does not prove the workflow will run in production. Firing for real needs dry_run: false plus the confirmation_token from a dry run of the same document.';
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

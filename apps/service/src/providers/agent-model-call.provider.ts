@@ -3,44 +3,21 @@ import { ConfigService } from '@nestjs/config';
 import { agentModelAuth, callAgentModel, type FetchLike, HttpClient } from '@sarati/actions-sdk';
 
 import { ConnectionsService } from '../connections/connections.service';
-import { PlatformKeysService } from '../platform/platform-keys.service';
-import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
-import type { EnvConfig } from '../config/env.config';
 import {
-  type AgentModelAuth,
-  type AgentModelPort,
-  type AgentProvider,
-  type ModelCallRequest,
-  type ModelTurn,
-} from '../runtime/agent';
+  agentModelStep,
+  connectionIdOf,
+  isInlineCredential,
+  noAccountMessage,
+  resolveRunAs,
+  type RunAsStep,
+} from '../connections/run-as-account';
+import { PlatformKeysService } from '../platform/platform-keys.service';
+import type { EnvConfig } from '../config/env.config';
+import type { AgentModelAuth, AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/agent';
 import { resolveSdkAuthHandle } from './sdk-auth';
 
 /** Test-only fetch for the agent model call; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
 export const AGENT_MODEL_FETCH = Symbol('AGENT_MODEL_FETCH');
-
-/** How each provider is written to a person — the model call's error names the app, not the enum value. */
-const PROVIDER_LABEL: Record<AgentProvider, string> = {
-  claude: 'Claude',
-  openai: 'OpenAI',
-  mistral: 'Mistral',
-  gemini: 'Gemini',
-};
-
-/**
- * Where the missing model credential goes. The platform Anthropic key (Settings) is the COMPOSER's
- * and is deliberately not consulted here, so a Claude failure has to say that or it reads as a bug.
- */
-function missingConnectionHelp(provider: AgentProvider): string {
-  const label = PROVIDER_LABEL[provider] ?? provider;
-  const composer =
-    provider === 'claude'
-      ? ' The Anthropic key in Settings → Platform keys powers the AI composer only, not agent steps.'
-      : '';
-  return (
-    `This agent step has no ${label} connection to call the model with. ` +
-    `Connect one under Integrations → "Use your own credentials" → ${label}, then pick it on the step's model.${composer}`
-  );
-}
 
 /**
  * The production {@link AgentModelPort} — binds the AI Agent node's model seam to the SDK's tool-aware
@@ -54,8 +31,7 @@ export class AgentModelCallProvider implements AgentModelPort {
 
   constructor(
     config: ConfigService<{ env: EnvConfig }, true>,
-    // Optional so the provider stays `new`-able in unit tests without DI.
-    @Optional() private readonly connections?: ConnectionsService,
+    private readonly connections: ConnectionsService,
     @Optional() @Inject(AGENT_MODEL_FETCH) private readonly fetchImpl?: FetchLike,
     @Optional() private readonly platformKeys?: PlatformKeysService,
   ) {
@@ -74,18 +50,20 @@ export class AgentModelCallProvider implements AgentModelPort {
     if (!scheme) {
       throw new Error(`Agent model call: unsupported provider "${String(req.provider)}"`);
     }
-    const resolved = await this.resolveModelConnection(req.provider, auth);
+    const step = agentModelStep(auth.stepName ?? 'AI Agent', req.provider, connectionIdOf(auth.connection));
+    const resolved = await this.resolveModelConnection(step, auth);
     const handle = await resolveSdkAuthHandle(
       scheme,
       {
         externalUserId: resolved.externalUserId,
         auth: resolved.connection,
-        ...(this.connections ? { connections: this.connections } : {}),
+        connections: this.connections,
         composioApiKey: (await this.composioKeyFor(auth)) ?? '',
         composioBaseUrl: this.composioBaseUrl,
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        decided: { step, where: auth },
       },
-      missingConnectionHelp(req.provider),
+      noAccountMessage(step),
     );
     // ModelCallRequest and the SDK's AgentModelRequest are structurally identical by design — no remapping needed.
     const result = await callAgentModel(
@@ -108,18 +86,14 @@ export class AgentModelCallProvider implements AgentModelPort {
     };
   }
 
-  /**
-   * The connection + tenant the model call runs on. In an ENV-scoped run the provider's env SLOT wins and the call
-   * runs as its owner (action parity); a Default run uses `auth.connection`, and a missing slot is a hard 428.
-   */
   private async resolveModelConnection(
-    provider: AgentProvider,
+    step: RunAsStep,
     auth: AgentModelAuth,
   ): Promise<{ connection: unknown; externalUserId: string }> {
-    if (this.connections) {
-      const slot = await resolveEnvSlotConnection(this.connections, auth, provider);
-      if (slot) return { connection: { connectionId: slot.connectionId }, externalUserId: slot.ownerUserId };
+    if (isInlineCredential(auth.connection)) {
+      return { connection: auth.connection, externalUserId: auth.externalUserId };
     }
-    return { connection: auth.connection, externalUserId: auth.externalUserId };
+    const account = await resolveRunAs(step, auth, this.connections);
+    return { connection: { connectionId: account.id }, externalUserId: account.ownerUserId };
   }
 }

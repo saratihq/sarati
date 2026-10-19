@@ -5,13 +5,14 @@ import { type AuthHandle, type AuthScheme, type DropdownResult, type FetchLike }
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { ConnectionsService } from '../connections/connections.service';
+import { actionStep, noAccountMessage } from '../connections/run-as-account';
 import type { EnvConfig } from '../config/env.config';
 import { sdkAction, isSdkActionType } from './sdk-actions.registry';
 import { IdempotencyHttpClient } from './idempotency-http-client';
 import { DryRunHttpClient } from './dry-run-http-client';
 import { withheldWrite } from './dry-run-marker';
 import { PlatformKeysService } from '../platform/platform-keys.service';
-import { resolveSdkAuthHandle } from './sdk-auth';
+import { resolveSdkAuthHandle, type SdkAuthContext } from './sdk-auth';
 import type { RunActionInput, RunActionResult } from './managed-integration-provider';
 
 /** Test-only fetch for the SDK transports; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
@@ -48,7 +49,9 @@ export class SdkActionsProvider {
       // A miss is a wiring bug, not a user error, so it stays a 500 (unlike the run-but-fails 422 below).
       throw new Error(`SdkActionsProvider has no action for "${input.actionId}"`);
     }
-    const auth = await this.authFor(input, input.actionId, input.auth, action.auth);
+    // Only a run names a step; an account check (the identity probe) runs none, so its failure names none.
+    const decided = input.stepName ? { step: actionStep(input), where: input } : undefined;
+    const auth = await this.authFor(input, input.actionId, input.auth, action.auth, decided);
     // A dry run refuses mutating requests; otherwise a deterministic Idempotency-Key stops a crash-replay double-firing.
     const dryRun = input.dryRun ? new DryRunHttpClient() : null;
     const http =
@@ -103,6 +106,7 @@ export class SdkActionsProvider {
     actionId: string,
     auth: unknown,
     scheme: AuthScheme,
+    decided?: SdkAuthContext['decided'],
   ): Promise<AuthHandle> {
     return resolveSdkAuthHandle(
       scheme,
@@ -113,15 +117,10 @@ export class SdkActionsProvider {
         composioApiKey: (await this.composioKeyFor(owner)) ?? '',
         composioBaseUrl: this.composioBaseUrl,
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        ...(decided ? { decided } : {}),
       },
-      this.needsConnectionMessage(actionId),
+      noAccountMessage(decided?.step ?? actionStep({ actionId })),
     );
-  }
-
-  /** The "attach a connection" step-precondition text (422), naming the app slug. */
-  private needsConnectionMessage(actionId: string): string {
-    const slug = actionId.slice(0, actionId.indexOf('.')) || 'account';
-    return `Step "${actionId}" requires a ${slug} connection — attach one to this step and retry`;
   }
 
   /** Map an SDK failure to a structured 422 step failure carrying the normalized, secret-free message. */

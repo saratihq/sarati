@@ -15,6 +15,11 @@ const SINGLE_DEFINITION = [
   { symbol: 'computeDiff', definedIn: 'ir/diff.ts' },
   // Constitution #17 — what `{{$account…}}` reads, and how it is filled.
   { symbol: 'fillAccountRefs', definedIn: 'runtime/account-ref.ts' },
+  // Constitution #18 — which account a step runs as, which accounts serve an app, and which actions need one, or a one-click one.
+  { symbol: 'decideRunAs', definedIn: 'connections/run-as-account.ts' },
+  { symbol: 'providersServing', definedIn: 'connections/run-as-account.ts' },
+  { symbol: 'actionNeedsAccount', definedIn: 'providers/sdk-actions.registry.ts' },
+  { symbol: 'actionNeedsManagedAccount', definedIn: 'providers/sdk-actions.registry.ts' },
 ] as const;
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -57,6 +62,40 @@ describe('vault: one definition site per load-bearing question', () => {
       .map((f) => f.rel);
 
     expect(fills).toEqual(['providers/action-router.provider.ts']);
+  });
+
+  /** Constitution #17: a save's ref warnings are `refWarningsOf`'s alone, so no save path skips its account check. */
+  it('only refWarningsOf lints a document for a save', () => {
+    const linters = sources()
+      .filter((f) => f.rel !== 'compiler/ref-lint.ts' && /\blintDataRefs\s*\(/.test(f.text))
+      .map((f) => f.rel);
+
+    expect(linters).toEqual(['compose/author-validation.ts']);
+  });
+
+  /** Constitution #18: nothing but the run-as rule looks up a slot or the runner's accounts for a step; a trigger's slot is read where it is stood up and promoted. */
+  it('only the run-as rule picks the account a step runs as', () => {
+    const pickers = sources()
+      .filter((f) => /\.(?:resolveSlotConnection|resolveClusterConnection|accountsServing)\s*\(/.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+    expect(pickers).toEqual([
+      'connections/run-as-account.ts',
+      'environments/env-slot-preflight.ts',
+      'triggers/canvas/trigger-reconciler.service.ts',
+    ]);
+  });
+
+  /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */
+  it('every in-process rail runs a step as the run-as rule decides', () => {
+    const rails = ['providers/action-router.provider.ts', 'providers/agent-model-call.provider.ts'];
+    const asking = sources()
+      .filter((f) => /\b(?:resolveRunAs|decideRunAs)\s*\(/.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+    expect(asking).toEqual(['connections/run-as-account.ts', ...rails]);
   });
 
   /** Constitution #15: a failing pre-merge test blocks a protected merge in `mergeBranchIn` alone, so no entry point can skip it. */

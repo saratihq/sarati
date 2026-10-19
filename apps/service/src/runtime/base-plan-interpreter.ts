@@ -102,6 +102,7 @@ export const MAX_SUB_WORKFLOW_INVOCATIONS = 64;
 /** The action-payload subset the executor needs — shared by `ActionNode` and `DagActionNode`, minus the error lane. */
 export interface ExecutableAction {
   id: string;
+  name?: string;
   actionId: string;
   props: Record<string, unknown>;
   auth?: unknown;
@@ -121,6 +122,7 @@ export interface ExecutableCode {
 /** The agent fields the executor needs — the subset `DagAgentNode` carries (its tools + model config). */
 export interface ExecutableAgent {
   id: string;
+  name?: string;
   systemPrompt: string;
   model: { provider: AgentProvider; model: string };
   maxSteps: number;
@@ -674,6 +676,7 @@ export abstract class BasePlanInterpreter {
           actionId: node.actionId,
           props,
           auth: node.auth,
+          stepName: node.name ?? node.id,
           runId: ctx.runId,
           // Stable across a DBOS crash-replay, so a re-run dedupes side effects.
           idempotencyKey: `${ctx.runId}:${stepKey}`,
@@ -814,6 +817,7 @@ export abstract class BasePlanInterpreter {
       environment: ctx.environment,
       environmentId: ctx.environmentId,
       orgId: ctx.orgId,
+      stepName: node.name ?? node.id,
     };
   }
 
@@ -907,6 +911,7 @@ export abstract class BasePlanInterpreter {
           actionId: tool.actionId,
           props,
           auth: tool.auth,
+          stepName: tool.stepName ?? tool.name,
           runId: ctx.runId,
           idempotencyKey: `${ctx.runId}:${stepKey}`,
           dryRun: ctx.dryRun,

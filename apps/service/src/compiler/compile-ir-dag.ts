@@ -65,6 +65,15 @@ const MAX_AGENT_MAX_STEPS = 100;
 const DEFAULT_AGENT_MODEL = { provider: 'claude' as AgentProvider, model: 'claude-opus-4-8' };
 const AGENT_PROVIDERS: ReadonlySet<AgentProvider> = new Set(['openai', 'claude', 'gemini', 'mistral']);
 
+/** The provider an AI Agent step's model calls — the default when it names none; null for any other step, or a model this compiler refuses. */
+export function agentModelProvider(node: { node_type: unknown; parameters?: unknown }): AgentProvider | null {
+  if (node.node_type !== ORCHESTR_AGENT) return null;
+  const raw = isRecord(node.parameters) ? node.parameters.model : undefined;
+  if (raw === undefined || raw === null) return DEFAULT_AGENT_MODEL.provider;
+  const provider = isRecord(raw) ? raw.provider : undefined;
+  return AGENT_PROVIDERS.has(provider as AgentProvider) ? (provider as AgentProvider) : null;
+}
+
 /** The single loop-type predicate (mirrors `isIfNode`); the loop is a structured node with a nested body. */
 function isLoopNode(node: IRNode): boolean {
   return node.node_type === ORCHESTR_LOOP;
@@ -642,6 +651,7 @@ function buildAgentNode(node: IRNode, translate: (value: unknown) => unknown, gu
   return {
     kind: 'agent',
     id: node.id,
+    ...(node.name ? { name: node.name } : {}),
     systemPrompt,
     model,
     maxSteps,
@@ -758,6 +768,7 @@ function buildAgentTool(
   return {
     kind: 'action',
     name: sanitizeToolName(alias || node.node_type),
+    stepName: node.name || node.id,
     actionId: node.node_type,
     props: translate(baseProps) as Record<string, unknown>,
     ...(typeof connectionId === 'string' && connectionId ? { auth: { connectionId } } : {}),

@@ -18,7 +18,7 @@ const Input = z.object({
 const Output = z.object({
   connections: z.array(
     z.object({
-      /** Put this on a node as `parameters.connectionId` — it is the only thing that becomes step auth. */
+      /** Put this on a node as `parameters.connectionId` to pin a Default run to this account. */
       id: z.string(),
       provider: z.string(),
       /** The `<app>` half of the action ids this connection can serve; null when it can serve none. */
@@ -38,7 +38,7 @@ export class ListConnectionsTool implements McpTool {
   readonly scope: ApiScope = 'connection:read';
   readonly title = 'List connections';
   readonly description =
-    'The connections available to this account — ids and status only, never credential material. A node that needs auth carries one of these ids as `connectionId`.';
+    "The connections available to this account — ids and status only, never credential material. Name one of these ids as a step's `connectionId` to pin a Default run to it; a step that names none runs as your only active account for its app (only one-click accounts count for a step that runs only through one-click sign-in). A promoted run always runs as its environment's account.";
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

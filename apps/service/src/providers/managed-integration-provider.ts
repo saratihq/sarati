@@ -20,8 +20,10 @@ export interface RunActionInput {
   actionId: string;
   /** The node's configured inputs (the action's `propsValue`). */
   props: ConfiguredProps;
-  /** Connection credential (OAuth token / API key) when the action needs auth. */
+  /** The account chosen on the step (`{ connectionId }`, else decided by the run-as rule), or an inline credential the step runs on as handed. */
   auth?: unknown;
+  /** The step's name, for a message that has to name it. */
+  stepName?: string;
   /** The scoped run id, so any file blobs this step produces are cleaned up with the run. */
   runId?: string;
   /**
@@ -31,10 +33,7 @@ export interface RunActionInput {
   idempotencyKey?: string;
   /** Preview mode: the SDK rail stubs mutating HTTP (reads still run); the Composio rail skips the action entirely. */
   dryRun?: boolean;
-  /**
-   * Per-env connection scoping: set → the step resolves the env's SLOT, and a missing slot is a hard 428,
-   * never a pool fallback. `environment` is the env NAME and, with `orgId`, the LEGACY pre-006 resolution key.
-   */
+  /** The env NAME a run recorded; with `orgId`, the LEGACY pre-006 slot key (`environmentId` is the current one). */
   environment?: string | null;
   environmentId?: string | null;
   orgId?: string | null;

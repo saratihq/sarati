@@ -19,6 +19,8 @@ export interface CatalogEntry {
   category: string;
   description: string;
   auth: string;
+  /** `action`, `trigger` or `control`. */
+  kind?: string;
   parameters: Record<string, unknown>;
 }
 
@@ -263,11 +265,21 @@ export class WorkflowServiceClient {
       provider: typeof c.provider === 'string' ? c.provider : 'unknown',
       status: typeof c.status === 'string' ? c.status : 'unknown',
       display_name: typeof c.display_name === 'string' ? c.display_name : null,
+      one_click: c.auth_type === 'managed',
       account: accountOf(c.account),
     }));
   }
 
-  /** A run's record: status + per-step log (incl. error details). */
+  /** What each step of a document runs as for the caller on Default — the service's run-as rule, asked dry. */
+  async runAs(document: WorkflowIr, caller: CallerContext): Promise<StepRunAs[]> {
+    const { status, body } = await this.request('POST', '/api/connections/run-as', caller, {
+      workflow_json: document,
+    });
+    if (status !== 200) throw this.asError('check accounts', status, body);
+    const steps = (body as { steps?: unknown }).steps;
+    return Array.isArray(steps) ? steps.flatMap(stepRunAsOf) : [];
+  }
+
   /**
    * The caller's latest COMPLETED run scope — `trigger` + one key per step —
    * the same sample source the editor's data picker eats from (W3). Null when
@@ -283,6 +295,7 @@ export class WorkflowServiceClient {
       : null;
   }
 
+  /** A run's record: status + per-step log (incl. error details). */
   async readRun(runId: string, caller: CallerContext): Promise<RunRecord> {
     const { status, body } = await this.request('GET', `/api/runs/${encodeURIComponent(runId)}`, caller);
     if (status !== 200) throw this.asError('read run', status, body);
@@ -383,12 +396,44 @@ export interface ComposerAccount {
   handle: string | null;
 }
 
+/** What one step runs as for the caller, by the service's run-as rule. */
+export interface StepRunAs {
+  node_id: string;
+  /** How it gets its account (`chosen`, `only`), or why it has none (`none`, `several`, `stale`, `inactive`, `wrong_app`, `needs_managed`). */
+  state: string;
+  /** The account it runs as; null when it has none. */
+  connection_id: string | null;
+  /** The caller's active accounts that can run it — what a pick may name. */
+  accounts: string[];
+  /** What a run would fail with; null when it runs. */
+  message: string | null;
+}
+
+function stepRunAsOf(raw: unknown): StepRunAs[] {
+  if (raw === null || typeof raw !== 'object') return [];
+  const s = raw as Record<string, unknown>;
+  if (typeof s.node_id !== 'string' || typeof s.state !== 'string') return [];
+  return [
+    {
+      node_id: s.node_id,
+      state: s.state,
+      connection_id: typeof s.connection_id === 'string' ? s.connection_id : null,
+      accounts: Array.isArray(s.accounts)
+        ? s.accounts.filter((id): id is string => typeof id === 'string')
+        : [],
+      message: typeof s.message === 'string' ? s.message : null,
+    },
+  ];
+}
+
 /** One of the caller's connections, as the composer sees it. */
 export interface ComposerConnection {
   id: string;
   provider: string;
   status: string;
   display_name: string | null;
+  /** Connected with one-click (managed) sign-in, the only kind a step with no SDK action runs on. */
+  one_click: boolean;
   /** Null until the provider has said which account this is. */
   account: ComposerAccount | null;
 }

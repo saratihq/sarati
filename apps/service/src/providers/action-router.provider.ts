@@ -5,15 +5,26 @@ import { errorMessage } from '../common/error-message';
 import { type AccountIdentity } from '../connections/account-identity';
 import { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import { ConnectionsService, type ManagedConnectionRef } from '../connections/connections.service';
-import { resolveEnvSlotConnection } from '../connections/env-slot-resolver';
+import {
+  actionStep,
+  connectionIdOf,
+  isInlineCredential,
+  lostAccountMessage,
+  resolveRunAs,
+} from '../connections/run-as-account';
 import { isComposioDirectApp } from '../connections/managed-app-rails';
 import { accountRefFields, accountRefText, fillAccountRefs, isAccountRefField } from '../runtime/account-ref';
 import { accountProbeFor, type AccountTarget, identityFrom } from './account-probes';
 import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
-import { connectionIdOf } from './sdk-auth';
 import { withheldManagedStep } from './dry-run-marker';
 import { alignComposioOutput } from './composio-output-shape';
-import { composioToolFor, isRoutableActionType, validatedAppSlug } from './sdk-actions.registry';
+import {
+  actionNeedsAccount,
+  actionNeedsManagedAccount,
+  composioToolFor,
+  isRoutableActionType,
+  validatedAppSlug,
+} from './sdk-actions.registry';
 import { SdkActionsProvider } from './sdk-actions.provider';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 import type {
@@ -45,8 +56,8 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   async runAction(input: RunActionInput): Promise<RunActionResult> {
     // The commit check's own gate, before any connection lookup or provider call: commit-reject ⟺ run-400.
     const appSlug = this.routableAppSlug(input.actionId);
-    // Env-scoping runs BEFORE routing, so every rail resolves the right account transparently.
-    input = await this.applyEnvConnection(input, appSlug);
+    // The account is decided BEFORE routing, so every rail runs as the same one (#18).
+    input = await this.runAs(input, appSlug);
     // Only now is the connection the step runs as decided, so only now can `{{$account…}}` be filled (#17).
     input = await this.fillAccount(input);
     return this.route(input);
@@ -76,15 +87,16 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
 
   /** Replace each `{{$account…}}` with the account this step runs as — failing the step, never the field, when unknown. */
   private async fillAccount(input: RunActionInput): Promise<RunActionInput> {
-    if (accountRefFields(input.props).length === 0) return input;
+    const [field] = accountRefFields(input.props);
+    if (field === undefined) return input;
     const connectionId = connectionIdOf(input.auth);
     if (!connectionId) {
       throw new DomainError(
-        '{{$account…}} is the account a step runs as, and this step runs as none — give it a connection',
+        `Step "${actionStep(input).name}" uses no account, so ${accountRefText(field)} has no value — it is filled only on a step that runs as one`,
       );
     }
     const stored = await this.connections.accountOf(input.externalUserId, connectionId);
-    if (!stored) throw new DomainError(`Connection ${connectionId} not found`, 404);
+    if (!stored) throw await this.lost('removed', input);
     const account =
       stored.account ??
       (await this.refreshAccount({
@@ -118,16 +130,18 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return this.runViaComposio(appSlug, input);
   }
 
-  /**
-   * Rebind a step's connection through the env's SLOT for `(environmentId, app)`, via the SHARED resolver.
-   * A connection-less step and a Default run are untouched; a missing slot is a hard 428, NEVER a personal-pool fallback.
-   */
-  private async applyEnvConnection(input: RunActionInput, appSlug: string): Promise<RunActionInput> {
-    if (!connectionIdOf(input.auth)) return input; // step uses no connection (http/text/…)
-    const slot = await resolveEnvSlotConnection(this.connections, input, appSlug);
-    if (!slot) return input; // Default run — the personal pool, untouched
-    // Rebind the identity too — the downstream getCredential/managedRef is user-scoped, so the step must run as the owner.
-    return { ...input, auth: { connectionId: slot.connectionId }, externalUserId: slot.ownerUserId };
+  private async runAs(input: RunActionInput, app: string): Promise<RunActionInput> {
+    if (!actionNeedsAccount(input.actionId)) return { ...input, auth: undefined };
+    if (isInlineCredential(input.auth)) return input;
+    const step = {
+      name: actionStep(input).name,
+      app,
+      connectionId: connectionIdOf(input.auth),
+      managedOnly: actionNeedsManagedAccount(input.actionId),
+    };
+    const account = await resolveRunAs(step, input, this.connections);
+    // The identity moves with it: every credential lookup downstream is scoped to the account's owner.
+    return { ...input, auth: { connectionId: account.id }, externalUserId: account.ownerUserId };
   }
 
   private async runViaComposio(
@@ -146,18 +160,14 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
       );
     }
     const ref = resolvedRef ?? (await this.connections.managedRef(input.externalUserId, connectionId));
-    if (!ref) throw new DomainError(`Connection ${connectionId} not found`, 404);
+    if (!ref) throw await this.lost('removed', input);
     if (ref.authType !== 'managed' || !ref.connectedAccountId) {
       // A BYO/direct connection can't take the fallback — Composio has no custody of its auth.
       throw new DomainError(
         `"${appSlug}" needs a managed connection to run — a bring-your-own connection can't execute this app`,
       );
     }
-    if (ref.status !== 'active') {
-      throw new DomainError(
-        `Connection ${connectionId} (${appSlug}) is not active yet — complete the connect flow, then retry`,
-      );
-    }
+    if (ref.status !== 'active') throw await this.lost('inactive', input);
     const scope = await this.scopeOf(input);
     if (!(await this.composio.isConfigured(scope))) {
       throw new DomainError(
@@ -255,6 +265,12 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return items
       .filter((item) => item.epochMilliSeconds > lastPoll)
       .map((item) => ({ payload: item.payload }));
+  }
+
+  // The account decided for the step went before its rail ran: worded as the decision would, where the run is.
+  private async lost(lost: 'removed' | 'inactive', input: RunActionInput): Promise<DomainError> {
+    const message = await lostAccountMessage(lost, actionStep(input), input, this.connections);
+    return new DomainError(message, lost === 'removed' ? 404 : 422);
   }
 
   /** The step/trigger connection's managed ref, or null (no/foreign connection). */

@@ -104,6 +104,8 @@ export interface DagParallelNode {
 export interface DagAgentNode {
   kind: 'agent';
   id: string;
+  /** The name a person knows the step by — what a refusal names. */
+  name?: string;
   systemPrompt: string;
   model: { provider: AgentProvider; model: string };
   /** Hard cap on model-call rounds (a positive integer) — the safety net (§7). */
@@ -113,7 +115,7 @@ export interface DagAgentNode {
   /** Treat `input` as a VERBATIM message, skipping resolution — set only by the test-agent path,
    *  never by the compiler (an authored workflow always resolves). */
   inputLiteral?: boolean;
-  /** Connection reference for the model call's auth (opaque; the transport injects the key). */
+  /** The model's account chosen (`{ connectionId }`), or a credential it is called with as handed; absent → decided when it runs. */
   auth?: unknown;
   /** The bound tools — peeled from `port_type:'tool'` edges (invariant #14), attached after flatten. */
   tools: DagAgentTool[];

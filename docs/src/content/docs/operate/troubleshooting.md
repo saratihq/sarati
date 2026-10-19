@@ -193,19 +193,32 @@ jira.get_issue failed: instanceUrl https://old.atlassian.net is not a site this 
 
 Set **Instance URL** to one of the sites the message lists.
 
-## A step says it needs a connection
+## A step says it has no account to run as
 
 ```json
-{"detail":"Step \"slack.list_channels\" requires a slack connection — attach one to this step and retry"}
+{"detail":"Step \"List channels\" has no slack account to run as — connect one"}
 ```
 
-Connect the app, then name that connection on the step. See
-[Connections](/build/connections/).
+Connect the app; the step runs as it. If it says you have two accounts for the app, pick the one the
+step runs as on the step. If it says its account no longer exists or isn't yours, the account picked
+on the step was removed, or belongs to a teammate — pick one of yours. If it says its account is for
+another app, the account picked on the step connects a different app — pick one for this one. If it
+says its account isn't active, the sign-in picked on the step was never finished or has expired —
+pick another of your accounts for the app on the step. If it says the step runs only on a one-click
+(managed) account, its action runs only through one-click sign-in — connect the app that way, and
+pick that account if the step names another. See [Connections](/build/connections/#using-one-in-a-step).
 
-## An AI Agent step says it has no Claude connection
+Under an environment the message names it instead —
+`production has no gmail account assigned, so "Email me the report" can't run there`,
+`production's gmail account is for slack`, `production's slack account uses its own credentials`, or
+`production's gmail account isn't active` — and an owner assigns or reassigns one under
+**Integrations → Environments**. An account that isn't active is also mended by its owner
+reconnecting it under **Integrations**.
+
+## An AI Agent step says it has no Claude account
 
 ```json
-{"detail":"This agent step has no Claude connection to call the model with. Connect one under Integrations → \"Use your own credentials\" → Claude, then pick it on the step's model. The Anthropic key in Settings → Platform keys powers the AI composer only, not agent steps."}
+{"detail":"Step \"Agent\" has no Claude account to run as — connect one under Integrations → \"Use your own credentials\" → Claude. The Anthropic key in Settings → Platform keys powers the AI composer only, not agent steps"}
 ```
 
 The two Anthropic credentials are separate on purpose: the Settings key builds workflows, a

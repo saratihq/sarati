@@ -46,10 +46,24 @@ function platformKeys(apiKey = 'ak_test'): PlatformKeysService {
   } as unknown as PlatformKeysService;
 }
 
-function connections(over: { ref?: ManagedConnectionRef | null; credential?: unknown }): ConnectionsService {
+function connections(over: {
+  ref?: ManagedConnectionRef | null;
+  credential?: unknown;
+  /** The runner's own accounts for the model's provider. */
+  own?: string[];
+  /** The app the chosen connection is for. */
+  provider?: string;
+}): ConnectionsService {
+  const own = over.ref ? { provider: over.provider ?? 'openai', status: over.ref.status } : null;
   return {
     managedRef: jest.fn().mockResolvedValue(over.ref ?? null),
     getCredential: jest.fn().mockResolvedValue(over.credential ?? null),
+    ownConnections: jest.fn((_userId: string, ids: string[]) =>
+      Promise.resolve(new Map(own ? ids.map((id) => [id, own]) : [])),
+    ),
+    accountsServing: jest.fn((_userId: string, apps: readonly string[]) =>
+      Promise.resolve((over.own ?? []).map((id) => ({ id, provider: apps[0], managed: false }))),
+    ),
   } as unknown as ConnectionsService;
 }
 
@@ -100,7 +114,7 @@ describe('AgentModelCallProvider', () => {
     }));
     const provider = new AgentModelCallProvider(
       config(),
-      connections({ ref: byoRef, credential: { api_key: 'g-key' } }),
+      connections({ ref: byoRef, credential: { api_key: 'g-key' }, provider: 'gemini' }),
       impl,
     );
 
@@ -122,7 +136,7 @@ describe('AgentModelCallProvider', () => {
     });
     const provider = new AgentModelCallProvider(
       config(),
-      connections({ ref: managedRef }),
+      connections({ ref: managedRef, provider: 'claude' }),
       impl,
       platformKeys(),
     );
@@ -134,15 +148,30 @@ describe('AgentModelCallProvider', () => {
     expect(calls[0]!.body).toMatchObject({ connected_account_id: 'ca__test' });
   });
 
-  it('fails with NO connection as a 422 naming the provider AND where the credential goes', async () => {
+  it('runs a step with no account chosen as the runner’s only account for the provider', async () => {
+    const { impl, calls } = fakeFetch(() => ({
+      status: 200,
+      body: { choices: [{ message: { content: 'ok' } }] },
+    }));
+    const store = connections({ ref: byoRef, credential: { api_key: 'sk-only' }, own: ['only-openai'] });
+    const provider = new AgentModelCallProvider(config(), store, impl);
+
+    const turn = await provider.call(req('openai', 'gpt-4o'), authFor(undefined));
+
+    expect(turn.text).toBe('ok');
+    expect(calls[0]!.headers['authorization']).toBe('Bearer sk-only');
+    expect(store.getCredential).toHaveBeenCalledWith('u', 'only-openai');
+  });
+
+  it('fails with NO account as a 422 naming the step, the provider AND where the credential goes', async () => {
     const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
     const err = await provider
-      .call(req('claude', 'claude-opus-4-8'), authFor(undefined))
+      .call(req('claude', 'claude-opus-4-8'), { ...authFor(undefined), stepName: 'Think it over' })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DomainError);
     expect((err as DomainError).status).toBe(422);
     const message = (err as DomainError).message;
-    expect(message).toContain('no Claude connection');
+    expect(message).toContain('Step "Think it over" has no Claude account to run as');
     // The reason the platform key does not cover this is part of the message, or it reads as a bug.
     expect(message).toContain('Integrations');
     expect(message).toContain('AI composer only');
@@ -152,12 +181,90 @@ describe('AgentModelCallProvider', () => {
     const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
     const err = await provider.call(req('openai', 'gpt-5'), authFor(undefined)).catch((e: unknown) => e);
     const message = (err as DomainError).message;
-    expect(message).toContain('no OpenAI connection');
+    expect(message).toContain('no OpenAI account to run as');
     expect(message).not.toContain('AI composer');
   });
 
+  // The run-as rule decided an active account, which went inactive before the model call asked for it.
+  it.each([
+    [
+      'on Default',
+      {},
+      'Step "Think it over" runs as a Claude account that isn\'t active — pick another of your Claude accounts on the step',
+    ],
+    [
+      'under an environment, by its current name',
+      { environmentId: 'env-1', environment: 'staging-before-rename' },
+      "staging's Claude account isn't active, so \"Think it over\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments",
+    ],
+  ])(
+    'an account lost after the decision is worded as the decision would (%s)',
+    async (_name, where, expected) => {
+      const lapsed: ManagedConnectionRef = { ...managedRef, status: 'pending' };
+      const store = {
+        ...connections({ ref: lapsed }),
+        ownConnections: jest.fn((_userId: string, ids: string[]) =>
+          Promise.resolve(
+            new Map(ids.map((id) => [id, { provider: 'claude', status: 'active', managed: true }])),
+          ),
+        ),
+        resolveSlotConnection: jest.fn().mockResolvedValue({
+          id: 'c1',
+          ownerUserId: 'owner',
+          provider: 'claude',
+          status: 'active',
+          managed: true,
+        }),
+        environmentNameOf: jest.fn().mockResolvedValue('staging'),
+      } as unknown as ConnectionsService;
+      const provider = new AgentModelCallProvider(config(), store, undefined, platformKeys());
+
+      const err = await provider
+        .call(req('claude', 'claude-opus-4-8'), {
+          ...authFor({ connectionId: 'c1' }),
+          stepName: 'Think it over',
+          ...where,
+        })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(DomainError);
+      expect((err as DomainError).message).toBe(expected);
+    },
+  );
+
+  it.each([
+    ['Default, with an only account', {}],
+    ['an environment, with a slot', { environmentId: 'env-1' }],
+  ])(
+    'a credential handed inline calls the model as handed on %s — never swapped for an account',
+    async (_label, where) => {
+      const { impl, calls } = fakeFetch(() => ({
+        status: 200,
+        body: { choices: [{ message: { content: 'ok' } }] },
+      }));
+      const store = {
+        ...connections({ ref: byoRef, credential: { api_key: 'sk-stored' }, own: ['only-openai'] }),
+        resolveSlotConnection: jest.fn().mockResolvedValue({
+          id: 'slot-openai',
+          ownerUserId: 'owner',
+          provider: 'openai',
+          status: 'active',
+          managed: false,
+        }),
+      } as unknown as ConnectionsService;
+      const provider = new AgentModelCallProvider(config(), store, impl);
+
+      await provider.call(req('openai', 'gpt-4o'), { ...authFor({ api_key: 'sk-inline' }), ...where });
+
+      expect(calls[0]!.headers['authorization']).toBe('Bearer sk-inline');
+      expect(store.getCredential).not.toHaveBeenCalled();
+      expect(store.resolveSlotConnection).not.toHaveBeenCalled();
+      expect(store.accountsServing).not.toHaveBeenCalled();
+    },
+  );
+
   it('throws on an unsupported provider', async () => {
-    const provider = new AgentModelCallProvider(config(), connections({ ref: byoRef }));
+    const provider = new AgentModelCallProvider(config(), connections({ ref: byoRef, provider: 'grok' }));
     const err = await provider
       .call(req('grok' as AgentProvider, 'x'), authFor({ connectionId: 'c1' }))
       .catch((e: unknown) => e);

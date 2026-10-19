@@ -117,6 +117,7 @@ export function mapNode(node: IRNode, translate: (value: unknown) => unknown): R
     return {
       kind: 'action',
       id: node.id,
+      ...(node.name ? { name: node.name } : {}),
       actionId: node.node_type,
       props: translate(props) as Record<string, unknown>,
       ...(typeof connectionId === 'string' && connectionId ? { auth: { connectionId } } : {}),

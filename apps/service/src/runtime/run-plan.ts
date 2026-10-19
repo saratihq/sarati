@@ -12,11 +12,13 @@ export interface ActionNode {
   kind: 'action';
   /** Unique id; other nodes reference this node's output as `{{<id>.path}}`. */
   id: string;
+  /** The name a person knows the step by — what a refusal names. */
+  name?: string;
   /** The PUBLIC action type, `"<slug>.<action>"` (e.g. `"http.send_request"`). */
   actionId: string;
   /** Configured inputs; string values may embed `{{nodeId.path}}` refs to upstream outputs. */
   props: Record<string, unknown>;
-  /** Connection credential when the action needs auth. */
+  /** The account chosen (`{ connectionId }`), or a credential the step runs on as handed; absent → decided when it runs. */
   auth?: unknown;
   /** Per-node failure policy; `"continue"` captures the error into scope and goes on.
    *  Absent ⇒ stop. Execution-time only; never in the doc. */

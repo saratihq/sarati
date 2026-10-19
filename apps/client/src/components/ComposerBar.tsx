@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { ArrowUp, Check, CircleDot, Database, MessageSquare, Paperclip, Plus, Table2, X } from "lucide-react";
 import { useComposerAvailable } from "@/lib/useComposerAvailable";
 import { useComposer, type ThreadEntry } from "@/store/useComposer";
 import { useWorkflow } from "@/store/useWorkflow";
+import { useStepAccounts } from "@/store/useStepAccounts";
 import { canMoveEnvPointers, useOrgs } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 import ConnectAppButton from "./ConnectAppButton";
@@ -39,10 +40,18 @@ export default function ComposerBar({
   const composerReady = useComposerAvailable()?.available === true;
   const [confirmClear, setConfirmClear] = useState(false);
 
-  // One chip per app, however many steps wait on it (a connection is per-provider).
-  const neededProviders = Array.from(
-    new Map(Object.values(connectionNeeds).map((n) => [n.provider, n])).values(),
-  );
+  const workflowJson = useWorkflow((s) => s.workflowJson);
+  const waiting = useMemo(() => {
+    const nodes = Array.isArray(workflowJson?.nodes) ? (workflowJson.nodes as Array<{ id?: unknown }>) : [];
+    const onCanvas = new Set(nodes.map((n) => n.id));
+    return Object.entries(connectionNeeds).filter(([nodeId]) => onCanvas.has(nodeId));
+  }, [connectionNeeds, workflowJson]);
+  const { connecting } = useStepAccounts(waiting.length > 0);
+  // One chip per app, however many steps wait on it — for a node still on the canvas whose ask still shows.
+  const neededProviders = useMemo(() => {
+    const unconnected = waiting.filter(([nodeId]) => connecting[nodeId] === true);
+    return Array.from(new Map(unconnected.map(([, n]) => [n.provider, n])).values());
+  }, [waiting, connecting]);
 
   const [input, setInput] = useState("");
   // A picked text file rides along with the next message; text-only and size-capped.

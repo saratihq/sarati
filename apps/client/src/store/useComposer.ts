@@ -1,8 +1,9 @@
 import { create } from "zustand";
 import * as agent from "@/api/agent";
 import * as api from "@/api/client";
-import { activeConnections, matchingConnections } from "@/lib/connections";
 import { composeMerge, type ComposerMergeConflict } from "@/api/client";
+import { isAppTriggerNode } from "@/lib/constants";
+import { activeConnections, matchingConnections } from "@/lib/connections";
 import { irCanvasKey } from "@/lib/irCompare";
 import { collectMissingRequired, hasStepBeyondTrigger } from "@/lib/workflow-validation";
 import { UNTITLED_WORKFLOW, useWorkflow, type SaveOutcome } from "@/store/useWorkflow";
@@ -116,6 +117,41 @@ function nameUnsavedWorkflow(suggested: string | null): void {
   const current = typeof doc?.name === "string" ? doc.name : "";
   if (!suggested || (current !== "" && current !== UNTITLED_WORKFLOW)) return;
   useWorkflow.getState().setWorkflowDocName(suggested);
+}
+
+interface CanvasNode {
+  id: string;
+  node_type?: string;
+  parameters?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+function canvasNodes(): CanvasNode[] {
+  return (useWorkflow.getState().workflowJson as { nodes?: CanvasNode[] } | null)?.nodes ?? [];
+}
+
+// Names the account just connected on each app trigger waiting on `provider` that names none; never on a step, whose account is decided when it runs.
+async function bindWaitingTriggers(waiting: Array<[string, ConnectionNeed]>, provider: string): Promise<void> {
+  const triggers = new Set(canvasNodes().flatMap((n) => (isAppTriggerNode(n.node_type, n.metadata) ? [n.id] : [])));
+  const nodeIds = waiting.flatMap(([nodeId, need]) => (need.provider === provider && triggers.has(nodeId) ? [nodeId] : []));
+  // A protected branch's canvas can't be saved, so nothing is written to it.
+  if (nodeIds.length === 0 || useWorkflow.getState().editBranchProtected) return;
+  try {
+    const { connections } = await api.listConnections();
+    const match = matchingConnections(activeConnections(connections), provider).sort((a, b) =>
+      (b.created_at ?? "").localeCompare(a.created_at ?? ""),
+    )[0];
+    if (!match) return;
+    for (const nodeId of nodeIds) {
+      const live = canvasNodes().find((n) => n.id === nodeId);
+      const p = live?.parameters ?? {};
+      if (!live || (typeof p.connectionId === "string" && p.connectionId !== "")) continue;
+      // A default, not a person's edit: the next save carries it either way.
+      useWorkflow.getState().updateIrNode(nodeId, { parameters: { ...p, connectionId: match.id } }, { markDirty: false });
+    }
+  } catch {
+    // Binding is best-effort — the agent's doctrine covers the miss.
+  }
 }
 
 function storageKey(workflowId?: string): string {
@@ -253,6 +289,13 @@ export const useComposer = create<ComposerStore>((set, get) => {
           [evt.data.node_id]: { provider: evt.data.provider, providerLabel: evt.data.provider_label },
         },
       }));
+    } else if (evt.event === "connection_resolved") {
+      set((s) => {
+        if (!s.connectionNeeds[evt.data.node_id]) return {};
+        const remaining = { ...s.connectionNeeds };
+        delete remaining[evt.data.node_id];
+        return { connectionNeeds: remaining };
+      });
     } else if (evt.event === "run_result") {
       const passed = evt.data.status === "passed";
       set((s) => ({
@@ -527,36 +570,8 @@ export const useComposer = create<ComposerStore>((set, get) => {
     },
 
     notifyConnected: async (provider: string, providerLabel: string) => {
-      // BIND the fresh account into every waiting step first, or their connectionId stays empty and runs
-      // fail. Newest active match wins — it's the one that just landed.
-      const waitingNodes = Object.entries(get().connectionNeeds)
-        .filter(([, need]) => need.provider === provider)
-        .map(([nodeId]) => nodeId);
-      // A protected branch's canvas can't be saved, so nothing is written to it.
-      if (waitingNodes.length > 0 && !useWorkflow.getState().editBranchProtected) {
-        try {
-          const { connections } = await api.listConnections();
-          const match = matchingConnections(activeConnections(connections), provider).sort((a, b) =>
-            (b.created_at ?? "").localeCompare(a.created_at ?? ""),
-          )[0];
-          if (match) {
-            for (const nodeId of waitingNodes) {
-              const doc = useWorkflow.getState().workflowJson as {
-                nodes?: { id: string; parameters?: Record<string, unknown> }[];
-              } | null;
-              const live = doc?.nodes?.find((n) => n.id === nodeId);
-              if (!live) continue;
-              const p = live.parameters ?? {};
-              if (typeof p.connectionId === "string" && p.connectionId !== "") continue;
-              // Silent capture, not a user edit — the doc carries it into the next save either way.
-              useWorkflow.getState().updateIrNode(nodeId, { parameters: { ...p, connectionId: match.id } }, { markDirty: false });
-            }
-          }
-        } catch {
-          // Binding is best-effort — the agent's doctrine covers the miss.
-        }
-      }
-      // One connection serves every step on that provider — clear them all.
+      await bindWaitingTriggers(Object.entries(get().connectionNeeds), provider);
+      // A step's account is decided when it runs, so nothing is written to one; one connection serves every waiting node on that provider.
       set((s) => {
         const remaining: Record<string, ConnectionNeed> = {};
         for (const [nodeId, need] of Object.entries(s.connectionNeeds)) {
