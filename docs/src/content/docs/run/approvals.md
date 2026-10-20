@@ -64,10 +64,14 @@ decision before the first one takes it; otherwise it stays parked until it times
 decision for it is refused as already decided. That entry leaves the inbox, and a decision for it is
 refused, once either wait is within two seconds of timing out.
 
-Until a fix for how runs resume lands, a run with a wait in a parallel branch, or beside another step
-that runs at the same time, can fail when it resumes after a restart, an upgrade or going back to an
-earlier version, even with a single approval waiting: it can end in an error, or put a decision on the
-wrong wait. Let such runs finish before you restart.
+A run that had already run steps side by side when the service stopped — a wait in a parallel branch,
+or any step beside another that runs at the same time — can't be resumed safely, even with a single
+approval waiting. After a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying
+so: its waits leave the inbox, and a decision made for one that it had not taken yet is recorded,
+with who made it, but not applied.
+Run it again. Going back to an earlier version is different: there such a run can end in an error or
+put a decision on the wrong wait, so let it finish first, as
+[Upgrades](/operate/upgrades/#going-back) says.
 
 ## Deciding
 

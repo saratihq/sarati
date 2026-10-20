@@ -15,7 +15,7 @@ import {
 import { BasePlanInterpreter, type RunContext, type RunOptions } from './base-plan-interpreter';
 import { BLOB_STORE, type BlobStore } from './blob-store';
 import { CodeRunner } from './code-runner';
-import { evaluateCondition } from './conditions';
+import { routedPort } from './conditions';
 import type { DagIfNode, DagNode, DagPlan, DagSwitchNode, Guard } from './dag-plan';
 import { waitsRoutedByStep } from './event-wait';
 import type { RunResult } from './run-plan';
@@ -162,7 +162,7 @@ export class DagInterpreter extends BasePlanInterpreter {
           // Pure routing (no scope output, no I/O): settle synchronously so the
           // selected port is visible before any dependent is scheduled.
           const unresolved = new Set<string>();
-          const port = evaluateCondition(node.condition, scope, (ref) => unresolved.add(ref)) ? 0 : 1;
+          const port = routedPort(node, scope, (ref) => unresolved.add(ref));
           ifLivePort.set(node.id, port);
           if (unresolved.size > 0) undecided.push({ node, kind: 'if', port, refs: unresolved });
           ran.add(node.id);
@@ -172,14 +172,8 @@ export class DagInterpreter extends BasePlanInterpreter {
         if (node.kind === 'switch') {
           // Pure routing, like IF: cases evaluate IN ORDER, first match wins, else the
           // default port. Settled synchronously so the port is visible before any dependent.
-          let selected = node.cases.length; // default/fallback when no case matches
           const unresolved = new Set<string>();
-          for (let i = 0; i < node.cases.length; i++) {
-            if (evaluateCondition(node.cases[i]!.condition, scope, (ref) => unresolved.add(ref))) {
-              selected = i;
-              break;
-            }
-          }
+          const selected = routedPort(node, scope, (ref) => unresolved.add(ref));
           switchLivePort.set(node.id, selected);
           if (unresolved.size > 0) {
             undecided.push({ node, kind: 'switch', port: selected, refs: unresolved });

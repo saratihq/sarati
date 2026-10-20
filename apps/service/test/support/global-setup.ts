@@ -14,7 +14,8 @@ export default async function e2eGlobalSetup(): Promise<void> {
       olderThanMs: override > 0 ? override : REAP_AFTER_MS,
     });
     if (dropped.length + remaining > 0) {
-      console.log(
+      // On stderr, so a run's own report on stdout (`--json`) stays parseable.
+      console.warn(
         `e2e databases: dropped ${dropped.length} stale, ${remaining} left for the next run` +
           (refused.length > 0 ? `; refused: ${refused.join('; ')}` : ''),
       );

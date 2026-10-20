@@ -1,0 +1,243 @@
+{
+  "build": "4bd5caa9b5823584f5bc148e0bb1a96604c7ad4d",
+  "recordedAt": 1792437372615,
+  "runId": "golden-parked-after-fan-out",
+  "orgId": "1209d37a-d10c-4f81-b832-ffb318943224",
+  "app": {
+    "runtime_runs": [
+      {
+        "id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "run_id": "golden-parked-after-fan-out",
+        "user_id": "00000000-0000-0000-0000-000000000001",
+        "plan_id": "plan-golden-parked-after-fan-out",
+        "plan": {
+          "id": "plan-golden-parked-after-fan-out",
+          "nodes": [
+            {
+              "kind": "parallel",
+              "id": "fork",
+              "branches": [
+                {
+                  "id": "fork#branch0",
+                  "nodes": [
+                    {
+                      "kind": "code",
+                      "id": "a",
+                      "code": "return { ran: 'a' };",
+                      "guards": []
+                    }
+                  ]
+                },
+                {
+                  "id": "fork#branch1",
+                  "nodes": [
+                    {
+                      "kind": "code",
+                      "id": "b",
+                      "code": "return { ran: 'b' };",
+                      "guards": []
+                    }
+                  ]
+                }
+              ],
+              "guards": []
+            },
+            {
+              "kind": "waitForEvent",
+              "id": "approve",
+              "topic": "approval",
+              "timeoutMs": 600000,
+              "guards": [
+                {
+                  "source": "fork",
+                  "port": 0
+                }
+              ]
+            }
+          ]
+        },
+        "status": "waiting",
+        "outputs": null,
+        "error": null,
+        "started_at": "2026-10-19T23:16:12.478112+04:00",
+        "finished_at": null,
+        "workflow_id": null,
+        "source": "api",
+        "waiting_node_id": "approve",
+        "waiting_topic": "approval",
+        "waiting_since": "2026-10-19T23:16:12.533836+04:00",
+        "waiting_timeout_at": "2026-10-19T23:26:12.533836+04:00",
+        "decided_by": null,
+        "decided_at": null,
+        "environment": null,
+        "workflow_version_id": null,
+        "environment_id": null,
+        "review_id": null,
+        "dry_run": false,
+        "parent_run_id": null,
+        "parent_step_key": null,
+        "org_id": "1209d37a-d10c-4f81-b832-ffb318943224"
+      }
+    ],
+    "runtime_run_steps": [
+      {
+        "id": "85efc7d1-b984-4f0d-bb2e-b78a13318241",
+        "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "step_key": "approve",
+        "node_id": "approve",
+        "kind": "waitForEvent",
+        "status": "running",
+        "output": null,
+        "error": null,
+        "started_at": "2026-10-19T23:16:12.533836+04:00",
+        "finished_at": null,
+        "pinned": false,
+        "continued": false,
+        "attempts": 1,
+        "warnings": null,
+        "waiting_topic": "approval",
+        "waiting_since": "2026-10-19T23:16:12.533836+04:00",
+        "waiting_timeout_at": "2026-10-19T23:26:12.533836+04:00",
+        "claimed_at": null,
+        "delivery_topic": null,
+        "claimed_by": null,
+        "claimed_payload": null,
+        "resumed_at": null,
+        "decided_by": null,
+        "decided_at": null
+      },
+      {
+        "id": "a4f45e50-342a-421a-8bc6-beac74eb9630",
+        "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "step_key": "fork|0/a",
+        "node_id": "a",
+        "kind": "code",
+        "status": "completed",
+        "output": {
+          "ran": "a"
+        },
+        "error": null,
+        "started_at": "2026-10-19T23:16:12.495754+04:00",
+        "finished_at": "2026-10-19T23:16:12.533422+04:00",
+        "pinned": false,
+        "continued": false,
+        "attempts": 1,
+        "warnings": null,
+        "waiting_topic": null,
+        "waiting_since": null,
+        "waiting_timeout_at": null,
+        "claimed_at": null,
+        "delivery_topic": null,
+        "claimed_by": null,
+        "claimed_payload": null,
+        "resumed_at": null,
+        "decided_by": null,
+        "decided_at": null
+      },
+      {
+        "id": "31df8675-7c4b-4b54-96a2-23a3d999f812",
+        "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "step_key": "fork|1/b",
+        "node_id": "b",
+        "kind": "code",
+        "status": "completed",
+        "output": {
+          "ran": "b"
+        },
+        "error": null,
+        "started_at": "2026-10-19T23:16:12.495755+04:00",
+        "finished_at": "2026-10-19T23:16:12.533212+04:00",
+        "pinned": false,
+        "continued": false,
+        "attempts": 1,
+        "warnings": null,
+        "waiting_topic": null,
+        "waiting_since": null,
+        "waiting_timeout_at": null,
+        "claimed_at": null,
+        "delivery_topic": null,
+        "claimed_by": null,
+        "claimed_payload": null,
+        "resumed_at": null,
+        "decided_by": null,
+        "decided_at": null
+      }
+    ]
+  },
+  "dbos": {
+    "workflow_status": [
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "status": "PENDING",
+        "name": "orchestr.runPlan",
+        "authenticated_user": "",
+        "assumed_role": "",
+        "authenticated_roles": "[]",
+        "request": "{}",
+        "output": null,
+        "error": null,
+        "executor_id": "local",
+        "created_at": 1792437372484,
+        "updated_at": 1792437372485,
+        "application_version": "orchestr-1",
+        "application_id": "",
+        "class_name": null,
+        "config_name": null,
+        "recovery_attempts": 1,
+        "queue_name": null,
+        "workflow_timeout_ms": null,
+        "workflow_deadline_epoch_ms": null,
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-parked-after-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"code\",\"id\":\"a\",\"code\":\"return { ran: 'a' };\",\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"code\",\"id\":\"b\",\"code\":\"return { ran: 'b' };\",\"guards\":[]}]}],\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"fork\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"1209d37a-d10c-4f81-b832-ffb318943224\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "started_at_epoch_ms": null,
+        "deduplication_id": null,
+        "priority": 0,
+        "queue_partition_key": null,
+        "forked_from": null,
+        "owner_xid": "22d180b2-fa94-45d2-a8d8-bc6734df6efa",
+        "parent_workflow_id": null,
+        "serialization": "js_superjson",
+        "delay_until_epoch_ms": null,
+        "was_forked_from": false,
+        "rate_limited": false,
+        "completed_at": null,
+        "attributes": null,
+        "schedule_name": null
+      }
+    ],
+    "operation_outputs": [
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "function_id": 0,
+        "output": "{\"json\":{\"ran\":\"a\"},\"__dbos_serializer\":\"superjson\"}",
+        "error": null,
+        "function_name": "plan-golden-parked-after-fan-out:fork|0/a",
+        "child_workflow_id": null,
+        "started_at_epoch_ms": 1792437372497,
+        "completed_at_epoch_ms": 1792437372530,
+        "serialization": "js_superjson"
+      },
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "function_id": 1,
+        "output": "{\"json\":{\"ran\":\"b\"},\"__dbos_serializer\":\"superjson\"}",
+        "error": null,
+        "function_name": "plan-golden-parked-after-fan-out:fork|1/b",
+        "child_workflow_id": null,
+        "started_at_epoch_ms": 1792437372497,
+        "completed_at_epoch_ms": 1792437372530,
+        "serialization": "js_superjson"
+      },
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
+        "function_id": 3,
+        "output": "1792437972535",
+        "error": null,
+        "function_name": "DBOS.sleep",
+        "child_workflow_id": null,
+        "started_at_epoch_ms": 1792437372535,
+        "completed_at_epoch_ms": 1792437372535,
+        "serialization": "portable_json"
+      }
+    ]
+  }
+}

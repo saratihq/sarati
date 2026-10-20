@@ -74,6 +74,34 @@ If the worker came back, it resumes on its own. If it never comes back, the reap
 `error` once it has been in flight for `RUN_MAX_DURATION_SECONDS` since it started or last resumed
 from a wait, within five minutes.
 
+## A run reads "…so it can't be resumed safely — run it again."
+
+The service stopped — a restart, a crash or an upgrade — and resuming the run could have put a step's
+result or a decision in the wrong place: it had run steps side by side, an AI Agent step in it was
+refused a sub-workflow call and carried on, or what it recorded does not fit its workflow. The
+message says which. Nothing in it ran again: each step it had under way reads *Stopped when the
+service did*, and a decision it had not taken yet is recorded on its wait, with who made it, but not
+applied. Run the workflow again. The service log names the run at
+warn level with the reason, followed by a `RunNotResumable` error and its stack trace: that is the
+run ending, not a fault in the service.
+[Durability](/run/runs/#durability) says which runs this happens to, and
+[Upgrades](/operate/upgrades/#upgrade) how to list them before a restart.
+
+## A decision is refused: "Run … has stopped, so a decision can no longer reach it"
+
+The run is still listed as waiting, but its workflow is no longer running, so nothing can take a
+decision: it is refused rather than recorded. That happens when the service gives up on the run as
+it recovers it:
+
+- the recovery guard could not read the run's history and gave up after 40 tries, logging
+  `Couldn't read the history of run … in 40 tries`. That covers errors such as a lock held on the
+  history's tables; while the database can't be reached at all, the read waits instead, and DBOS
+  logs `Database connection failed` as it tries again.
+- DBOS gave up recovering the run after too many attempts.
+
+The run stays listed until its wait's window passes; then the reaper ends it in `error` with
+*Approval window expired before a decision was recorded.* Run the workflow again.
+
 ## A run reads "Decided by … the run has yet to take it"
 
 Someone decided, and the decision is waiting for the run to pick it up — the run is down, or catching

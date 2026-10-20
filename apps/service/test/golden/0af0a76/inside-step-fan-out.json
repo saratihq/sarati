@@ -1,0 +1,179 @@
+{
+  "build": "0af0a76fa9e5419accca5f3e46415fc990ddeda3",
+  "recordedAt": 1792449309890,
+  "runId": "golden-inside-step-fan-out",
+  "orgId": "167d8463-f99a-412d-984a-c6749bdd73ff",
+  "app": {
+    "runtime_runs": [
+      {
+        "id": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
+        "run_id": "golden-inside-step-fan-out",
+        "user_id": "00000000-0000-0000-0000-000000000001",
+        "plan_id": "plan-golden-inside-step-fan-out",
+        "plan": {
+          "id": "plan-golden-inside-step-fan-out",
+          "nodes": [
+            {
+              "kind": "parallel",
+              "id": "fork",
+              "branches": [
+                {
+                  "id": "fork#branch0",
+                  "nodes": [
+                    {
+                      "kind": "action",
+                      "id": "a",
+                      "actionId": "http.send_request",
+                      "props": {
+                        "method": "GET",
+                        "url": "http://127.0.0.1:65026/answer"
+                      },
+                      "guards": []
+                    }
+                  ]
+                },
+                {
+                  "id": "fork#branch1",
+                  "nodes": [
+                    {
+                      "kind": "action",
+                      "id": "b",
+                      "actionId": "http.send_request",
+                      "props": {
+                        "method": "GET",
+                        "url": "http://127.0.0.1:65026/hold"
+                      },
+                      "guards": []
+                    }
+                  ]
+                }
+              ],
+              "guards": []
+            }
+          ]
+        },
+        "status": "running",
+        "outputs": null,
+        "error": null,
+        "started_at": "2026-10-20T02:35:09.750713+04:00",
+        "finished_at": null,
+        "workflow_id": null,
+        "source": "api",
+        "waiting_node_id": null,
+        "waiting_topic": null,
+        "waiting_since": null,
+        "waiting_timeout_at": null,
+        "decided_by": null,
+        "decided_at": null,
+        "environment": null,
+        "workflow_version_id": null,
+        "environment_id": null,
+        "review_id": null,
+        "dry_run": false,
+        "parent_run_id": null,
+        "parent_step_key": null,
+        "org_id": "167d8463-f99a-412d-984a-c6749bdd73ff"
+      }
+    ],
+    "runtime_run_steps": [
+      {
+        "id": "80b18911-5090-41eb-9cb8-156b7b822b44",
+        "run_id": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
+        "step_key": "fork|0/a",
+        "node_id": "a",
+        "kind": "action",
+        "status": "completed",
+        "output": {
+          "status": 200,
+          "headers": {
+            "connection": "keep-alive",
+            "content-type": "application/json",
+            "date": "Mon, 19 Oct 2026 22:35:09 GMT",
+            "keep-alive": "timeout=5",
+            "transfer-encoding": "chunked"
+          },
+          "body": {
+            "ok": true
+          }
+        },
+        "error": null,
+        "started_at": "2026-10-20T02:35:09.764281+04:00",
+        "finished_at": "2026-10-20T02:35:09.79176+04:00",
+        "pinned": false,
+        "continued": false,
+        "attempts": 1,
+        "warnings": null
+      },
+      {
+        "id": "22258814-3d0f-46f1-96f1-befe96589f9f",
+        "run_id": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
+        "step_key": "fork|1/b",
+        "node_id": "b",
+        "kind": "action",
+        "status": "running",
+        "output": null,
+        "error": null,
+        "started_at": "2026-10-20T02:35:09.768774+04:00",
+        "finished_at": null,
+        "pinned": false,
+        "continued": false,
+        "attempts": 1,
+        "warnings": null
+      }
+    ]
+  },
+  "dbos": {
+    "workflow_status": [
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
+        "status": "PENDING",
+        "name": "orchestr.runPlan",
+        "authenticated_user": "",
+        "assumed_role": "",
+        "authenticated_roles": "[]",
+        "request": "{}",
+        "output": null,
+        "error": null,
+        "executor_id": "local",
+        "created_at": 1792449309755,
+        "updated_at": 1792449309755,
+        "application_version": "orchestr-1",
+        "application_id": "",
+        "class_name": null,
+        "config_name": null,
+        "recovery_attempts": 1,
+        "queue_name": null,
+        "workflow_timeout_ms": null,
+        "workflow_deadline_epoch_ms": null,
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-inside-step-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"action\",\"id\":\"a\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:65026/answer\"},\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"action\",\"id\":\"b\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:65026/hold\"},\"guards\":[]}]}],\"guards\":[]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"167d8463-f99a-412d-984a-c6749bdd73ff\"}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "started_at_epoch_ms": null,
+        "deduplication_id": null,
+        "priority": 0,
+        "queue_partition_key": null,
+        "forked_from": null,
+        "owner_xid": "59522989-edf1-45a9-8cca-13f034e5cb4b",
+        "parent_workflow_id": null,
+        "serialization": "js_superjson",
+        "delay_until_epoch_ms": null,
+        "was_forked_from": false,
+        "rate_limited": false,
+        "completed_at": null,
+        "attributes": null,
+        "schedule_name": null
+      }
+    ],
+    "operation_outputs": [
+      {
+        "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
+        "function_id": 0,
+        "output": "{\"json\":{\"output\":{\"status\":200,\"headers\":{\"connection\":\"keep-alive\",\"content-type\":\"application/json\",\"date\":\"Mon, 19 Oct 2026 22:35:09 GMT\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":{\"ok\":true}}},\"__dbos_serializer\":\"superjson\"}",
+        "error": null,
+        "function_name": "plan-golden-inside-step-fan-out:fork|0/a",
+        "child_workflow_id": null,
+        "started_at_epoch_ms": 1792449309765,
+        "completed_at_epoch_ms": 1792449309782,
+        "serialization": "js_superjson"
+      }
+    ]
+  }
+}

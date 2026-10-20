@@ -15,6 +15,21 @@ export interface Condition {
   right?: unknown;
 }
 
+/** A router: an `if` with one condition, or a `switch` with cases in order. */
+export type Router =
+  { kind: 'if'; condition: Condition } | { kind: 'switch'; cases: ReadonlyArray<{ condition: Condition }> };
+
+/** The port `router` takes over `scope`: an `if` 0 when its condition holds, else 1; a `switch` its first case that holds, else its default. */
+export function routedPort(
+  router: Router,
+  scope: Record<string, unknown>,
+  onUnresolved?: UnresolvedRefSink,
+): number {
+  if (router.kind === 'if') return evaluateCondition(router.condition, scope, onUnresolved) ? 0 : 1;
+  const matched = router.cases.findIndex((c) => evaluateCondition(c.condition, scope, onUnresolved));
+  return matched === -1 ? router.cases.length : matched;
+}
+
 export function evaluateCondition(
   condition: Condition,
   scope: Record<string, unknown>,

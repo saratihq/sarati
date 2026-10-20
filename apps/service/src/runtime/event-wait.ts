@@ -70,19 +70,34 @@ function markShared(groups: Waits[], routed: Set<DagWaitForEventNode>): void {
   }
 }
 
-// Two nodes of one plan run at once when neither waits on the other and some outcome of the routers upstream of them runs both.
-function runTogether(plan: DagPlan, sharing: Pair[]): Pair[] {
+/**
+ * The pairs of `plan.nodes` indexes in `sharing` that can run at once: neither waits on the other, and some router
+ * outcome runs both — with each router in `taken` held to the port it took.
+ */
+export function runTogether(
+  plan: DagPlan,
+  sharing: ReadonlyArray<readonly [number, number]>,
+  taken: ReadonlyMap<number, number> = new Map(),
+): Array<[number, number]> {
   const guards = inPlanGuards(plan);
   const before = ancestorsOf(guards);
   const together: Pair[] = [];
   const bins = new Map<string, Bin>();
   for (const [i, j] of sharing) {
     if (before[j]!.has(i) || before[i]!.has(j)) continue;
-    const routers = routersAmong(plan, [...before[i]!, ...before[j]!]);
+    const routers = routersAmong(plan, [...before[i]!, ...before[j]!], taken);
     if (outcomeCount(routers) > MAX_ROUTER_OUTCOMES) together.push([i, j]);
     else binOf(bins, routers).pairs.push([i, j]);
   }
-  return [...together, ...[...bins.values()].flatMap((bin) => liveTogether(plan, guards, before, bin))];
+  return [
+    ...together,
+    ...[...bins.values()].flatMap((bin) => liveTogether(plan, guards, before, bin, taken)),
+  ];
+}
+
+/** Each of `plan.nodes`' indexes, the in-plan nodes it waits on, directly or not. */
+export function planAncestors(plan: DagPlan): ReadonlyArray<ReadonlySet<number>> {
+  return ancestorsOf(inPlanGuards(plan));
 }
 
 // A guard counts only when its source sits earlier in this plan; any other source never runs here.
@@ -104,10 +119,12 @@ function ancestorsOf(guards: InPlanGuard[][]): Array<Set<number>> {
   return before;
 }
 
-function routersAmong(plan: DagPlan, among: number[]): Routers {
+// A router held to the port it took has that one outcome.
+function routersAmong(plan: DagPlan, among: number[], taken: ReadonlyMap<number, number>): Routers {
   return new Map(
     among.flatMap((i): Pair[] => {
       const n = plan.nodes[i]!;
+      if (taken.has(i) && (n.kind === 'if' || n.kind === 'switch')) return [[i, 1]];
       if (n.kind === 'if') return [[i, 2]];
       return n.kind === 'switch' ? [[i, n.cases.length + 1]] : [];
     }),
@@ -127,14 +144,20 @@ function binOf(bins: Map<string, Bin>, routers: Routers): Bin {
 }
 
 // Each node marks the outcomes it runs under; a pair runs together when their marks overlap.
-function liveTogether(plan: DagPlan, guards: InPlanGuard[][], before: Array<Set<number>>, bin: Bin): Pair[] {
+function liveTogether(
+  plan: DagPlan,
+  guards: InPlanGuard[][],
+  before: Array<Set<number>>,
+  bin: Bin,
+  taken: ReadonlyMap<number, number>,
+): Pair[] {
   const holders = [...new Set(bin.pairs.flat())];
   const needed = [...new Set(holders.flatMap((h) => [...before[h]!, h]))].sort((a, b) => a - b);
   const words = Math.ceil(outcomeCount(bin.routers) / 32);
   const runs = new Map(holders.map((h) => [h, new Uint32Array(words)]));
   const live = new Uint8Array(plan.nodes.length);
   let outcome = 0;
-  eachOutcome(plan.nodes.length, bin.routers, (port) => {
+  eachOutcome(plan.nodes.length, bin.routers, taken, (port) => {
     markLive(plan, guards, port, needed, live);
     runs.forEach((marks, h) => {
       if (live[h]) marks[outcome >> 5]! |= 1 << (outcome & 31);
@@ -145,10 +168,15 @@ function liveTogether(plan: DagPlan, guards: InPlanGuard[][], before: Array<Set<
 }
 
 // Visits each combination of ports the routers can take, -1 standing for a node that is not one of them.
-function eachOutcome(size: number, routers: Routers, visit: (port: Int32Array) => void): void {
+function eachOutcome(
+  size: number,
+  routers: Routers,
+  taken: ReadonlyMap<number, number>,
+  visit: (port: Int32Array) => void,
+): void {
   const port = new Int32Array(size).fill(-1);
-  const digits = [...routers];
-  digits.forEach(([router]) => (port[router] = 0));
+  const digits = [...routers].filter(([router]) => !taken.has(router));
+  routers.forEach((_, router) => (port[router] = taken.get(router) ?? 0));
   do visit(port);
   while (advance(port, digits));
 }

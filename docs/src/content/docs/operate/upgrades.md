@@ -23,9 +23,27 @@ Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`
 
 Sarati runs as one instance. An upgrade stops it and starts the new version on the same data, and runs
 in flight carry on where they were: a run waiting for an approval or on a **Wait** step keeps waiting.
-The exception, until a fix for how runs resume lands, is a run with a wait in a parallel branch or
-beside another step that runs at the same time: it can fail when it resumes, as
-[Approvals](/run/approvals/#more-than-one-wait-at-once) describes. Let those finish before upgrading.
+The exception is a run that can't be resumed safely — one that had already run steps side by side
+(parallel branches, or steps that start at the same time), or whose AI Agent step was refused a
+sub-workflow call and carried on: it [ends in `error`](/run/runs/#durability) as the new version
+starts, saying why, and none of its steps runs again. A restart treats it the same way. Let those
+runs finish first, or run them again after.
+
+The boot log counts them, for example
+`Runs in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
+and names each one that fails at warn level with its reason, followed by a `RunNotResumable` error
+and its stack trace: that is the run ending, not the service failing. From v0.2.24 on, you can list
+them before you restart or upgrade:
+
+```bash
+cd sarati && docker compose exec sarati sarati-legacy-report
+```
+
+It only reads, and prints each run in flight as `would resume` or `would fail` with the reason, or
+`already ended` for one that had finished or been cancelled but not yet stopped, which stays as it
+ended. A run can still move on between the report and the restart, so each is judged again as it
+resumes. On a five-container install it is `docker compose exec service` instead; running it by hand,
+`docker exec sarati`.
 
 ### Going back
 
@@ -78,6 +96,13 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 **Five containers: re-run the installer.** The stack file changed — part of the rate-limit fix below
 is in `docker-compose.yaml` and `docker/Caddyfile`, which only the installer refreshes — so
 `docker compose pull` alone is not enough this time. One container needs only the new image.
+
+**A run that can't be resumed safely now ends in an error when it resumes** — one that had already
+run steps side by side, or whose AI Agent step was refused a sub-workflow call and carried on. It
+used to resume, and could then put a step's result or a decision in the wrong place, or end in an
+error later. The runs in flight as you upgrade are judged the same way when this version first
+starts, and its boot log says how many will fail. Earlier versions can't list them for you, so let
+runs with parallel branches, and AI Agent steps that call workflows, finish before upgrading.
 
 A few saved steps that ran before now stop with an error before sending anything, because they
 could act on the wrong Jira site or send a credential somewhere it does not belong. Check the

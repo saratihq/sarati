@@ -1,11 +1,13 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { DBOS } from '@dbos-inc/dbos-sdk';
+import { DBOS, type WorkflowStatus } from '@dbos-inc/dbos-sdk';
 
 import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import { RunRecorderService } from '../runtime/run-recorder.service';
 import type { RunResult, RunStatus } from '../runtime/run-plan';
 import { DbosDurableStep, RowGatedDurableStep } from './dbos-durable-step';
+import { RecoveryGuard } from './recovery-guard';
+import { RUN_PLAN_WORKFLOW } from './run-plan-workflow';
 
 /**
  * Runs the `DagInterpreter` as the one registered DBOS workflow; registration is at module load
@@ -13,6 +15,7 @@ import { DbosDurableStep, RowGatedDurableStep } from './dbos-durable-step';
  */
 let activeInterpreter: DagInterpreter | null = null;
 let activeRecorder: RunRecorderService | null = null;
+let activeGuard: RecoveryGuard | null = null;
 const durableStep = new DbosDurableStep();
 
 /** The plain-data args the durable workflow checkpoints. */
@@ -30,17 +33,27 @@ interface PlanWorkflowArgs {
   sharedTopicsByStep?: boolean;
 }
 
-const RUN_PLAN_WORKFLOW = 'orchestr.runPlan';
-
 const runPlanWorkflow = DBOS.registerWorkflow(
   async (args: PlanWorkflowArgs): Promise<RunResult> => {
     if (!activeInterpreter) throw new Error('DbosRuntime is not initialized (no interpreter bound)');
     const { runId } = args;
     const recorder = activeRecorder;
     const interpreter = activeInterpreter;
+    const guard = activeGuard;
     const gated =
       runId && recorder ? new RowGatedDurableStep(durableStep, () => recorder.runStatus(runId)) : null;
-    await gated?.admit().catch(async (err: unknown) => {
+    const enter = async (): Promise<void> => {
+      await gated?.admit();
+      if (gated && guard) {
+        const checkpointed = {
+          plan: args.plan,
+          pins: args.pins ?? {},
+          initialScope: args.initialScope ?? {},
+        };
+        await guard.admit(runId!, checkpointed, () => gated.admit());
+      }
+    };
+    await enter().catch(async (err: unknown) => {
       // It never reaches the plan, whose end is what drops a run's file blobs.
       await interpreter.cleanupBlobs(runId!);
       throw err;
@@ -65,11 +78,26 @@ const runPlanWorkflow = DBOS.registerWorkflow(
   { name: RUN_PLAN_WORKFLOW },
 );
 
+// What `canResume` answers, for a workflow that exists.
+function resumable(status: WorkflowStatus): boolean {
+  return (
+    status.status === 'PENDING' &&
+    status.workflowName === RUN_PLAN_WORKFLOW &&
+    status.executorId === DBOS.executorID &&
+    status.applicationVersion === DBOS.applicationVersion
+  );
+}
+
 @Injectable()
 export class DbosRuntime {
-  constructor(interpreter: DagInterpreter, @Optional() recorder?: RunRecorderService) {
+  constructor(
+    interpreter: DagInterpreter,
+    @Optional() recorder?: RunRecorderService,
+    @Optional() guard?: RecoveryGuard,
+  ) {
     activeInterpreter = interpreter;
     activeRecorder = recorder ?? null;
+    activeGuard = guard ?? null;
   }
 
   /** Run a plan durably; `runId` is the idempotency key and resume handle (requires `DBOS_ENABLED`). */
@@ -124,12 +152,13 @@ export class DbosRuntime {
   /** Whether this instance can still take a durable run on to its end: pending, a workflow it knows, and its own to recover. */
   async canResume(runId: string): Promise<boolean> {
     const status = await DBOS.getWorkflowStatus(runId);
-    return (
-      status?.status === 'PENDING' &&
-      status.workflowName === RUN_PLAN_WORKFLOW &&
-      status.executorId === DBOS.executorID &&
-      status.applicationVersion === DBOS.applicationVersion
-    );
+    return status !== null && resumable(status);
+  }
+
+  /** Whether the run has a workflow that nothing will take on to its end; `false` for a run that has none. */
+  async wontResume(runId: string): Promise<boolean> {
+    const status = await DBOS.getWorkflowStatus(runId);
+    return status !== null && !resumable(status);
   }
 
   /** Poll a durable run's status (and its outputs once it has completed). */

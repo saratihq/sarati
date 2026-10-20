@@ -15,7 +15,7 @@ import { request as undiciRequest } from 'undici';
 
 import { OUTSIDE } from './support/egress-fixtures/dial';
 import { takeRefusals } from './support/no-egress';
-import { ADMIN_URL } from './support/test-db';
+import { ADMIN_URL, REAP_AFTER_MS, e2eDatabaseName, e2eRunId } from './support/test-db';
 
 const SERVICE = join(__dirname, '..');
 const FIXTURES = join(__dirname, 'support', 'egress-fixtures');
@@ -156,7 +156,7 @@ describe('e2e egress guard (in process)', () => {
 });
 
 describe('e2e egress guard (reporting, through a nested jest run)', () => {
-  const runFixtures = (files: string[], ...flags: string[]) => {
+  const runFixtures = (files: string[], flags: string[] = [], env: Record<string, string> = {}) => {
     const run = spawnSync(
       process.execPath,
       [
@@ -176,7 +176,7 @@ describe('e2e egress guard (reporting, through a nested jest run)', () => {
       {
         cwd: SERVICE,
         encoding: 'utf8',
-        env: { ...process.env, FORCE_COLOR: '0' },
+        env: { ...process.env, FORCE_COLOR: '0', ...env },
         timeout: 90_000,
         killSignal: 'SIGKILL',
       },
@@ -186,16 +186,29 @@ describe('e2e egress guard (reporting, through a nested jest run)', () => {
     return run;
   };
 
-  it('fails the test that reached out, and the suite whose hook did — never a bystander — though each swallowed the refusal', () => {
+  it('fails the test that reached out, and the suite whose hook did — never a bystander — though each swallowed the refusal', async () => {
+    // Stale to the nested run's setup alone, so no other run's reap on a shared server takes it first: it always reports.
+    const reapAfterMs = REAP_AFTER_MS - 20 * 60_000;
+    const admin = new Client({ connectionString: ADMIN_URL });
+    await admin.connect();
+    try {
+      await admin.query(
+        `CREATE DATABASE ${e2eDatabaseName(e2eRunId(), Date.now() - reapAfterMs - 10 * 60_000)}`,
+      );
+    } finally {
+      await admin.end();
+    }
     const run = runFixtures(
       [
         'refused-in-a-test.egress-fixture.ts',
         'refused-in-describe-hooks.egress-fixture.ts',
         'refused-in-top-level-after-all.egress-fixture.ts',
       ],
-      '--json',
+      ['--json'],
+      { E2E_DB_REAP_AFTER_MS: String(reapAfterMs) },
     );
     expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/e2e databases: dropped [1-9]\d* stale/);
     const report = JSON.parse(run.stdout) as {
       testResults: Array<{
         name: string;
@@ -245,7 +258,7 @@ describe('e2e egress guard (reporting, through a nested jest run)', () => {
   it('refuses to run out of band, where a leaked timer could reach out unreported', () => {
     const run = runFixtures(
       ['a-leaks-a-timer.egress-fixture.ts', 'b-outlives-the-leak.egress-fixture.ts'],
-      '--maxWorkers=2',
+      ['--maxWorkers=2'],
     );
     expect(run.status).toBe(1);
     expect(run.stderr).toContain('the e2e egress check needs the suites in band');
