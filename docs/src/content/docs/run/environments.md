@@ -136,11 +136,17 @@ had read:
   sends is for the old trigger, so it starts no run, and a polled feed isn't polled, so the overview
   shows the trigger as **Not listening** and its reason says the change waits. Once the account is
   active again the change is made and the trigger starts afresh, without what happened at the app
-  meanwhile. A webhook's move to a new public URL for the service waits too, and so does its move
-  for a rename made just before the account stopped being active: the app keeps sending to the old
-  URL, which no longer serves the trigger, so it reads as **Not listening** in the same words. Any
-  later rename is refused instead, because the webhook would stay at a URL that no longer serves it;
-  see [Rename and delete](#rename-and-delete).
+  meanwhile. A webhook's move for a rename made just before the account stopped being active waits
+  too: the app keeps sending to the old environment name's URL, which no longer serves the trigger,
+  so it reads as **Not listening** in the same words. Any later rename is refused instead, because
+  the webhook would stay at a URL that no longer serves it; see [Rename and delete](#rename-and-delete).
+- A webhook's move to a new public URL for the service waits as well, but its path stays the same,
+  and the service takes a delivery by its path whatever address it came in on. So while the old
+  address still reaches the service — another name for the same host, or `http` where it is now
+  `https` — what the app sends there still starts a run, and the overview shows it as **Held**, its
+  reason saying the move waits. An old address that no longer reaches the service, such as a
+  replaced tunnel's, delivers nothing. Once the account is active again the webhook moves to the new
+  URL.
 - A webhook taken down meanwhile — its trigger removed or replaced, its slot given another account,
   its workflow or environment deleted — is deleted at the app once that account is active again; if
   the account is removed first, the log names the webhook to delete in the app. An app that keeps one

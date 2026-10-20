@@ -18,10 +18,12 @@ import type { EnvConfig } from '../src/config/env.config';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { RuntimeTriggerActivationEntity } from '../src/database/entities/runtime-trigger-activation.entity';
+import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH, SdkWebhookProvider } from '../src/providers/sdk-webhook.provider';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
+import { withActivationLock } from '../src/triggers/activation-lock';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { EnvPointersService } from '../src/workflows/env-pointers.service';
@@ -260,6 +262,8 @@ const NEEDS_OWN = (env: string, app: string, name: string): string =>
 // The words a live trigger held while its account isn't active says: a poll waits, what a webhook's or subscription's app sends still runs, and with a change to it waiting neither runs.
 const FIRES = (appSlug: string): string =>
   `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
+const MOVES = (appSlug: string): string =>
+  `its move to the service's new public URL waits until the account is active again, and meanwhile what ${appSlug} sends to the old one still starts runs while that URL still reaches the service`;
 const HELD_AS = (env: string, appSlug: string, name: string, meanwhile = FIRES(appSlug)): string =>
   `${env}'s ${appSlug} account isn't active, so "${name}" is held: ${meanwhile} — the account's owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`;
 const HELD = (env: string, rail: Rail, changeWaits = false): string => {
@@ -765,6 +769,59 @@ const parkPointerRead = (
   };
 };
 
+// Parks the next read of activation `activationId`'s row, as a Composio delivery makes it to decide what it records, until `release`.
+const parkActivationRead = (
+  activationId: string,
+): { reached: Promise<void>; release: () => void; restore: () => void } => {
+  const manager = app.get(DataSource).manager;
+  const findNow = manager.findOne.bind(manager) as (entity: unknown, options: unknown) => Promise<unknown>;
+  let release = (): void => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let arrive = (): void => undefined;
+  const reached = new Promise<void>((resolve) => (arrive = resolve));
+  let armed = true;
+  const parked = jest.spyOn(manager, 'findOne').mockImplementation((async (
+    entity: unknown,
+    options: { where?: { id?: unknown } },
+  ) => {
+    const found = await findNow(entity, options);
+    if (armed && entity === RuntimeTriggerActivationEntity && options.where?.id === activationId) {
+      armed = false;
+      arrive();
+      await gate;
+    }
+    return found;
+  }) as unknown as typeof manager.findOne);
+  return {
+    reached,
+    release: () => release(),
+    restore: () => {
+      release();
+      parked.mockRestore();
+    },
+  };
+};
+
+// Statements waiting on an advisory lock.
+const advisoryWaits = async (): Promise<number> =>
+  Number(
+    (
+      await db.query<{ n: string }>(
+        `SELECT count(*) AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
+      )
+    ).rows[0]!.n,
+  );
+
+// A Composio event on a live trigger's subscription, its answer awaited by the caller.
+const composioEvent = (live: ActivationRow, id: string): Promise<request.Response> =>
+  http()
+    .post('/api/hooks/composio')
+    .set('Content-Type', 'application/json')
+    .set('webhook-id', `msg_${id}`)
+    .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id } })
+    .then((res) => res);
+
 // A push GitHub signs with the secret its hook was registered with, at a production intake.
 const push = async (wfId: string, secret: string, after: string): Promise<Record<string, unknown>> => {
   const raw = JSON.stringify({
@@ -1190,7 +1247,8 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
-  it('a held webhook whose intake URL a new public base URL moves waits there, saying it starts no run and reading as not listening, and moves once the account is active again', async () => {
+  it('a held webhook whose intake URL a new public base URL moves still starts a run for each delivery that reaches the service at its old URL, saying its move waits and reading as held, and moves once the account is active again', async () => {
+    const { app: appSlug, name } = TRIGGERS.webhook;
     const { org, production, account, wf, live } = await liveTrigger('webhook', 'base moves');
     const store = await storeOf(live.id);
     const hook = (store['webhook.registration'] as { registration: { subscriptionId: string } }).registration
@@ -1210,16 +1268,23 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     env.publicBaseUrl = 'https://new-tunnel.example.com';
     try {
       await reconcile(wf);
-      const waiting = HELD('production', 'webhook', true);
-      expect(await activation(wf, production)).toEqual({ ...live, held: true, last_error: waiting });
+      const moving = HELD_AS('production', appSlug, name, MOVES(appSlug));
+      expect(await activation(wf, production)).toEqual({ ...live, held: true, last_error: moving });
       expect(await webhookUrlOf(live.id)).toBe(registeredAt);
       expect(await storeOf(live.id)).toEqual(store);
       expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
       expect(await shownOn(org, wf, production)).toMatchObject({
         held_back_by_slot: true,
-        listening: false,
-        last_error: waiting,
+        listening: true,
+        last_error: moving,
       });
+
+      // The intake routes by path alone, so a delivery the old host still forwards there fires.
+      expect(await deliver('webhook', wf, live, 'D_OLD_BASE')).toMatchObject({ fired: 1 });
+      await eventually(async () => expect(await triggerRuns(wf)).toHaveLength(1));
+      expect(await said((await triggerRuns(wf))[0]!)).toMatch(/^fired /);
+      expect(await activation(wf, production)).toMatchObject({ held: true, last_error: moving });
+      expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
 
       await setStatus(account, 'active');
       await reconcile(wf);
@@ -1596,43 +1661,11 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
 
   it('a Composio delivery recording its fire as its trigger is held decides under the activation’s lock, so the hold waits for it and its reason stands', async () => {
     const { production, account, wf, live } = await liveTrigger('composio', 'decides under lock');
-    const manager = app.get(DataSource).manager;
-    const findNow = manager.findOne.bind(manager) as (entity: unknown, options: unknown) => Promise<unknown>;
-    let release = (): void => undefined;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    let arrive = (): void => undefined;
-    const reached = new Promise<void>((resolve) => (arrive = resolve));
-    let armed = true;
     // Parks the delivery once it has read its row to decide what it records, before it writes.
-    const parked = jest.spyOn(manager, 'findOne').mockImplementation((async (
-      entity: unknown,
-      options: { where?: { id?: unknown } },
-    ) => {
-      const found = await findNow(entity, options);
-      if (armed && entity === RuntimeTriggerActivationEntity && options.where?.id === live.id) {
-        armed = false;
-        arrive();
-        await gate;
-      }
-      return found;
-    }) as unknown as typeof manager.findOne);
-    const advisoryWaits = async (): Promise<number> =>
-      Number(
-        (
-          await db.query<{ n: string }>(
-            `SELECT count(*) AS n FROM pg_stat_activity
-              WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
-          )
-        ).rows[0]!.n,
-      );
+    const parked = parkActivationRead(live.id);
     try {
-      const sent = http()
-        .post('/api/hooks/composio')
-        .set('Content-Type', 'application/json')
-        .set('webhook-id', 'msg_decides_under_lock')
-        .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id: 'under lock' } })
-        .then((res) => res);
-      await reached;
+      const sent = composioEvent(live, 'decides_under_lock');
+      await parked.reached;
       await setStatus(account, 'expired');
       let reconciled = false;
       const holding = reconcile(wf).then(() => {
@@ -1640,7 +1673,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       });
       // The hold waits on the lock the delivery holds; were the delivery's decision not under it, the hold would land first.
       await eventually(async () => expect(reconciled || (await advisoryWaits()) > 0).toBe(true));
-      release();
+      parked.release();
       expect((await sent).status).toBe(202);
       await holding;
       expect(await activation(wf, production)).toMatchObject({
@@ -1648,8 +1681,73 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         last_error: HELD('production', 'composio'),
       });
     } finally {
+      parked.restore();
+    }
+  });
+
+  it('Composio deliveries to one activation record their fires side by side, so one deciding what it records leaves another’s failed fire recorded', async () => {
+    const { production, wf, live } = await liveTrigger('composio', 'side by side');
+    const parked = parkActivationRead(live.id);
+    try {
+      const first = composioEvent(live, 'side_first');
+      await parked.reached;
+      jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+        throw new Error('the version does not compile');
+      });
+      const second = await composioEvent(live, 'side_second');
+      expect(second.status).toBe(202);
+      expect(second.body).toMatchObject({ fired: 0 });
+      expect(await activation(wf, production)).toMatchObject({ last_error: 'the version does not compile' });
+      parked.release();
+      expect((await first).body).toMatchObject({ fired: 1 });
+    } finally {
+      parked.restore();
+    }
+  });
+
+  it('a burst of Composio deliveries while a reconcile holds their activation’s lock never waits for it: each answers, readiness stays up, and the row is that reconcile’s', async () => {
+    const { production, wf, live } = await liveTrigger('composio', 'burst under reconcile');
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let arrive = (): void => undefined;
+    const reached = new Promise<void>((resolve) => (arrive = resolve));
+    // The sweep's self-heal re-subscribes under the activation's lock; Composio answers it only at the gate.
+    subscribed.mockImplementationOnce(async () => {
+      arrive();
+      await gate;
+      return live.composio_trigger_instance_id!;
+    });
+    const healing = reconcile(wf, { selfHeal: true });
+    try {
+      await reached;
+      jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+        throw new Error('the version does not compile');
+      });
+      // More deliveries than the service's pool has connections.
+      const BURST = 25;
+      let answered = 0;
+      const sent = Array.from({ length: BURST }, (_, i) =>
+        composioEvent(live, `burst_${i}`).then((res) => {
+          answered += 1;
+          return res;
+        }),
+      );
+      await eventually(() => Promise.resolve(expect(answered).toBe(BURST)));
+      const answers = await Promise.all(sent);
+      expect(answers.map((res) => res.status)).toEqual(Array.from({ length: BURST }, () => 202));
+      expect(answers.filter((res) => (res.body as { fired: number }).fired === 1)).toHaveLength(BURST - 1);
+      expect(await advisoryWaits()).toBe(0);
+      await http().get('/api/ready').expect(200);
+      expect(await withActivationLock(app.get(PG_POOL), randomUUID(), () => Promise.resolve('ran'))).toBe(
+        'ran',
+      );
+      expect(await activation(wf, production)).toMatchObject({
+        last_error: null,
+        last_polled_at: live.last_polled_at,
+      });
+    } finally {
       release();
-      parked.mockRestore();
+      await healing;
     }
   });
 

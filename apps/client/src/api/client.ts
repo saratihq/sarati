@@ -1853,7 +1853,7 @@ export interface TriggerActivationHealth {
   active: boolean;
   /** Held back or held by its environment's account: nothing is stood up, polled or changed at its app for it, and `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
-  /** Whether it takes events now: not while paused, held back or its last stand-up unfinished, and while held only a webhook or subscription the version its environment points at still holds as it is live, a webhook at the URL served for it. */
+  /** Whether it takes events now: not while paused, held back or its last stand-up unfinished, and while held only a webhook or subscription the version its environment points at still holds as it is live, a webhook registered at the intake served for it, which a delivery reaches by path alone. */
   listening: boolean;
   status: "paused" | "error" | "ok" | "idle";
   last_polled_at: string | null;

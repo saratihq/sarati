@@ -235,13 +235,15 @@ function inactiveSlotMessage(environment: string, step: NamedStep): string {
   return `${environment}'s ${label} account isn't active, so "${step.name}" can't run there — its owner ${REVIVES_SLOT}`;
 }
 
-/** What a held trigger does until its account is active again: fires what its app sends, resumes as a poll from where it stopped, or, while a change to it waits, starts no run and then starts afresh. */
-export type WhileHeld = 'fires' | 'resumes' | 'waits';
+/** What a held trigger does until its account is active again: fires what its app sends, resumes as a poll from where it stopped, fires what still reaches the service at its old URL while its move to a new public URL waits, or, while a change to it waits, starts no run and then starts afresh. */
+export type WhileHeld = 'fires' | 'resumes' | 'moves' | 'waits';
 
 const MEANWHILE: Record<WhileHeld, (label: string) => string> = {
   fires: (label) =>
     `what ${label} sends still starts runs, and nothing is changed at ${label} until the account is active again`,
   resumes: () => "it isn't polled, and picks up from where it stopped once the account is active again",
+  moves: (label) =>
+    `its move to the service's new public URL waits until the account is active again, and meanwhile what ${label} sends to the old one still starts runs while that URL still reaches the service`,
   waits: (label) =>
     `a change to it waits, so it starts no run until the account is active again, and then starts afresh, without what happened at ${label} meanwhile`,
 };

@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import ts from 'typescript';
+
 /**
  * VAULT CANARY — the constitution's "ONE definition site" rules, enforced.
  * Add a row here in the same PR as any new one-definition-site rule.
@@ -30,7 +32,122 @@ const SINGLE_DEFINITION = [
   { symbol: 'heldBackBySlot', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'firesWhileHeld', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'holdsTrigger', definedIn: 'triggers/canvas/activation-row.ts' },
+  { symbol: 'servedWebhookUrl', definedIn: 'triggers/canvas/webhook-url.ts' },
+  { symbol: 'sameWebhookIntake', definedIn: 'triggers/canvas/webhook-url.ts' },
 ] as const;
+
+// Calls whose direct arguments are SQL or query criteria: a raw query, the raw-query helpers, and TypeORM's query builder and criteria methods.
+const QUERY_CALLS = new Set([
+  'query',
+  'rawQuery',
+  'rawMutate',
+  'rawMutateReturning',
+  'where',
+  'andWhere',
+  'orWhere',
+  'having',
+  'andHaving',
+  'orHaving',
+  'select',
+  'addSelect',
+  'orderBy',
+  'addOrderBy',
+  'groupBy',
+  'addGroupBy',
+  'innerJoin',
+  'leftJoin',
+  'innerJoinAndSelect',
+  'leftJoinAndSelect',
+  'findBy',
+  'findOneBy',
+  'findOneByOrFail',
+  'findAndCountBy',
+  'countBy',
+  'existsBy',
+  'sum',
+  'average',
+  'minimum',
+  'maximum',
+  'delete',
+  'softDelete',
+  'restore',
+  'increment',
+  'decrement',
+]);
+const SQL_STATEMENT =
+  /\bselect\b[\s\S]*\bfrom\b|\bupdate\s+\S+[\s\S]*\bset\b|\bdelete\s+from\b|\binsert\s+into\b/i;
+// The column bare, quoted or behind an alias, in any case; never a quoted value ('held') or a longer name.
+const HELD_COLUMN = /(?<![\w$'])(?:"?\w+"?\.)?"?held"?(?![\w$'])/i;
+
+function callName(call: ts.CallExpression): string {
+  const callee = call.expression;
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+  return ts.isIdentifier(callee) ? callee.text : '';
+}
+
+// The SQL text of a string, a template's literal parts or a `+` join of them; undefined for anything else.
+function literalText(node: ts.Node): string | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isTemplateExpression(node)) {
+    return [node.head.text, ...node.templateSpans.map((span) => span.literal.text)].join(' ? ');
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return `${literalText(node.left) ?? ' ? '}${literalText(node.right) ?? ' ? '}`;
+  }
+  return undefined;
+}
+
+const keyName = (name: ts.PropertyName): string => name.getText().replace(/[[\]'"`]/g, '');
+
+// Whether a `held` key sits in query criteria: under a `where`, or in an object handed to a criteria call.
+function inCriteria(key: ts.Node): boolean {
+  for (let at: ts.Node = key; at.parent; at = at.parent) {
+    if (ts.isPropertyAssignment(at) && at !== key && keyName(at.name) === 'where') return true;
+    const call = at.parent;
+    if (ts.isCallExpression(call) && call.arguments.some((a) => a === at)) {
+      const name = callName(call);
+      return QUERY_CALLS.has(name) || (name === 'update' && call.arguments.at(-1) !== at);
+    }
+    if (
+      !ts.isObjectLiteralExpression(at) &&
+      !ts.isArrayLiteralExpression(at) &&
+      at !== key &&
+      !ts.isPropertyAssignment(at)
+    ) {
+      return false;
+    }
+  }
+  return false;
+}
+
+// Where a source's SQL or query criteria names an activation's `held` column, as `line: text`.
+function heldInQueries(text: string): string[] {
+  const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const at = (node: ts.Node): string =>
+    `${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}: ${node.getText().slice(0, 80)}`;
+  const visit = (node: ts.Node): void => {
+    const isPart =
+      ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.PlusToken;
+    const sql = isPart ? undefined : literalText(node);
+    const handed =
+      ts.isCallExpression(node.parent) &&
+      node.parent.arguments.some((a) => a === node) &&
+      QUERY_CALLS.has(callName(node.parent));
+    if (sql !== undefined && (handed || SQL_STATEMENT.test(sql)) && HELD_COLUMN.test(sql))
+      found.push(at(node));
+    if (
+      (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) &&
+      keyName(node.name) === 'held' &&
+      inCriteria(node)
+    ) {
+      found.push(at(node));
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+  return found;
+}
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -114,10 +231,75 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(asking(/\bheldBackBySlot\s*\(/, kindSite)).toEqual(runtime);
     expect(asking(/\bfiresWhileHeld\s*\(/, kindSite)).toEqual(runtime);
     expect(asking(/\bholdsTrigger\s*\(/, 'triggers/canvas/activation-row.ts')).toEqual(runtime);
-    // SQL that decides on an activation's `held` column answers heldBackBySlot where the callers above can't see it.
-    const heldInSql =
-      /\b(?:WHEN|OR|AND|NOT|WHERE)\s+(?:\w+\.)?held\b|\b(?:\w+\.)?held\s+(?:OR|AND|IS|THEN)\b/;
-    expect(asking(heldInSql, kindSite)).toEqual([]);
+    // SQL or query criteria naming an activation's `held` column would answer heldBackBySlot where the callers above can't see it.
+    const naming = sources()
+      .map((f) => ({ rel: f.rel, at: heldInQueries(f.text) }))
+      .filter((f) => f.at.length > 0);
+    expect(naming).toEqual([]);
+  });
+
+  /** Constitution #11: the guard above reads the `held` column in every form of SQL and query criteria listed in row 11. */
+  it('finds the held column in SQL and query criteria in any case, quoting, alias or expression, and nowhere else', () => {
+    const sql = (statement: string): string => `rawMutateReturning(em, \`${statement}\`, [id]);`;
+    const named = [
+      sql(
+        'UPDATE runtime_trigger_activations SET x = CASE WHEN held OR connection_id IS NULL THEN x ELSE $3 END',
+      ),
+      sql(
+        'update runtime_trigger_activations set x = case when held or connection_id is null then x else $3 end',
+      ),
+      sql('UPDATE runtime_trigger_activations SET x = CASE WHEN (held = true) THEN x END'),
+      sql('UPDATE runtime_trigger_activations SET x = CASE WHEN COALESCE(held, false) THEN x END'),
+      sql('UPDATE runtime_trigger_activations a SET x = 1 WHERE a.paused = false AND (a.held = false)'),
+      sql('SELECT count(*) filter (where held) FROM runtime_trigger_activations'),
+      sql('SELECT CASE held WHEN true THEN 1 END FROM runtime_trigger_activations'),
+      sql('SELECT 1 FROM runtime_trigger_activations a WHERE a."HELD"'),
+      "qb.andWhere('a.held = false');",
+      "qb.where(`a.${'x'} = 1 AND a.held`);",
+      "const statement = 'SELECT id FROM runtime_trigger_activations WHERE held';",
+      "client.query('SELECT id FROM runtime_trigger_activations WHERE ' + 'held');",
+      'em.find(RuntimeTriggerActivationEntity, { where: { paused: false, held: false } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: [{ held }] });',
+      'em.findBy(RuntimeTriggerActivationEntity, { held: true });',
+      "em.update(RuntimeTriggerActivationEntity, { id, 'held': false }, { lastError });",
+      'qb.where({ held: false });',
+      "em.find(RuntimeTriggerActivationEntity, { 'where': { ['held']: true } });",
+    ];
+    const unnamed = [
+      "client.query(\"SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'\");",
+      'heldBackBySlot({ ...actualOf(row), held: row.held });',
+      'em.create(RuntimeTriggerActivationEntity, { id, held: false });',
+      'em.update(RuntimeTriggerActivationEntity, { id }, { held: true, lastError });',
+      'logger.warn(`composio intake: held activation ${id} did not fire`);',
+      "const copy = `${env}'s account isn't active, so it is held: what it sends still starts runs`;",
+      sql('SELECT held_back, withheld FROM runtime_trigger_activations'),
+      "qb.where('a.id = :id', { id: 'held' });",
+    ];
+
+    expect(named.filter((source) => heldInQueries(source).length !== 1)).toEqual([]);
+    expect(unnamed.filter((source) => heldInQueries(source).length !== 0)).toEqual([]);
+  });
+
+  /** Constitution #11: the URL a webhook is served at and the intake a URL reaches are each built in one place, so the held reason and the health read cannot disagree. */
+  it('builds a webhook URL from the public base URL, and compares intakes, in one place', () => {
+    const callers = (symbol: string): string[] =>
+      sources()
+        .filter(
+          (f) => f.rel !== 'triggers/canvas/webhook-url.ts' && new RegExp(`\\b${symbol}\\s*\\(`).test(f.text),
+        )
+        .map((f) => f.rel)
+        .sort();
+    const readers = sources()
+      .filter((f) => /\bpublicBaseUrl\b/.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+    expect(callers('servedWebhookUrl')).toEqual([
+      'triggers/canvas/trigger-reconciler.service.ts',
+      'triggers/triggers.service.ts',
+    ]);
+    expect(callers('sameWebhookIntake')).toEqual(['triggers/canvas/activation-row.ts']);
+    expect(readers).toEqual(['config/env.config.ts', 'triggers/canvas/webhook-url.ts']);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

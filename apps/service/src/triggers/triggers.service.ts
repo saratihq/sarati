@@ -24,7 +24,7 @@ import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
 import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
-import { ifActivationUnlocked, withActivationLock } from './activation-lock';
+import { ifActivationUnlocked, ifActivationUnlockedShared } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
@@ -131,7 +131,7 @@ export interface ActivationHealth {
   active: boolean;
   /** Held back or held by its environment's slot, so nothing is stood up, polled or changed at its app for it; `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
-  /** Whether it takes events now: not while paused, held back or its last stand-up unfinished, and while held only a webhook or subscription the version its environment points at still holds as it is live, a webhook at the URL served for it. */
+  /** Whether it takes events now: not while paused, held back or its last stand-up unfinished, and while held only a webhook or subscription the version its environment points at still holds as it is live, a webhook registered at the intake served for it, which a delivery reaches by path alone. */
   listening: boolean;
   status: 'paused' | 'error' | 'ok' | 'idle';
   last_polled_at: string | null;
@@ -456,8 +456,9 @@ export class TriggersService {
   }
 
   /**
-   * Fire ONE activation for a verified Composio delivery — resolve/compile synchronously
-   * (failures land on `last_error`), run fire-and-forget. Returns 1 when dispatched.
+   * Fire ONE activation for a verified Composio delivery — resolve/compile synchronously, run
+   * fire-and-forget. Returns 1 when dispatched. A failure lands on `last_error` unless the row is held
+   * back or a reconcile is changing it; then it is logged.
    */
   private async fireComposioActivation(
     row: RuntimeTriggerActivationEntity,
@@ -500,8 +501,8 @@ export class TriggersService {
       failure = { error };
     }
     const lastError = failure === null ? null : activationError(failure.error);
-    // Decided under the activation's lock, which every hold, release and teardown is written under: a row held back by then keeps its slot's reason, so a fire of it that failed is the operator's to read.
-    const kept = await withActivationLock(this.pool, row.id, async () => {
+    // Decided under the activation's lock, which every hold, release and teardown is written under, shared with other deliveries and never waited for: while a reconcile holds or awaits it, the row is that reconcile's.
+    const kept = await ifActivationUnlockedShared(this.pool, row.id, async () => {
       const current = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
         where: { id: row.id },
       });
@@ -514,9 +515,10 @@ export class TriggersService {
       );
       return keeps;
     });
-    if (kept && failure !== null) {
+    if (kept !== false && failure !== null) {
+      const why = kept ? 'held back' : 'a reconcile is changing it';
       this.logger.warn(
-        `composio intake: held activation ${row.id} did not fire: ${errorMessage(failure.error)}`,
+        `composio intake: activation ${row.id} did not fire (${why}): ${errorMessage(failure.error)}`,
       );
     }
     return failure === null ? 1 : 0;
@@ -762,7 +764,7 @@ export class TriggersService {
     return { wf, env, versionId, ir: version.workflowIr as unknown as WorkflowIR };
   }
 
-  // A held webhook or subscription fires what its app sends only while the version its environment points at holds it as it is live, a webhook at the URL served for it.
+  // A held webhook or subscription fires what reaches it only while the version its environment points at holds it as it is live, a webhook at the intake served for it.
   private async firingWhileHeld(rows: RuntimeTriggerActivationEntity[]): Promise<Set<string>> {
     const firing = new Set<string>();
     const env = this.config.get('env', { infer: true });

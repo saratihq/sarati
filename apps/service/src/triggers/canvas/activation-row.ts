@@ -8,6 +8,7 @@ import {
   type DesiredActivation,
   triggerPropsOf,
 } from './trigger-activation';
+import { sameWebhookIntake } from './webhook-url';
 
 /** The activation key a row is stored under. */
 export function activationKeyOf(row: RuntimeTriggerActivationEntity): ActivationKey {
@@ -43,7 +44,7 @@ export function triggerOf(ir: WorkflowIR, triggerNodeId: string): HeldTrigger | 
   return node ? { triggerType: node.node_type, props: triggerPropsOf(node) } : null;
 }
 
-/** Whether a row holds `trigger` as it is live — same node type and props, and a registered webhook at the URL `trigger` names, if any — which a delivery or a poll needs to fire that trigger's version (#11). */
+/** Whether a row holds `trigger` as it is live — same node type and props, and where `trigger` names its webhook's URL, registered at that URL's intake, which a delivery is routed to by path alone — which a delivery or a poll needs to fire that trigger's version (#11). */
 export function holdsTrigger(
   row: Pick<RuntimeTriggerActivationEntity, 'kind' | 'triggerType' | 'props' | 'webhookUrl'>,
   trigger: HeldTrigger | null,
@@ -52,7 +53,7 @@ export function holdsTrigger(
   return (
     trigger.webhookUrl === undefined ||
     row.kind !== 'registered_webhook' ||
-    trigger.webhookUrl === row.webhookUrl
+    sameWebhookIntake(trigger.webhookUrl, row.webhookUrl)
   );
 }
 

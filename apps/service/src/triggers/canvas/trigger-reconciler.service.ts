@@ -1038,10 +1038,11 @@ function slotReason(
   );
 }
 
-// A held trigger fires or resumes only while the version its pointer names holds it as it is live, a webhook at the URL served for it.
+// A held trigger fires or resumes only while the version its pointer names holds it as it is live, a webhook at the intake served for it.
 function whileHeld(row: RuntimeTriggerActivationEntity, desired: DesiredActivation): WhileHeld {
   if (!holdsTrigger(row, desired)) return 'waits';
-  return firesWhileHeld(liveOf(row).kind) ? 'fires' : 'resumes';
+  if (!firesWhileHeld(liveOf(row).kind)) return 'resumes';
+  return row.webhookUrl === desired.webhookUrl ? 'fires' : 'moves';
 }
 
 // A held row keeps what it was stood up as, and records only the version a 'keep' moves it to.

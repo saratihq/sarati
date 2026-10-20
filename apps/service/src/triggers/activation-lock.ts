@@ -32,6 +32,30 @@ export async function ifActivationUnlocked<T>(
   });
 }
 
+/** Run `work` holding the activation's lock beside its other shared holders; `null`, without waiting, while a teardown, stand-up or poll holds or awaits it. */
+export async function ifActivationUnlockedShared<T>(
+  pool: Pool,
+  activationId: string,
+  work: () => Promise<T>,
+): Promise<T | null> {
+  const client = await pool.connect();
+  return releasing(client, async () => {
+    const { rows } = await client.query<{ locked: boolean }>(
+      'SELECT pg_try_advisory_lock_shared($1, hashtext($2)) AS locked',
+      [ACTIVATION_LOCK_SPACE, activationId],
+    );
+    if (!rows[0]?.locked) return null;
+    try {
+      return await work();
+    } finally {
+      await client.query('SELECT pg_advisory_unlock_shared($1, hashtext($2))', [
+        ACTIVATION_LOCK_SPACE,
+        activationId,
+      ]);
+    }
+  });
+}
+
 async function holding<T>(client: PoolClient, activationId: string, work: () => Promise<T>): Promise<T> {
   try {
     return await work();

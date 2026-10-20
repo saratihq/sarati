@@ -40,6 +40,18 @@ export function servedWebhookUrl(
   return webhookUrlFor(env.publicBaseUrl || `http://localhost:${env.port}`, workflowId, environment);
 }
 
+/** Whether two webhook URLs reach the same `(workflow, env)` intake, which routes by the hooks path alone, whatever host or prefix is before it. */
+export function sameWebhookIntake(a: string | null, b: string | null): boolean {
+  if (a === b) return true;
+  const [x, y] = [intakeOf(a), intakeOf(b)];
+  return x !== null && y !== null && x.workflowId === y.workflowId && x.environment === y.environment;
+}
+
+function intakeOf(url: string | null): WebhookTarget | null {
+  const at = url?.lastIndexOf(`/${HOOKS_PREFIX}/`) ?? -1;
+  return url && at >= 0 ? parseWebhookPath(url.slice(at)) : null;
+}
+
 /**
  * Parse a request path into a per-`(workflow, env)` target, or `null` when it is not one. The
  * segment after `api/hooks/` MUST be a uuid, which is what keeps the `catch/:catchId` intake out.

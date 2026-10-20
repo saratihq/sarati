@@ -83,9 +83,12 @@ the environment's account, and starts once the slot is fixed. A trigger whose ow
 being active is **held** as it was, and the overview's reason says what it still does: a polled feed
 is not listening and picks up from where it stopped once a **Test** under Integrations finds that
 account working, while a webhook or subscription still starts a run for each delivery, which the
-service checks without the account. One whose new version's change, or move to a new URL, waits for
-the account is not listening either, and starts afresh once the account works again. A trigger whose
-stand-up failed is not listening until one succeeds, and the overview gives the app's error. See
+service checks without the account. One whose new version's change, or move to a renamed
+environment's URL, waits for the account is not listening either, and starts afresh once the account
+works again. One whose move to a new public URL for the service waits still starts a run for each
+delivery that reaches the service at its old address, and moves once the account works again. A
+trigger whose stand-up failed is not listening until one succeeds, and the overview gives the app's
+error. See
 [Environments](/run/environments/#triggers-listen-as-the-environments-account).
 
 ## Renaming an environment says a webhook would be left at its old URL

@@ -147,7 +147,7 @@ For local development, expose your instance with a tunnel and set `PUBLIC_BASE_U
 URL so generated webhook URLs are the ones a sender can actually reach.
 
 If the tunnel's address changes, update `PUBLIC_BASE_URL` and restart. Webhooks registered with apps
-move to the new address when the service starts. A URL you gave a sender yourself has to be updated
-there.
+move to the new address when the service starts, except one whose account isn't active: it moves once
+the account is active again. A URL you gave a sender yourself has to be updated there.
 
 Your own `curl` on the same machine works without any of this.
