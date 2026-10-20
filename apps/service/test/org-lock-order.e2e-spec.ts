@@ -10,6 +10,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { gmailFake } from './support/gmail-fake';
 import { listenOnLoopback } from './support/listen';
@@ -33,8 +34,8 @@ interface Writer {
   event?: string;
   /** Rows the write needs beyond a team's. */
   prepare?: (team: Team) => Promise<void>;
-  /** Where the lands-first test holds the write: just before its event or just after its org lock; null when the org delete removes what the write would before its transaction. */
-  heldAt: 'event' | 'org lock' | null;
+  /** Where the lands-first test holds the write: just before its event or just after its org lock. */
+  heldAt: 'event' | 'org lock';
   /** What an org delete answers with 409 once the write has landed, when the org delete removes the org otherwise. */
   refusal?: string;
   /** What the write answers once the org is gone, when not "Organization not found". */
@@ -147,6 +148,23 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     asOwner(http().put(`/api/platform-keys/${name}`), t.org).send({ value: `${name}-${suffix()}` });
   const connectCluster = (t: Team): request.Test =>
     asOwner(http().post(`/api/orgs/${t.org}/clusters/production/connect`)).send({ app: 'slack' });
+
+  // An org's cluster connection and the Composio account its connect made.
+  const clusterIn = async (t: Team): Promise<{ connection: string; account: string }> => {
+    await setOrgKey(t, 'composio_api_key').expect(200);
+    const before = new Set(composioAccounts.created);
+    const connection = (await connectCluster(t).expect(201)).body.connection_id as string;
+    const [account] = [...composioAccounts.created].filter((id) => !before.has(id));
+    return { connection, account: account! };
+  };
+
+  const kept = async (cluster: { connection: string; account: string }): Promise<unknown> => ({
+    connection: (await db.query(`SELECT 1 FROM connections WHERE id = $1`, [cluster.connection])).rows.length,
+    revoked: composioAccounts.deleted.has(cluster.account),
+  });
+
+  const leftAtComposio = (before: Set<string>): string[] =>
+    [...composioAccounts.created].filter((id) => !before.has(id) && !composioAccounts.deleted.has(id));
 
   const outcome = async (org: string, event: string): Promise<{ org: boolean; events: number }> =>
     (
@@ -282,8 +300,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       send: connectCluster,
       status: 201,
       heldAt: 'org lock',
-      refusal:
-        'A connection was added to this organization while it was being deleted — delete the organization again to remove it too.',
     },
     {
       name: 'a cluster connection delete',
@@ -293,7 +309,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       },
       send: (t) => asOwner(http().delete(`/api/orgs/${t.org}/clusters/connections/${t.cluster ?? ''}`)),
       status: 200,
-      heldAt: null,
+      heldAt: 'org lock',
     },
     {
       name: 'a workflow deploy',
@@ -454,40 +470,40 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
 
   for (const writer of WRITERS) {
     const event = writer.event ?? '';
-    if (writer.heldAt) {
-      const then = writer.refusal ? 'refuses with 409' : 'removes the org';
-      it(`${writer.name} holding the org row when an org delete starts lands first, and the org delete then ${then}`, async () => {
-        const t = await team(`${writer.name}, then an org delete`);
-        await writer.prepare?.(t);
-        const landed = (await outcome(t.org, event)).events;
-        const held = holdWriter(writer);
-        const before = await deadlocks();
-        try {
-          const writing = statusOf(writer.send(t));
-          await held.arrived;
-          const deleting = answer(deleteOrg(t.org));
-          await lockWaiters(1);
-          held.release();
-          expect(await writing).toBe(writer.status);
-          expect(await deleting).toEqual(
-            writer.refusal ? { status: 409, detail: writer.refusal } : { status: 200, detail: undefined },
-          );
-        } finally {
-          held.restore();
-        }
-        expect(await outcome(t.org, event)).toEqual({
-          org: writer.refusal !== undefined,
-          events: writer.event ? landed + 1 : 0,
-        });
-        expect(await deadlocksSince(before)).toBe(0);
+    const then = writer.refusal ? 'refuses with 409' : 'removes the org';
+    it(`${writer.name} holding the org row when an org delete starts lands first, and the org delete then ${then}`, async () => {
+      const t = await team(`${writer.name}, then an org delete`);
+      const accountsBefore = new Set(composioAccounts.created);
+      await writer.prepare?.(t);
+      const landed = (await outcome(t.org, event)).events;
+      const held = holdWriter(writer);
+      const before = await deadlocks();
+      try {
+        const writing = statusOf(writer.send(t));
+        await held.arrived;
+        const deleting = answer(deleteOrg(t.org));
+        await lockWaiters(1);
+        held.release();
+        expect(await writing).toBe(writer.status);
+        expect(await deleting).toEqual(
+          writer.refusal ? { status: 409, detail: writer.refusal } : { status: 200, detail: undefined },
+        );
+      } finally {
+        held.restore();
+      }
+      expect(await outcome(t.org, event)).toEqual({
+        org: writer.refusal !== undefined,
+        events: writer.event ? landed + 1 : 0,
       });
-    }
+      expect(leftAtComposio(accountsBefore)).toEqual([]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
 
     it(`${writer.name} started while an org delete is in flight waits for it and answers 404`, async () => {
       const t = await team(`an org delete, then ${writer.name}`);
+      const accountsBefore = new Set(composioAccounts.created);
       await writer.prepare?.(t);
       const landed = (await outcome(t.org, event)).events;
-      const accountsBefore = new Set(composioAccounts.created);
       const held = gateEmits('org.deleted', 'after');
       const before = await deadlocks();
       try {
@@ -502,10 +518,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         held.restore();
       }
       expect(await outcome(t.org, event)).toEqual({ org: false, events: landed });
-      const leftAtComposio = [...composioAccounts.created].filter(
-        (id) => !accountsBefore.has(id) && !composioAccounts.deleted.has(id),
-      );
-      expect(leftAtComposio).toEqual([]);
+      expect(leftAtComposio(accountsBefore)).toEqual([]);
       expect(await deadlocksSince(before)).toBe(0);
     });
   }
@@ -592,6 +605,15 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
           status: 201,
         },
       ],
+      [
+        "the delete of the cluster connection's own org",
+        {
+          app: 'slack',
+          connect: cluster,
+          remove: (owner) => deleteOrg(owner ?? ''),
+          status: 200,
+        },
+      ],
     ];
 
     const slotIn = (org: string, env: string, app: string, connection: string): request.Test =>
@@ -657,6 +679,89 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
           [org, connection],
         );
         expect(left.rows[0]).toEqual({ org: false, connection: false, slots: 0 });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+
+    it("a slot assign of an org's cluster connection, in another org's environment it fills, started while the org's delete holds the connection waits for it and answers 404", async () => {
+      const t = await team('Cluster connection under an org delete');
+      const { connection } = await clusterIn(t);
+      const other = await team('Slot in another org');
+      await slotIn(other.org, other.env, 'slack', connection).expect(200);
+      const held = bounded(
+        holdQuery(/SELECT id, org_id = \$1 AS own FROM environments/, 'after'),
+        'an org delete',
+      );
+      const before = await deadlocks();
+      try {
+        const deleting = statusOf(deleteOrg(t.org));
+        await held.arrived;
+        const assigning = answer(slotIn(other.org, other.env, 'slack', connection));
+        await lockWaiters(1);
+        held.release();
+        expect({ deleting: await deleting, assigning: await assigning }).toEqual({
+          deleting: 200,
+          assigning: { status: 404, detail: 'Connection not found' },
+        });
+      } finally {
+        held.restore();
+      }
+      const slots = await db.query(`SELECT 1 FROM environment_connections WHERE connection_id = $1`, [
+        connection,
+      ]);
+      expect(slots.rows).toEqual([]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    const deleted = { status: 200, detail: undefined };
+
+    it.each([
+      [
+        'the second waiting for the first held just after its first environment lock',
+        /FROM environments WHERE id = \$1 FOR /,
+        async (): Promise<void> => {
+          await lockWaiters(1);
+        },
+      ],
+      [
+        'the second going first past the first held just after reading its environments',
+        /SELECT id, org_id = \$1 AS own FROM environments/,
+        async (second: Promise<unknown>): Promise<void> => {
+          expect(await within(second)).toEqual(deleted);
+        },
+      ],
+    ])(
+      "two org deletes, each org's cluster connection filling a slot in the other's environment, %s, both complete",
+      async (_, at, meanwhile) => {
+        const one = await team('Crossed clusters, one');
+        const two = await team('Crossed clusters, two');
+        const clusters = [await clusterIn(one), await clusterIn(two)];
+        await slotIn(two.org, two.env, 'slack', clusters[0]!.connection).expect(200);
+        await slotIn(one.org, one.env, 'slack', clusters[1]!.connection).expect(200);
+        // The first takes the lower id, the second's environment, before its own.
+        const [second, first] = one.env < two.env ? [one, two] : [two, one];
+        const held = bounded(holdQuery(at, 'after'), 'the first org delete');
+        const before = await deadlocks();
+        try {
+          const firstDeleting = answer(deleteOrg(first.org));
+          await held.arrived;
+          const secondDeleting = answer(deleteOrg(second.org));
+          await meanwhile(secondDeleting);
+          held.release();
+          expect({ first: await firstDeleting, second: await secondDeleting }).toEqual({
+            first: deleted,
+            second: deleted,
+          });
+        } finally {
+          held.restore();
+        }
+        const left = await db.query(
+          `SELECT (SELECT count(*)::int FROM organizations WHERE id = ANY($1::uuid[])) AS orgs,
+                  (SELECT count(*)::int FROM connections WHERE id = ANY($2::uuid[])) AS connections`,
+          [[one.org, two.org], clusters.map((c) => c.connection)],
+        );
+        expect(left.rows[0]).toEqual({ orgs: 0, connections: 0 });
+        expect(clusters.map((c) => composioAccounts.deleted.has(c.account))).toEqual([true, true]);
         expect(await deadlocksSince(before)).toBe(0);
       },
     );
@@ -840,8 +945,93 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     });
   });
 
-  it('a workflow created while an org delete waits for the org row is counted, so a promote of it lands and the org delete answers 409', async () => {
+  it("a cluster connect replacing the connection a concurrent connect has just made deletes that connection's Composio account", async () => {
+    const t = await team('Two cluster connects');
+    await setOrgKey(t, 'composio_api_key').expect(200);
+    const before = new Set(composioAccounts.created);
+    const minted = (): string[] => [...composioAccounts.created].filter((id) => !before.has(id));
+    const held = bounded(holdQuery(ORG_LOCK), 'a cluster connect');
+    try {
+      const replacing = connectCluster(t).then((res) => ({
+        status: res.status,
+        connection: res.body.connection_id as string,
+      }));
+      await held.arrived;
+      expect(minted()).toHaveLength(1);
+      const replaced = (await connectCluster(t).expect(201)).body.connection_id as string;
+      const [replacingAccount, replacedAccount] = minted();
+      held.release();
+      const { status, connection } = await replacing;
+      expect(status).toBe(201);
+      const rows = await db.query(`SELECT id FROM connections WHERE org_id = $1`, [t.org]);
+      expect({ rows: rows.rows, replaced: replaced !== connection }).toEqual({
+        rows: [{ id: connection }],
+        replaced: true,
+      });
+      expect({
+        replaced: composioAccounts.deleted.has(replacedAccount!),
+        replacing: composioAccounts.deleted.has(replacingAccount!),
+      }).toEqual({ replaced: true, replacing: false });
+    } finally {
+      held.restore();
+    }
+  });
+
+  it("a cluster connection delete the org's delete follows at once still deletes the connection's Composio account, with the key the org had", async () => {
+    const t = await team('Cluster connection delete, then the org delete');
+    const cluster = await clusterIn(t);
+    const held = bounded(holdQuery(/FROM platform_secrets/), 'a cluster connection delete');
+    const before = await deadlocks();
+    try {
+      const removing = statusOf(
+        asOwner(http().delete(`/api/orgs/${t.org}/clusters/connections/${cluster.connection}`)),
+      );
+      await held.arrived;
+      const deleting = statusOf(deleteOrg(t.org));
+      await lockWaiters(1);
+      held.release();
+      expect({ removing: await removing, deleting: await deleting }).toEqual({
+        removing: 200,
+        deleting: 200,
+      });
+    } finally {
+      held.restore();
+    }
+    expect(await kept(cluster)).toEqual({ connection: 0, revoked: true });
+    expect(await deadlocksSince(before)).toBe(0);
+  });
+
+  it('an org delete that fails after deleting its cluster connections keeps them and their Composio accounts', async () => {
+    const t = await team('Fails after its cluster connections');
+    const cluster = await clusterIn(t);
+    const events = app.get(EventsService);
+    const emit = events.emit.bind(events);
+    const failing = jest
+      .spyOn(events, 'emit')
+      .mockImplementation((em, event: DomainEventInput) =>
+        event.type === 'org.deleted' ? Promise.reject(new Error('the org delete fails')) : emit(em, event),
+      );
+    try {
+      expect((await answer(deleteOrg(t.org))).status).toBe(500);
+    } finally {
+      failing.mockRestore();
+    }
+    expect(await kept(cluster)).toEqual({ connection: 1, revoked: false });
+  });
+
+  it('an org delete refused while the org has a workflow keeps its cluster connections and their Composio accounts', async () => {
+    const t = await team('Refused with a cluster connection');
+    const cluster = await clusterIn(t);
+    await asOwner(http().post('/api/deploy'), t.org)
+      .send({ workflow_json: webhookDoc('Keeps the org') })
+      .expect(201);
+    expect(await answer(deleteOrg(t.org))).toEqual({ status: 409, detail: HAS_WORKFLOW });
+    expect(await kept(cluster)).toEqual({ connection: 1, revoked: false });
+  });
+
+  it("a workflow created while an org delete waits for the org row is counted, so a promote of it lands and the org delete answers 409, keeping the org's cluster connection", async () => {
     const t = await team('Promote beside an org delete');
+    const cluster = await clusterIn(t);
     const writer = new Client({ connectionString: dbUrl });
     await writer.connect();
     const promoted = gateEmits('workflow.promoted');
@@ -874,12 +1064,13 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         refused: { status: 409, detail: HAS_WORKFLOW },
         promoting: 201,
       });
-      const kept = await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [workflow]);
-      expect(kept.rows).toEqual([{ org_id: t.org }]);
+      const still = await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [workflow]);
+      expect(still.rows).toEqual([{ org_id: t.org }]);
     } finally {
       promoted.restore();
       await writer.end();
     }
+    expect(await kept(cluster)).toEqual({ connection: 1, revoked: false });
     expect(await deadlocksSince(before)).toBe(0);
   });
 

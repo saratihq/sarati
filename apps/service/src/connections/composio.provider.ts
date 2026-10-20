@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { request } from 'undici';
 
 import { DomainError } from '../common/domain-error';
@@ -316,9 +316,13 @@ export class ComposioProvider {
     return 'failed';
   }
 
-  /** Delete the Composio connected account (revokes their custody of the grant). */
-  async deleteAccount(scope: PlatformKeyScope, connectedAccountId: string): Promise<void> {
-    await this.deleteAccountWith(await this.requireApiKey(scope), connectedAccountId);
+  /** Deletes connected accounts with the key `scope` has now, which an org's delete takes with it; null when it has none. */
+  async accountDeleter(
+    scope: PlatformKeyScope,
+    em?: EntityManager,
+  ): Promise<((connectedAccountId: string) => Promise<void>) | null> {
+    const apiKey = (await this.platformKeys?.composioApiKey(scope, em)) ?? '';
+    return apiKey ? (connectedAccountId) => this.deleteAccountWith(apiKey, connectedAccountId) : null;
   }
 
   private async deleteAccountWith(apiKey: string, connectedAccountId: string): Promise<void> {

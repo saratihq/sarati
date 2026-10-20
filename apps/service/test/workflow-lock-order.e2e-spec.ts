@@ -121,10 +121,8 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     return res.body.id as string;
   };
 
-  const deploy = async (org: string, name: string): Promise<string> => {
-    const res = await as(http().post('/api/deploy'), org)
-      .send({ workflow_json: webhookDoc(name) })
-      .expect(201);
+  const deploy = async (org: string, name: string, doc = webhookDoc(name)): Promise<string> => {
+    const res = await as(http().post('/api/deploy'), org).send({ workflow_json: doc }).expect(201);
     return res.body.workflow_id as string;
   };
 
@@ -468,35 +466,67 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     expect(rows[0]!.id).not.toBe(env);
   });
 
-  it('a rename held mid-way does not hold up the run a webhook fire in that environment starts', async () => {
-    const org = await workspace('Fire during rename');
-    const env = await createEnv(org, 'fire-a');
-    const wfId = await deploy(org, 'fired during rename');
-    const [v1] = await versions(org, wfId);
-    await promote(org, wfId, 'fire-a', v1!.id).expect(201);
-    const asked = await as(http().patch(`/api/environments/${env}`), org)
-      .send({ name: 'fire-b' })
-      .expect(409);
-    const renamed = gateEmits('environment.renamed');
-    try {
-      const renaming = statusOf(
-        as(http().patch(`/api/environments/${env}`), org).send({
-          name: 'fire-b',
-          confirm_url_changes: asked.body.url_changes,
-        }),
-      );
-      await renamed.arrived(0);
-      const fired = await http()
-        .post(`/api/hooks/${wfId}/fire-a`)
-        .send({ title: 'during rename' })
-        .expect(202);
-      expect(await runRecordedWithin(fired.body.run_id as string, 3_000)).toBe(true);
-      renamed.release(0);
-      expect(await renaming).toBe(200);
-    } finally {
-      renamed.restore();
-    }
-  });
+  interface FireBeside {
+    org: string;
+    env: string;
+    /** A second workflow promoted to the environment, the one the write un-promotes. */
+    other: string;
+  }
+
+  it.each([
+    [
+      'a rename',
+      'environment.renamed',
+      async ({ org, env }: FireBeside): Promise<number> => {
+        const asked = await as(http().patch(`/api/environments/${env}`), org)
+          .send({ name: 'fire-b' })
+          .expect(409);
+        return statusOf(
+          as(http().patch(`/api/environments/${env}`), org).send({
+            name: 'fire-b',
+            confirm_url_changes: asked.body.url_changes,
+          }),
+        );
+      },
+    ],
+    [
+      "an environment delete's un-promote",
+      'workflow.unpromoted',
+      ({ org, env }: FireBeside): Promise<number> => statusOf(removeEnv(org, env)),
+    ],
+    [
+      'an un-promote',
+      'workflow.unpromoted',
+      ({ org, env, other }: FireBeside): Promise<number> =>
+        statusOf(as(http().delete(`/api/workflows/${other}/pointers/${env}`), org)),
+    ],
+    [
+      "a workflow delete's un-promote",
+      'workflow.unpromoted',
+      ({ org, other }: FireBeside): Promise<number> => statusOf(remove(org, other)),
+    ],
+  ])(
+    '%s held mid-way does not hold up the run a webhook fire in that environment starts',
+    async (_, event, write) => {
+      const org = await workspace('Fire beside a write');
+      const env = await createEnv(org, 'fire-a');
+      const [fired, other] = [await deploy(org, 'fired'), await deploy(org, 'un-promoted')];
+      for (const wfId of [fired, other]) {
+        const [v1] = await versions(org, wfId);
+        await promote(org, wfId, 'fire-a', v1!.id).expect(201);
+      }
+      const held = gateEmits(event);
+      const writing = write({ org, env, other });
+      try {
+        await held.arrived(0);
+        const run = await http().post(`/api/hooks/${fired}/fire-a`).send({ title: 'beside' }).expect(202);
+        expect(await runRecordedWithin(run.body.run_id as string, 3_000)).toBe(true);
+      } finally {
+        held.restore();
+      }
+      expect(await writing).toBe(200);
+    },
+  );
 
   it('a second pointer on one environment is refused by the database', async () => {
     const org = await workspace('One pointer per env');
@@ -1816,14 +1846,26 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         [env, envName],
       );
 
-    const unpromoteOrder = (org: string, env: string, envName: string): Promise<string[]> =>
-      rolledBack(
-        `DELETE FROM workflow_env_pointers p USING workflows w
+    const UNPROMOTE = `DELETE FROM workflow_env_pointers p USING workflows w
           WHERE w.id = p.workflow_id
-            AND (p.environment_id = $1 OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))
-         RETURNING p.workflow_id`,
-        [env, envName, org],
-      );
+            AND (p.environment_id = $1 OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))`;
+
+    const unpromoteOrder = (org: string, env: string, envName: string): Promise<string[]> =>
+      rolledBack(`${UNPROMOTE} RETURNING p.workflow_id`, [env, envName, org]);
+
+    // The planner scans the workflows first only once it sees enough of them beside the pointers, so add workflows with no pointer until it does.
+    const unpromoteScansWorkflows = async (org: string, env: string, envName: string): Promise<void> => {
+      for (let round = 0; round < 20; round++) {
+        await db.query('ANALYZE workflows, workflow_env_pointers');
+        const plan = await db.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${UNPROMOTE}`, [env, envName, org]);
+        const scans = plan.rows.map((row) => /Scan (?:using \S+ )?on (\w+)/.exec(row['QUERY PLAN'])?.[1]);
+        if (scans.find(Boolean) === 'workflows') return;
+        await db.query(
+          `INSERT INTO workflows (id, name) SELECT gen_random_uuid(), 'no pointer' FROM generate_series(1, 50)`,
+        );
+      }
+      throw new Error("the un-promote's plan never scans the workflows first");
+    };
 
     // Three of `renamed` that `unpromoted` holds in the reverse order, if any.
     const reversedThree = (renamed: string[], unpromoted: string[]): string[] | undefined => {
@@ -1834,20 +1876,20 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       return threes.find(([a, b, c]) => at(a!) > at(b!) && at(b!) > at(c!));
     };
 
-    // An environment left with three workflows' pointers that its delete's un-promote deletes in the reverse of a rename's order, picked from six and retried with a fresh org until the un-promote's join scans the workflows.
+    // An environment left with three workflows' pointers that its delete's un-promote, scanning the workflows, deletes in the reverse of a rename's order: six promoted in the reverse of their creation, three kept, retried with a fresh org if no three are reversed.
     const crossed = async (name: string): Promise<Crossed> => {
       for (let attempt = 0; attempt < 20; attempt++) {
         const org = await workspace(name);
         const envName = `crossed-${suffix()}`;
         const env = await createEnv(org, envName);
-        for (let i = 0; i < 6; i++) {
-          const res = await as(http().post('/api/deploy'), org)
-            .send({ workflow_json: manualDoc(`${name} ${i}`) })
-            .expect(201);
-          const [v1] = await versions(org, res.body.workflow_id as string);
-          await promote(org, res.body.workflow_id as string, envName, v1!.id).expect(201);
+        const created: string[] = [];
+        for (let i = 0; i < 6; i++)
+          created.push(await deploy(org, `${name} ${i}`, manualDoc(`${name} ${i}`)));
+        for (const wfId of [...created].reverse()) {
+          const [v1] = await versions(org, wfId);
+          await promote(org, wfId, envName, v1!.id).expect(201);
         }
-        await db.query('ANALYZE workflows, workflow_env_pointers');
+        await unpromoteScansWorkflows(org, env, envName);
         const renamed = await renameOrder(env, envName);
         const three = reversedThree(renamed, await unpromoteOrder(org, env, envName));
         if (!three) continue;

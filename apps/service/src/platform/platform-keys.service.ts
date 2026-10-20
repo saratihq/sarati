@@ -108,9 +108,13 @@ export class PlatformKeysService {
     ) as Record<PlatformKeyName, PlatformKeyState>;
   }
 
-  /** The decrypted key for this scope, or null when unset. */
-  async get(scope: PlatformKeyScope, name: PlatformKeyName): Promise<string | null> {
-    const rows: Array<{ secret: string }> = await this.dataSource.query(
+  /** The decrypted key for this scope, or null when unset; read on `em` when given, so a transaction reads it on its own connection. */
+  async get(
+    scope: PlatformKeyScope,
+    name: PlatformKeyName,
+    em: EntityManager = this.dataSource.manager,
+  ): Promise<string | null> {
+    const rows: Array<{ secret: string }> = await em.query(
       `SELECT secret FROM platform_secrets
         WHERE name = $1 AND user_id IS NOT DISTINCT FROM $2 AND org_id IS NOT DISTINCT FROM $3
         LIMIT 1`,
@@ -155,8 +159,8 @@ export class PlatformKeysService {
   }
 
   /** The Composio key as the empty-string sentinel the managed rail tests for. */
-  async composioApiKey(scope: PlatformKeyScope): Promise<string> {
-    return (await this.get(scope, 'composio_api_key')) ?? '';
+  async composioApiKey(scope: PlatformKeyScope, em?: EntityManager): Promise<string> {
+    return (await this.get(scope, 'composio_api_key', em)) ?? '';
   }
 
   /**

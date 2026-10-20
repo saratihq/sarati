@@ -29,15 +29,33 @@ export function lockInvite(
   return em.findOne(OrgInviteEntity, { where, lock: { mode: 'pessimistic_write' } });
 }
 
-/** An org delete's first locks: the org row FOR UPDATE, granted once every {@link lockOrgForWrite} write holding it has committed, so `refuse` then sees what they wrote and every later write, a second delete included, waits and answers 404 if the org goes; then its environments FOR UPDATE in id order, the order a workflow delete takes them in (constitution rows 11 and 20). */
+/** An org delete's locks before anything it deletes: the org row FOR UPDATE, granted once every {@link lockOrgForWrite} write holding it has committed, so `refuse` then sees what they wrote and every later write, a second delete included, waits and answers 404 if the org goes; then the org's connections FOR UPDATE, so no slot joins them; then, in one id order, its environments FOR UPDATE, the order a workflow delete takes them in, and every other environment holding one of those connections' slots FOR KEY SHARE, so it takes turns with that environment's delete or its org's (constitution rows 11 and 20); returns the connections' ids. */
 export async function lockOrgForDelete(
   em: EntityManager,
   orgId: string,
   refuse: () => Promise<void>,
-): Promise<void> {
+): Promise<string[]> {
   await lockOrg(em, orgId, 'FOR UPDATE', orgGone());
   await refuse();
-  await rawQuery(em, `SELECT 1 FROM environments WHERE org_id = $1 ORDER BY id FOR UPDATE`, [orgId]);
+  const connections = await rawQuery<{ id: string }>(
+    em,
+    `SELECT id FROM connections WHERE org_id = $1 ORDER BY id FOR UPDATE`,
+    [orgId],
+  );
+  const ids = connections.map((row) => row.id);
+  const environments = await rawQuery<{ id: string; own: boolean }>(
+    em,
+    `SELECT id, org_id = $1 AS own FROM environments
+      WHERE org_id = $1
+         OR id IN (SELECT environment_id FROM environment_connections WHERE connection_id = ANY($2::uuid[]))
+      ORDER BY id`,
+    [orgId, ids],
+  );
+  for (const { id, own } of environments) {
+    const mode = own ? 'FOR UPDATE' : 'FOR KEY SHARE';
+    await rawQuery(em, `SELECT 1 FROM environments WHERE id = $1 ${mode}`, [id]);
+  }
+  return ids;
 }
 
 /** A connection delete's locks before its cascade empties their slots: the connections FOR UPDATE, so no slot joins them, then the org of every environment holding one of their slots, FOR KEY SHARE in id order (constitution row 20); returns the ids still there. */

@@ -2,12 +2,11 @@ import { randomBytes } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { IsNull, type DataSource, type EntityManager } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
 import { OrgInviteEntity } from '../database/entities/org-invite.entity';
-import { ConnectionEntity } from '../database/entities/connection.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -105,24 +104,12 @@ export class OrgManagementService {
     });
   }
 
-  /** Delete a non-personal org; refuses while workflows remain, memberships/invites/keys cascade. */
+  /** Delete a non-personal org; refuses while workflows remain, deletes its cluster connections and revokes their Composio accounts, memberships/invites/keys cascade. */
   async deleteOrg(org: OrganizationEntity, actorId: string): Promise<void> {
     if (org.isPersonal) throw new DomainError('The personal organization cannot be deleted');
-    await this.refuseWhileWorkflows(this.dataSource.manager, org.id);
-    // Tear down cluster connections FIRST: no FK, so the org delete would orphan live third-party grants.
-    const clusters = await this.connections.listClusters(org.id);
-    for (const c of clusters) await this.connections.deleteCluster(org.id, c.id);
-
-    await this.dataSource.transaction(async (em) => {
-      await lockOrgForDelete(em, org.id, async () => {
-        await this.refuseWhileWorkflows(em, org.id);
-        if ((await em.count(ConnectionEntity, { where: { orgId: org.id } })) > 0) {
-          throw new DomainError(
-            'A connection was added to this organization while it was being deleted — delete the organization again to remove it too.',
-            409,
-          );
-        }
-      });
+    const clusters = await this.dataSource.transaction(async (em) => {
+      const connections = await lockOrgForDelete(em, org.id, () => this.refuseWhileWorkflows(em, org.id));
+      const removal = await this.connections.deleteLocked(em, connections);
       await this.events.emit(em, {
         orgId: org.id,
         actorUserId: actorId,
@@ -132,7 +119,9 @@ export class OrgManagementService {
         payload: { name: org.name },
       });
       await em.delete(OrganizationEntity, { id: org.id });
+      return removal;
     });
+    await clusters.revoke();
   }
 
   private async refuseWhileWorkflows(em: EntityManager, orgId: string): Promise<void> {
@@ -407,12 +396,7 @@ export class OrgManagementService {
           role: invite.role,
           createdAt: now(),
         });
-        const { affected } = await em.update(
-          OrgInviteEntity,
-          { id: invite.id, acceptedAt: IsNull() },
-          { acceptedBy: userId, acceptedAt: now() },
-        );
-        if (affected !== 1) throw spent;
+        await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
         await this.events.emit(em, {
           orgId: org.id,
           actorUserId: userId,

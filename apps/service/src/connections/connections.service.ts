@@ -124,6 +124,15 @@ export interface ManagedConnectionRef {
   connectedAccountId: string | null;
 }
 
+/** Connections a transaction deleted, with what revokes their Composio accounts once it commits. */
+export interface ConnectionRemoval {
+  deleted: number;
+  /** Logs a failure, never throws. */
+  revoke: () => Promise<void>;
+}
+
+const NOTHING_REMOVED: ConnectionRemoval = { deleted: 0, revoke: () => Promise.resolve() };
+
 export interface CreateConnectionInput {
   /** The app this account is for — the public slug, e.g. `slack`. */
   provider: string;
@@ -203,29 +212,30 @@ export class ConnectionsService implements RunAsAccounts {
       return toSummary(entity);
     }
 
-    // Cluster upsert-on-rotate (one account per app per env): revoke the OUTGOING grant first,
-    // outside the tx, then swap the row atomically so a concurrent connect can't remove the new one.
-    const existing = await this.dataSource.manager.find(ConnectionEntity, {
-      where: { orgId: cluster.orgId, environment: cluster.environment, provider },
-    });
-    for (const row of existing) await this.revokeComposioAccount(row);
-    try {
-      await this.dataSource.transaction(async (em) => {
+    // One account per app per env: the swap replaces whichever row holds it when the swap runs, and revokes that one's grant.
+    const replaced = await this.dataSource
+      .transaction(async (em) => {
         await lockOrgForWrite(em, cluster.orgId);
-        await this.deleteWithSlots(em, { orgId: cluster.orgId, environment: cluster.environment, provider });
+        const removal = await this.deleteWithSlots(em, {
+          orgId: cluster.orgId,
+          environment: cluster.environment,
+          provider,
+        });
         await em.save(ConnectionEntity, entity);
+        return removal;
+      })
+      .catch((err: unknown) => {
+        // Lost the unique-index race for the same (org, env, app) — a clean 409, not a raw 500.
+        const code = (err as { driverError?: { code?: string }; code?: string }) ?? {};
+        if (code.driverError?.code === '23505' || code.code === '23505') {
+          throw new DomainError(
+            `A ${provider} connection for the ${cluster.environment} environment is already being set up — try again in a moment`,
+            409,
+          );
+        }
+        throw err;
       });
-    } catch (err) {
-      // Lost the unique-index race for the same (org, env, app) — a clean 409, not a raw 500.
-      const code = (err as { driverError?: { code?: string }; code?: string }) ?? {};
-      if (code.driverError?.code === '23505' || code.code === '23505') {
-        throw new DomainError(
-          `A ${provider} connection for the ${cluster.environment} environment is already being set up — try again in a moment`,
-          409,
-        );
-      }
-      throw err;
-    }
+    await replaced.revoke();
     return toSummary(entity);
   }
 
@@ -447,27 +457,44 @@ export class ConnectionsService implements RunAsAccounts {
 
   async delete(userId: string, id: string): Promise<boolean> {
     // Personal-scoped: a cluster row (orgId set) is removable only via deleteCluster, which enforces owner/admin.
-    const row = await this.dataSource.manager.findOne(ConnectionEntity, {
-      where: { id, userId, orgId: IsNull() },
+    return this.deleteAndRevoke({ id, userId, orgId: IsNull() });
+  }
+
+  private async deleteAndRevoke(
+    where: FindOptionsWhere<ConnectionEntity>,
+    lockFirst?: (em: EntityManager) => Promise<void>,
+  ): Promise<boolean> {
+    const removal = await this.dataSource.transaction(async (em) => {
+      await lockFirst?.(em);
+      return this.deleteWithSlots(em, where);
     });
-    if (!row) return false;
-    const removed = await this.dataSource.transaction(async (em) => {
-      const deleted = await this.deleteWithSlots(em, { id, userId, orgId: IsNull() });
-      return deleted > 0;
-    });
-    if (removed) await this.revokeComposioAccount(row);
-    return removed;
+    await removal.revoke();
+    return removal.deleted > 0;
   }
 
   private async deleteWithSlots(
     em: EntityManager,
     where: FindOptionsWhere<ConnectionEntity>,
-  ): Promise<number> {
+  ): Promise<ConnectionRemoval> {
     const found = (await em.find(ConnectionEntity, { where, select: { id: true } })).map(({ id }) => id);
-    const ids = await lockConnectionsForDelete(em, found);
-    if (ids.length === 0) return 0;
-    const res = await em.delete(ConnectionEntity, { id: In(ids) });
-    return res.affected ?? 0;
+    if (found.length === 0) return NOTHING_REMOVED;
+    return this.deleteLocked(em, await lockConnectionsForDelete(em, found));
+  }
+
+  /** Deletes connections `ids`, which the caller's transaction holds FOR UPDATE, and their slots; `revoke` then uses the keys their scopes have now, since an org's delete takes the org's key with it. */
+  async deleteLocked(em: EntityManager, ids: string[]): Promise<ConnectionRemoval> {
+    if (ids.length === 0) return NOTHING_REMOVED;
+    const revokes: Array<() => Promise<void>> = [];
+    for (const row of await em.find(ConnectionEntity, { where: { id: In(ids) } })) {
+      revokes.push(await this.revocation(em, row));
+    }
+    const { affected } = await em.delete(ConnectionEntity, { id: In(ids) });
+    return {
+      deleted: affected ?? 0,
+      revoke: async () => {
+        for (const revoke of revokes) await revoke();
+      },
+    };
   }
 
   /** How many cluster connections in an org a given member owns (env steps run AS them). */
@@ -520,31 +547,25 @@ export class ConnectionsService implements RunAsAccounts {
 
   /** Delete a cluster connection (ORG-scoped, not user-scoped) + revoke its Composio account. */
   async deleteCluster(orgId: string, id: string): Promise<boolean> {
-    const removed = await this.dataSource.transaction(async (em) => {
-      await lockOrgForWrite(em, orgId);
-      const row = await em.findOne(ConnectionEntity, { where: { id, orgId } });
-      if (!row) return null;
-      return (await this.deleteWithSlots(em, { id, orgId })) > 0 ? row : null;
-    });
-    if (removed) await this.revokeComposioAccount(removed);
-    return removed !== null;
+    return this.deleteAndRevoke({ id, orgId }, (em) => lockOrgForWrite(em, orgId));
   }
 
-  /** Best-effort cascade revoking the Composio account; a failure must not resurrect the row — log and move on. */
-  private async revokeComposioAccount(row: ConnectionEntity): Promise<void> {
-    const composio = this.composio;
+  /** Best-effort cascade revoking the row's Composio account with its scope's key as it is now; a failure must not resurrect the row — log and move on. */
+  private async revocation(em: EntityManager, row: ConnectionEntity): Promise<() => Promise<void>> {
     const scope = scopeOfConnection(row);
-    if (row.authType !== 'managed' || !composio || !scope || !(await composio.isConfigured(scope))) return;
-    const accountId = this.connectedAccountIdOf(row);
-    if (!accountId) return;
-    try {
-      await composio.deleteAccount(scope, accountId);
-    } catch (err) {
-      const message = errorMessage(err);
-      this.logger.warn(
-        `Connection ${row.id}: Composio account ${accountId} could not be deleted: ${message}`,
-      );
-    }
+    const accountId = row.authType === 'managed' ? this.connectedAccountIdOf(row) : null;
+    const deleteAccount = scope && accountId ? await this.composio?.accountDeleter(scope, em) : null;
+    if (!deleteAccount || !accountId) return () => Promise.resolve();
+    return async () => {
+      try {
+        await deleteAccount(accountId);
+      } catch (err) {
+        const message = errorMessage(err);
+        this.logger.warn(
+          `Connection ${row.id}: Composio account ${accountId} could not be deleted: ${message}`,
+        );
+      }
+    };
   }
 
   /**
