@@ -505,6 +505,37 @@ describe('the recovery guard (e2e)', () => {
     await endedUnresumed('aged');
   }, 120_000);
 
+  it('claims a decision for a run another build started and still runs, and refuses one nothing will resume', async () => {
+    const workflows: Record<string, { name?: string; status?: string; executor?: string }> = {
+      'later-build': { name: 'orchestr.runPlan.later' },
+      'other-executor': { executor: 'elsewhere' },
+      'later-build-ended': { name: 'orchestr.runPlan.later', status: 'ERROR' },
+    };
+    await reboot(async () => {
+      for (const [runId, as] of Object.entries(workflows)) {
+        await restoreGoldenHistory(db, dbos, `${LATEST}/linear-parked`, runId);
+        await dbos.query(
+          `UPDATE dbos.workflow_status
+              SET name = COALESCE($2, name), status = COALESCE($3, status), executor_id = COALESCE($4, executor_id)
+            WHERE workflow_uuid = $1`,
+          [`${MOCK_USER_ID}:${runId}`, as.name ?? null, as.status ?? null, as.executor ?? null],
+        );
+      }
+    });
+    // Another build's to resume, as a run a later version started is on a rollback: the decision is claimed for it.
+    expect((await decide('later-build', 'approve')).status).toBe(200);
+    expect(await runOf('later-build')).toMatchObject({ status: 'waiting' });
+    expect(await stepsWhere('later-build', 'claimed_by IS NOT NULL')).toHaveLength(1);
+    for (const runId of ['other-executor', 'later-build-ended']) {
+      const refused = await decide(runId, 'approve');
+      expect(refused.status).toBe(409);
+      expect(((await refused.json()) as { detail: string }).detail).toBe(
+        `Run ${runId} has stopped, so a decision can no longer reach it — run it again`,
+      );
+      expect(await stepsWhere(runId, 'claimed_at IS NOT NULL')).toEqual([]);
+    }
+  }, 120_000);
+
   it('refuses a decision for a run whose workflow ended while its row still waits, as when its recovery gave up', async () => {
     await reboot(async () => {
       await restoreGoldenHistory(db, dbos, `${LATEST}/linear-parked`, 'gave-up');
