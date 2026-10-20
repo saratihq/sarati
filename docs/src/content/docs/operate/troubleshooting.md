@@ -82,8 +82,9 @@ The same reason on the workflow overview, under **Not listening**, means a trigg
 the environment's account, and starts once the slot is fixed. A trigger whose own account stopped
 being active is **held** as it was, and the overview's reason says what it still does: a polled feed
 is not listening and picks up from where it stopped once a **Test** under Integrations finds that
-account working, while a webhook or subscription still starts a run for each delivery. See
-[Environments](/run/environments/#triggers-listen-as-the-environments-account).
+account working, while a webhook or subscription still starts a run for each delivery. One whose new
+version's change waits for the account is not listening either, and starts afresh once the account
+works again. See [Environments](/run/environments/#triggers-listen-as-the-environments-account).
 
 ## Renaming an environment says a webhook would be left at its old URL
 
@@ -97,8 +98,9 @@ under Integrations → Environments
 A webhook trigger in that environment is held: the account it was registered with at the app isn't
 active, and without it the webhook can be neither deleted nor registered again at the new URL. Once
 the account works again, a **Test** under Integrations brings it back; or assign the slot another
-account under **Integrations → Environments**, which registers the trigger anew as that account.
-Then rename. See [Rename and delete](/run/environments/#rename-and-delete).
+account under **Integrations → Environments**, which registers the trigger anew as that account,
+deleting the old webhook with it first where the app keeps one per address, as GitHub does. Then
+rename. See [Rename and delete](/run/environments/#rename-and-delete).
 
 ## A run ends in `error`
 

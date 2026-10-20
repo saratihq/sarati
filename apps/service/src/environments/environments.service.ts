@@ -68,9 +68,10 @@ export type ConfirmedUrlChange = Pick<UrlChange, 'workflow_id' | 'trigger' | 'fr
 export interface HeldWebhook {
   workflow_id: string;
   workflow_name: string;
-  trigger_node_id: string;
-  /** The trigger node's name. */
-  trigger_name: string;
+  /** The trigger node's id, as a preflight's `triggers` entry names it. */
+  node_id: string;
+  /** The trigger node's name, as a preflight's `triggers` entry names it. */
+  node_name: string;
   /** The app the webhook is registered with. */
   app: string;
   /** The account it was registered with. */
@@ -411,8 +412,8 @@ export class EnvironmentsService {
     const held: HeldWebhook[] = rows.map((r) => ({
       workflow_id: r.workflow_id,
       workflow_name: r.workflow_name,
-      trigger_node_id: r.trigger_node_id,
-      trigger_name: r.workflow_ir?.nodes.find((n) => n.id === r.trigger_node_id)?.name || r.trigger_node_id,
+      node_id: r.trigger_node_id,
+      node_name: r.workflow_ir?.nodes.find((n) => n.id === r.trigger_node_id)?.name || r.trigger_node_id,
       app: validatedAppSlug(r.trigger_type) ?? r.provider,
       connection_id: r.connection_id,
       account_label: labelOf(r),
@@ -599,10 +600,15 @@ function labelOf(connection: { display_name: string | null; account: unknown; pr
 function heldWebhooksMessage(environment: string, held: HeldWebhook[]): string {
   const [only] = held;
   if (held.length === 1 && only) {
-    return `Renaming '${environment}' would leave "${only.trigger_name}" in "${only.workflow_name}" registered at its old URL, which serves nothing, because the ${only.app} account it was registered with (${only.account_label}) isn't active — before renaming, its owner ${REVIVES_SLOT}`;
+    return `Renaming '${environment}' would leave "${only.node_name}" in "${only.workflow_name}" registered at its old URL, which serves nothing, because the ${only.app} account it was registered with (${only.account_label}) isn't active — before renaming, its owner ${REVIVES_SLOT}`;
+  }
+  const leaves = `Renaming '${environment}' would leave ${held.length} webhooks registered at their old URLs, which serve nothing`;
+  if (only && held.every((w) => w.connection_id === only.connection_id)) {
+    const named = held.map((w) => `"${w.node_name}" in "${w.workflow_name}"`);
+    return `${leaves}, because the ${only.app} account they were registered with (${only.account_label}) isn't active: ${named.join(', ')} — before renaming, its owner ${REVIVES_SLOT}`;
   }
   const named = held.map(
-    (w) => `"${w.trigger_name}" in "${w.workflow_name}" (${w.app} account ${w.account_label})`,
+    (w) => `"${w.node_name}" in "${w.workflow_name}" (${w.app} account ${w.account_label})`,
   );
-  return `Renaming '${environment}' would leave ${held.length} webhooks registered at their old URLs, which serve nothing, because the accounts they were registered with aren't active: ${named.join(', ')} — before renaming, each account's owner ${REVIVES_SLOT}`;
+  return `${leaves}, because the accounts they were registered with aren't active: ${named.join(', ')} — before renaming, each account's owner ${REVIVES_SLOT}`;
 }

@@ -20,6 +20,7 @@ import { SDK_WEBHOOK_FETCH, SdkWebhookProvider } from '../src/providers/sdk-webh
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { EnvPointersService } from '../src/workflows/env-pointers.service';
 import { listenOnLoopback } from './support/listen';
 import { setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -50,9 +51,38 @@ const pollingFetch: FetchLike = (input, init) => {
 const stripeEndpoints = new Set<string>();
 const stripeDeletes: string[] = [];
 let endpointSeq = 0;
+
+// GitHub's repository hooks, by `/repos/<owner>/<repo>/hooks/<id>`, and the URL each delivers to: one per URL in a repository, as GitHub keeps them.
+const githubHooks = new Map<string, string>();
+// Each GitHub hook delete, and the headers it was sent with.
+const githubDeletes: Array<{ hook: string; headers: string }> = [];
+let githubSeq = 100;
+const github = (method: string, path: string, init: Parameters<FetchLike>[1]): FetchLikeResponse => {
+  if (method === 'POST' && path.endsWith('/hooks')) {
+    const body = typeof init?.body === 'string' ? init.body : '{}';
+    const url = String((JSON.parse(body) as { config?: { url?: string } }).config?.url);
+    if ([...githubHooks].some(([hook, at]) => hook.startsWith(`${path}/`) && at === url)) {
+      return json(422, {
+        message: 'Validation Failed',
+        errors: [{ message: 'Hook already exists on this repository' }],
+      });
+    }
+    githubSeq += 1;
+    githubHooks.set(`${path}/${githubSeq}`, url);
+    return json(201, { id: githubSeq });
+  }
+  if (method === 'DELETE') {
+    githubDeletes.push({ hook: path, headers: JSON.stringify(init?.headers ?? {}) });
+    return githubHooks.delete(path) ? json(204, {}) : json(404, { message: 'Not Found' });
+  }
+  return json(404, { message: 'Not Found' });
+};
+
 const webhookFetch: FetchLike = (input, init) => {
   const method = (init?.method ?? 'GET').toUpperCase();
-  const path = new URL(String(input)).pathname;
+  const url = new URL(String(input));
+  const path = url.pathname;
+  if (url.host === 'api.github.com') return Promise.resolve(github(method, path, init));
   if (method === 'POST' && path === '/v1/webhook_endpoints') {
     endpointSeq += 1;
     stripeEndpoints.add(`we_slotfit_${endpointSeq}`);
@@ -199,13 +229,14 @@ const NEEDS_MANAGED = (env: string, app: string, name: string): string =>
 const NEEDS_OWN = (env: string, app: string, name: string): string =>
   `${env}'s ${app} account is one-click (managed), and "${name}" runs only on one that uses its own credentials, so it can't run there — an owner assigns ${/^[aeiou]/.test(app) ? 'an' : 'a'} ${app} account that uses its own credentials under Integrations → Environments`;
 
-// The words a live trigger held while its account isn't active says: a poll waits, while what a webhook's or subscription's app sends still runs.
-const HELD = (env: string, rail: Rail): string => {
+// The words a live trigger held while its account isn't active says: a poll waits, what a webhook's or subscription's app sends still runs, and with a change to it waiting neither runs.
+const HELD = (env: string, rail: Rail, changeWaits = false): string => {
   const { app: appSlug, name } = TRIGGERS[rail];
-  const meanwhile =
-    rail === 'polling'
-      ? "it isn't polled, and picks up from where it stopped once the account is active again"
-      : `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
+  const fires = `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
+  const resumes = "it isn't polled, and picks up from where it stopped once the account is active again";
+  const waits = `a change to it waits, so it starts no run until the account is active again, and then starts afresh, without what happened at ${appSlug} meanwhile`;
+  const unchanged = rail === 'polling' ? resumes : fires;
+  const meanwhile = changeWaits ? waits : unchanged;
   return `${env}'s ${appSlug} account isn't active, so "${name}" is held: ${meanwhile} — the account's owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`;
 };
 
@@ -638,6 +669,55 @@ const parkReconciles = (): {
   };
 };
 
+// Parks the next read of which version `wfId` runs, as an intake makes it after reading its activation, until `release`.
+const parkPointerRead = (
+  wfId: string,
+): { reached: Promise<void>; release: () => void; restore: () => void } => {
+  const pointers = app.get(EnvPointersService);
+  const readNow = pointers.resolveVersionIdForEnv.bind(pointers);
+  let release = (): void => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let arrive = (): void => undefined;
+  const reached = new Promise<void>((resolve) => (arrive = resolve));
+  let armed = true;
+  const parked = jest.spyOn(pointers, 'resolveVersionIdForEnv').mockImplementation(async (em, wf, env) => {
+    if (armed && wf.id === wfId) {
+      armed = false;
+      arrive();
+      await gate;
+    }
+    return readNow(em, wf, env);
+  });
+  return {
+    reached,
+    release: () => release(),
+    restore: () => {
+      release();
+      parked.mockRestore();
+    },
+  };
+};
+
+// A push GitHub signs with the secret its hook was registered with, at a production intake.
+const push = async (wfId: string, secret: string, after: string): Promise<Record<string, unknown>> => {
+  const raw = JSON.stringify({
+    ref: 'refs/heads/main',
+    before: '0',
+    after,
+    repository: { full_name: 'acme/held' },
+    commits: [],
+  });
+  const sent = await http()
+    .post(`/api/hooks/${wfId}/production`)
+    .set('Content-Type', 'application/json')
+    .set('x-github-event', 'push')
+    .set('x-github-delivery', after)
+    .set('x-hub-signature-256', `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`)
+    .send(raw)
+    .expect(202);
+  return sent.body as Record<string, unknown>;
+};
+
 // A live trigger on `rail` in a workspace of its own, its production slot holding a fitting account.
 const liveTrigger = async (
   rail: Rail,
@@ -657,6 +737,14 @@ const liveTrigger = async (
 
 const RAILS: Rail[] = ['composio', 'polling', 'webhook'];
 const FAULTS: Fault[] = ['empty', 'inactive', 'wrong_app'];
+
+// The call each rail stands a trigger up with, and the stand-ups that can fail.
+const STAND_UP: Record<Rail, () => jest.SpyInstance> = {
+  composio: () => subscribed,
+  polling: () => seeded,
+  webhook: () => registered,
+};
+const STAND_UPS = ['its first stand-up', "its change's stand-up"];
 
 // Constitution #11: a trigger listens as its slot only while #18's slot half says the slot serves it, at a promote and at a stand-up.
 describe('an app trigger listens only as a slot that serves it (e2e, isolated DB, fake providers)', () => {
@@ -882,7 +970,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
   );
 
   it.each(RAILS)(
-    'a change to a held %s trigger that its app must be asked about waits, holding what is live, and is made once the account is active again',
+    'a change to a held %s trigger that its app must be asked about waits, holding what is live and saying it starts no run, and is made once the account is active again',
     async (rail) => {
       const { name, changed } = TRIGGERS[rail];
       const { org, production, account, wf, live } = await liveTrigger(rail, 'waits');
@@ -893,18 +981,23 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       await setStatus(account, 'expired');
       await reconcile(wf);
 
-      expect(await activation(wf, production)).toEqual({
-        ...live,
-        held: true,
-        last_error: HELD('production', rail),
-      });
+      const waiting = HELD('production', rail, true);
+      expect(await activation(wf, production)).toEqual({ ...live, held: true, last_error: waiting });
       expect(await storeOf(live.id)).toEqual(store);
       expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
-      if (rail !== 'polling') {
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: true,
+        listening: false,
+        last_error: waiting,
+      });
+      if (rail === 'polling') {
+        slackChannels.push({ id: 'C_WAITED', name: 'made-while-a-change-waited' });
+      } else {
         // What the old trigger's app still sends is for the old trigger, never the version waiting to replace it.
         const delivered = await deliver(rail, wf, live, `D_OLD_${rail}`, 'charge.succeeded');
         expect(delivered).toMatchObject({ fired: 0 });
         expect(await triggerRuns(wf)).toEqual([]);
+        expect(await activation(wf, production)).toMatchObject({ held: true, last_error: waiting });
       }
 
       await setStatus(account, 'active');
@@ -921,6 +1014,190 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       });
       expect(await standUpsAs(rail, account)).toBe(2);
       expect(teardowns()).toBe(calledDown + (rail === 'polling' ? 0 : 1));
+      if (rail === 'polling') {
+        // It started afresh: the channel made while its change waited is behind it, as the reason said.
+        const listsAs = (): number => channelLists.filter((headers) => headers.includes(account)).length;
+        const lists = listsAs();
+        await poll();
+        expect(listsAs()).toBeGreaterThan(lists);
+        expect(await triggerRuns(wf)).toEqual([]);
+      }
+    },
+  );
+
+  it.each(RAILS.flatMap((rail) => STAND_UPS.map((which): [Rail, string] => [rail, which])))(
+    'a %s trigger whose account stops being active after %s failed is held back with the refusal, never held, and stands up once the account is active again',
+    async (rail, which) => {
+      const { app: appSlug, name, nodeType, props, changed } = TRIGGERS[rail];
+      const { org, production } = await workspace(`never finished ${rail} ${which}`);
+      const account = await fitting(rail);
+      await assignSlot(org, production, appSlug, account);
+      const refused = `${appSlug} refused the stand-up`;
+      const failNextStandUp = (): void => {
+        STAND_UP[rail]().mockRejectedValueOnce(new Error(refused));
+      };
+      let wf: string;
+      if (which === 'its first stand-up') {
+        failNextStandUp();
+        ({ wf } = await deploy(org, triggerDoc(nodeType, name, props)));
+      } else {
+        ({ wf } = await deploy(org, triggerDoc(nodeType, name, props)));
+        await publishUnreconciled(org, wf, triggerDoc(changed.nodeType, name, changed.props));
+        failNextStandUp();
+        await reconcile(wf);
+      }
+      const failed = await activation(wf, production);
+      expect(failed).toMatchObject({
+        connection_id: account,
+        held: false,
+        composio_trigger_instance_id: null,
+        last_error: refused,
+      });
+      if (which === "its change's stand-up") {
+        // What was live is torn down, and the row still records it as the last thing stood up.
+        expect(failed).toMatchObject({
+          trigger_type: changed.nodeType,
+          props: changed.props,
+          materialized: { triggerType: nodeType, props },
+        });
+      } else {
+        expect(failed.materialized).toBeNull();
+      }
+      const [calledUp, calledDown] = [standUps(), teardowns()];
+
+      await setStatus(account, 'expired');
+      await reconcile(wf);
+
+      // Nothing was live to hold, so it waits as a new stand-up does, saying it can't run there.
+      const refusal = LAST_ERROR.inactive('production', appSlug, name, '');
+      expect(await activation(wf, production)).toMatchObject({
+        id: failed.id,
+        connection_id: null,
+        held: false,
+        last_error: refusal,
+        materialized: { connection: null },
+      });
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: true,
+        listening: false,
+        last_error: refusal,
+      });
+      expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
+
+      await setStatus(account, 'active');
+      await reconcile(wf);
+
+      expect(await activation(wf, production)).toMatchObject({
+        id: failed.id,
+        connection_id: account,
+        held: false,
+        last_error: null,
+        materialized: { connection: { connectionId: account } },
+      });
+      expect(standUps()).toBe(calledUp + 1);
+    },
+  );
+
+  it('a held GitHub webhook whose slot an owner reassigns, as its reason says, is registered anew as that account, which deletes the hook GitHub would refuse a second one beside', async () => {
+    const name = 'On push';
+    const { org, production } = await workspace('reassign held github');
+    const first = await tokenConnection('github');
+    await assignSlot(org, production, 'github', first);
+    const { wf } = await deploy(org, triggerDoc('github.new_push', name, { owner: 'acme', repo: 'held' }));
+    const live = await activation(wf, production);
+    const registeredAs = async (): Promise<{ hook: string; secret: string }> => {
+      const store = await storeOf(live.id);
+      const record = store['webhook.registration'] as { registration: { subscriptionId: string } };
+      return {
+        hook: `/repos/acme/held/hooks/${record.registration.subscriptionId}`,
+        secret: store['webhook.secret'] as string,
+      };
+    };
+    const held = await registeredAs();
+    expect(githubHooks.has(held.hook)).toBe(true);
+
+    await setStatus(first, 'expired');
+    await reconcile(wf);
+    expect(await activation(wf, production)).toMatchObject({ held: true, last_error: expect.any(String) });
+    expect(await push(wf, held.secret, 'sha-held')).toMatchObject({ fired: 1 });
+
+    const second = await tokenConnection('github');
+    await assignSlot(org, production, 'github', second);
+    await reconcile(wf);
+    await app.get(TriggerReconcilerService).retriesSettled();
+
+    expect(await activation(wf, production)).toMatchObject({
+      id: live.id,
+      connection_id: second,
+      held: false,
+      last_error: null,
+      materialized: { connection: { connectionId: second } },
+    });
+    const moved = await registeredAs();
+    expect([...githubHooks.keys()].filter((hook) => hook.startsWith('/repos/acme/held/'))).toEqual([
+      moved.hook,
+    ]);
+    // The old hook was deleted once, with the account the slot now holds, never the one that isn't active.
+    const deletes = githubDeletes.filter((d) => d.hook === held.hook);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.headers).toContain(`tok-github-${second}`);
+    expect(githubDeletes.some((d) => d.headers.includes(`tok-github-${first}`))).toBe(false);
+    expect(await pendingDeletes(wf)).toEqual([]);
+    expect(await shownOn(org, wf, production)).toMatchObject({
+      held_back_by_slot: false,
+      listening: true,
+      last_error: null,
+    });
+    expect(await push(wf, moved.secret, 'sha-moved')).toMatchObject({ fired: 1 });
+  });
+
+  it.each(['held', 'held back', 'released'] as const)(
+    'a Composio delivery that read its row before its trigger was %s leaves the reason that change wrote, or records its own failed fire',
+    async (change) => {
+      const { app: appSlug, name } = TRIGGERS.composio;
+      const { production, account, wf, live } = await liveTrigger('composio', `read before ${change}`);
+      const written = {
+        held: HELD('production', 'composio'),
+        'held back': LAST_ERROR.empty('production', appSlug, name, ''),
+        released: null,
+      }[change];
+      if (change === 'released') {
+        await setStatus(account, 'expired');
+        await reconcile(wf);
+      }
+      const parked = parkPointerRead(wf);
+      try {
+        const sent = http()
+          .post('/api/hooks/composio')
+          .set('Content-Type', 'application/json')
+          .set('webhook-id', `msg_read_before_${change}`)
+          .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id: change } })
+          .then((res) => res);
+        await parked.reached;
+        if (change === 'held') await setStatus(account, 'expired');
+        if (change === 'released') await setStatus(account, 'active');
+        if (change === 'held back') {
+          await db.query(`DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`, [
+            production,
+            appSlug,
+          ]);
+        }
+        await reconcile(wf);
+        expect(await activation(wf, production)).toMatchObject({ last_error: written });
+        if (change === 'released') {
+          jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+            throw new Error('the version does not compile');
+          });
+        }
+
+        parked.release();
+        expect((await sent).status).toBe(202);
+        expect(await activation(wf, production)).toMatchObject({
+          last_error: change === 'released' ? 'the version does not compile' : written,
+        });
+      } finally {
+        parked.restore();
+      }
     },
   );
 
@@ -1112,29 +1389,66 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     };
     const billing = await promoted('Billing');
     const refunds = await promoted('Refunds');
+    const code = await tokenConnection('github');
+    await db.query(`UPDATE connections SET display_name = 'Code' WHERE id = $1`, [code]);
+    await assignSlot(org, staging, 'github', code);
+    const { wf: pushes, v1: pushesV1 } = await deploy(org, {
+      ...triggerDoc('github.new_push', 'On push', { owner: 'acme', repo: 'rename' }),
+      name: 'Pushes',
+    });
+    await asA(
+      http()
+        .post(`/api/workflows/${pushes}/promote`)
+        .set('X-Org-Id', org)
+        .send({ environment: 'staging', version_id: pushesV1 }),
+    ).expect(201);
+    await reconcile(pushes);
+    expect(await activation(pushes, staging)).toMatchObject({ connection_id: code, last_error: null });
     const rename = (to: string): request.Test =>
       asA(http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: to }));
     const fix =
       'tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
+    // Named as a promote's 428 names a trigger under `triggers`.
     const entry = (wf: string, workflowName: string): Record<string, unknown> => ({
       workflow_id: wf,
       workflow_name: workflowName,
-      trigger_node_id: 'watch',
-      trigger_name: name,
+      node_id: 'watch',
+      node_name: name,
       app: 'stripe',
       connection_id: account,
       account_label: 'Billing',
     });
     const [calledUp, calledDown] = [standUps(), teardowns()];
 
-    // Refused as soon as the account isn't active, before a reconcile has held either trigger.
+    // Refused as soon as the accounts aren't active, before a reconcile has held any trigger.
     await setStatus(account, 'expired');
+    await setStatus(code, 'expired');
+    const three = await rename('qa').expect(409);
+    expect(three.body).toMatchObject({
+      detail: `Renaming 'staging' would leave 3 webhooks registered at their old URLs, which serve nothing, because the accounts they were registered with aren't active: "${name}" in "Billing" (stripe account Billing), "On push" in "Pushes" (github account Code), "${name}" in "Refunds" (stripe account Billing) — before renaming, each account's owner ${fix}`,
+      held_webhooks: [
+        entry(billing.wf, 'Billing'),
+        {
+          workflow_id: pushes,
+          workflow_name: 'Pushes',
+          node_id: 'watch',
+          node_name: 'On push',
+          app: 'github',
+          connection_id: code,
+          account_label: 'Code',
+        },
+        entry(refunds.wf, 'Refunds'),
+      ],
+    });
+    expect(three.body).not.toHaveProperty('url_changes');
+
+    // Two webhooks registered with one account name it once.
+    await asA(http().delete(`/api/workflows/${pushes}`).set('X-Org-Id', org)).expect(200);
     const both = await rename('qa').expect(409);
     expect(both.body).toMatchObject({
-      detail: `Renaming 'staging' would leave 2 webhooks registered at their old URLs, which serve nothing, because the accounts they were registered with aren't active: "${name}" in "Billing" (stripe account Billing), "${name}" in "Refunds" (stripe account Billing) — before renaming, each account's owner ${fix}`,
+      detail: `Renaming 'staging' would leave 2 webhooks registered at their old URLs, which serve nothing, because the stripe account they were registered with (Billing) isn't active: "${name}" in "Billing", "${name}" in "Refunds" — before renaming, its owner ${fix}`,
       held_webhooks: [entry(billing.wf, 'Billing'), entry(refunds.wf, 'Refunds')],
     });
-    expect(both.body).not.toHaveProperty('url_changes');
 
     // A webhook taken down meanwhile waits for its delete apart from the environment, so it no longer stops a rename.
     await reconcile(billing.wf);
@@ -1538,7 +1852,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         await earlier.query('COMMIT');
         await queued;
 
-        // The reconcile the earlier change asked for holds the trigger.
+        // The earlier change, written in SQL, asks for no reconcile, so the test runs the one a status change asks for, which holds the trigger.
         await reconcile(wf);
         expect(await activation(wf, production)).toMatchObject({
           held: true,

@@ -1,5 +1,13 @@
 import type { RuntimeTriggerActivationEntity } from '../../database/entities/runtime-trigger-activation.entity';
-import type { ActivationKey, ActivationKind, ActualActivation, ConnectionRef } from './trigger-activation';
+import { deepEqual, type WorkflowIR } from '../../ir/models';
+import {
+  type ActivationKey,
+  type ActivationKind,
+  type ActualActivation,
+  type ConnectionRef,
+  type DesiredActivation,
+  triggerPropsOf,
+} from './trigger-activation';
 
 /** The activation key a row is stored under. */
 export function activationKeyOf(row: RuntimeTriggerActivationEntity): ActivationKey {
@@ -23,6 +31,25 @@ export function actualOf(row: RuntimeTriggerActivationEntity): ActualActivation 
       webhookUrl: row.materialized.webhookUrl ?? null,
     },
   };
+}
+
+/** A trigger as an activation holds it: its node type and props. */
+export type HeldTrigger = Pick<DesiredActivation, 'triggerType' | 'props'>;
+
+/** The trigger node `triggerNodeId` of a version, as an activation would hold it; null when the version has none by that id. */
+export function triggerOf(ir: WorkflowIR, triggerNodeId: string): HeldTrigger | null {
+  const node = ir.nodes.find((n) => n.id === triggerNodeId);
+  return node ? { triggerType: node.node_type, props: triggerPropsOf(node) } : null;
+}
+
+/** Whether a row holds `trigger` as it is live — same node type and props — which a delivery or a poll needs to fire that trigger's version (#11). */
+export function holdsTrigger(
+  row: Pick<RuntimeTriggerActivationEntity, 'triggerType' | 'props'>,
+  trigger: HeldTrigger | null,
+): boolean {
+  return (
+    trigger !== null && trigger.triggerType === row.triggerType && deepEqual(trigger.props, row.props ?? {})
+  );
 }
 
 function connectionOf(row: RuntimeTriggerActivationEntity): ConnectionRef | null {

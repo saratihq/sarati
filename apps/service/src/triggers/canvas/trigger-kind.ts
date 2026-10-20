@@ -103,7 +103,7 @@ export function decideTriggerSlots(
   );
 }
 
-/** Whether a held activation still fires what its app sends: a registered webhook or a Composio subscription does, a held poll waits. */
+/** Whether a held activation of `kind` fires what its app sends while its version holds it as it is live: a registered webhook or a Composio subscription does, a held poll waits. */
 export function firesWhileHeld(kind: ActivationKind): boolean {
   return kind === 'registered_webhook' || kind === 'composio_subscription';
 }

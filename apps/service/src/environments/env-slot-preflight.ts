@@ -2,6 +2,7 @@ import { DomainError } from '../common/domain-error';
 import { isRecord } from '../common/json-util';
 import {
   planRunAs,
+  REVIVES_SLOT,
   type RunAsAccounts,
   type SlotRefusalReason,
   type StepRunAs,
@@ -140,7 +141,7 @@ function remedyFor(present: ReadonlySet<SlotRefusalReason>, steps: StepRunAs[]):
   if (present.size === 1 && present.has('inactive_slot')) {
     return appsOf(steps).length > 1
       ? 'their owners test them under Integrations once they work again, or an owner reassigns the slots under Integrations → Environments'
-      : 'its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
+      : `its owner ${REVIVES_SLOT}`;
   }
   const empty = present.has('empty_slot');
   const held = [...present].some((reason) => reason !== 'empty_slot');

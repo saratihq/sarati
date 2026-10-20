@@ -235,13 +235,21 @@ function inactiveSlotMessage(environment: string, step: NamedStep): string {
   return `${environment}'s ${label} account isn't active, so "${step.name}" can't run there — its owner ${REVIVES_SLOT}`;
 }
 
-/** What a trigger held while its slot's account isn't active says: what it still does, and what releases it (#11). */
-export function heldTriggerMessage(environment: string, trigger: NamedStep, firesWhileHeld: boolean): string {
+/** What a held trigger does until its account is active again: fires what its app sends, resumes as a poll from where it stopped, or, while a change to it waits, starts no run and then starts afresh. */
+export type WhileHeld = 'fires' | 'resumes' | 'waits';
+
+const MEANWHILE: Record<WhileHeld, (label: string) => string> = {
+  fires: (label) =>
+    `what ${label} sends still starts runs, and nothing is changed at ${label} until the account is active again`,
+  resumes: () => "it isn't polled, and picks up from where it stopped once the account is active again",
+  waits: (label) =>
+    `a change to it waits, so it starts no run until the account is active again, and then starts afresh, without what happened at ${label} meanwhile`,
+};
+
+/** What a trigger held while its slot's account isn't active says: what it does meanwhile, and what releases it (#11). */
+export function heldTriggerMessage(environment: string, trigger: NamedStep, meanwhile: WhileHeld): string {
   const label = trigger.label ?? trigger.app;
-  const meanwhile = firesWhileHeld
-    ? `what ${label} sends still starts runs, and nothing is changed at ${label} until the account is active again`
-    : "it isn't polled, and picks up from where it stopped once the account is active again";
-  return `${environment}'s ${label} account isn't active, so "${trigger.name}" is held: ${meanwhile} — the account's owner ${REVIVES_SLOT}`;
+  return `${environment}'s ${label} account isn't active, so "${trigger.name}" is held: ${MEANWHILE[meanwhile](label)} — the account's owner ${REVIVES_SLOT}`;
 }
 
 /** What a connected credential lacks for its step's sign-in, and how it is fixed. */

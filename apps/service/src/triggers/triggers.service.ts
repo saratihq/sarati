@@ -17,6 +17,7 @@ import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { RuntimeTriggerActivationEntity } from '../database/entities/runtime-trigger-activation.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
+import { rawMutateReturning } from '../database/raw-query';
 import { PG_POOL } from '../database/tokens';
 import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
@@ -24,7 +25,7 @@ import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
 import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
-import { actualOf } from './canvas/activation-row';
+import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
 import { firesWhileHeld, heldBackBySlot } from './canvas/trigger-kind';
 import { webhookRegistrationOf } from './registered-webhook';
@@ -128,7 +129,7 @@ export interface ActivationHealth {
   active: boolean;
   /** Held back or held by its environment's slot, so nothing is stood up, polled or changed at its app for it; `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
-  /** Whether it takes events now: not while paused or held back, and while held only what its app still sends (a webhook or subscription). */
+  /** Whether it takes events now: not while paused or held back, and while held only a webhook or subscription the version its environment points at still holds as it is live. */
   listening: boolean;
   status: 'paused' | 'error' | 'ok' | 'idle';
   last_polled_at: string | null;
@@ -299,7 +300,7 @@ export class TriggersService {
       where: { workflowId: wf.id, environmentId: resolved.environmentId, triggerNodeId: node.id },
     });
     if (!row || row.paused) throw new DomainError('Webhook not found', 404);
-    if (!holdsTrigger(ir, row)) {
+    if (!holdsTrigger(row, triggerOf(ir, row.triggerNodeId))) {
       this.logger.warn(
         `webhook intake: activation ${row.id} is still to be changed at its app — acked, not fired`,
       );
@@ -459,7 +460,6 @@ export class TriggersService {
     payload: unknown,
     deliveryAccountId: string | null,
   ): Promise<number> {
-    const em = this.dataSource.manager;
     // Defense in depth: never fire another connected account's event as this owner.
     if (deliveryAccountId && !(await this.activationAccountMatches(row, deliveryAccountId))) {
       this.logger.warn(
@@ -470,7 +470,7 @@ export class TriggersService {
     let failure: { error: unknown } | null = null;
     try {
       const { wf, env, versionId, ir } = await this.resolveActivationTarget(row);
-      if (!holdsTrigger(ir, row)) {
+      if (!holdsTrigger(row, triggerOf(ir, row.triggerNodeId))) {
         this.logger.warn(
           `composio intake: activation ${row.id} is still to be changed at Composio — acked, not fired`,
         );
@@ -495,26 +495,22 @@ export class TriggersService {
     } catch (error) {
       failure = { error };
     }
-    await em.update(
-      RuntimeTriggerActivationEntity,
-      { id: row.id },
-      { lastPolledAt: now(), ...this.fireOutcome(row, failure) },
+    // Decided in the write: a row held, or held back with no account, by then keeps its slot's reason, so a fire of it that failed is the operator's to read.
+    const [written] = await rawMutateReturning<{ kept: boolean }>(
+      this.dataSource.manager,
+      `UPDATE runtime_trigger_activations
+          SET last_polled_at = $2,
+              last_error = CASE WHEN held OR connection_id IS NULL THEN last_error ELSE $3 END
+        WHERE id = $1
+        RETURNING held OR connection_id IS NULL AS kept`,
+      [row.id, now(), failure === null ? null : activationError(failure.error)],
     );
-    return failure === null ? 1 : 0;
-  }
-
-  // A held trigger's last_error stays its slot's reason, so a fire of it that failed is the operator's to read.
-  private fireOutcome(
-    row: RuntimeTriggerActivationEntity,
-    failure: { error: unknown } | null,
-  ): { lastError?: string | null } {
-    if (!heldBack(row)) return { lastError: failure === null ? null : activationError(failure.error) };
-    if (failure !== null) {
+    if (written?.kept && failure !== null) {
       this.logger.warn(
         `composio intake: held activation ${row.id} did not fire: ${errorMessage(failure.error)}`,
       );
     }
-    return {};
+    return failure === null ? 1 : 0;
   }
 
   /**
@@ -649,7 +645,7 @@ export class TriggersService {
     try {
       const target = await this.resolveActivationTarget(row);
       // A pointer moved and its reconcile has yet to run: the live version does not hold this trigger.
-      if (!holdsTrigger(target.ir, row)) return null;
+      if (!holdsTrigger(row, triggerOf(target.ir, row.triggerNodeId))) return null;
       const plan = this.compiler.compile(target.ir, target.wf.id);
       const store = new DbActivationStore(this.dataSource, row.id);
       const events = await this.pollableEvents(row, store, target.wf);
@@ -736,16 +732,36 @@ export class TriggersService {
    * Re-resolved on every fire (so a promote takes effect next tick); throws land on `last_error`.
    */
   private async resolveActivationTarget(row: RuntimeTriggerActivationEntity): Promise<ActivationTarget> {
+    const target = await this.pointedTarget(row);
+    if ('missing' in target) throw new Error(target.missing);
+    return target;
+  }
+
+  // The version an activation's environment points at, or why there is none.
+  private async pointedTarget(
+    row: RuntimeTriggerActivationEntity,
+  ): Promise<ActivationTarget | { missing: string }> {
     const em = this.dataSource.manager;
     const wf = await em.findOne(WorkflowEntity, { where: { id: row.workflowId } });
-    if (!wf) throw new Error(`Bound workflow ${row.workflowId} no longer exists`);
+    if (!wf) return { missing: `Bound workflow ${row.workflowId} no longer exists` };
     const env = await em.findOne(EnvironmentEntity, { where: { id: row.environmentId } });
-    if (!env) throw new Error(`Activation environment ${row.environmentId} no longer exists`);
+    if (!env) return { missing: `Activation environment ${row.environmentId} no longer exists` };
     const versionId = await this.envPointers.resolveVersionIdForEnv(em, wf, env);
-    if (!versionId) throw new Error(`Workflow "${wf.name}" has no version promoted to ${env.name} yet`);
+    if (!versionId) return { missing: `Workflow "${wf.name}" has no version promoted to ${env.name} yet` };
     const version = await em.findOne(WorkflowVersionEntity, { where: { id: versionId } });
-    if (!version?.workflowIr) throw new Error(`Workflow "${wf.name}"'s ${env.name} version has no IR`);
+    if (!version?.workflowIr) return { missing: `Workflow "${wf.name}"'s ${env.name} version has no IR` };
     return { wf, env, versionId, ir: version.workflowIr as unknown as WorkflowIR };
+  }
+
+  // A held webhook or subscription fires what its app sends only while the version its environment points at holds it as it is live.
+  private async firingWhileHeld(rows: RuntimeTriggerActivationEntity[]): Promise<Set<string>> {
+    const firing = new Set<string>();
+    for (const row of rows) {
+      if (!row.held || !firesWhileHeld(actualOf(row).kind)) continue;
+      const target = await this.pointedTarget(row);
+      if ('ir' in target && holdsTrigger(row, triggerOf(target.ir, row.triggerNodeId))) firing.add(row.id);
+    }
+    return firing;
   }
 
   /**
@@ -832,6 +848,7 @@ export class TriggersService {
     const envIds = [...new Set(rows.map((r) => r.environmentId))];
     const envs = await em.find(EnvironmentEntity, { where: { id: In(envIds) } });
     const nameById = new Map(envs.map((e) => [e.id, e.name]));
+    const firing = await this.firingWhileHeld(rows);
 
     return rows.map((row) => ({
       environment: nameById.get(row.environmentId) ?? PROD_ENV,
@@ -840,7 +857,7 @@ export class TriggersService {
       kind: row.kind,
       active: !row.paused,
       held_back_by_slot: heldBack(row),
-      listening: listening(row),
+      listening: !row.paused && (!heldBack(row) || firing.has(row.id)),
       status: activationStatus(row),
       last_polled_at: row.lastPolledAt?.toISOString() ?? null,
       last_error: row.lastError,
@@ -880,18 +897,8 @@ function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): Promise
   );
 }
 
-function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {
-  const node = ir.nodes.find((n) => n.id === row.triggerNodeId);
-  return node?.node_type === row.triggerType && deepEqual(triggerPropsOf(node), row.props ?? {});
-}
-
 function heldBack(row: RuntimeTriggerActivationEntity): boolean {
   return heldBackBySlot({ ...actualOf(row), held: row.held });
-}
-
-function listening(row: RuntimeTriggerActivationEntity): boolean {
-  if (row.paused) return false;
-  return !heldBack(row) || (row.held && firesWhileHeld(actualOf(row).kind));
 }
 
 function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {

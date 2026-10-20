@@ -11,7 +11,7 @@ import { runBounded } from '../../common/bounded';
 import { withDeadline } from '../../common/deadline';
 import { errorMessage } from '../../common/error-message';
 import { ConnectionsService } from '../../connections/connections.service';
-import { heldTriggerMessage } from '../../connections/run-as-account';
+import { heldTriggerMessage, type WhileHeld } from '../../connections/run-as-account';
 import type { EnvConfig } from '../../config/env.config';
 import { newId, now } from '../../database/ids';
 import { rawMutate, rawQuery } from '../../database/raw-query';
@@ -47,7 +47,7 @@ import { SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
-import { activationKeyOf, actualOf } from './activation-row';
+import { activationKeyOf, actualOf, holdsTrigger } from './activation-row';
 import {
   activationKindOf,
   decideTriggerSlots,
@@ -57,7 +57,6 @@ import {
 } from './trigger-kind';
 import {
   type ActivationKey,
-  type ActivationKind,
   activationKeyString,
   applyFinished,
   type ConnectionRef,
@@ -350,7 +349,7 @@ export class TriggerReconcilerService {
     const live = liveOf(row);
     const held = isHeld(desired, slots);
     const heldBack = heldBackBySlot({ ...desired, held });
-    describeRow(row, update, held, heldBack ? slotReason(desired, slots, held ? live.kind : null) : null);
+    describeRow(row, update, held, heldBack ? slotReason(desired, slots, held ? row : null) : null);
     await withActivationLock(this.pool, row.id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
       // A 'keep' leaves the cursor/subscription untouched, and a held row asks nothing of its app; a 'reset' tears down what is live and starts from now.
@@ -482,11 +481,14 @@ export class TriggerReconcilerService {
 
   // A webhook is never deleted with an account that isn't active (#11); one whose account is gone is given up by its retry.
   private async waitsForAccount(webhook: RegisteredWebhook): Promise<boolean> {
-    const account = webhook.connection;
-    if (!account) return false;
-    const own = await this.connections.ownConnections(account.ownerUserId, [account.connectionId]);
-    const status = own.get(account.connectionId)?.status;
+    if (!webhook.connection) return false;
+    const status = await this.statusOf(webhook.connection);
     return status !== undefined && status !== 'active';
+  }
+
+  private async statusOf(account: ConnectionRef): Promise<string | undefined> {
+    const own = await this.connections.ownConnections(account.ownerUserId, [account.connectionId]);
+    return own.get(account.connectionId)?.status;
   }
 
   // A delete still running past the wait stays in the fence, so a stand-up handed its handle waits for it to land.
@@ -601,19 +603,25 @@ export class TriggerReconcilerService {
     }
   }
 
-  private async retryRetiredWebhook(entry: TriggerRetiredWebhookEntity): Promise<void> {
+  private async retryRetiredWebhook(
+    entry: TriggerRetiredWebhookEntity,
+    standUp: ConnectionRef | null = null,
+  ): Promise<void> {
     const em = this.dataSource.manager;
     if ((await em.count(TriggerRetiredWebhookEntity, { where: { id: entry.id } })) === 0) return;
     const done = await this.deleteFence.deleting(
       entry.webhook,
-      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry)),
+      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry, standUp)),
     );
     if (done) await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
   }
 
   // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
-  private async retriedDelete(entry: TriggerRetiredWebhookEntity): Promise<boolean> {
-    if (await this.waitsForAccount(entry.webhook)) return false;
+  private async retriedDelete(
+    entry: TriggerRetiredWebhookEntity,
+    standUp: ConnectionRef | null,
+  ): Promise<boolean> {
+    if (await this.waitsForAccount(entry.webhook)) return this.deletedAs(entry, standUp);
     try {
       await this.disableWebhook(entry.webhook, new InMemoryStore());
       this.noteUnreportedDelete(entry.webhook, entry.workflowId);
@@ -631,6 +639,24 @@ export class TriggerReconcilerService {
       );
       return false;
     }
+  }
+
+  // A stand-up its app refuses at the address of a webhook whose own account isn't active deletes that webhook with its own active account, for the same app (#11).
+  private async deletedAs(
+    entry: TriggerRetiredWebhookEntity,
+    account: ConnectionRef | null,
+  ): Promise<boolean> {
+    if (account === null || (await this.statusOf(account)) !== 'active') return false;
+    try {
+      await this.disableWebhook({ ...entry.webhook, connection: account }, new InMemoryStore());
+    } catch (err) {
+      this.logger.warn(
+        `${webhookLabel(entry.webhook)} was not deleted with the account standing a trigger up at its address, so it waits for its own: ${errorMessage(err)}`,
+      );
+      return false;
+    }
+    this.noteUnreportedDelete(entry.webhook, entry.workflowId);
+    return true;
   }
 
   // An app that upserts (Typeform's per-URL tag) hands a new registration an old one's handle; deleting it would take the new one down.
@@ -683,7 +709,7 @@ export class TriggerReconcilerService {
     }
   }
 
-  // Whether a pending delete of a webhook at the desired address was there and landed within the wait; other retries are never waited on.
+  // Whether a pending delete of a webhook at the desired address was there and landed within the wait, made with the stand-up's account where its own isn't active; other retries are never waited on.
   private async landPendingDeletesAt(desired: DesiredActivation): Promise<boolean> {
     const { webhookUrl } = desired;
     if (!webhookUrl) return false;
@@ -698,7 +724,7 @@ export class TriggerReconcilerService {
     // One already being deleted lands through the fence; the rest are deleted now, so their queued copies find them gone.
     const landing = (async (): Promise<void> => {
       await this.deleteFence.landed((webhook) => sameAddress(webhook, target));
-      for (const entry of await atAddress()) await this.retryRetiredWebhook(entry);
+      for (const entry of await atAddress()) await this.retryRetiredWebhook(entry, desired.connection);
     })();
     const inTime = await withDeadline(
       landing,
@@ -975,9 +1001,15 @@ function listensAs(
   if (decision.kind === 'account') {
     return { connectionId: decision.connectionId, ownerUserId: decision.ownerUserId };
   }
-  const live = row ? liveOf(row).connection : null;
+  const live = row ? liveConnection(row) : null;
   const same = live !== null && live.connectionId === account?.id && live.ownerUserId === account.ownerUserId;
   return decision.reason === 'inactive_slot' && same ? live : null;
+}
+
+// Only a row whose last apply finished has a trigger live; one whose stand-up never finished holds nothing at its app.
+function liveConnection(row: RuntimeTriggerActivationEntity): ConnectionRef | null {
+  const actual = actualOf(row);
+  return applyFinished(actual) ? actual.materialized.connection : null;
 }
 
 function refusedBy(desired: DesiredActivation, slots: SlotReads): SlotRead | null {
@@ -990,19 +1022,29 @@ function isHeld(desired: DesiredActivation, slots: SlotReads): boolean {
   return desired.connection !== null && refusedBy(desired, slots) !== null;
 }
 
-// The reason a trigger its slot holds back gives: for one held while live as `heldKind`, what it still does; else the rule's refusal.
-function slotReason(desired: DesiredActivation, slots: SlotReads, heldKind: ActivationKind | null): string {
+// The reason a trigger its slot holds back gives: for one held as `held` is live, what it does meanwhile; else the rule's refusal.
+function slotReason(
+  desired: DesiredActivation,
+  slots: SlotReads,
+  held: RuntimeTriggerActivationEntity | null,
+): string {
   const read = refusedBy(desired, slots);
   // resolveSlots judges every trigger heldBackBySlot names, so a held-back one always has the rule's refusal.
   if (read?.decision.kind !== 'refused') {
     throw new Error(`No slot decision for trigger node ${desired.key.triggerNodeId}`);
   }
-  if (heldKind === null) return read.decision.message;
+  if (held === null) return read.decision.message;
   return heldTriggerMessage(
     read.environment,
     { name: read.name, app: read.slot.app },
-    firesWhileHeld(heldKind),
+    whileHeld(held, desired),
   );
+}
+
+// A held trigger fires or resumes only while the version its pointer names holds it as it is live, as its intake and poll check.
+function whileHeld(row: RuntimeTriggerActivationEntity, desired: DesiredActivation): WhileHeld {
+  if (!holdsTrigger(row, desired)) return 'waits';
+  return firesWhileHeld(liveOf(row).kind) ? 'fires' : 'resumes';
 }
 
 // A held row keeps what it was stood up as, and records only the version a 'keep' moves it to.
@@ -1043,9 +1085,7 @@ function restatements(
     const row = rowByKey.get(keyStr);
     if (!row || planned.has(keyStr)) return [];
     const held = isHeld(d, slots);
-    const refusal = heldBackBySlot({ ...d, held })
-      ? slotReason(d, slots, held ? liveOf(row).kind : null)
-      : null;
+    const refusal = heldBackBySlot({ ...d, held }) ? slotReason(d, slots, held ? row : null) : null;
     const restated = refusal !== null && row.lastError !== refusal;
     return restated || row.held !== held ? [{ desired: d, actual: actualOf(row), cursorAction: 'keep' }] : [];
   });
