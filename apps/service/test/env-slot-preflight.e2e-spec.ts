@@ -256,7 +256,7 @@ describe('env slot preflight (e2e, isolated DB)', () => {
       http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
     ).expect(428);
     expect(inactive.body.detail).toBe(
-      "staging's gmail account isn't active, so \"Email me the report\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here",
+      "staging's gmail account isn't active, so \"Email me the report\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments before promoting here",
     );
     expect(inactive.body.code).toBe('environment_slots_inactive');
 

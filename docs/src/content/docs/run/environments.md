@@ -72,12 +72,13 @@ its own key:
 > (managed) one, so it can't run there — reassign it under Integrations → Environments before
 > promoting here
 
-An account that isn't active is refused the same way, and its owner reconnecting it mends it as well
-as an owner reassigning the slot:
+An account that isn't active is refused the same way. It is active again once its owner's **Test**
+under Integrations finds it working, or it renews itself. **Reconnect** connects a new account
+instead, which the slot holds only once an owner assigns it:
 
-> staging's gmail account isn't active, so "Email me the report" can't run there — its owner
-> reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments
-> before promoting here
+> staging's gmail account isn't active, so "Email me the report" can't run there — its owner tests it
+> under Integrations once it works again, or an owner reassigns the slot under Integrations →
+> Environments before promoting here
 
 A run already there stops before that step calls the app, naming the step and the environment as it
 is called now.
@@ -108,26 +109,44 @@ runs only on one:
 > (managed) one, so it can't run there — reassign it under Integrations → Environments before
 > promoting here
 
+Any other app trigger — a GitHub or Stripe webhook, a polled Slack feed — signs in with the account's
+own credentials, which a one-click account never hands over, so a one-click slot account is refused
+for it, with the reason `needs_own_credentials_slot`:
+
+> staging's stripe account is one-click (managed), and "New customer" runs only on one that uses its
+> own credentials, so it can't run there — reassign it under Integrations → Environments before
+> promoting here
+
 A live trigger whose own account stops being active is **held**, not taken down. What it set up at
 the app stays — a GitHub or Stripe webhook, a Composio subscription — and so does how far its feed
-had read. Nothing polls it and nothing is asked of the app, so the account is never used while it
-isn't active, and the workflow overview shows the trigger as not listening, with the reason. When
-that account is active again, the trigger carries on from where it stopped: a polled feed picks up
-what arrived while it was held. A change that needs the app — a new version's trigger settings, a
-renamed environment's webhook URL — waits until then, keeping what is live. The account is active
-again once a **Test** under Integrations finds it working, or it renews itself. **Reconnect**
-connects a new account instead, which the trigger listens as only once an owner assigns it to the
-slot.
+had read:
+
+- A polled feed isn't polled while it is held, so the workflow overview shows it as **Not
+  listening**. Once the account is active again it picks up from where it stopped, including what
+  arrived while it was held.
+- A webhook or a subscription still receives what its app sends, and each delivery still starts a
+  run, so the overview shows it as **Held**. A GitHub, Stripe or other webhook the service verifies
+  itself still resolves the account's credential for each delivery, renewing an OAuth token about
+  to expire, as it always does. A step of that run that calls the app as the account is refused, as
+  any step is while the account isn't active.
+- Nothing is changed at the app with the account while it isn't active. A change that needs the app
+  — a new version's trigger settings, a renamed environment's webhook URL — waits until the account
+  is active again, keeping what is live, and a delivery meanwhile is for the old trigger, so it
+  starts no run. A webhook taken down meanwhile — its trigger removed or replaced, its slot given
+  another account, its workflow or environment deleted — is deleted at the app once that account is
+  active again; if the account is removed first, the log names the webhook to delete in the app.
+
+The overview gives the reason, and what makes the account active again.
 
 A live trigger is taken down when its slot is emptied, given another account, given another app's,
-or, for a one-click trigger, given one that uses its own credentials. It starts fresh once the slot
-serves it. These changes, and any change to an account — it stops or starts being active, or is
-removed — reconcile the triggers that listen as it straight away, not at the fifteen-minute sweep.
-If the slot changes again before it serves the trigger, or the environment is renamed, the reason
-changes with it. Creating a workflow is not refused this way: when its first version goes live, a
-trigger the account can't serve waits in the same way, with the reason on the overview. A trigger
-that signs in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed — needs no
-account.
+or given one of the wrong kind: one that uses its own credentials for a one-click trigger, or a
+one-click one for any other. It starts fresh once the slot serves it. These changes, and any change
+to an account — it stops or starts being active, or is removed — reconcile the triggers that listen
+as it straight away, not at the fifteen-minute sweep. If the slot changes again before it serves the
+trigger, or the environment is renamed, the reason changes with it. Creating a workflow is not
+refused this way: when its first version goes live, a trigger the account can't serve waits in the
+same way, with the reason on the overview. A trigger that signs in to nothing — a schedule, an
+incoming webhook or chat, an RSS or HTTP feed — needs no account.
 
 ## Rename and delete
 

@@ -1851,8 +1851,10 @@ export interface TriggerActivationHealth {
   kind: string;
   /** false only when an operator paused it (desired-present but not firing). */
   active: boolean;
-  /** Held back by its environment's account: nothing polls it or is set up at its app, and `last_error` says why and what fixes it. */
+  /** Held back or held by its environment's account: nothing is stood up, polled or changed at its app for it, and `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
+  /** Whether it takes events now: not while paused or held back, and while held only what its app still sends (a webhook or subscription). */
+  listening: boolean;
   status: "paused" | "error" | "ok" | "idle";
   last_polled_at: string | null;
   last_error: string | null;

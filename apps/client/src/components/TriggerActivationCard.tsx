@@ -11,32 +11,49 @@ function truncateError(message: string): string {
   return oneLine.length > 120 ? `${oneLine.slice(0, 119)}…` : oneLine;
 }
 
+/** The environments some of a trigger's activations are in, and whether that is every one. */
+interface Scope {
+  environments: string[];
+  everywhere: boolean;
+}
+
 interface HealthView {
-  /** When the listening activations were last polled; null when none is listening. */
+  /** When the activations running unheld were last polled; null when none is. */
   checked: string | null;
-  /** The environments whose account holds the trigger back, and each one's reason, which names its fix. */
+  /** The environments whose account holds the trigger back or holds it, and each one's reason, which names its fix. */
   heldBack: Array<{ environment: string; reason: string }>;
+  /** Where it takes no events. */
+  notListening: Scope;
+  /** Where it is held while still taking what its app sends. */
+  held: Scope;
   error: string | null;
 }
 
-/** Runtime health across ACTIVE activations: the most recent poll of those listening, why any is held back, and the last failure. */
+function scopeOf(some: TriggerActivationHealth[], all: TriggerActivationHealth[]): Scope {
+  return { environments: [...new Set(some.map((h) => h.environment))], everywhere: some.length === all.length };
+}
+
+/** Runtime health across ACTIVE activations: where it listens, why any is held back or held, the most recent poll of those running unheld, and the last failure. */
 function healthView(health: TriggerActivationHealth[] | null): HealthView | null {
   const active = (health ?? []).filter((h) => h.active);
   if (active.length === 0) return null;
 
-  // A held-back activation's last_error is why it is held back, never a failed run.
+  // A held or held-back activation's last_error is why, never a failed run.
   const heldBack = active
     .filter((h) => h.held_back_by_slot)
     .map((h) => ({ environment: h.environment, reason: h.last_error ?? "" }));
-  const listening = active.filter((h) => !h.held_back_by_slot);
-  if (listening.length === 0) return { checked: null, heldBack, error: null };
+  const notListening = scopeOf(active.filter((h) => !h.listening), active);
+  const held = scopeOf(active.filter((h) => h.listening && h.held_back_by_slot), active);
+  const view = { checked: null, heldBack, notListening, held, error: null };
+  const running = active.filter((h) => !h.held_back_by_slot);
+  if (running.length === 0) return view;
 
-  const polls = listening.map((h) => h.last_polled_at).filter((t): t is string => Boolean(t));
+  const polls = running.map((h) => h.last_polled_at).filter((t): t is string => Boolean(t));
   const lastPolled = polls.sort().at(-1) ?? null;
   const checked = lastPolled ? `Last checked ${timeAgo(lastPolled)}` : "Not polled yet";
 
-  const failed = listening.filter((h) => h.last_error);
-  if (failed.length === 0) return { checked, heldBack, error: null };
+  const failed = running.filter((h) => h.last_error);
+  if (failed.length === 0) return { ...view, checked };
 
   // Show the most-recently-polled failure; prefix the env only when several are live.
   const worst = failed.reduce((a, b) =>
@@ -45,10 +62,14 @@ function healthView(health: TriggerActivationHealth[] | null): HealthView | null
   const multiEnv = new Set(active.map((h) => h.environment)).size > 1;
   const detail = truncateError(worst.last_error ?? "");
   const error = `Last run failed: ${multiEnv ? `${worst.environment}: ${detail}` : detail}`;
-  return { checked, heldBack, error };
+  return { ...view, checked, error };
 }
 
-// Live, held back by its environment's account in some or every environment, or not live yet.
+function scoped(text: string, scope: Scope): string {
+  return scope.everywhere ? text : `${text} in ${scope.environments.join(", ")}`;
+}
+
+// Live, not listening or held by its environment's account in some or every environment, or not live yet.
 function statusOf(
   manual: boolean,
   liveVersion: number | null,
@@ -59,12 +80,11 @@ function statusOf(
   if (liveVersion == null) {
     return { dot: "var(--orchestr-warning)", text: "Not live yet — publish a version to start it" };
   }
-  const heldIn = [...new Set((runtime?.heldBack ?? []).map((h) => h.environment))];
-  if (heldIn.length > 0) {
-    return {
-      dot: "var(--orchestr-warning)",
-      text: runtime?.checked == null ? "Not listening" : `Not listening in ${heldIn.join(", ")}`,
-    };
+  if (runtime && runtime.notListening.environments.length > 0) {
+    return { dot: "var(--orchestr-warning)", text: scoped("Not listening", runtime.notListening) };
+  }
+  if (runtime && runtime.held.environments.length > 0) {
+    return { dot: "var(--orchestr-warning)", text: scoped("Held", runtime.held) };
   }
   return {
     dot: "var(--orchestr-success)",

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -15,6 +15,7 @@ import { ConnectionsService } from '../src/connections/connections.service';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH, SdkWebhookProvider } from '../src/providers/sdk-webhook.provider';
+import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
@@ -105,6 +106,7 @@ function triggerDoc(
   name: string,
   parameters: Record<string, unknown>,
   steps: Array<Record<string, unknown>> = [],
+  triggerId = 'watch',
 ): Record<string, unknown> {
   return {
     version: '1.0',
@@ -112,7 +114,7 @@ function triggerDoc(
     description: '',
     nodes: [
       {
-        id: 'watch',
+        id: triggerId,
         name,
         node_type: nodeType,
         type_version: 1,
@@ -134,7 +136,7 @@ function triggerDoc(
     edges: [
       {
         id: 'e',
-        source_node_id: 'watch',
+        source_node_id: triggerId,
         source_port: 0,
         target_node_id: 'say',
         target_port: 0,
@@ -168,7 +170,7 @@ const REFUSED: Record<
     code: 'environment_slots_inactive',
     reason: 'inactive_slot',
     promote: (env, app, name) =>
-      `${env}'s ${app} account isn't active, so "${name}" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here`,
+      `${env}'s ${app} account isn't active, so "${name}" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments before promoting here`,
   },
   wrong_app: {
     code: 'environment_slots_unfit',
@@ -182,7 +184,7 @@ const LAST_ERROR: Record<Fault, (env: string, app: string, name: string, held: s
   empty: (env, app, name) =>
     `${env} has no ${app} account assigned, so "${name}" can't run there — an owner assigns one under Integrations → Environments`,
   inactive: (env, app, name) =>
-    `${env}'s ${app} account isn't active, so "${name}" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments`,
+    `${env}'s ${app} account isn't active, so "${name}" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`,
   wrong_app: (env, app, name, held) =>
     `${env}'s ${app} account is for ${held}, so "${name}" can't run there — an owner assigns ${/^[aeiou]/.test(app) ? 'an' : 'a'} ${app} account under Integrations → Environments`,
 };
@@ -190,6 +192,20 @@ const LAST_ERROR: Record<Fault, (env: string, app: string, name: string, held: s
 // The words a step that runs only on a one-click account is refused in, by the same rule.
 const NEEDS_MANAGED = (env: string, app: string, name: string): string =>
   `${env}'s ${app} account uses its own credentials, and "${name}" runs only on a one-click (managed) one, so it can't run there — an owner assigns a one-click ${app} account under Integrations → Environments`;
+
+// The words a trigger signing in on the SDK's direct rail is refused in when its slot holds a one-click account.
+const NEEDS_OWN = (env: string, app: string, name: string): string =>
+  `${env}'s ${app} account is one-click (managed), and "${name}" runs only on one that uses its own credentials, so it can't run there — an owner assigns ${/^[aeiou]/.test(app) ? 'an' : 'a'} ${app} account that uses its own credentials under Integrations → Environments`;
+
+// The words a live trigger held while its account isn't active says: a poll waits, while what a webhook's or subscription's app sends still runs.
+const HELD = (env: string, rail: Rail): string => {
+  const { app: appSlug, name } = TRIGGERS[rail];
+  const meanwhile =
+    rail === 'polling'
+      ? "it isn't polled, and picks up from where it stopped once the account is active again"
+      : `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
+  return `${env}'s ${appSlug} account isn't active, so "${name}" is held: ${meanwhile} — the account's owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`;
+};
 
 interface ActivationRow {
   id: string;
@@ -396,6 +412,32 @@ const publishUnreconciled = async (org: string, wf: string, doc: Record<string, 
   }
 };
 
+// Commit `doc` onto main, publish it and converge.
+const publish = async (org: string, wf: string, doc: Record<string, unknown>): Promise<void> => {
+  const versions = await asA(http().get(`/api/workflows/${wf}/versions`).set('X-Org-Id', org)).expect(200);
+  const head = (versions.body.versions as Array<{ id: string; version_number: number }>).reduce((a, b) =>
+    b.version_number > a.version_number ? b : a,
+  );
+  await asA(
+    http()
+      .post(`/api/workflows/${wf}/commit`)
+      .set('X-Org-Id', org)
+      .send({ workflow_ir: doc, commit_message: 'change the trigger', base_version_id: head.id }),
+  ).expect(201);
+  await asA(http().post(`/api/workflows/${wf}/publish`).set('X-Org-Id', org).send({})).expect(201);
+  await reconcile(wf);
+};
+
+// The webhook deletes still to be made for a workflow, and why each waits.
+const pendingDeletes = async (wfId: string): Promise<Array<{ hook: string; last_error: string | null }>> =>
+  (
+    await db.query<{ hook: string; last_error: string | null }>(
+      `SELECT webhook -> 'registration' ->> 'subscriptionId' AS hook, last_error
+         FROM trigger_retired_webhooks WHERE workflow_id = $1 ORDER BY created_at`,
+      [wfId],
+    )
+  ).rows;
+
 // What the workflow overview reads for a trigger's health.
 const shownOn = async (org: string, wfId: string, envId: string): Promise<Record<string, unknown>> => {
   const health = await asA(
@@ -448,13 +490,55 @@ const standUpsAs = async (rail: Rail, connectionId: string | null): Promise<numb
   ).length;
 };
 
+// The runs a trigger started, by a poll or a delivery.
 const triggerRuns = async (wfId: string): Promise<string[]> =>
   (
     await db.query<{ run_id: string }>(
-      `SELECT run_id FROM runtime_runs WHERE workflow_id = $1 AND source = 'trigger' ORDER BY started_at`,
+      `SELECT run_id FROM runtime_runs WHERE workflow_id = $1 AND source IN ('trigger', 'webhook') ORDER BY started_at`,
       [wfId],
     )
   ).rows.map((row) => row.run_id);
+
+// A delivery from what a live trigger set up at its app: an event on its Composio subscription, or a signed Stripe event at its intake.
+const deliver = async (
+  rail: Exclude<Rail, 'polling'>,
+  wfId: string,
+  live: ActivationRow,
+  id: string,
+  stripeEvent = 'customer.created',
+): Promise<Record<string, unknown>> => {
+  if (rail === 'composio') {
+    const sent = await http()
+      .post('/api/hooks/composio')
+      .set('Content-Type', 'application/json')
+      .set('webhook-id', `msg_${id}`)
+      .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id } })
+      .expect(202);
+    return sent.body as Record<string, unknown>;
+  }
+  const record = (await storeOf(live.id))['webhook.registration'] as {
+    registration: { signingSecret: string };
+  };
+  const raw = JSON.stringify({
+    id: `evt_${id}`,
+    object: 'event',
+    type: stripeEvent,
+    created: 1700000000,
+    livemode: false,
+    data: { object: { id } },
+  });
+  const t = '1700000000';
+  const signature = createHmac('sha256', record.registration.signingSecret)
+    .update(`${t}.${raw}`)
+    .digest('hex');
+  const sent = await http()
+    .post(`/api/hooks/${wfId}/production`)
+    .set('Content-Type', 'application/json')
+    .set('stripe-signature', `t=${t},v1=${signature}`)
+    .send(raw)
+    .expect(202);
+  return sent.body as Record<string, unknown>;
+};
 
 const said = async (runId: string): Promise<unknown> => {
   let run: Record<string, unknown> = {};
@@ -591,6 +675,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(standUps()).toBe(before);
       expect(await shownOn(org, wf, production)).toMatchObject({
         held_back_by_slot: true,
+        listening: false,
         last_error: refusal,
       });
 
@@ -617,11 +702,10 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
   it.each(RAILS)(
     'a live %s trigger whose account stops being active is held as it was stood up — never polled, nothing asked of its app — and picks up where it left off once the account is active again',
     async (rail) => {
-      const { app: appSlug, name } = TRIGGERS[rail];
       const { org, production, account, wf, live } = await liveTrigger(rail, 'held');
       const store = await storeOf(live.id);
       if (rail !== 'composio') expect(store).not.toEqual({});
-      const refusal = LAST_ERROR.inactive('production', appSlug, name, '');
+      const refusal = HELD('production', rail);
       const listsAs = (): number => channelLists.filter((headers) => headers.includes(account)).length;
       const [calledUp, calledDown, lists] = [standUps(), teardowns(), listsAs()];
       if (rail === 'polling') expect(lists).toBeGreaterThan(0);
@@ -638,6 +722,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(await storeOf(live.id)).toEqual(store);
       expect(await shownOn(org, wf, production)).toMatchObject({
         held_back_by_slot: true,
+        listening: rail !== 'polling',
         last_error: refusal,
       });
 
@@ -650,15 +735,18 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       });
       expect(listsAs()).toBe(lists);
 
-      if (rail === 'composio') {
-        // A delivery the app still sends fires, needing no account, and the trigger stays held for the reason it was.
-        await http()
-          .post('/api/hooks/composio')
-          .set('Content-Type', 'application/json')
-          .set('webhook-id', `msg_${live.id}`)
-          .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id: 'D_HELD' } })
-          .expect(202);
+      if (rail !== 'polling') {
+        // A delivery the app still sends fires, and the trigger stays held for the reason it was.
+        expect(await deliver(rail, wf, live, `D_HELD_${rail}`)).toMatchObject({ fired: 1 });
         await eventually(async () => expect(await triggerRuns(wf)).toHaveLength(1));
+        expect(await activation(wf, production)).toMatchObject({ held: true, last_error: refusal });
+      }
+      if (rail === 'composio') {
+        // One that fails to fire leaves the hold's reason, which names the fix, in place.
+        jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+          throw new Error('the version does not compile');
+        });
+        expect(await deliver(rail, wf, live, 'D_HELD_UNFIRED')).toMatchObject({ fired: 0 });
         expect(await activation(wf, production)).toMatchObject({ held: true, last_error: refusal });
       }
       expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
@@ -674,10 +762,11 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         composio_trigger_instance_id: live.composio_trigger_instance_id,
         materialized: live.materialized,
       });
-      expect(await storeOf(live.id)).toEqual(store);
+      expect(await storeOf(live.id)).toMatchObject(store);
       expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
       expect(await shownOn(org, wf, production)).toMatchObject({
         held_back_by_slot: false,
+        listening: true,
         last_error: null,
       });
 
@@ -721,7 +810,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
   it.each(RAILS)(
     'a change to a held %s trigger that its app must be asked about waits, holding what is live, and is made once the account is active again',
     async (rail) => {
-      const { app: appSlug, name, changed } = TRIGGERS[rail];
+      const { name, changed } = TRIGGERS[rail];
       const { org, production, account, wf, live } = await liveTrigger(rail, 'waits');
       const store = await storeOf(live.id);
       await publishUnreconciled(org, wf, triggerDoc(changed.nodeType, name, changed.props));
@@ -733,10 +822,16 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(await activation(wf, production)).toEqual({
         ...live,
         held: true,
-        last_error: LAST_ERROR.inactive('production', appSlug, name, ''),
+        last_error: HELD('production', rail),
       });
       expect(await storeOf(live.id)).toEqual(store);
       expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
+      if (rail !== 'polling') {
+        // What the old trigger's app still sends is for the old trigger, never the version waiting to replace it.
+        const delivered = await deliver(rail, wf, live, `D_OLD_${rail}`, 'charge.succeeded');
+        expect(delivered).toMatchObject({ fired: 0 });
+        expect(await triggerRuns(wf)).toEqual([]);
+      }
 
       await setStatus(account, 'active');
       await reconcile(wf);
@@ -752,6 +847,44 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       });
       expect(await standUpsAs(rail, account)).toBe(2);
       expect(teardowns()).toBe(calledDown + (rail === 'polling' ? 0 : 1));
+    },
+  );
+
+  it.each(['retyped to a schedule', 'deleted with its workflow'])(
+    'a held webhook trigger %s asks nothing of its app with the account that is not active, and its webhook is deleted once that account is active again',
+    async (removal) => {
+      const { org, production, account, wf, live } = await liveTrigger('webhook', `removed ${removal}`);
+      const hook = (
+        (await storeOf(live.id))['webhook.registration'] as { registration: { subscriptionId: string } }
+      ).registration.subscriptionId;
+      await setStatus(account, 'expired');
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({ held: true });
+      const deletes = stripeDeletes.length;
+
+      if (removal === 'deleted with its workflow') {
+        await asA(http().delete(`/api/workflows/${wf}`).set('X-Org-Id', org)).expect(200);
+      } else {
+        await publish(org, wf, triggerDoc('orchestr:schedule', 'Every hour', { interval_minutes: 60 }));
+        expect(await activation(wf, production)).toMatchObject({
+          trigger_type: 'orchestr:schedule',
+          held: false,
+        });
+      }
+      // A later reconcile retries the pending delete, and still asks nothing of the app.
+      await reconcile(wf);
+      await app.get(TriggerReconcilerService).retriesSettled();
+
+      expect(stripeDeletes.length).toBe(deletes);
+      expect(stripeEndpoints.has(hook)).toBe(true);
+      expect(await pendingDeletes(wf)).toEqual([
+        { hook, last_error: "the account it was registered with isn't active" },
+      ]);
+
+      await app.get(ConnectionsService).setStatus(account, 'active');
+      await eventually(async () => expect(await pendingDeletes(wf)).toEqual([]));
+      expect(stripeDeletes.slice(deletes)).toEqual([hook]);
+      expect(stripeEndpoints.has(hook)).toBe(false);
     },
   );
 
@@ -787,17 +920,18 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         expect(await shownOn(org, wf, staging)).toMatchObject({
           status: 'error',
           held_back_by_slot: true,
+          listening: listeningAs !== null && rail !== 'polling',
           last_error: words,
         });
       };
 
       await setStatus(account, 'expired');
-      await heldSaying(LAST_ERROR.inactive('staging', appSlug, name, ''), account);
+      await heldSaying(HELD('staging', rail), account);
 
       await asA(
         http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'preview' }),
       ).expect(200);
-      await heldSaying(LAST_ERROR.inactive('preview', appSlug, name, ''), account);
+      await heldSaying(HELD('preview', rail), account);
 
       await asA(http().delete(`/api/environments/${staging}/slots/${appSlug}`).set('X-Org-Id', org)).expect(
         200,
@@ -936,6 +1070,60 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
+  it.each(['polling', 'webhook'] as const)(
+    'an SDK %s trigger whose slot holds a one-click account is refused as needing its own credentials, and held back in the same words',
+    async (rail) => {
+      const { app: appSlug, name, nodeType, props } = TRIGGERS[rail];
+      const { org, production, staging } = await workspace(`needs own credentials ${rail}`);
+      const oneClick = await oneClickConnection(appSlug);
+      await putSlot(production, appSlug, oneClick);
+      await putSlot(staging, appSlug, oneClick);
+      const before = standUps();
+      const { wf, v1, created } = await deploy(org, triggerDoc(nodeType, name, props));
+      const refusal = NEEDS_OWN('production', appSlug, name);
+      expect(created).toMatchObject({ activated: false, activation_error: refusal });
+      expect(await activation(wf, production)).toMatchObject({ connection_id: null, last_error: refusal });
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: true,
+        listening: false,
+        last_error: refusal,
+      });
+
+      const refusedTrigger = {
+        node_id: 'watch',
+        node_name: name,
+        app: appSlug,
+        reason: 'needs_own_credentials_slot',
+      };
+      const promoted = await asA(
+        http()
+          .post(`/api/workflows/${wf}/promote`)
+          .set('X-Org-Id', org)
+          .send({ environment: 'staging', version_id: v1 }),
+      ).expect(428);
+      expect(promoted.body).toMatchObject({
+        detail: `staging's ${appSlug} account is one-click (managed), and "${name}" runs only on one that uses its own credentials, so it can't run there — reassign it under Integrations → Environments before promoting here`,
+        code: 'environment_slots_unfit',
+        environment: 'staging',
+        triggers: [refusedTrigger],
+        steps: [],
+      });
+      for (const door of ['publish', 'restore']) {
+        const refused = await asA(
+          http().post(`/api/workflows/${wf}/${door}`).set('X-Org-Id', org).send({ version_number: 1 }),
+        ).expect(428);
+        expect(refused.body).toMatchObject({ code: 'environment_slots_unfit', triggers: [refusedTrigger] });
+      }
+      expect(standUps()).toBe(before);
+
+      const own = await tokenConnection(appSlug);
+      await assignSlot(org, production, appSlug, own);
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({ connection_id: own, last_error: null });
+      expect(await standUpsAs(rail, own)).toBe(1);
+    },
+  );
+
   it('holds back no trigger for a slot the preflight asks no slot for: one whose type names no app', async () => {
     const { org, staging } = await workspace('names no app');
     const { wf, v1 } = await deploy(org, triggerDoc('Acme.new_deal', 'Nameless', {}));
@@ -984,7 +1172,6 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     it.each(RAILS)(
       'a live %s trigger is held when its account stops being active, and resumes when it is reconnected',
       async (rail) => {
-        const { app: appSlug, name } = TRIGGERS[rail];
         const { production, account, wf, live } = await liveTrigger(rail, 'status held');
         const calledUp = standUps();
 
@@ -993,7 +1180,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
           expect(await activation(wf, production)).toMatchObject({
             held: true,
             connection_id: account,
-            last_error: LAST_ERROR.inactive('production', appSlug, name, ''),
+            last_error: HELD('production', rail),
           }),
         );
 
@@ -1113,7 +1300,6 @@ describe('a change to an account reconciles the triggers listening as it through
   it.each(['composio', 'polling'] as const)(
     'a live %s trigger is held and resumed by the queued reconciles its account changes ask for',
     async (rail) => {
-      const { app: appSlug, name } = TRIGGERS[rail];
       const { production, account, wf, live } = await liveTrigger(rail, 'queued');
       const jobs = await queued();
 
@@ -1128,7 +1314,7 @@ describe('a change to an account reconciles the triggers listening as it through
           expect(await activation(wf, production)).toMatchObject({
             id: live.id,
             held: true,
-            last_error: LAST_ERROR.inactive('production', appSlug, name, ''),
+            last_error: HELD('production', rail),
           }),
         20_000,
       );

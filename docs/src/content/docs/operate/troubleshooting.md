@@ -65,20 +65,24 @@ curl "http://localhost:8080/api/workflows/<id>/webhook-secret?node_id=trigger&en
 ## A promote or publish says a trigger or step "can't run there"
 
 ```
-staging's gmail account isn't active, so "New email" can't run there — its owner reconnects it under
-Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here
+staging's gmail account isn't active, so "New email" can't run there — its owner tests it under
+Integrations once it works again, or an owner reassigns the slot under Integrations → Environments
+before promoting here
 ```
 
 The environment's account for that app can't serve what the message names: there is none, it is for
-another app, it isn't active, or it uses its own credentials where only a one-click account runs the
-trigger or step. A trigger listens as the environment's account even when it names one of its own,
-so picking an account on the trigger does not help. Fix the slot under
-**Integrations → Environments** and promote again.
+another app, it isn't active, or it is of the wrong kind — one that uses its own credentials where
+only a one-click account runs the trigger or step, or a one-click one for a trigger that signs in
+with its own. A trigger listens as the environment's account even when it names one of its own, so
+picking an account on the trigger does not help. Fix the slot under
+**Integrations → Environments** and promote again. **Reconnect** under Integrations connects a new
+account, which the slot holds only once an owner assigns it there.
 
 The same reason on the workflow overview, under **Not listening**, means a trigger is held back by
-the environment's account. One whose own account stopped being active is held as it was, and
-carries on from where it stopped once a **Test** under Integrations finds that account working. Any
-other starts once the slot is fixed. See
+the environment's account, and starts once the slot is fixed. A trigger whose own account stopped
+being active is **held** as it was, and the overview's reason says what it still does: a polled feed
+is not listening and picks up from where it stopped once a **Test** under Integrations finds that
+account working, while a webhook or subscription still starts a run for each delivery. See
 [Environments](/run/environments/#triggers-listen-as-the-environments-account).
 
 ## A run ends in `error`

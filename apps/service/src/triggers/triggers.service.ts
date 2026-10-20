@@ -26,7 +26,7 @@ import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
-import { heldBackBySlot } from './canvas/trigger-kind';
+import { firesWhileHeld, heldBackBySlot } from './canvas/trigger-kind';
 import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -126,8 +126,10 @@ export interface ActivationHealth {
   kind: string;
   /** `false` only when an operator paused it (desired-present but not firing). */
   active: boolean;
-  /** Held back by its environment's slot, so nothing polls it or is set up at its app; `last_error` says why and what fixes it. */
+  /** Held back or held by its environment's slot, so nothing is stood up, polled or changed at its app for it; `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
+  /** Whether it takes events now: not while paused or held back, and while held only what its app still sends (a webhook or subscription). */
+  listening: boolean;
   status: 'paused' | 'error' | 'ok' | 'idle';
   last_polled_at: string | null;
   last_error: string | null;
@@ -297,6 +299,12 @@ export class TriggersService {
       where: { workflowId: wf.id, environmentId: resolved.environmentId, triggerNodeId: node.id },
     });
     if (!row || row.paused) throw new DomainError('Webhook not found', 404);
+    if (!holdsTrigger(ir, row)) {
+      this.logger.warn(
+        `webhook intake: activation ${row.id} is still to be changed at its app — acked, not fired`,
+      );
+      return { runIds: [] };
+    }
 
     const store = new DbActivationStore(this.dataSource, row.id);
     const [secret, registration] = await Promise.all([
@@ -459,8 +467,15 @@ export class TriggersService {
       );
       return 0;
     }
+    let failure: { error: unknown } | null = null;
     try {
       const { wf, env, versionId, ir } = await this.resolveActivationTarget(row);
+      if (!holdsTrigger(ir, row)) {
+        this.logger.warn(
+          `composio intake: activation ${row.id} is still to be changed at Composio — acked, not fired`,
+        );
+        return 0;
+      }
       const plan = this.compiler.compile(ir, wf.id);
       void this.runs
         .runExecutable(plan, {
@@ -477,21 +492,29 @@ export class TriggersService {
         .catch((err) =>
           this.logger.warn(`composio intake: activation ${row.id} fired run failed: ${String(err)}`),
         );
-      // A held trigger's delivery still fires, but its account still isn't active, so the hold's reason stays.
-      await em.update(
-        RuntimeTriggerActivationEntity,
-        { id: row.id },
-        { lastPolledAt: now(), ...(heldBack(row) ? {} : { lastError: null }) },
-      );
-      return 1;
-    } catch (err) {
-      await em.update(
-        RuntimeTriggerActivationEntity,
-        { id: row.id },
-        { lastPolledAt: now(), lastError: activationError(err) },
-      );
-      return 0;
+    } catch (error) {
+      failure = { error };
     }
+    await em.update(
+      RuntimeTriggerActivationEntity,
+      { id: row.id },
+      { lastPolledAt: now(), ...this.fireOutcome(row, failure) },
+    );
+    return failure === null ? 1 : 0;
+  }
+
+  // A held trigger's last_error stays its slot's reason, so a fire of it that failed is the operator's to read.
+  private fireOutcome(
+    row: RuntimeTriggerActivationEntity,
+    failure: { error: unknown } | null,
+  ): { lastError?: string | null } {
+    if (!heldBack(row)) return { lastError: failure === null ? null : activationError(failure.error) };
+    if (failure !== null) {
+      this.logger.warn(
+        `composio intake: held activation ${row.id} did not fire: ${errorMessage(failure.error)}`,
+      );
+    }
+    return {};
   }
 
   /**
@@ -817,6 +840,7 @@ export class TriggersService {
       kind: row.kind,
       active: !row.paused,
       held_back_by_slot: heldBack(row),
+      listening: listening(row),
       status: activationStatus(row),
       last_polled_at: row.lastPolledAt?.toISOString() ?? null,
       last_error: row.lastError,
@@ -863,6 +887,11 @@ function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): bool
 
 function heldBack(row: RuntimeTriggerActivationEntity): boolean {
   return heldBackBySlot({ ...actualOf(row), held: row.held });
+}
+
+function listening(row: RuntimeTriggerActivationEntity): boolean {
+  if (row.paused) return false;
+  return !heldBack(row) || (row.held && firesWhileHeld(actualOf(row).kind));
 }
 
 function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {

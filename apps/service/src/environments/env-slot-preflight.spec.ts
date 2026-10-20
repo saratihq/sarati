@@ -76,7 +76,7 @@ describe('env slot preflight — the run-as rule, dry, under an environment', ()
     ).catch((e: unknown) => e);
     expect((inactive as DomainError).status).toBe(428);
     expect((inactive as DomainError).message).toBe(
-      "staging's gmail account isn't active, so \"mail\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here",
+      "staging's gmail account isn't active, so \"mail\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments before promoting here",
     );
     expect((inactive as DomainError).details).toMatchObject({
       code: 'environment_slots_inactive',
@@ -90,7 +90,7 @@ describe('env slot preflight — the run-as rule, dry, under an environment', ()
       slots({ claude: 'c', slack: 's', gmail: 'g' }, ['gmail', 'slack']),
     ).catch((e: unknown) => e);
     expect((several as DomainError).message).toBe(
-      'staging\'s gmail and slack accounts aren\'t active, so "post" and "mail" can\'t run there — their owners reconnect them under Integrations, or an owner reassigns the slots under Integrations → Environments before promoting here',
+      'staging\'s gmail and slack accounts aren\'t active, so "post" and "mail" can\'t run there — their owners test them under Integrations once they work again, or an owner reassigns the slots under Integrations → Environments before promoting here',
     );
 
     const both = await assertEnvSlotsCover(
@@ -170,7 +170,7 @@ describe('env slot preflight — the run-as rule, dry, under an environment', ()
 
         const inactive = await refusal(watching(parameters), slots({ ...covered, asana: 'a' }, ['asana']));
         expect(inactive.message).toBe(
-          "staging's asana account isn't active, so \"New task\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here",
+          "staging's asana account isn't active, so \"New task\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments before promoting here",
         );
         expect(inactive.details).toMatchObject({
           code: 'environment_slots_inactive',
@@ -190,6 +190,27 @@ describe('env slot preflight — the run-as rule, dry, under an environment', ()
         });
       },
     );
+
+    it('refuses triggers signing in on the SDK rail whose slots hold one-click accounts, naming each', async () => {
+      const channel = {
+        ...node('channel', 'slack.new_channel'),
+        name: 'New channel',
+        metadata: { trigger: true },
+      };
+      const doc = { nodes: [...watching({}).nodes, channel] };
+      const err = await refusal(doc, slots({ ...covered, asana: 'a' }, [], {}, ['asana', 'slack']));
+      expect(err.message).toBe(
+        'staging\'s asana and slack accounts are one-click (managed), and "New task" and "New channel" run only on ones that use their own credentials, so they can\'t run there — reassign them under Integrations → Environments before promoting here',
+      );
+      expect(err.details).toMatchObject({
+        code: 'environment_slots_unfit',
+        steps: [],
+        triggers: [
+          { node_id: 'watch', reason: 'needs_own_credentials_slot' },
+          { node_id: 'channel', reason: 'needs_own_credentials_slot' },
+        ],
+      });
+    });
 
     it('names a trigger and the steps its slots refuse in one refusal, the trigger first', async () => {
       const err = await refusal(watching({}), slots({ slack: 's' }));

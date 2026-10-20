@@ -261,7 +261,7 @@ export class ConnectionsService implements RunAsAccounts {
     if (before && before.status !== status) await this.reconcileTriggers(await this.listenersOf([id]));
   }
 
-  // A trigger listens as its slot's account only while that account is active (#11): the workflows a change to these accounts can move.
+  // A trigger listens as its slot's account, and a webhook is deleted with it, only while it is active (#11): the workflows a change to these accounts can move.
   private async listenersOf(connectionIds: readonly string[]): Promise<string[]> {
     if (connectionIds.length === 0) return [];
     const rows: Array<{ workflow_id: string }> = await this.dataSource.manager.query(
@@ -270,7 +270,10 @@ export class ConnectionsService implements RunAsAccounts {
          JOIN workflow_env_pointers p ON p.environment_id = ec.environment_id
         WHERE ec.connection_id = ANY($1::uuid[])
        UNION
-       SELECT workflow_id FROM runtime_trigger_activations WHERE connection_id = ANY($1::uuid[])`,
+       SELECT workflow_id FROM runtime_trigger_activations WHERE connection_id = ANY($1::uuid[])
+       UNION
+       SELECT workflow_id FROM trigger_retired_webhooks
+        WHERE webhook -> 'connection' ->> 'connectionId' = ANY($1::uuid[]::text[])`,
       [connectionIds],
     );
     return rows.map((row) => row.workflow_id);

@@ -26,7 +26,9 @@ const SINGLE_DEFINITION = [
   { symbol: 'listensAsAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'listensAsManagedAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'triggerSlotOf', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'decideTriggerSlots', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'heldBackBySlot', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'firesWhileHeld', definedIn: 'triggers/canvas/trigger-kind.ts' },
 ] as const;
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -94,7 +96,7 @@ describe('vault: one definition site per load-bearing question', () => {
     ]);
   });
 
-  /** Constitution #11: the reconciler and the promote preflight ask one predicate which triggers listen as a slot, and judge that slot by #18's rule. */
+  /** Constitution #11: the reconciler and the promote preflight ask one judgement which triggers listen as a slot, by one predicate and #18's slot rule. */
   it('a trigger listens as the slot one predicate names, judged by the run-as slot rule', () => {
     const asking = (call: RegExp, definedIn: string): string[] =>
       sources()
@@ -102,13 +104,14 @@ describe('vault: one definition site per load-bearing question', () => {
         .map((f) => f.rel)
         .sort();
     const listeners = ['environments/env-slot-preflight.ts', 'triggers/canvas/trigger-reconciler.service.ts'];
+    const kindSite = 'triggers/canvas/trigger-kind.ts';
+    const runtime = ['triggers/canvas/trigger-reconciler.service.ts', 'triggers/triggers.service.ts'];
 
-    expect(asking(/\btriggerSlotOf\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual(listeners);
-    expect(asking(/\bdecideBySlot\s*\(/, 'connections/run-as-account.ts')).toEqual(listeners);
-    expect(asking(/\bheldBackBySlot\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual([
-      'triggers/canvas/trigger-reconciler.service.ts',
-      'triggers/triggers.service.ts',
-    ]);
+    expect(asking(/\bdecideTriggerSlots\s*\(/, kindSite)).toEqual(listeners);
+    expect(asking(/\btriggerSlotOf\s*\(/, kindSite)).toEqual([]);
+    expect(asking(/\bdecideBySlot\s*\(/, 'connections/run-as-account.ts')).toEqual([kindSite]);
+    expect(asking(/\bheldBackBySlot\s*\(/, kindSite)).toEqual(runtime);
+    expect(asking(/\bfiresWhileHeld\s*\(/, kindSite)).toEqual(runtime);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

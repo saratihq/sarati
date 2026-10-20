@@ -1,14 +1,12 @@
 import { DomainError } from '../common/domain-error';
 import { isRecord } from '../common/json-util';
 import {
-  decideBySlot,
   planRunAs,
   type RunAsAccounts,
-  type SlotAccount,
   type SlotRefusalReason,
   type StepRunAs,
 } from '../connections/run-as-account';
-import { type TriggerSlot, triggerSlotOf } from '../triggers/canvas/trigger-kind';
+import { decideTriggerSlots, type TriggerNode } from '../triggers/canvas/trigger-kind';
 
 /** An environment a check predicts a run under. */
 export interface NamedEnvironment {
@@ -34,37 +32,34 @@ async function triggersRefusedIn(
   environment: NamedEnvironment,
   accounts: Pick<RunAsAccounts, 'resolveSlotConnection'>,
 ): Promise<StepRunAs[]> {
-  const reads = new Map<string, Promise<SlotAccount | null>>();
-  const slotFor = (app: string): Promise<SlotAccount | null> => {
-    const read = reads.get(app) ?? accounts.resolveSlotConnection(environment.id, app);
-    reads.set(app, read);
-    return read;
-  };
-  const decided = await Promise.all(
-    appTriggersOf(document).map(async (trigger) => ({
-      node_id: trigger.id,
-      node_name: trigger.name,
-      app: trigger.app,
-      managed_only: trigger.managedOnly,
-      decision: await decideBySlot(trigger, await slotFor(trigger.app), () =>
-        Promise.resolve(environment.name),
-      ),
-    })),
+  const decided = await decideTriggerSlots(triggerNodesOf(document), environment.name, (app) =>
+    accounts.resolveSlotConnection(environment.id, app),
   );
-  return decided.filter((trigger) => trigger.decision.kind === 'refused');
+  return decided
+    .filter((trigger) => trigger.decision.kind === 'refused')
+    .map((trigger) => ({
+      node_id: trigger.nodeId,
+      node_name: trigger.name,
+      app: trigger.slot.app,
+      managed_only: trigger.slot.managedOnly,
+      decision: trigger.decision,
+    }));
 }
 
-function appTriggersOf(
-  document: unknown,
-): Array<TriggerSlot & { id: string; name: string; connectionId: null }> {
+function triggerNodesOf(document: unknown): TriggerNode[] {
   const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
   return nodes.flatMap((node) => {
     if (!isRecord(node) || typeof node.id !== 'string' || typeof node.node_type !== 'string') return [];
     const metadata = isRecord(node.metadata) ? node.metadata : undefined;
-    const slot = triggerSlotOf({ node_type: node.node_type, ...(metadata ? { metadata } : {}) });
-    if (!slot) return [];
-    const name = typeof node.name === 'string' && node.name !== '' ? node.name : node.id;
-    return [{ id: node.id, name, ...slot, connectionId: null }];
+    const name = typeof node.name === 'string' ? node.name : undefined;
+    return [
+      {
+        id: node.id,
+        node_type: node.node_type,
+        ...(name ? { name } : {}),
+        ...(metadata ? { metadata } : {}),
+      },
+    ];
   });
 }
 
@@ -88,6 +83,13 @@ const CLAUSES: ReadonlyArray<[SlotRefusalReason, Clause]> = [
       `${env}'s ${accountsOf(steps, 'account uses its', 'accounts use their')} own credentials, and ${namesOf(steps)} ${
         steps.length === 1 ? 'runs' : 'run'
       } only on a one-click (managed) one, so ${steps.length === 1 ? 'it' : 'they'} can't run there`,
+  ],
+  [
+    'needs_own_credentials_slot',
+    (env, steps) =>
+      `${env}'s ${accountsOf(steps, 'account is', 'accounts are')} one-click (managed), and ${namesOf(steps)} ${
+        steps.length === 1 ? 'runs only on one that uses its' : 'run only on ones that use their'
+      } own credentials, so ${steps.length === 1 ? 'it' : 'they'} can't run there`,
   ],
   [
     'inactive_slot',
@@ -133,12 +135,12 @@ function codeOf(present: ReadonlySet<SlotRefusalReason>): string {
   return present.has('inactive_slot') ? 'environment_slots_inactive' : 'environment_slots_unfit';
 }
 
-// A slot is assigned or reassigned under Environments; an account that only isn't active is also mended by reconnecting it.
+// A slot is assigned or reassigned under Environments; an account that only isn't active also comes back once a test finds it working.
 function remedyFor(present: ReadonlySet<SlotRefusalReason>, steps: StepRunAs[]): string {
   if (present.size === 1 && present.has('inactive_slot')) {
     return appsOf(steps).length > 1
-      ? 'their owners reconnect them under Integrations, or an owner reassigns the slots under Integrations → Environments'
-      : 'its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments';
+      ? 'their owners test them under Integrations once they work again, or an owner reassigns the slots under Integrations → Environments'
+      : 'its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
   }
   const empty = present.has('empty_slot');
   const held = [...present].some((reason) => reason !== 'empty_slot');
