@@ -154,7 +154,7 @@ export class EnvPointersService {
       const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
       if (!wf.orgId) throw new DomainError('Environment not found', 404); // org-less: no env rows
-      const env = await this.environments.byIdForOrg(em, wf.orgId, environmentId);
+      const env = await this.environments.byIdForOrg(em, wf.orgId, environmentId, 'pessimistic_read');
       await this.assertPointerMoveAllowed(em, wf, env.name, actorUserId);
 
       const removed = await rawMutate(

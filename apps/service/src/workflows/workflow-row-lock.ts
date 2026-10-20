@@ -40,3 +40,15 @@ export async function lockRunEnvironments(em: EntityManager, workflowId: string)
     [workflowId],
   );
 }
+
+/** A workflow delete's un-promote, after its workflow row: the environments its pointers are on, FOR SHARE in id order, since every write of an environment's pointers takes the environment row first (constitution row 11). */
+export async function lockPointerEnvironments(em: EntityManager, workflowId: string): Promise<void> {
+  await rawQuery(
+    em,
+    `SELECT 1 FROM environments e
+      WHERE e.id IN (SELECT p.environment_id FROM workflow_env_pointers p WHERE p.workflow_id = $1)
+      ORDER BY e.id
+        FOR SHARE OF e`,
+    [workflowId],
+  );
+}

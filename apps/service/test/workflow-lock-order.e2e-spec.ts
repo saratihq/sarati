@@ -1785,4 +1785,243 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       expect(await deadlocksSince(before)).toBe(0);
     });
   });
+
+  describe("an environment's row is locked before its pointers", () => {
+    const manualDoc = (name: string): Record<string, unknown> => {
+      const doc = webhookDoc(name);
+      const [trigger] = doc.nodes as Array<Record<string, unknown>>;
+      trigger!.node_type = 'orchestr:trigger';
+      return doc;
+    };
+
+    interface Crossed {
+      org: string;
+      env: string;
+      /** Its workflows in the order a rename updates their pointers; an un-promote of the environment deletes them in reverse. */
+      order: string[];
+    }
+
+    const rolledBack = async (sql: string, params: unknown[]): Promise<string[]> => {
+      await db.query('BEGIN');
+      try {
+        return (await db.query<{ workflow_id: string }>(sql, params)).rows.map((row) => row.workflow_id);
+      } finally {
+        await db.query('ROLLBACK');
+      }
+    };
+
+    const renameOrder = (env: string, envName: string): Promise<string[]> =>
+      rolledBack(
+        `UPDATE workflow_env_pointers SET environment = $2 WHERE environment_id = $1 RETURNING workflow_id`,
+        [env, envName],
+      );
+
+    const unpromoteOrder = (org: string, env: string, envName: string): Promise<string[]> =>
+      rolledBack(
+        `DELETE FROM workflow_env_pointers p USING workflows w
+          WHERE w.id = p.workflow_id
+            AND (p.environment_id = $1 OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))
+         RETURNING p.workflow_id`,
+        [env, envName, org],
+      );
+
+    // Three of `renamed` that `unpromoted` holds in the reverse order, if any.
+    const reversedThree = (renamed: string[], unpromoted: string[]): string[] | undefined => {
+      const at = (id: string): number => unpromoted.indexOf(id);
+      const threes = renamed.flatMap((a, i) =>
+        renamed.slice(i + 1).flatMap((b, j) => renamed.slice(i + j + 2).map((c) => [a, b, c])),
+      );
+      return threes.find(([a, b, c]) => at(a!) > at(b!) && at(b!) > at(c!));
+    };
+
+    // An environment left with three workflows' pointers that its delete's un-promote deletes in the reverse of a rename's order, picked from six and retried with a fresh org until the un-promote's join scans the workflows.
+    const crossed = async (name: string): Promise<Crossed> => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const org = await workspace(name);
+        const envName = `crossed-${suffix()}`;
+        const env = await createEnv(org, envName);
+        for (let i = 0; i < 6; i++) {
+          const res = await as(http().post('/api/deploy'), org)
+            .send({ workflow_json: manualDoc(`${name} ${i}`) })
+            .expect(201);
+          const [v1] = await versions(org, res.body.workflow_id as string);
+          await promote(org, res.body.workflow_id as string, envName, v1!.id).expect(201);
+        }
+        await db.query('ANALYZE workflows, workflow_env_pointers');
+        const renamed = await renameOrder(env, envName);
+        const three = reversedThree(renamed, await unpromoteOrder(org, env, envName));
+        if (!three) continue;
+        for (const wfId of renamed.filter((id) => !three.includes(id))) {
+          await as(http().delete(`/api/workflows/${wfId}/pointers/${env}`), org).expect(200);
+        }
+        const order = await renameOrder(env, envName);
+        const unpromoted = await unpromoteOrder(org, env, envName);
+        if (order.join() === three.join() && unpromoted.join() === [...three].reverse().join()) {
+          return { org, env, order };
+        }
+      }
+      throw new Error(
+        "no environment whose delete un-promotes three workflows in the reverse of a rename's order",
+      );
+    };
+
+    // A client holding the pointer a rename and an un-promote of the environment both reach second.
+    const holdMiddle = async ({ env, order }: Crossed): Promise<Client> => {
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query(
+        `SELECT 1 FROM workflow_env_pointers WHERE workflow_id = $1 AND environment_id = $2 FOR NO KEY UPDATE`,
+        [order[1], env],
+      );
+      return holder;
+    };
+
+    const rowWaits = async (): Promise<string[]> =>
+      (
+        await db.query<{ relation: string }>(
+          `SELECT l.relation::regclass::text AS relation
+             FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND l.locktype = 'tuple'
+            ORDER BY 1`,
+        )
+      ).rows.map((row) => row.relation);
+
+    const renameEnv = (org: string, env: string): Promise<number> =>
+      statusOf(as(http().patch(`/api/environments/${env}`), org).send({ name: `renamed-${suffix()}` }));
+
+    const pointersOn = async (env: string): Promise<number> =>
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM workflow_env_pointers WHERE environment_id = $1`,
+          [env],
+        )
+      ).rows[0]!.n;
+
+    const leftBehind = async ({ env, order }: Crossed): Promise<unknown> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM environments WHERE id = $1) AS environment,
+                  (SELECT count(*)::int FROM workflow_env_pointers
+                    WHERE workflow_id = ANY($2::uuid[]) AND environment <> 'production') AS pointers,
+                  (SELECT json_object_agg(type, n) FROM (
+                     SELECT type, count(*)::int AS n FROM domain_events
+                      WHERE subject_id = ANY($3::text[])
+                        AND type IN ('environment.renamed', 'environment.deleted', 'workflow.unpromoted')
+                      GROUP BY type) e) AS events`,
+          [env, order, [env, ...order]],
+        )
+      ).rows[0];
+
+    const bothLanded = {
+      environment: false,
+      pointers: 0,
+      events: { 'environment.renamed': 1, 'environment.deleted': 1, 'workflow.unpromoted': 3 },
+    };
+
+    it('a rename holding the environment when its delete starts lands first, and the delete, waiting at the environment row, then un-promotes what it renamed', async () => {
+      const crossing = await crossed('Rename then environment delete');
+      const holder = await holdMiddle(crossing);
+      const before = await deadlocks();
+      try {
+        const renaming = renameEnv(crossing.org, crossing.env);
+        await lockWaiters(1);
+        const deleting = statusOf(removeEnv(crossing.org, crossing.env));
+        await lockWaiters(2);
+        expect(await rowWaits()).toEqual(['environments', 'workflow_env_pointers']);
+        await holder.query('COMMIT');
+        expect({ rename: await renaming, delete: await deleting }).toEqual({ rename: 200, delete: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(crossing)).toEqual(bothLanded);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an environment delete un-promoting when a rename of it starts goes first, and the rename, waiting at the environment row, then lands before the delete removes it', async () => {
+      const crossing = await crossed('Environment delete then rename');
+      const holder = await holdMiddle(crossing);
+      const before = await deadlocks();
+      try {
+        const deleting = statusOf(removeEnv(crossing.org, crossing.env));
+        await lockWaiters(1);
+        const renaming = renameEnv(crossing.org, crossing.env);
+        await lockWaiters(2);
+        expect(await rowWaits()).toEqual(['environments', 'workflow_env_pointers']);
+        await holder.query('COMMIT');
+        expect({ delete: await deleting, rename: await renaming }).toEqual({ delete: 200, rename: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(crossing)).toEqual(bothLanded);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a promote holding the environment when its delete starts lands first, and the delete un-promotes it with the rest', async () => {
+      const org = await workspace('Promote then environment delete');
+      const envName = `promoted-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const deployed = await as(http().post('/api/deploy'), org)
+        .send({ workflow_json: manualDoc('promoted while deleted') })
+        .expect(201);
+      const wfId = deployed.body.workflow_id as string;
+      const [v1] = await versions(org, wfId);
+      const promoted = gateEmits('workflow.promoted');
+      const before = await deadlocks();
+      try {
+        const promoting = statusOf(promote(org, wfId, envName, v1!.id));
+        await promoted.arrived(0);
+        const deleting = statusOf(removeEnv(org, env));
+        await lockWaiters(1);
+        promoted.release(0);
+        expect({ promote: await promoting, delete: await deleting }).toEqual({ promote: 201, delete: 200 });
+      } finally {
+        promoted.restore();
+      }
+      const unpromotedThere = await db.query(
+        `SELECT 1 FROM domain_events WHERE type = 'workflow.unpromoted' AND subject_id = $1 AND payload->>'environment' = $2`,
+        [wfId, envName],
+      );
+      expect(unpromotedThere.rows).toHaveLength(1);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it.each([
+      [
+        'an un-promote',
+        (org: string, wfId: string, env: string): request.Test =>
+          as(http().delete(`/api/workflows/${wfId}/pointers/${env}`), org),
+      ],
+      ["a workflow delete's un-promote", (org: string, wfId: string): request.Test => remove(org, wfId)],
+    ])(
+      '%s holding the environment when a rename of it starts lands first, and the rename lists no URL for it',
+      async (_, unpromote) => {
+        const org = await workspace('Un-promote then rename');
+        const envName = `unpromoted-${suffix()}`;
+        const env = await createEnv(org, envName);
+        const wfId = await deploy(org, 'un-promoted while renamed');
+        const [v1] = await versions(org, wfId);
+        await promote(org, wfId, envName, v1!.id).expect(201);
+        const unpromoted = gateEmits('workflow.unpromoted');
+        const before = await deadlocks();
+        try {
+          const unpromoting = statusOf(unpromote(org, wfId, env));
+          await unpromoted.arrived(0);
+          const renaming = renameEnv(org, env);
+          await lockWaiters(1);
+          expect(await rowWaits()).toEqual(['environments']);
+          unpromoted.release(0);
+          unpromoted.release(1);
+          expect({ unpromote: await unpromoting, rename: await renaming }).toEqual({
+            unpromote: 200,
+            rename: 200,
+          });
+        } finally {
+          unpromoted.restore();
+        }
+        expect(await pointersOn(env)).toBe(0);
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+  });
 });

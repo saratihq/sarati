@@ -19,7 +19,11 @@ import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
 import { lockOrgForWrite } from '../orgs/org-row-lock';
-import { lockRunEnvironments, lockWorkflowForPointerMove } from './workflow-row-lock';
+import {
+  lockPointerEnvironments,
+  lockRunEnvironments,
+  lockWorkflowForPointerMove,
+} from './workflow-row-lock';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
 export interface DraftCreateInput {
@@ -253,6 +257,7 @@ export class WorkflowLifecycleService {
   private unpromoteEverywhere(wf: WorkflowEntity, actorId: string | null): Promise<void> {
     return this.dataSource.transaction(async (tx) => {
       await lockWorkflowForPointerMove(tx, wf.id);
+      await lockPointerEnvironments(tx, wf.id);
       const removed = await rawMutateReturning<{ environment: string }>(
         tx,
         `DELETE FROM workflow_env_pointers WHERE workflow_id = $1 RETURNING environment`,

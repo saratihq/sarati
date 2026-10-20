@@ -265,7 +265,8 @@ export class EnvironmentsService {
     actorUserId: string,
   ): Promise<{ env: EnvironmentEntity; removedPointers: number; holders: string[] }> {
     return this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
       if (env.name === UAT_ENV)
@@ -402,10 +403,8 @@ export class EnvironmentsService {
     );
   }
 
-  // Read from what serves the URL — the pointer's pinned version — and held still until the rename commits.
+  // Read from what serves the URL — the pointer's pinned version — held still by the env row lock every pointer write takes first (constitution row 11).
   private async urlChangesOf(em: EntityManager, env: EnvironmentEntity, name: string): Promise<UrlChange[]> {
-    // Locked on their own: a join that locks them re-checks a pointer moved meanwhile against the version it read first.
-    await rawQuery(em, `SELECT 1 FROM workflow_env_pointers WHERE environment_id = $1 FOR SHARE`, [env.id]);
     const pointers = await rawQuery<{
       workflow_id: string;
       workflow_name: string;
@@ -502,7 +501,7 @@ export class EnvironmentsService {
     em: EntityManager,
     orgId: string,
     envId: string,
-    lock?: 'for_no_key_update' | 'for_key_share',
+    lock?: 'for_no_key_update' | 'pessimistic_read' | 'for_key_share',
   ): Promise<EnvironmentEntity> {
     const notFound = new DomainError('Environment not found', 404);
     if (!isIdShape(envId)) throw notFound;
