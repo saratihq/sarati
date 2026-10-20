@@ -2,7 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { ActionError } from '@sarati/actions-sdk';
 import { ILike, In, IsNull } from 'typeorm';
-import type { DataSource, EntityManager } from 'typeorm';
+import type { DataSource, EntityManager, FindOptionsWhere } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { EncryptionService } from '../common/crypto/encryption.service';
@@ -19,7 +19,7 @@ import {
   type ServingAccount,
   type SlotAccount,
 } from './run-as-account';
-import { lockOrgForWrite } from '../orgs/org-row-lock';
+import { lockConnectionsForDelete, lockOrgForWrite } from '../orgs/org-row-lock';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 import {
   byoClientToConfig,
@@ -212,11 +212,7 @@ export class ConnectionsService implements RunAsAccounts {
     try {
       await this.dataSource.transaction(async (em) => {
         await lockOrgForWrite(em, cluster.orgId);
-        await em.delete(ConnectionEntity, {
-          orgId: cluster.orgId,
-          environment: cluster.environment,
-          provider,
-        });
+        await this.deleteWithSlots(em, { orgId: cluster.orgId, environment: cluster.environment, provider });
         await em.save(ConnectionEntity, entity);
       });
     } catch (err) {
@@ -455,10 +451,24 @@ export class ConnectionsService implements RunAsAccounts {
       where: { id, userId, orgId: IsNull() },
     });
     if (!row) return false;
-    const res = await this.dataSource.manager.delete(ConnectionEntity, { id, userId, orgId: IsNull() });
-    const removed = (res.affected ?? 0) > 0;
+    const removed = await this.dataSource.transaction(async (em) => {
+      const deleted = await this.deleteWithSlots(em, { id, userId, orgId: IsNull() });
+      return deleted > 0;
+    });
     if (removed) await this.revokeComposioAccount(row);
     return removed;
+  }
+
+  /** Delete the connections `where` names, and by cascade their slots, under {@link lockConnectionsForDelete}; how many it deleted. */
+  private async deleteWithSlots(
+    em: EntityManager,
+    where: FindOptionsWhere<ConnectionEntity>,
+  ): Promise<number> {
+    const found = (await em.find(ConnectionEntity, { where, select: { id: true } })).map(({ id }) => id);
+    const ids = await lockConnectionsForDelete(em, found);
+    if (ids.length === 0) return 0;
+    const res = await em.delete(ConnectionEntity, { id: In(ids) });
+    return res.affected ?? 0;
   }
 
   /** How many cluster connections in an org a given member owns (env steps run AS them). */
@@ -515,8 +525,7 @@ export class ConnectionsService implements RunAsAccounts {
       await lockOrgForWrite(em, orgId);
       const row = await em.findOne(ConnectionEntity, { where: { id, orgId } });
       if (!row) return null;
-      const res = await em.delete(ConnectionEntity, { id, orgId });
-      return (res.affected ?? 0) > 0 ? row : null;
+      return (await this.deleteWithSlots(em, { id, orgId })) > 0 ? row : null;
     });
     if (removed) await this.revokeComposioAccount(removed);
     return removed !== null;

@@ -314,7 +314,10 @@ export class EnvironmentsService {
       // Visibility = ownership: a foreign or malformed-id connection is an indistinguishable 404.
       const notFound = new DomainError('Connection not found', 404);
       if (!isIdShape(connectionId)) throw notFound;
-      const conn = await em.findOne(ConnectionEntity, { where: { id: connectionId } });
+      const conn = await em.findOne(ConnectionEntity, {
+        where: { id: connectionId },
+        lock: { mode: 'for_key_share' },
+      });
       if (!conn || conn.userId !== callerUserId) throw notFound;
       if (!providersServing(app).includes(conn.provider)) {
         throw new DomainError(

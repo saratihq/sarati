@@ -42,7 +42,7 @@ export interface LockProbes {
   lockWaiters: (count: number) => Promise<void>;
   /** The database's deadlock count. */
   deadlocks: () => Promise<number>;
-  /** The deadlocks since `before`, read once each backend has reported its counters, at most a second after it idles. */
+  /** The deadlocks since `before`, read 1.5 s on: Postgres 14 counts one at once, 15+ as the deadlocked backend idles (it waited deadlock_timeout, past the second 15+ keeps between reports), or up to 10 s later if another backend is reporting at that instant. */
   deadlocksSince: (before: number) => Promise<number>;
 }
 

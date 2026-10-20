@@ -74,8 +74,10 @@ function webhookDoc(name: string): Record<string, unknown> {
 describe('every write under an org takes the org row first (e2e, isolated DB, stubbed Composio)', () => {
   let app: INestApplication;
   let db: Client;
+  let dbUrl = '';
   let composio: Server;
   let gmail = '';
+  const composioAccounts = { created: new Set<string>(), deleted: new Set<string>() };
 
   const owner = randomUUID();
   const member = randomUUID();
@@ -314,6 +316,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
 
   beforeAll(async () => {
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
+    dbUrl = e2eUrl;
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
     await db.query(
@@ -373,11 +376,11 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         } else if (req.method === 'POST' && url === '/api/v3/auth_configs') {
           json(201, { toolkit: { slug: 'slack' }, auth_config: { id: `ac_lock_${suffix()}` } });
         } else if (req.method === 'POST' && url === '/api/v3/connected_accounts/link') {
-          json(201, {
-            redirect_url: 'https://connect.composio.test/lock',
-            connected_account_id: `ca_lock_${++account}`,
-          });
+          const created = `ca_lock_${++account}`;
+          composioAccounts.created.add(created);
+          json(201, { redirect_url: 'https://connect.composio.test/lock', connected_account_id: created });
         } else if (req.method === 'DELETE' && url.startsWith('/api/v3/connected_accounts/')) {
+          composioAccounts.deleted.add(decodeURIComponent(url.slice('/api/v3/connected_accounts/'.length)));
           json(200, { success: true });
         } else {
           json(404, { error: `unexpected ${req.method ?? ''} ${url}` });
@@ -452,6 +455,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       const t = await team(`an org delete, then ${writer.name}`);
       await writer.prepare?.(t);
       const landed = (await outcome(t.org, event)).events;
+      const accountsBefore = new Set(composioAccounts.created);
       const held = gateEmits('org.deleted', 'after');
       const before = await deadlocks();
       try {
@@ -466,6 +470,10 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         held.restore();
       }
       expect(await outcome(t.org, event)).toEqual({ org: false, events: landed });
+      const leftAtComposio = [...composioAccounts.created].filter(
+        (id) => !accountsBefore.has(id) && !composioAccounts.deleted.has(id),
+      );
+      expect(leftAtComposio).toEqual([]);
       expect(await deadlocksSince(before)).toBe(0);
     });
   }
@@ -500,6 +508,149 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     } finally {
       held.restore();
     }
+  });
+
+  describe("a connection delete and an org delete over the connection's slots in two of the org's environments", () => {
+    interface ConnectionDeleter {
+      app: string;
+      connect: () => Promise<{ owner: string | null; connection: string }>;
+      remove: (owner: string | null, connection: string) => request.Test;
+      status: number;
+    }
+
+    const personal = async (): Promise<{ owner: null; connection: string }> => {
+      const created = await asOwner(http().post('/api/connections'))
+        .send({ provider: 'gmail', credential: 'owner-gmail' })
+        .expect(201);
+      return { owner: null, connection: created.body.id as string };
+    };
+    const cluster = async (): Promise<{ owner: string; connection: string }> => {
+      const t = await team('Cluster owner');
+      await setOrgKey(t, 'composio_api_key').expect(200);
+      return { owner: t.org, connection: (await connectCluster(t).expect(201)).body.connection_id as string };
+    };
+
+    const DELETERS: Array<[string, ConnectionDeleter]> = [
+      [
+        'a personal connection delete with force',
+        {
+          app: 'gmail',
+          connect: personal,
+          remove: (_, connection) => asOwner(http().delete(`/api/connections/${connection}?force=true`)),
+          status: 200,
+        },
+      ],
+      [
+        'a cluster connection delete',
+        {
+          app: 'slack',
+          connect: cluster,
+          remove: (owner, connection) =>
+            asOwner(http().delete(`/api/orgs/${owner ?? ''}/clusters/connections/${connection}`)),
+          status: 200,
+        },
+      ],
+      [
+        "a cluster connect replacing the cluster's connection",
+        {
+          app: 'slack',
+          connect: cluster,
+          remove: (owner) =>
+            asOwner(http().post(`/api/orgs/${owner ?? ''}/clusters/production/connect`)).send({
+              app: 'slack',
+            }),
+          status: 201,
+        },
+      ],
+    ];
+
+    const slotIn = (org: string, env: string, app: string, connection: string): request.Test =>
+      asOwner(http().put(`/api/environments/${env}/slots/${app}`), org).send({ connection_id: connection });
+
+    // Retried until the org delete reaches the environments one then two, by heap and by name, and the connection's own scan reaches its slot in two first.
+    const crossedSlots = async (
+      deleter: ConnectionDeleter,
+      connection: string,
+    ): Promise<{ org: string; one: string; two: string }> => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const created = await asOwner(http().post('/api/orgs')).send({ name: 'Crossed slots' }).expect(201);
+        const org = created.body.id as string;
+        const envIn = async (name: string): Promise<string> =>
+          (await asOwner(http().post('/api/environments'), org).send({ name }).expect(201)).body.id as string;
+        const one = await envIn(`a-one-${suffix()}`);
+        const two = await envIn(`b-two-${suffix()}`);
+        await slotIn(org, two, deleter.app, connection).expect(200);
+        await slotIn(org, one, deleter.app, connection).expect(200);
+        const scans = await db.query<{ envs: string[]; slots: string[] }>(
+          `SELECT (SELECT array_agg(id ORDER BY ctid) FROM environments WHERE org_id = $1) AS envs,
+                  (SELECT array_agg(environment_id ORDER BY ctid) FROM environment_connections
+                    WHERE connection_id = $2) AS slots`,
+          [org, connection],
+        );
+        const { envs, slots } = scans.rows[0]!;
+        if (envs.join() === [one, two].join() && slots.join() === [two, one].join()) return { org, one, two };
+        await deleteOrg(org).expect(200);
+      }
+      throw new Error('never got the two slots in the crossed heap orders');
+    };
+
+    it.each(DELETERS)(
+      '%s and an org delete, with the slot the org delete reaches first held, both complete',
+      async (_, deleter) => {
+        const { owner, connection } = await deleter.connect();
+        const { org, one } = await crossedSlots(deleter, connection);
+        const slotHolder = new Client({ connectionString: dbUrl });
+        await slotHolder.connect();
+        const before = await deadlocks();
+        try {
+          await slotHolder.query('BEGIN');
+          await slotHolder.query(
+            `SELECT 1 FROM environment_connections WHERE environment_id = $1 AND app = $2 FOR KEY SHARE`,
+            [one, deleter.app],
+          );
+          const orgDeleting = answer(deleteOrg(org));
+          await lockWaiters(1);
+          const removing = answer(deleter.remove(owner, connection));
+          await lockWaiters(2);
+          await slotHolder.query('COMMIT');
+          expect({ org: await orgDeleting, connection: await removing }).toEqual({
+            org: { status: 200, detail: undefined },
+            connection: { status: deleter.status, detail: undefined },
+          });
+        } finally {
+          await slotHolder.end();
+        }
+        const left = await db.query(
+          `SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1) AS org,
+                  EXISTS (SELECT 1 FROM connections WHERE id = $2) AS connection,
+                  (SELECT count(*)::int FROM environment_connections WHERE connection_id = $2) AS slots`,
+          [org, connection],
+        );
+        expect(left.rows[0]).toEqual({ org: false, connection: false, slots: 0 });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+
+    it('a slot assign started while a connection delete holds the connection waits for it and answers 404', async () => {
+      const t = await team('Assign beside a connection delete');
+      const { connection } = await personal();
+      const held = bounded(holdQuery(/FROM organizations\s+WHERE id IN/, 'after'), 'a connection delete');
+      try {
+        const removing = statusOf(asOwner(http().delete(`/api/connections/${connection}?force=true`)));
+        await held.arrived;
+        const assigning = answer(slotIn(t.org, t.env, 'gmail', connection));
+        await lockWaiters(1);
+        held.release();
+        expect(await removing).toBe(200);
+        expect(await assigning).toEqual({ status: 404, detail: 'Connection not found' });
+      } finally {
+        held.restore();
+      }
+      const slots = await db.query(`SELECT 1 FROM environment_connections WHERE connection_id = $1`, [
+        connection,
+      ]);
+      expect(slots.rows).toEqual([]);
+    });
   });
 
   it('a second org delete started while one is in flight waits for it and answers 404', async () => {

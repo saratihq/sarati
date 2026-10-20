@@ -154,6 +154,14 @@ function normalizeExecuteError(error: unknown): string | null {
 
 export type ManagedAccountStatus = 'pending' | 'active' | 'expired' | 'failed';
 
+/** A minted Connect Link. */
+export interface ComposioLink {
+  redirectUrl: string;
+  connectedAccountId: string;
+  /** Deletes the account the link created with the key that minted it, which a deleted org no longer has; logs, never throws. */
+  discard: () => Promise<void>;
+}
+
 /** Composio itself failed (network, 5xx, unexpected shape) — a gateway problem, not the caller's. */
 export class ComposioUpstreamError extends DomainError {
   constructor(message: string) {
@@ -271,12 +279,9 @@ export class ComposioProvider {
   }
 
   /** Mint a hosted Connect Link for the user (managed configs REQUIRE this flow). */
-  async createLink(
-    scope: PlatformKeyScope,
-    userId: string,
-    authConfigId: string,
-  ): Promise<{ redirectUrl: string; connectedAccountId: string }> {
-    const body = await this.request(scope, 'POST', '/api/v3/connected_accounts/link', {
+  async createLink(scope: PlatformKeyScope, userId: string, authConfigId: string): Promise<ComposioLink> {
+    const apiKey = await this.requireApiKey(scope);
+    const body = await this.send(apiKey, 'POST', '/api/v3/connected_accounts/link', {
       auth_config_id: authConfigId,
       user_id: userId,
     });
@@ -287,7 +292,19 @@ export class ComposioProvider {
     ) {
       throw new ComposioUpstreamError('Composio connect-link response was missing redirect_url');
     }
-    return { redirectUrl: body.redirect_url, connectedAccountId: body.connected_account_id };
+    const connectedAccountId = body.connected_account_id;
+    const discard = async (): Promise<void> => {
+      try {
+        await this.send(
+          apiKey,
+          'DELETE',
+          `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
+        );
+      } catch (err) {
+        this.logger.warn(`Composio account ${connectedAccountId} could not be deleted: ${errorMessage(err)}`);
+      }
+    };
+    return { redirectUrl: body.redirect_url, connectedAccountId, discard };
   }
 
   /** Poll a connected account: INITIALIZING/INITIATED/PENDING → pending, ACTIVE → active, EXPIRED → expired, else failed. */
@@ -538,7 +555,15 @@ export class ComposioProvider {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
-    const apiKey = await this.requireApiKey(scope);
+    return this.send(await this.requireApiKey(scope), method, path, body);
+  }
+
+  private async send(
+    apiKey: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
     let statusCode: number;
     let text: string;
     try {

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { DomainError } from '../common/domain-error';
 import { ComposioProvider } from './composio.provider';
-import { ConnectionsService } from './connections.service';
+import { ConnectionsService, type ConnectionSummary } from './connections.service';
 import { isExecutableApp } from './managed-app-rails';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
@@ -119,19 +119,21 @@ export class ManagedConnectionsService {
       throw new DomainError(`App "${app}" is not available for managed connections`);
     }
     const authConfigId = await this.composio.ensureAuthConfig(scope, toComposioSlug(app));
-    const { redirectUrl, connectedAccountId } = await this.composio.createLink(
-      scope,
-      ownerUserId,
-      authConfigId,
-    );
-    const connection = await this.connections.createManaged(ownerUserId, app, connectedAccountId, {
-      orgId,
-      environment,
-    });
+    const link = await this.composio.createLink(scope, ownerUserId, authConfigId);
+    let connection: ConnectionSummary;
+    try {
+      connection = await this.connections.createManaged(ownerUserId, app, link.connectedAccountId, {
+        orgId,
+        environment,
+      });
+    } catch (err) {
+      await link.discard();
+      throw err;
+    }
     this.logger.log(
       `Cluster connect started: ${app} → ${environment} cluster of org ${orgId} (connection ${connection.id})`,
     );
-    return { connectionId: connection.id, redirectUrl };
+    return { connectionId: connection.id, redirectUrl: link.redirectUrl };
   }
 
   /**
