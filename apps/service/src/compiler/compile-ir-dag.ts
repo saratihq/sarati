@@ -13,6 +13,7 @@ import type {
 } from '../runtime/dag-plan';
 import { isRecord } from '../common/json-util';
 import { toDagCodeNode } from './code-node';
+import { assertStepKeyId } from './step-key-id';
 import {
   INTERNAL_ACTION_TYPE,
   PUBLIC_ACTION_TYPE,
@@ -104,6 +105,7 @@ function isSwitchNode(node: IRNode): boolean {
  *   pointing at it is a hard error; undefined skips the check.
  */
 export function compileWorkflowIrDag(ir: WorkflowIR, enclosingWorkflowId?: string): DagPlan {
+  for (const node of ir.nodes) assertStepKeyId(node.id);
   const byId = new Map(ir.nodes.map((n) => [n.id, n]));
   const nameToId = new Map(ir.nodes.map((n) => [n.name, n.id]));
   const triggerIds = new Set(ir.nodes.filter(isTriggerNode).map((n) => n.id));

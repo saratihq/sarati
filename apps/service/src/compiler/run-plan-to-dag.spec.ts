@@ -1,4 +1,5 @@
-import { PassThroughDurableStep, RunCancelledError, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep } from '../providers/durable-step';
+import { substrate } from '../providers/durable-step.testkit';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagActionNode, DagForEachNode, DagIfNode, DagParallelNode, DagPlan } from '../runtime/dag-plan';
@@ -162,6 +163,22 @@ describe('runPlanToDag — structure', () => {
       expect(() => runPlanToDag({ id: 'squat', nodes })).toThrow(
         'Wait for event "ask" can\'t use the topic "orchestr:timer:x" — it is reserved for timed waits',
       );
+    }
+  });
+
+  it('refuses a node id holding a character step keys are built from, wherever it is nested', () => {
+    for (const id of ['a|b', 'a/b', 'a#b', 'a:b']) {
+      const shapes: Array<RunPlan['nodes']> = [
+        [act(id)],
+        [{ kind: 'if', id: 'gate', condition: { op: 'truthy', left: '{{x}}' }, then: [], else: [act(id)] }],
+        [{ kind: 'parallel', id: 'fork', branches: [[act('a')], [act(id)]] }],
+        [{ ...act('boom'), onErrorBranch: [act(id)] } as RunPlan['nodes'][number]],
+      ];
+      for (const nodes of shapes) {
+        expect(() => runPlanToDag({ id: 'keys', nodes })).toThrow(
+          `Node id "${id}" can't contain "|", "/", "#" or ":" — they build its step's key`,
+        );
+      }
     }
   });
 
@@ -351,19 +368,13 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
 
   it('delay: pauses via the DurableStep between actions', async () => {
     const sleeps: Array<{ name: string; ms: number }> = [];
-    const recording: DurableStep = {
-      run: (_n, fn) => fn(),
+    const recording = substrate({
       sleep: (name, ms) => {
         sleeps.push({ name, ms });
         return Promise.resolve();
       },
-      waitForEvent: () => Promise.resolve(null),
-      waitInStep: () => Promise.resolve(),
-      isCancellation: () => false,
-      isFatal: () => false,
-      throwIfCancelled: () => undefined,
-      cancelSeenOnRow: () => new RunCancelledError(),
-    };
+      receive: () => Promise.resolve(null),
+    });
     const plan: RunPlan = {
       id: 'd',
       nodes: [act('before'), { kind: 'delay', id: 'wait', ms: 50 }, act('after')],
@@ -374,19 +385,14 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
 
   it('pinning: a pinned action replays its output and never calls the provider', async () => {
     const seen: string[] = [];
-    const recording: DurableStep = {
+    const recording = substrate({
       run: <T>(name: string, fn: () => Promise<T>) => {
         seen.push(name);
         return fn();
       },
       sleep: () => Promise.resolve(),
-      waitForEvent: () => Promise.resolve(null),
-      waitInStep: () => Promise.resolve(),
-      isCancellation: () => false,
-      isFatal: () => false,
-      throwIfCancelled: () => undefined,
-      cancelSeenOnRow: () => new RunCancelledError(),
-    };
+      receive: () => Promise.resolve(null),
+    });
     const plan: RunPlan = {
       id: 'pin',
       nodes: [act('fetch'), act('push', { up: '{{fetch.id}}' })],
@@ -403,19 +409,14 @@ describe('runPlanToDag — execution (raw plans run correctly on the one engine)
 
   it('durable keys stay path-scoped across a forEach (stable across replay)', async () => {
     const seen: string[] = [];
-    const recording: DurableStep = {
+    const recording = substrate({
       run: <T>(name: string, fn: () => Promise<T>) => {
         seen.push(name);
         return fn();
       },
       sleep: () => Promise.resolve(),
-      waitForEvent: () => Promise.resolve(null),
-      waitInStep: () => Promise.resolve(),
-      isCancellation: () => false,
-      isFatal: () => false,
-      throwIfCancelled: () => undefined,
-      cancelSeenOnRow: () => new RunCancelledError(),
-    };
+      receive: () => Promise.resolve(null),
+    });
     const plan: RunPlan = {
       id: 'p',
       nodes: [

@@ -105,7 +105,8 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
     // Audit trail for a side-effecting shared-slot feature: what ran, which version, and as whom.
     this.logger.log(
       `sub-workflow → "${wf.name}" (${wf.id}) v=${versionId} depth=${depth} ` +
-        `as user=${ctx.externalUserId} env=${ctx.environment ?? 'default'} budget_left=${ctx.budget.remaining}`,
+        `as user=${ctx.externalUserId} env=${ctx.environment ?? 'default'}` +
+        (ctx.budgetCharged ? '' : ` budget_left=${ctx.budget.remaining}`),
     );
     const result = await this.runs.runSubWorkflowNested(plan, {
       externalUserId: ctx.externalUserId,
@@ -121,7 +122,12 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
       orgId: ctx.orgId,
       dryRun: ctx.dryRun,
       subWorkflowDepth: depth,
-      subWorkflowBudget: ctx.budget, // the SAME counter — shared by reference across the whole tree
+      // The legacy engine's in-memory counter, shared by reference across the whole tree.
+      subWorkflowBudget: ctx.budget,
+      ownErrorLanePaths: ctx.ownErrorLanePaths,
+      budgetCharged: ctx.budgetCharged,
+      subWorkflowRoot: ctx.rootRunId,
+      lineage: ctx.lineage,
     });
 
     // The tool result is the terminal-node output, by the SAME rule the chat intake uses —

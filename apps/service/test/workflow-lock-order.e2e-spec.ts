@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
+import { EntityManager } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
@@ -12,6 +13,7 @@ import { NOT_RESUMABLE, RecoveryGuard } from '../src/dbos/recovery-guard';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
+import { MAX_SUB_WORKFLOW_INVOCATIONS } from '../src/runtime/base-plan-interpreter';
 import { eventTopicFor } from '../src/runtime/event-wait';
 import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import type { ReviewTestSummary } from '../src/reviews/review-test.types';
@@ -1472,6 +1474,161 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         expect(await deadlocksSince(before)).toBe(0);
       },
     );
+
+    const chargeTo = (root: string, callKey: string, lineage: string[] = []): Promise<boolean> =>
+      app.get(RunRecorderService).chargeSubWorkflowCall(root, callKey, MAX_SUB_WORKFLOW_INVOCATIONS, lineage);
+    const chargeKeys = async (root: string): Promise<string[]> =>
+      (
+        await db.query<{ call_key: string }>(
+          `SELECT call_key FROM runtime_sub_workflow_charges WHERE root_run_id = $1 ORDER BY call_key`,
+          [root],
+        )
+      ).rows.map((row) => row.call_key);
+    const rootWrites = {
+      charge: {
+        sql: /INSERT INTO runtime_sub_workflow_charges/,
+        write: (root: string) => chargeTo(root, `${root}|agent`),
+        kept: (root: string) => [`${root}|agent`],
+      },
+      forget: {
+        sql: /DELETE FROM runtime_sub_workflow_charges/,
+        write: async (root: string) => {
+          await chargeTo(root, `${root}/child|agent`, [`${root}/child`]);
+          await app.get(RunRecorderService).forgetSubWorkflowCharges(root, `${root}/child`);
+          return true;
+        },
+        kept: () => [],
+      },
+    };
+
+    it.each([
+      ['a sub-workflow charge', 'a workflow', 'charge', 'workflow'],
+      ['a sub-workflow charge', 'an environment', 'charge', 'environment'],
+      ["a called run's forget of its charges", 'a workflow', 'forget', 'workflow'],
+      ["a called run's forget of its charges", 'an environment', 'forget', 'environment'],
+    ] as const)(
+      '%s held under its root’s lock finishes before %s delete, which then clears the run’s link',
+      async (_, __, write, kind) => {
+        const org = await workspace(`${write} then ${kind} delete`);
+        const wfId = await deploy(org, `${write} under delete`);
+        const env = kind === 'environment' ? await createEnv(org, `${write}-${suffix()}`) : undefined;
+        const id = await parkRun(`held-${write}-${suffix()}`, {
+          workflowId: wfId,
+          environmentId: env,
+          status: 'running',
+          waits: [],
+        });
+        const held = holdQuery(rootWrites[write].sql);
+        const before = await deadlocks();
+        try {
+          const writing = rootWrites[write].write(id);
+          await held.arrived;
+          const deleting = statusOf(env ? removeEnv(org, env) : remove(org, wfId));
+          await lockWaiters(1);
+          held.release();
+          expect(await writing).toBe(true);
+          expect(await deleting).toBe(200);
+        } finally {
+          held.restore();
+        }
+        expect(await chargeKeys(id)).toEqual(rootWrites[write].kept(id));
+        expect(await runOf(id)).toMatchObject(env ? { environment_id: null } : { workflow_id: null });
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
+
+    it('a cancel waits on a sub-workflow charge held under its run’s lock, then cancels the run', async () => {
+      const org = await workspace('Charge then cancel');
+      const runId = `held-charge-cancel-${suffix()}`;
+      const id = await parkRun(runId, { waits: [{ key: 'approve', topic: 'approval', due: OPEN }] });
+      const held = holdQuery(rootWrites.charge.sql);
+      const before = await deadlocks();
+      try {
+        const charging = chargeTo(id, `${id}|agent`);
+        await held.arrived;
+        const cancelling = statusOf(as(http().post(`/api/runs/${runId}/cancel`), org));
+        await lockWaiters(1);
+        held.release();
+        expect(await charging).toBe(true);
+        expect(await cancelling).toBe(200);
+      } finally {
+        held.restore();
+      }
+      expect((await runOf(id)).status).toBe('cancelled');
+      expect(await chargeKeys(id)).toEqual([`${id}|agent`]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a crashed-run pass waits on a sub-workflow charge held under its run’s lock, then reaps the run', async () => {
+      const id = await parkRun(`held-charge-reap-${suffix()}`, { status: 'running', waits: [] });
+      const held = holdQuery(rootWrites.charge.sql);
+      const before = await deadlocks();
+      try {
+        const charging = chargeTo(id, `${id}|agent`);
+        await held.arrived;
+        const reaping = app.get(RunReaperService).reapStale();
+        await lockWaiters(1);
+        held.release();
+        expect(await charging).toBe(true);
+        expect((await reaping).crashedRuns).toBeGreaterThanOrEqual(1);
+      } finally {
+        held.restore();
+      }
+      expect((await runOf(id)).status).toBe('error');
+      expect(await chargeKeys(id)).toEqual([`${id}|agent`]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    const CHARGERS = 5;
+    it(`${CHARGERS} charges from as many called runs, queued behind one held at its insert, allow exactly the one call the cap has left`, async () => {
+      const root = await parkRun(`cap-root-${suffix()}`, { status: 'running', waits: [] });
+      const callers: string[] = [];
+      for (let i = 0; i < CHARGERS; i++) {
+        callers.push(await parkRun(`cap-caller-${suffix()}`, { status: 'running', waits: [] }));
+      }
+      await db.query(
+        `INSERT INTO runtime_sub_workflow_charges (root_run_id, call_key, allowed)
+         SELECT $1, 'seeded|' || g, true FROM generate_series(1, $2::int) g`,
+        [root, MAX_SUB_WORKFLOW_INVOCATIONS - 1],
+      );
+      const query = EntityManager.prototype.query;
+      const opened = deferred();
+      let inserted = 0;
+      // Each charge's insert runs, then its transaction stays open until the gate opens.
+      const spy = jest.spyOn(EntityManager.prototype, 'query').mockImplementation(async function (
+        this: EntityManager,
+        text: string,
+        params?: Parameters<EntityManager['query']>[1],
+      ) {
+        const result: unknown = await query.call(this, text, params);
+        if (rootWrites.charge.sql.test(text)) {
+          inserted++;
+          await opened.promise;
+        }
+        return result;
+      });
+      try {
+        const charging = callers.map((caller) => chargeTo(root, `${caller}|agent`, [caller]));
+        const queued = async (): Promise<boolean> => {
+          const { rows } = await db.query(
+            `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          );
+          return inserted === 1 && rows.length >= CHARGERS - 1;
+        };
+        for (let i = 0; i < 200 && inserted < CHARGERS && !(await queued()); i++) await pause(25);
+        expect(inserted === CHARGERS || (await queued())).toBe(true);
+        opened.resolve();
+        expect((await Promise.all(charging)).filter(Boolean)).toHaveLength(1);
+      } finally {
+        opened.resolve();
+        spy.mockRestore();
+      }
+      const { rows } = await db.query<{ allowed: number }>(
+        `SELECT count(*)::int AS allowed FROM runtime_sub_workflow_charges WHERE root_run_id = $1 AND allowed`,
+        [root],
+      );
+      expect(rows[0]!.allowed).toBe(MAX_SUB_WORKFLOW_INVOCATIONS);
+    });
   });
 
   describe('a workflow delete and an environment delete over a run they share', () => {

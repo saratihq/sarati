@@ -35,7 +35,7 @@ function terminalLeafIds(ir: WorkflowIR): string[] {
 function lastExecutedLeaf(leaves: string[], trace: TraceEntry[]): string {
   const leafSet = new Set(leaves);
   for (let i = trace.length - 1; i >= 0; i--) {
-    if (leafSet.has(trace[i]!.nodeId)) return trace[i]!.nodeId;
+    if (leafSet.has(trace[i]!.node)) return trace[i]!.node;
   }
   return leaves[leaves.length - 1]!;
 }

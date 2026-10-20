@@ -23,36 +23,47 @@ Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`
 
 Sarati runs as one instance. An upgrade stops it and starts the new version on the same data, and runs
 in flight carry on where they were: a run waiting for an approval or on a **Wait** step keeps waiting.
-The exception is a run that can't be resumed safely — one that had already run steps side by side
-(parallel branches, or steps that start at the same time), or whose AI Agent step was refused a
-sub-workflow call and carried on: it [ends in `error`](/run/runs/#durability) as the new version
-starts, saying why, and none of its steps runs again. A restart treats it the same way. Let those
-runs finish first, or run them again after.
+The exception is a run an earlier version started that can't be resumed safely — one that had
+already run steps side by side (parallel branches, or steps that start at the same time), whose AI
+Agent step was refused a sub-workflow call and carried on, or whose history doesn't fit its workflow:
+it [ends in `error`](/run/runs/#durability) as the new version starts, saying why, and none of its
+steps runs again. A restart treats it the same
+way. Let those runs finish first, or run them again after. Runs this version starts resume where they
+were, through later restarts and upgrades.
 
-The boot log counts them, for example
-`Runs in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
+The boot log counts the runs an earlier version started that are in flight, for example
+`Runs an earlier version started, in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
 and names each one that fails at warn level with its reason, followed by a `RunNotResumable` error
-and its stack trace: that is the run ending, not the service failing. From v0.2.24 on, you can list
-them before you restart or upgrade:
+and its stack trace: that is the run ending, not the service failing. Runs this version started are
+not counted there, as only a run an earlier version started is judged this way. From v0.2.24 on, you
+can list them before you restart or upgrade:
 
 ```bash
 cd sarati && docker compose exec sarati sarati-legacy-report
 ```
 
-It only reads, and prints each run in flight as `would resume` or `would fail` with the reason, or
-`already ended` for one that had finished or been cancelled but not yet stopped, which stays as it
-ended. A run can still move on between the report and the restart, so each is judged again as it
-resumes. On a five-container install it is `docker compose exec service` instead; running it by hand,
-`docker exec sarati`.
+It only reads, and prints each run an earlier version started that is in flight as `would resume`
+or `would fail` with the reason, or `already ended` for one that had finished or been cancelled but
+not yet stopped, which stays as it ended. A run can still move on between the report and the
+restart, so each is judged again as it resumes. On a five-container install it is
+`docker compose exec service` instead; running it by hand, `docker exec sarati`.
 
 ### Going back
 
 Set `SARATI_VERSION` to the earlier version and upgrade again.
 
-On the earlier version, a run keeps its waits only if none of them runs beside another step: approvals
-that come one after another, even on the same topic, and a wait inside a loop. Let any run with
-parallel branches, or with steps that start side by side, finish before going back, even when only
-one of its approvals shows in the inbox. There it can lose that approval, put a decision on the wrong
+A run this version started doesn't carry on on v0.2.24, which logs at boot that it can't recover it.
+It stays in flight there: its approvals stay listed, and a decision made there is taken when you come
+back to this version, which picks the run up where it was. Three things end it there in an error,
+and coming back leaves it that way, running nothing more: an approval whose window passes, a **Wait**
+step still parked `RUN_MAX_DURATION_SECONDS` after its time is up, and a step it was running when you
+went back, once the run has been in flight for `RUN_MAX_DURATION_SECONDS`. Come back before any of
+them to keep such runs: a **Wait** step whose time came while you were away then wakes.
+
+A run an earlier version started carries on there, and keeps its waits only if none of them runs
+beside another step: approvals that come one after another, even on the same topic, and a wait inside
+a loop. Let any such run with parallel branches, or with steps that start side by side, finish before
+going back, even when only one of its approvals shows in the inbox. There it can lose that approval, put a decision on the wrong
 wait, or end in an error. So can a run with two approvals on one topic, neither waiting for the other,
 when the **If** and **Switch** steps before either of them have more than 4096 combinations of routes,
 even if the two never wait at the same time.
@@ -91,6 +102,25 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
+### v0.2.25: runs with parallel branches resume as they ran
+
+Runs this version starts resume after a crash, a restart or an upgrade where they were, parallel
+branches included. A run an earlier version started goes on as [v0.2.24](#v0224-moving-to-this-version)
+describes.
+
+What a caller of the API sees change:
+
+- **A raw plan's node ids keep to the rule a saved workflow's do:** letters, digits, `_` and `-`, at
+  most 60 characters, starting with a letter or digit. `POST /api/runs` and `POST /api/runs/async`
+  refuse a plan with any other id with `400` and the code `compile_failed` before any step runs.
+- **A document handed to `POST /api/runs/from-ir`, to `POST /api/runs/async` as `workflow_ir`, or to
+  MCP's `orchestr_test_workflow` is checked as a save checks it.** One with a step type no catalog
+  knows, or an id outside that rule, is refused before any step runs.
+- **A step in an error lane is keyed under the step that failed into it**, as `<that step's id>#error/<its
+  id>`: in a run's `steps[].step_key`, in its waits in the inbox, and in a decision aimed at a
+  `step_key`. A run an earlier version started keeps the keys it had.
+- **A delay of 10 to 60 seconds ends within about ten seconds of a cancel**, where it used to run out.
+
 ### v0.2.24: moving to this version
 
 **Five containers: re-run the installer.** The stack file changed — part of the rate-limit fix below
@@ -98,7 +128,8 @@ is in `docker-compose.yaml` and `docker/Caddyfile`, which only the installer ref
 `docker compose pull` alone is not enough this time. One container needs only the new image.
 
 **A run that can't be resumed safely now ends in an error when it resumes** — one that had already
-run steps side by side, or whose AI Agent step was refused a sub-workflow call and carried on. It
+run steps side by side, whose AI Agent step was refused a sub-workflow call and carried on, or whose
+history doesn't fit its workflow. It
 used to resume, and could then put a step's result or a decision in the wrong place, or end in an
 error later. The runs in flight as you upgrade are judged the same way when this version first
 starts, and its boot log says how many will fail. Earlier versions can't list them for you, so let

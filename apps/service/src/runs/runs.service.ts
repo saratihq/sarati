@@ -7,6 +7,8 @@ import { LessThan, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { nodeIdProblem, validateAuthoredIr } from '../compose/author-validation';
+import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import type { EnvConfig } from '../config/env.config';
 import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
@@ -33,7 +35,7 @@ import {
 } from '../runtime/run-recorder.service';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
-import type { RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
+import type { RunNode, RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
 import { isTimerWait, TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
 import { eventMessage } from '../runtime/event-wait';
 import { reachesRun, runReachSql, type RunAccess } from './run-access';
@@ -85,6 +87,8 @@ export interface RunDispatchOptions {
   dryRun?: boolean;
   /** SCOPED `workflow:env:session` key the agent loop streams steps to; unset → no streaming. */
   chatChannelKey?: string | null;
+  /** A document the caller wrote, which faces the author-time gate a commit does before it compiles. */
+  authored?: boolean;
 }
 
 /** Dispatch options for the IR entry points, which additionally resolve the caller's org. */
@@ -254,6 +258,26 @@ export type RunDetail = RunStatus & {
   waiting: RunWaiting | null;
 };
 
+function childLists(node: RunNode): RunNode[][] {
+  switch (node.kind) {
+    case 'if':
+      return [node.then, node.else ?? []];
+    case 'forEach':
+      return [node.body];
+    case 'parallel':
+      return node.branches;
+    case 'action':
+    case 'code':
+      return [node.onErrorBranch ?? []];
+    default:
+      return [];
+  }
+}
+
+function runPlanIds(nodes: RunNode[]): string[] {
+  return nodes.flatMap((node) => [node.id, ...childLists(node).flatMap(runPlanIds)]);
+}
+
 /**
  * Front door for executing a RunPlan: durably via DBOS when `DBOS_ENABLED`, else directly
  * through the interpreter (approvals then pause in-memory and die with the process).
@@ -273,6 +297,7 @@ export class RunsService {
     @InjectDataSource() @Optional() private readonly dataSource?: DataSource,
     @Optional() private readonly recorder?: RunRecorderService,
     @Optional() private readonly agentStepBus?: AgentStepBus,
+    @Optional() private readonly catalog?: ComposeCatalogService,
   ) {
     this.dbosEnabled = config.get('env', { infer: true }).dbosEnabled;
   }
@@ -422,9 +447,16 @@ export class RunsService {
       dryRun?: boolean;
       subWorkflowDepth: number;
       subWorkflowBudget: { remaining: number };
+      ownErrorLanePaths: boolean;
+      budgetCharged: boolean;
+      subWorkflowRoot: string;
+      /** The runs between the root and the caller, the caller last. */
+      lineage: readonly string[];
     },
   ): Promise<RunResult> {
     const scoped = this.scopedRunId(opts.externalUserId, opts.runId);
+    // A called run runs again whole after its caller's step is cut off: its earlier attempt's charges go first.
+    if (opts.budgetCharged) await this.recorder?.forgetSubWorkflowCharges(opts.subWorkflowRoot, scoped);
     await this.recorder?.runStarted(scoped, opts.runId, opts.externalUserId, plan, {
       workflowId: opts.workflowId,
       workflowVersionId: opts.workflowVersionId,
@@ -453,6 +485,10 @@ export class RunsService {
           dryRun: opts.dryRun,
           subWorkflowDepth: opts.subWorkflowDepth,
           subWorkflowBudget: opts.subWorkflowBudget,
+          ownErrorLanePaths: opts.ownErrorLanePaths,
+          budgetCharged: opts.budgetCharged,
+          subWorkflowRoot: opts.subWorkflowRoot,
+          subWorkflowLineage: [...opts.lineage, scoped],
         });
       } finally {
         this.waiters.delete(scoped);
@@ -495,9 +531,20 @@ export class RunsService {
     };
   }
 
+  private assertAuthored(source: PlanSource): void {
+    if (!this.catalog) throw new Error('no catalog to check the document against');
+    const problem =
+      'ir' in source
+        ? validateAuthoredIr(source.ir as unknown as Record<string, unknown>, this.catalog.facts()).errors[0]
+            ?.message
+        : runPlanIds(source.plan.nodes).map(nodeIdProblem).find(Boolean);
+    if (problem) throw new Error(problem);
+  }
+
   /** Compile what a run start was given; one that can't compile is answered 400 before any step runs, and recorded as refused unless its id already holds a run. */
   private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
+      if (opts.authored) this.assertAuthored(source);
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
       return 'ir' in source
         ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)
