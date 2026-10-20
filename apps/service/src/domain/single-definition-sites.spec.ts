@@ -98,24 +98,40 @@ function literalText(node: ts.Node): string | undefined {
 }
 
 const keyName = (name: ts.PropertyName): string => name.getText().replace(/[[\]'"`]/g, '');
+const LOGICAL = new Set([
+  ts.SyntaxKind.AmpersandAmpersandToken,
+  ts.SyntaxKind.BarBarToken,
+  ts.SyntaxKind.QuestionQuestionToken,
+]);
 
-// Whether a `held` key sits in query criteria: under a `where`, or in an object handed to a criteria call.
+// Whether `node` hands `from` on unchanged as criteria: an object or array, a property, a spread, parentheses, a cast, `!`, a conditional's branch, or either side of `&&`, `||` or `??`.
+function handsOn(node: ts.Node, from: ts.Node): boolean {
+  if (ts.isConditionalExpression(node)) return node.condition !== from;
+  if (ts.isBinaryExpression(node)) return LOGICAL.has(node.operatorToken.kind);
+  return (
+    ts.isObjectLiteralExpression(node) ||
+    ts.isArrayLiteralExpression(node) ||
+    ts.isPropertyAssignment(node) ||
+    ts.isSpreadAssignment(node) ||
+    ts.isSpreadElement(node) ||
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isNonNullExpression(node)
+  );
+}
+
+// Whether a `held` key sits in query criteria: under a `where`, or in an object handed to a criteria call, through whatever hands it on.
 function inCriteria(key: ts.Node): boolean {
   for (let at: ts.Node = key; at.parent; at = at.parent) {
-    if (ts.isPropertyAssignment(at) && at !== key && keyName(at.name) === 'where') return true;
-    const call = at.parent;
-    if (ts.isCallExpression(call) && call.arguments.some((a) => a === at)) {
-      const name = callName(call);
-      return QUERY_CALLS.has(name) || (name === 'update' && call.arguments.at(-1) !== at);
+    const up = at.parent;
+    if (ts.isCallExpression(up) && up.arguments.some((a) => a === at)) {
+      const name = callName(up);
+      return QUERY_CALLS.has(name) || (name === 'update' && up.arguments.at(-1) !== at);
     }
-    if (
-      !ts.isObjectLiteralExpression(at) &&
-      !ts.isArrayLiteralExpression(at) &&
-      at !== key &&
-      !ts.isPropertyAssignment(at)
-    ) {
-      return false;
-    }
+    if (ts.isPropertyAssignment(up) && keyName(up.name) === 'where') return true;
+    if (!handsOn(up, at)) return false;
   }
   return false;
 }
@@ -239,7 +255,7 @@ describe('vault: one definition site per load-bearing question', () => {
   });
 
   /** Constitution #11: the guard above reads the `held` column in every form of SQL and query criteria listed in row 11. */
-  it('finds the held column in SQL and query criteria in any case, quoting, alias or expression, and nowhere else', () => {
+  it('finds the held column in SQL and query criteria in any case, quoting, alias, expression or wrapper, and not in values, copy or parameters', () => {
     const sql = (statement: string): string => `rawMutateReturning(em, \`${statement}\`, [id]);`;
     const named = [
       sql(
@@ -264,6 +280,17 @@ describe('vault: one definition site per load-bearing question', () => {
       "em.update(RuntimeTriggerActivationEntity, { id, 'held': false }, { lastError });",
       'qb.where({ held: false });',
       "em.find(RuntimeTriggerActivationEntity, { 'where': { ['held']: true } });",
+      'em.find(RuntimeTriggerActivationEntity, { where: live ? { paused: false, held: false } : { paused: false } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false } as FindOptionsWhere<Activation> });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false } satisfies FindOptionsWhere<Activation> });',
+      'em.find(RuntimeTriggerActivationEntity, { where: <FindOptionsWhere<Activation>>{ held: false } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: ({ held: false }) });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false }! });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { paused: false, ...(live && { held: false }) } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { paused: false, ...(live ? { held: false } : {}) } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: [...(live ? [{ held: false }] : [])] });',
+      'em.find(RuntimeTriggerActivationEntity, { where: given ?? { held: false } });',
+      'em.update(RuntimeTriggerActivationEntity, live ? { id, held: false } : { id }, { lastError });',
     ];
     const unnamed = [
       "client.query(\"SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'\");",
@@ -274,6 +301,8 @@ describe('vault: one definition site per load-bearing question', () => {
       "const copy = `${env}'s account isn't active, so it is held: what it sends still starts runs`;",
       sql('SELECT held_back, withheld FROM runtime_trigger_activations'),
       "qb.where('a.id = :id', { id: 'held' });",
+      'em.update(RuntimeTriggerActivationEntity, { id }, live ? { held: true } : { lastError });',
+      'const shown = live ? { held: true } : {};',
     ];
 
     expect(named.filter((source) => heldInQueries(source).length !== 1)).toEqual([]);

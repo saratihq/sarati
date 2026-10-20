@@ -7,7 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
-import { Client } from 'pg';
+import { Client, type Pool } from 'pg';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -18,10 +18,12 @@ import type { EnvConfig } from '../src/config/env.config';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { RuntimeTriggerActivationEntity } from '../src/database/entities/runtime-trigger-activation.entity';
+import { WorkflowVersionEntity } from '../src/database/entities/workflow-version.entity';
 import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH, SdkWebhookProvider } from '../src/providers/sdk-webhook.provider';
+import { RunsService } from '../src/runs/runs.service';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import { withActivationLock } from '../src/triggers/activation-lock';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
@@ -1659,23 +1661,21 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
-  it('a Composio delivery recording its fire as its trigger is held decides under the activation’s lock, so the hold waits for it and its reason stands', async () => {
-    const { production, account, wf, live } = await liveTrigger('composio', 'decides under lock');
-    // Parks the delivery once it has read its row to decide what it records, before it writes.
+  it('a Composio delivery that claimed its row before its trigger was held writes nothing over the hold, so its reason stands', async () => {
+    const { production, account, wf, live } = await liveTrigger('composio', 'claimed before held');
+    // Parks the delivery once it has claimed its row and read it to decide what it records, before it writes.
     const parked = parkActivationRead(live.id);
     try {
-      const sent = composioEvent(live, 'decides_under_lock');
+      const sent = composioEvent(live, 'claimed_before_held');
       await parked.reached;
       await setStatus(account, 'expired');
-      let reconciled = false;
-      const holding = reconcile(wf).then(() => {
-        reconciled = true;
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({
+        held: true,
+        last_error: HELD('production', 'composio'),
       });
-      // The hold waits on the lock the delivery holds; were the delivery's decision not under it, the hold would land first.
-      await eventually(async () => expect(reconciled || (await advisoryWaits()) > 0).toBe(true));
       parked.release();
-      expect((await sent).status).toBe(202);
-      await holding;
+      expect((await sent).body).toMatchObject({ fired: 1 });
       expect(await activation(wf, production)).toMatchObject({
         held: true,
         last_error: HELD('production', 'composio'),
@@ -1685,25 +1685,33 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     }
   });
 
-  it('Composio deliveries to one activation record their fires side by side, so one deciding what it records leaves another’s failed fire recorded', async () => {
-    const { production, wf, live } = await liveTrigger('composio', 'side by side');
-    const parked = parkActivationRead(live.id);
-    try {
-      const first = composioEvent(live, 'side_first');
-      await parked.reached;
-      jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
-        throw new Error('the version does not compile');
-      });
-      const second = await composioEvent(live, 'side_second');
-      expect(second.status).toBe(202);
-      expect(second.body).toMatchObject({ fired: 0 });
-      expect(await activation(wf, production)).toMatchObject({ last_error: 'the version does not compile' });
-      parked.release();
-      expect((await first).body).toMatchObject({ fired: 1 });
-    } finally {
-      parked.restore();
-    }
-  });
+  it.each(['before it claims its row', 'once it has claimed its row'] as const)(
+    'a Composio delivery that arrived first and records %s, after a later one, leaves the later one’s failed fire recorded',
+    async (when) => {
+      const { production, wf, live } = await liveTrigger('composio', `recorded ${when}`);
+      const parked = when === 'before it claims its row' ? parkPointerRead(wf) : parkActivationRead(live.id);
+      try {
+        const first = composioEvent(live, `first_${when.length}`);
+        await parked.reached;
+        jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+          throw new Error('the version does not compile');
+        });
+        const second = await composioEvent(live, `second_${when.length}`);
+        expect(second.status).toBe(202);
+        expect(second.body).toMatchObject({ fired: 0 });
+        const recorded = await activation(wf, production);
+        expect(recorded).toMatchObject({ last_error: 'the version does not compile' });
+        parked.release();
+        expect((await first).body).toMatchObject({ fired: 1 });
+        expect(await activation(wf, production)).toMatchObject({
+          last_error: 'the version does not compile',
+          last_polled_at: recorded.last_polled_at,
+        });
+      } finally {
+        parked.restore();
+      }
+    },
+  );
 
   it('a burst of Composio deliveries while a reconcile holds their activation’s lock never waits for it: each answers, readiness stays up, and the row is that reconcile’s', async () => {
     const { production, wf, live } = await liveTrigger('composio', 'burst under reconcile');
@@ -1749,6 +1757,136 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       release();
       await healing;
     }
+  });
+
+  it('a Composio delivery that claimed its row before a reconcile took its activation’s lock records nothing while that reconcile holds it', async () => {
+    const { production, wf, live } = await liveTrigger('composio', 'claimed before reconcile');
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let arrive = (): void => undefined;
+    const reached = new Promise<void>((resolve) => (arrive = resolve));
+    subscribed.mockImplementationOnce(async () => {
+      arrive();
+      await gate;
+      return live.composio_trigger_instance_id!;
+    });
+    jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+      throw new Error('the version does not compile');
+    });
+    const parked = parkActivationRead(live.id);
+    let healing: Promise<void> | undefined;
+    try {
+      const sent = composioEvent(live, 'claimed_before_reconcile');
+      await parked.reached;
+      healing = reconcile(wf, { selfHeal: true });
+      await reached;
+      parked.release();
+      expect((await sent).body).toMatchObject({ fired: 0 });
+      expect(await activation(wf, production)).toMatchObject({ last_error: null });
+    } finally {
+      parked.restore();
+      release();
+      await healing;
+    }
+  });
+
+  it('Composio deliveries recording their fires while every data-source connection is busy take none of the pool readiness, reconciles and polls share, so readiness stays up', async () => {
+    const { production, wf, live } = await liveTrigger('composio', 'busy connections');
+    const BURST = 25;
+    const manager = app.get(DataSource).manager;
+    const own = (app.get(DataSource).driver as unknown as { master: Pool }).master;
+    const shared = app.get<Pool>(PG_POOL);
+    // Each delivery is held once it has read the version it fires, so it records only after every connection is taken.
+    let open = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    let read = 0;
+    const findNow = manager.findOne.bind(manager) as (entity: unknown, options: unknown) => Promise<unknown>;
+    const versionRead = jest.spyOn(manager, 'findOne').mockImplementation((async (
+      entity: unknown,
+      options: unknown,
+    ) => {
+      const found = await findNow(entity, options);
+      if (entity === WorkflowVersionEntity) {
+        read += 1;
+        await gate;
+      }
+      return found;
+    }) as unknown as typeof manager.findOne);
+    const dispatched = jest.spyOn(app.get(RunsService), 'runExecutable');
+    const checkouts = jest.spyOn(shared, 'connect');
+    const BUSY = 914_601;
+    let busy: Array<Promise<unknown>> = [];
+    try {
+      const sent = Array.from({ length: BURST }, (_, i) => composioEvent(live, `busy_${i}`));
+      await eventually(() => Promise.resolve(expect(read).toBe(BURST)));
+      await db.query('SELECT pg_advisory_lock($1)', [BUSY]);
+      busy = Array.from({ length: own.options.max ?? 20 }, () =>
+        app.get(DataSource).query('SELECT pg_advisory_xact_lock_shared($1)', [BUSY]),
+      );
+      await eventually(async () => expect(await advisoryWaits()).toBe(busy.length));
+      open();
+      await eventually(() => Promise.resolve(expect(dispatched).toHaveBeenCalledTimes(BURST)));
+      await eventually(() => Promise.resolve(expect(own.waitingCount).toBeGreaterThanOrEqual(BURST)));
+      expect(shared.totalCount - shared.idleCount).toBe(0);
+      expect(shared.waitingCount).toBe(0);
+      await http().get('/api/ready').expect(200);
+      await db.query('SELECT pg_advisory_unlock($1)', [BUSY]);
+      const answers = await Promise.all(sent);
+      expect(answers.map((res) => [res.status, (res.body as { fired: number }).fired])).toEqual(
+        Array.from({ length: BURST }, () => [202, 1]),
+      );
+      // Readiness's own check is the one connection taken.
+      expect(checkouts).toHaveBeenCalledTimes(1);
+      expect(await activation(wf, production)).toMatchObject({ last_error: null });
+      expect((await activation(wf, production)).last_polled_at).not.toBeNull();
+    } finally {
+      open();
+      await db.query('SELECT pg_advisory_unlock_all()');
+      await Promise.all(busy);
+      versionRead.mockRestore();
+      dispatched.mockRestore();
+      checkouts.mockRestore();
+    }
+  });
+
+  it('a Composio delivery to a subscription two activations share fires both, though one’s fire is not recorded', async () => {
+    const first = await liveTrigger('composio', 'shared first');
+    const second = await liveTrigger('composio', 'shared second');
+    // Composio dedupes on account, trigger and config, so two activations can hold one instance.
+    await db.query(`UPDATE runtime_trigger_activations SET composio_trigger_instance_id = $1 WHERE id = $2`, [
+      first.live.composio_trigger_instance_id,
+      second.live.id,
+    ]);
+    const manager = app.get(DataSource).manager;
+    const queryNow = manager.query.bind(manager) as (sql: string, params?: unknown[]) => Promise<unknown>;
+    let failed = false;
+    const recording = jest.spyOn(manager, 'query').mockImplementation((async (
+      sql: string,
+      params?: unknown[],
+    ) => {
+      if (!failed && sql.includes('SET last_polled_at')) {
+        failed = true;
+        throw new Error('the connection was lost');
+      }
+      return queryNow(sql, params);
+    }) as unknown as typeof manager.query);
+    try {
+      const sent = await composioEvent(first.live, 'shared_instance');
+      expect(sent.status).toBe(202);
+      expect(sent.body).toMatchObject({ fired: 2 });
+      expect(failed).toBe(true);
+    } finally {
+      recording.mockRestore();
+    }
+    await eventually(async () => {
+      expect(await triggerRuns(first.wf)).toHaveLength(1);
+      expect(await triggerRuns(second.wf)).toHaveLength(1);
+    });
+    const polled = [
+      await activation(first.wf, first.production),
+      await activation(second.wf, second.production),
+    ];
+    expect(polled.filter((row) => row.last_polled_at !== null)).toHaveLength(1);
   });
 
   it.each(['retyped to a schedule', 'deleted with its workflow'])(
