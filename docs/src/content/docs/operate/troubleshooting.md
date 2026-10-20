@@ -283,8 +283,9 @@ Under an environment the message names it instead —
 `production has no gmail account assigned, so "Email me the report" can't run there`,
 `production's gmail account is for slack`, `production's slack account uses its own credentials`, or
 `production's gmail account isn't active` — and an owner assigns or reassigns one under
-**Integrations → Environments**. An account that isn't active is also mended by its owner
-reconnecting it under **Integrations**.
+**Integrations → Environments**. An account that isn't active is also mended once its owner's
+**Test** under **Integrations** finds it working; **Reconnect** connects a new account, which the
+slot holds only once an owner assigns it there.
 
 ## An AI Agent step says it has no Claude account
 

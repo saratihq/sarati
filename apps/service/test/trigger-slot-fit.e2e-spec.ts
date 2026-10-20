@@ -1504,6 +1504,90 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     ).toMatchObject({ fired: 1 });
   });
 
+  it('renaming an environment is refused for a webhook whose account a check found failed, before any URL change is asked to be confirmed and with them confirmed, and asks for them once the account works again', async () => {
+    const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+    const { org, staging } = await workspace('rename failed');
+    const account = await fitting('webhook');
+    await db.query(`UPDATE connections SET display_name = 'Payments' WHERE id = $1`, [account]);
+    await assignSlot(org, staging, appSlug, account);
+    const promoted = async (doc: Record<string, unknown>): Promise<string> => {
+      const { wf, v1 } = await deploy(org, doc);
+      await asA(
+        http()
+          .post(`/api/workflows/${wf}/promote`)
+          .set('X-Org-Id', org)
+          .send({ environment: 'staging', version_id: v1 }),
+      ).expect(201);
+      await reconcile(wf);
+      return wf;
+    };
+    const charges = await promoted({ ...triggerDoc(nodeType, name, props), name: 'Charges' });
+    const live = await activation(charges, staging);
+    expect(live).toMatchObject({ connection_id: account, last_error: null });
+    const hook = (
+      (await storeOf(live.id))['webhook.registration'] as { registration: { subscriptionId: string } }
+    ).registration.subscriptionId;
+    const inbox = await promoted({ ...triggerDoc('orchestr:webhook', 'Incoming', {}), name: 'Inbox' });
+    const urlChanges = [
+      {
+        workflow_id: inbox,
+        trigger: 'webhook',
+        from: `/api/hooks/${inbox}/staging`,
+        to: `/api/hooks/${inbox}/qa`,
+      },
+    ];
+    const rename = (confirmed?: typeof urlChanges): request.Test =>
+      asA(
+        http()
+          .patch(`/api/environments/${staging}`)
+          .set('X-Org-Id', org)
+          .send({ name: 'qa', ...(confirmed ? { confirm_url_changes: confirmed } : {}) }),
+      );
+    const refusal = {
+      detail: `Renaming 'staging' would leave "${name}" in "Charges" registered at its old URL, which serves nothing, because the stripe account it was registered with (Payments) isn't active — before renaming, its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`,
+      held_webhooks: [
+        {
+          workflow_id: charges,
+          workflow_name: 'Charges',
+          node_id: 'watch',
+          node_name: name,
+          app: 'stripe',
+          connection_id: account,
+          account_label: 'Payments',
+        },
+      ],
+    };
+    const check = async (): Promise<unknown> =>
+      (await asA(http().post(`/api/connections/${account}/test`)).expect(200)).body;
+    const [calledUp, calledDown] = [standUps(), teardowns()];
+
+    const credential = (
+      await db.query<{ credential: string }>(`SELECT credential FROM connections WHERE id = $1`, [account])
+    ).rows[0]!.credential;
+    await db.query(`UPDATE connections SET credential = '' WHERE id = $1`, [account]);
+    expect(await check()).toMatchObject({ ok: false, status: 'failed' });
+
+    const unconfirmed = await rename().expect(409);
+    expect(unconfirmed.body).toMatchObject(refusal);
+    expect(unconfirmed.body).not.toHaveProperty('url_changes');
+    expect((await rename(urlChanges).expect(409)).body).toMatchObject(refusal);
+    expect((await db.query(`SELECT name FROM environments WHERE id = $1`, [staging])).rows).toEqual([
+      { name: 'staging' },
+    ]);
+    expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
+
+    await db.query(`UPDATE connections SET credential = $2 WHERE id = $1`, [account, credential]);
+    expect(await check()).toMatchObject({ ok: true, status: 'active' });
+    const asked = await rename().expect(409);
+    expect(asked.body).toMatchObject({ url_changes: urlChanges });
+    expect(asked.body).not.toHaveProperty('held_webhooks');
+    await rename(urlChanges).expect(200);
+    await reconcile(charges);
+    const moved = (await storeOf(live.id))['webhook.registration'] as { webhookUrl: string };
+    expect(moved.webhookUrl).toMatch(new RegExp(`/api/hooks/${charges}/qa$`));
+    expect(stripeEndpoints.has(hook)).toBe(false);
+  });
+
   const POLLED = [
     { nodeType: 'slack.new_channel', app: 'slack', name: 'When a channel is created', other: 'github' },
     {
@@ -1712,14 +1796,14 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
   });
 
   describe('a change to an account reconciles the triggers listening as it, unasked', () => {
-    // A token account is renewed by its health check; a one-click one by Composio's answer to it.
-    const reconnect = async (account: string): Promise<void> => {
+    // Its owner's Test under Integrations: a token account's health check, or Composio's answer for a one-click one, finds it working.
+    const testedWorking = async (account: string): Promise<void> => {
       const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
       expect(checked.body).toMatchObject({ ok: true, status: 'active' });
     };
 
     it.each(RAILS)(
-      'a live %s trigger is held when its account stops being active, and resumes when it is reconnected',
+      'a live %s trigger is held when its account stops being active, and resumes when a test finds that account working again',
       async (rail) => {
         const { production, account, wf, live } = await liveTrigger(rail, 'status held');
         const calledUp = standUps();
@@ -1733,7 +1817,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
           }),
         );
 
-        await reconnect(account);
+        await testedWorking(account);
         await eventually(async () =>
           expect(await activation(wf, production)).toMatchObject({
             id: live.id,
@@ -1747,7 +1831,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     );
 
     it.each(RAILS)(
-      'a %s trigger held back by an account that is not active stands up when that account is reconnected',
+      'a %s trigger held back by an account that is not active stands up when a test finds that account working again',
       async (rail) => {
         const { app: appSlug, name, nodeType, props } = TRIGGERS[rail];
         const { org, production } = await workspace(`status stands up ${rail}`);
@@ -1758,7 +1842,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
           last_error: LAST_ERROR.inactive('production', appSlug, name, ''),
         });
 
-        await reconnect(account!);
+        await testedWorking(account!);
         await eventually(async () =>
           expect(await activation(wf, production)).toMatchObject({
             connection_id: account,
