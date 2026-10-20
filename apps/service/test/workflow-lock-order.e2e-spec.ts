@@ -5,12 +5,10 @@ import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
-import { EntityManager } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { NOT_RESUMABLE, RecoveryGuard } from '../src/dbos/recovery-guard';
-import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
@@ -21,6 +19,7 @@ import { BranchService } from '../src/workflows/branch.service';
 import { VersionsWriteService } from '../src/workflows/versions-write.service';
 import { WorkflowLifecycleService } from '../src/workflows/workflow-lifecycle.service';
 import { listenOnLoopback } from './support/listen';
+import { deferred, lockProbes, pause } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ROUNDS = 30;
@@ -66,19 +65,6 @@ function webhookDoc(name: string, echo = 'title', separator = ''): Record<string
   };
 }
 
-interface Deferred {
-  promise: Promise<void>;
-  resolve: () => void;
-}
-
-function deferred(): Deferred {
-  let resolve = (): void => undefined;
-  const promise = new Promise<void>((done) => (resolve = done));
-  return { promise, resolve };
-}
-
-const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 // Counts each request's answers by status, so a failing race reports every unexpected one at once.
 class Tally {
   private readonly counts = new Map<string, number>();
@@ -112,11 +98,14 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
   const user = randomUUID();
   const personal = randomUUID();
   const key = 'ork_e2e_lockord_aaaaaaaaaaaaaaaaaaaaaaaa';
+  const orgless = randomUUID();
+  const orglessKey = 'ork_e2e_orgless_cccccccccccccccccccccccc';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const as = (r: request.Test, org: string): request.Test =>
     r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', org);
+  const asOrgless = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${orglessKey}`);
 
   const workspace = async (name: string): Promise<string> => {
     const created = await http()
@@ -168,18 +157,10 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
 
   const statusOf = (r: request.Test): Promise<number> => r.then((res) => res.status);
 
-  const deadlocks = async (): Promise<number> => {
-    const { rows } = await db.query<{ deadlocks: string }>(
-      `SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`,
-    );
-    return Number(rows[0]!.deadlocks);
-  };
-
-  // A backend reports its counters once idle, at most a second later.
-  const deadlocksSince = async (before: number): Promise<number> => {
-    await pause(1_500);
-    return (await deadlocks()) - before;
-  };
+  const { gateEmits, holdQuery, lockWaiters, deadlocks, deadlocksSince } = lockProbes(
+    () => app,
+    () => db,
+  );
 
   const runRecordedWithin = async (runId: string, ms: number): Promise<boolean> => {
     for (const deadline = Date.now() + ms; Date.now() < deadline; await pause(25)) {
@@ -187,17 +168,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       if (rows.length > 0) return true;
     }
     return false;
-  };
-
-  const lockWaiters = async (count: number): Promise<void> => {
-    for (let i = 0; i < 200; i++) {
-      const { rows } = await db.query(
-        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-      );
-      if (rows.length >= count) return;
-      await pause(25);
-    }
-    throw new Error(`never saw ${count} lock waiter(s)`);
   };
 
   const workflowState = async (
@@ -222,34 +192,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     return rows[0]!;
   };
 
-  // Holds each transaction that emits `type` at that emit, the nth until `release(n)` or `restore()`.
-  const gateEmits = (
-    type: string,
-  ): { arrived: (n: number) => Promise<void>; release: (n: number) => void; restore: () => void } => {
-    const events = app.get(EventsService);
-    const emit = events.emit.bind(events);
-    const gates: Array<{ arrived: Deferred; released: Deferred }> = [];
-    const nth = (n: number): { arrived: Deferred; released: Deferred } =>
-      (gates[n] ??= { arrived: deferred(), released: deferred() });
-    let seen = 0;
-    const spy = jest.spyOn(events, 'emit').mockImplementation(async (em, event: DomainEventInput) => {
-      if (event.type === type) {
-        const gate = nth(seen++);
-        gate.arrived.resolve();
-        await gate.released.promise;
-      }
-      return emit(em, event);
-    });
-    return {
-      arrived: (n) => nth(n).arrived.promise,
-      release: (n) => nth(n).released.resolve(),
-      restore: () => {
-        for (const gate of gates) gate.released.resolve();
-        spy.mockRestore();
-      },
-    };
-  };
-
   // Holds each call of `method` at its entry until `release()` or `restore()`, then runs it.
   const holdCalls = <T extends object>(
     target: T,
@@ -263,34 +205,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       await released.promise;
       return original(...args);
     }) as never);
-    return {
-      arrived: arrived.promise,
-      release: released.resolve,
-      restore: () => {
-        released.resolve();
-        spy.mockRestore();
-      },
-    };
-  };
-
-  // Holds the first query whose SQL matches `sql` before it runs, until `release()` or `restore()`.
-  const holdQuery = (sql: RegExp): { arrived: Promise<void>; release: () => void; restore: () => void } => {
-    const query = EntityManager.prototype.query;
-    const arrived = deferred();
-    const released = deferred();
-    let held = false;
-    const spy = jest.spyOn(EntityManager.prototype, 'query').mockImplementation(async function (
-      this: EntityManager,
-      text: string,
-      params?: Parameters<EntityManager['query']>[1],
-    ) {
-      if (!held && sql.test(text)) {
-        held = true;
-        arrived.resolve();
-        await released.promise;
-      }
-      return query.call(this, text, params);
-    });
     return {
       arrived: arrived.promise,
       release: released.resolve,
@@ -329,6 +243,14 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
       [user, hash(key), key.slice(0, 12)],
+    );
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'org-less@e2e.local', 'No Org', now(), now())`,
+      [orgless],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
+      [orgless, hash(orglessKey), orglessKey.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;
@@ -1520,7 +1442,14 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
   describe('a workflow delete and an environment delete over a run they share', () => {
     const shared = async (
       name: string,
-    ): Promise<{ org: string; wfId: string; env: string; versionId: string; runId: string }> => {
+    ): Promise<{
+      org: string;
+      wfId: string;
+      env: string;
+      envName: string;
+      versionId: string;
+      runId: string;
+    }> => {
       const org = await workspace(name);
       const wfId = await deploy(org, name);
       const envName = `shared-${suffix()}`;
@@ -1536,7 +1465,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       await as(http().put(`/api/workflows/${wfId}/webhook-secret`), org)
         .send({ node_id: 'trigger', secret: 's', environment: envName })
         .expect(200);
-      return { org, wfId, env, versionId: v1!.id, runId };
+      return { org, wfId, env, envName, versionId: v1!.id, runId };
     };
 
     const leftBehind = async (wfId: string, env: string, runId: string): Promise<Record<string, unknown>> =>
@@ -1557,16 +1486,18 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     const lockedNow = (table: 'environments' | 'runtime_runs', id: string): Promise<unknown> =>
       db.query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE NOWAIT`, [id]);
 
-    const cleared = {
-      workflow: false,
-      environment: false,
-      secrets: 0,
-      run: { workflow_id: null, workflow_version_id: null, environment_id: null, status: 'completed' },
+    const unlinked = {
+      workflow_id: null,
+      workflow_version_id: null,
+      environment_id: null,
+      status: 'completed',
     };
+    const cleared = { workflow: false, environment: false, secrets: 0, run: unlinked };
 
     it('an environment delete holding its row when the workflow delete starts finishes first, and both delete', async () => {
       const { org, wfId, env, runId } = await shared('Env delete then workflow delete');
       const held = holdQuery(/DELETE FROM environments WHERE id/);
+      const wfEmit = gateEmits('workflow.deleted');
       const before = await deadlocks();
       try {
         const envDeleting = statusOf(removeEnv(org, env));
@@ -1576,9 +1507,13 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         await lockWaiters(1);
         held.release();
         expect(await envDeleting).toBe(200);
+        await Promise.race([wfEmit.arrived(0), wfDeleting]);
+        expect(await leftBehind(wfId, env, runId)).toMatchObject({ workflow: true, environment: false });
+        wfEmit.release(0);
         expect(await wfDeleting).toBe(200);
       } finally {
         held.restore();
+        wfEmit.restore();
       }
       expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
       expect(await deadlocksSince(before)).toBe(0);
@@ -1588,6 +1523,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       const { org, wfId, env, versionId, runId } = await shared('Workflow delete then env delete');
       const holder = new Client({ connectionString: dbUrl });
       await holder.connect();
+      const envEmit = gateEmits('environment.deleted');
       const before = await deadlocks();
       try {
         await holder.query('BEGIN');
@@ -1599,11 +1535,97 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         await lockWaiters(2);
         await holder.query('COMMIT');
         expect(await wfDeleting).toBe(200);
+        await Promise.race([envEmit.arrived(0), envDeleting]);
+        expect(await leftBehind(wfId, env, runId)).toMatchObject({ workflow: false, environment: true });
+        envEmit.release(0);
         expect(await envDeleting).toBe(200);
       } finally {
+        envEmit.restore();
         await holder.end();
       }
       expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a workflow delete holding the environments its runs ran in lets a run, a promote and a rename in one go ahead', async () => {
+      const { org, wfId, env, envName } = await shared('Writes beside a delete');
+      const fired = await deploy(org, 'fired beside a delete');
+      const [firedV1] = await versions(org, fired);
+      await promote(org, fired, envName, firedV1!.id).expect(201);
+      const promoted = await deploy(org, 'promoted beside a delete');
+      const [promotedV1] = await versions(org, promoted);
+      const renamed = `beside-${suffix()}`;
+      const rename = (confirm: unknown = null): request.Test =>
+        as(http().patch(`/api/environments/${env}`), org).send({
+          name: renamed,
+          ...(confirm ? { confirm_url_changes: confirm } : {}),
+        });
+      const within = <T>(work: PromiseLike<T>): Promise<T | 'blocked'> =>
+        Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
+      const held = holdQuery(/SET active_version_id = NULL, default_branch_id = NULL/);
+      try {
+        const deleting = statusOf(remove(org, wfId));
+        await held.arrived;
+        await expect(lockedNow('environments', env)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const run = await within(
+          http()
+            .post(`/api/hooks/${fired}/${envName}`)
+            .send({ title: 'beside a delete' })
+            .then((res) => String(res.body.run_id)),
+        );
+        const recorded = await runRecordedWithin(run, 3_000);
+        const promoting = await within(statusOf(promote(org, promoted, envName, promotedV1!.id)));
+        const asked = await within(rename().then((res) => res.body.url_changes as unknown));
+        const renaming = asked === 'blocked' ? asked : await within(statusOf(rename(asked)));
+        expect({ recorded, promoting, renaming }).toEqual({ recorded: true, promoting: 201, renaming: 200 });
+        held.release();
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+    });
+
+    it("an org delete and the delete of an org-less workflow whose sub-workflow run ran in the org's environment both delete", async () => {
+      const org = await workspace('Org delete beside a sub-workflow run');
+      const envName = `called-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const called = await asOrgless(http().post('/api/deploy'))
+        .send({ workflow_json: webhookDoc('org-less callee') })
+        .expect(201);
+      const calledId = called.body.workflow_id as string;
+      const callee = await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [calledId]);
+      expect(callee.rows).toEqual([{ org_id: null }]);
+      const listed = await asOrgless(http().get(`/api/workflows/${calledId}/versions`)).expect(200);
+      const [v1] = listed.body.versions as Array<{ id: string }>;
+      const runId = `${orgless}:called-${suffix()}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, finished_at, source,
+                                   workflow_id, workflow_version_id, environment, environment_id, org_id)
+         VALUES ($1, $1, $2, 'plan-called', 'completed', now(), now(), 'sub_workflow', $3, $4, $5, $6, $7)`,
+        [runId, orgless, calledId, v1!.id, envName, env, org],
+      );
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM workflow_versions WHERE id = $1 FOR KEY SHARE`, [v1!.id]);
+        const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${calledId}`)));
+        await lockWaiters(1);
+        await expect(lockedNow('runtime_runs', runId)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect(await wfDeleting).toBe(200);
+        expect(await orgDeleting).toBe(200);
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(calledId, env, runId)).toMatchObject({
+        workflow: false,
+        environment: false,
+        run: unlinked,
+      });
       expect(await deadlocksSince(before)).toBe(0);
     });
   });

@@ -19,6 +19,7 @@ import {
   type ServingAccount,
   type SlotAccount,
 } from './run-as-account';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 import {
   byoClientToConfig,
@@ -210,6 +211,7 @@ export class ConnectionsService implements RunAsAccounts {
     for (const row of existing) await this.revokeComposioAccount(row);
     try {
       await this.dataSource.transaction(async (em) => {
+        await lockOrgForWrite(em, cluster.orgId);
         await em.delete(ConnectionEntity, {
           orgId: cluster.orgId,
           environment: cluster.environment,
@@ -509,12 +511,15 @@ export class ConnectionsService implements RunAsAccounts {
 
   /** Delete a cluster connection (ORG-scoped, not user-scoped) + revoke its Composio account. */
   async deleteCluster(orgId: string, id: string): Promise<boolean> {
-    const row = await this.dataSource.manager.findOne(ConnectionEntity, { where: { id, orgId } });
-    if (!row) return false;
-    const res = await this.dataSource.manager.delete(ConnectionEntity, { id, orgId });
-    const removed = (res.affected ?? 0) > 0;
-    if (removed) await this.revokeComposioAccount(row);
-    return removed;
+    const removed = await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      const row = await em.findOne(ConnectionEntity, { where: { id, orgId } });
+      if (!row) return null;
+      const res = await em.delete(ConnectionEntity, { id, orgId });
+      return (res.affected ?? 0) > 0 ? row : null;
+    });
+    if (removed) await this.revokeComposioAccount(removed);
+    return removed !== null;
   }
 
   /** Best-effort cascade revoking the Composio account; a failure must not resurrect the row — log and move on. */

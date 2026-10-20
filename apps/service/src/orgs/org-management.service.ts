@@ -18,6 +18,7 @@ import {
 import { rawQuery } from '../database/raw-query';
 import { EventsService } from '../events/events.service';
 import { isUniqueViolation } from '../database/pg-errors';
+import { lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
 
 const INVITE_TTL_DAYS = 14;
 
@@ -88,6 +89,7 @@ export class OrgManagementService {
   ): Promise<OrgSummary> {
     if (org.isPersonal) throw new DomainError('The personal organization cannot be renamed');
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, org.id);
       const previous = org.name;
       await em.update(OrganizationEntity, { id: org.id }, { name, updatedAt: now() });
       await this.events.emit(em, {
@@ -118,6 +120,7 @@ export class OrgManagementService {
     for (const c of clusters) await this.connections.deleteCluster(org.id, c.id);
 
     await this.dataSource.transaction(async (em) => {
+      await lockOrgForDelete(em, org.id);
       await this.events.emit(em, {
         orgId: org.id,
         actorUserId: actorId,
@@ -162,6 +165,7 @@ export class OrgManagementService {
     role: AssignableOrgRole,
   ): Promise<Record<string, unknown>> {
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const target = await this.memberForUpdate(em, orgId, targetUserId);
       if (target.role === 'owner' && role !== 'owner' && (await this.ownerCount(em, orgId)) <= 1) {
         throw new DomainError('Cannot demote the last owner');
@@ -201,6 +205,7 @@ export class OrgManagementService {
     if (org.isPersonal) throw new DomainError('The personal organization has no other members');
     if (actorId === targetUserId) throw new DomainError('You are already the owner');
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, org.id);
       // Lock both membership rows in sorted order so a concurrent transfer on the same pair can't deadlock.
       const firstId = actorId < targetUserId ? actorId : targetUserId;
       const secondId = actorId < targetUserId ? targetUserId : actorId;
@@ -229,6 +234,7 @@ export class OrgManagementService {
   async removeMember(orgId: string, actorId: string, targetUserId: string): Promise<void> {
     const isSelf = actorId === targetUserId;
     await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const target = await this.memberForUpdate(em, orgId, targetUserId);
       if (!isSelf && target.role === 'owner') {
         const actor = await em.findOne(OrgMemberEntity, { where: { orgId, userId: actorId } });
@@ -289,6 +295,7 @@ export class OrgManagementService {
   ): Promise<OrgInviteEntity> {
     const email = emailRaw.trim().toLowerCase();
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, org.id);
       const pending = await em
         .createQueryBuilder(OrgInviteEntity, 'i')
         .where('i.org_id = :orgId', { orgId: org.id })
@@ -326,6 +333,7 @@ export class OrgManagementService {
 
   async revokeInvite(orgId: string, actorId: string, inviteId: string): Promise<void> {
     await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const invite = isIdShape(inviteId)
         ? await em.findOne(OrgInviteEntity, { where: { id: inviteId, orgId } })
         : null;
@@ -368,14 +376,16 @@ export class OrgManagementService {
   async acceptInvite(userId: string, token: string): Promise<{ org_id: string; name: string }> {
     try {
       return await this.dataSource.transaction(async (em) => {
+        const spent = new DomainError('Invite not found or expired', 404);
         const invite = await em.findOne(OrgInviteEntity, { where: { token } });
-        const org = invite ? await em.findOne(OrganizationEntity, { where: { id: invite.orgId } }) : null;
-        if (!invite || !org) throw new DomainError('Invite not found or expired', 404);
+        if (!invite) throw spent;
+        await lockOrgForWrite(em, invite.orgId, spent);
+        const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
 
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
         if (existing) return { org_id: org.id, name: org.name };
 
-        if (!(await this.isRedeemable(em, invite))) throw new DomainError('Invite not found or expired', 404);
+        if (!(await this.isRedeemable(em, invite))) throw spent;
 
         await em.insert(OrgMemberEntity, {
           id: newId(),

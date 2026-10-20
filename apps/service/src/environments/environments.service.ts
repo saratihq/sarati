@@ -11,6 +11,7 @@ import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { EventsService } from '../events/events.service';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { runBounded } from '../common/bounded';
@@ -65,6 +66,8 @@ export type ConfirmedUrlChange = Pick<UrlChange, 'workflow_id' | 'trigger' | 'fr
 const DRAIN_CONCURRENCY = 5;
 
 const ENSURE_ATTEMPTS = 3;
+
+const DEFAULT_ENVS = [PROD_ENV, 'staging', UAT_ENV];
 
 const HAND_GIVEN_URLS = [
   { trigger: 'chat', nodeType: INCOMING_CHAT_PUBLIC, pathFor: chatPathFor },
@@ -155,6 +158,7 @@ export class EnvironmentsService {
   async create(orgId: string, rawName: string, actorUserId: string): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const rows = await rawQuery<{ id: string }>(
         em,
         `INSERT INTO environments (org_id, name, is_prod) VALUES ($1, $2, $3)
@@ -186,6 +190,7 @@ export class EnvironmentsService {
   ): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     const renamed = await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const env = await this.byIdForOrg(em, orgId, envId, true);
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be renamed`, 409);
@@ -237,6 +242,7 @@ export class EnvironmentsService {
       this.triggerSignals.reconcileNow(workflowId),
     );
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       await lockDeletable(em, { environmentId: env.id }, `'${env.name}'`);
       await em.query(`DELETE FROM environments WHERE id = $1`, [env.id]);
       const receipt = { removed_pointers: removedPointers, unbound_triggers: holders.length };
@@ -303,6 +309,7 @@ export class EnvironmentsService {
     callerUserId: string,
   ): Promise<{ replaced_connection_id: string | null; also_in_environments: string[] }> {
     const result = await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const env = await this.byIdForOrg(em, orgId, envId);
       // Visibility = ownership: a foreign or malformed-id connection is an indistinguishable 404.
       const notFound = new DomainError('Connection not found', 404);
@@ -350,16 +357,18 @@ export class EnvironmentsService {
 
   /** Empty a slot — "<env> runs will fail on <app> until reassigned" (honest skip). */
   async emptySlot(orgId: string, envId: string, app: string): Promise<void> {
-    const em = this.dataSource.manager;
-    const env = await this.byIdForOrg(em, orgId, envId);
-    const removed = await rawMutate(
-      em,
-      `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
-      [env.id, app],
-    );
-    if (removed === 0) {
-      throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
-    }
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId);
+      const removed = await rawMutate(
+        em,
+        `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
+        [env.id, app],
+      );
+      if (removed === 0) {
+        throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
+      }
+    });
     // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
   }
@@ -504,12 +513,21 @@ export class EnvironmentsService {
 
   /** Lazy defaults: prod (is_prod anchor) + staging + uat, once per org. */
   private async ensureDefaults(orgId: string): Promise<void> {
-    await this.dataSource.query(
-      `INSERT INTO environments (org_id, name, is_prod)
-       VALUES ($1, 'production', true), ($1, 'staging', false), ($1, 'uat', false)
-       ON CONFLICT (org_id, lower(name)) DO NOTHING`,
-      [orgId],
+    const [present] = await rawQuery<{ count: number }>(
+      this.dataSource.manager,
+      `SELECT count(*)::int AS count FROM environments WHERE org_id = $1 AND lower(name) = ANY($2)`,
+      [orgId, DEFAULT_ENVS],
     );
+    if (present?.count === DEFAULT_ENVS.length) return;
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      await em.query(
+        `INSERT INTO environments (org_id, name, is_prod)
+         SELECT $1, name, name = $3 FROM unnest($2::text[]) AS name
+         ON CONFLICT (org_id, lower(name)) DO NOTHING`,
+        [orgId, DEFAULT_ENVS, PROD_ENV],
+      );
+    });
   }
 
   private findByName(

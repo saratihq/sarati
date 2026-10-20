@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { EncryptionService } from '../common/crypto/encryption.service';
 import { DomainError } from '../common/domain-error';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
 
 /** The two optional platform credentials, set from Settings. Widening this set is a migration. */
 export const PLATFORM_KEY_NAMES = [
@@ -70,23 +71,25 @@ export class PlatformKeysService {
       scope.kind === 'user'
         ? '(name, user_id) WHERE user_id IS NOT NULL'
         : '(name, org_id) WHERE org_id IS NOT NULL';
-    await this.dataSource.query(
-      `INSERT INTO platform_secrets (name, user_id, org_id, secret) VALUES ($1, $2, $3, $4)
-       ON CONFLICT ${target}
-       DO UPDATE SET secret = EXCLUDED.secret, updated_at = now()`,
-      [name, ...this.owner(scope), enc],
+    await this.writeIn(scope, (em) =>
+      em.query(
+        `INSERT INTO platform_secrets (name, user_id, org_id, secret) VALUES ($1, $2, $3, $4)
+         ON CONFLICT ${target}
+         DO UPDATE SET secret = EXCLUDED.secret, updated_at = now()`,
+        [name, ...this.owner(scope), enc],
+      ),
     );
   }
 
-  /** Remove this scope's key; returns true if one was stored. */
-  async clear(scope: PlatformKeyScope, name: PlatformKeyName): Promise<boolean> {
-    const rows: unknown[] = await this.dataSource.query(
-      `DELETE FROM platform_secrets
-        WHERE name = $1 AND user_id IS NOT DISTINCT FROM $2 AND org_id IS NOT DISTINCT FROM $3
-        RETURNING id`,
-      [name, ...this.owner(scope)],
+  /** Remove this scope's key. */
+  async clear(scope: PlatformKeyScope, name: PlatformKeyName): Promise<void> {
+    await this.writeIn(scope, (em) =>
+      em.query(
+        `DELETE FROM platform_secrets
+          WHERE name = $1 AND user_id IS NOT DISTINCT FROM $2 AND org_id IS NOT DISTINCT FROM $3`,
+        [name, ...this.owner(scope)],
+      ),
     );
-    return rows.length > 0;
   }
 
   /** Which keys this scope has, and when each was last written — never the values themselves. */
@@ -168,6 +171,13 @@ export class PlatformKeysService {
     );
     const role = rows[0]?.role;
     return role === 'owner' || role === 'admin';
+  }
+
+  private writeIn(scope: PlatformKeyScope, write: (em: EntityManager) => Promise<unknown>): Promise<void> {
+    return this.dataSource.transaction(async (em) => {
+      if (scope.kind === 'org') await lockOrgForWrite(em, scope.orgId);
+      await write(em);
+    });
   }
 
   private owner(scope: PlatformKeyScope): [string | null, string | null] {

@@ -18,6 +18,7 @@ import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
 import { lockRunEnvironments, lockWorkflowForPointerMove } from './workflow-row-lock';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
@@ -61,6 +62,7 @@ export class WorkflowLifecycleService {
     assertAuthoredIrValid(input.irDoc, this.catalog.facts());
 
     const { wf, branchName } = await this.dataSource.transaction(async (em) => {
+      if (orgId) await lockOrgForWrite(em, orgId);
       const created = em.create(WorkflowEntity, {
         id: newId(),
         name: input.name,
@@ -130,6 +132,7 @@ export class WorkflowLifecycleService {
     }
 
     const workflowId = await this.dataSource.transaction(async (em) => {
+      if (orgId) await lockOrgForWrite(em, orgId);
       const wf = em.create(WorkflowEntity, {
         id: newId(),
         name,
