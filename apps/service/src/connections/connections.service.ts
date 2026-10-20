@@ -554,18 +554,15 @@ export class ConnectionsService implements RunAsAccounts {
   private async revocation(em: EntityManager, row: ConnectionEntity): Promise<() => Promise<void>> {
     const scope = scopeOfConnection(row);
     const accountId = row.authType === 'managed' ? this.connectedAccountIdOf(row) : null;
-    const deleteAccount = scope && accountId ? await this.composio?.accountDeleter(scope, em) : null;
-    if (!deleteAccount || !accountId) return () => Promise.resolve();
-    return async () => {
-      try {
-        await deleteAccount(accountId);
-      } catch (err) {
-        const message = errorMessage(err);
-        this.logger.warn(
-          `Connection ${row.id}: Composio account ${accountId} could not be deleted: ${message}`,
-        );
-      }
+    if (!scope || !accountId) return () => Promise.resolve();
+    const unrevoked = (err: unknown): void => {
+      this.logger.warn(
+        `Connection ${row.id}: Composio account ${accountId} could not be deleted: ${errorMessage(err)}`,
+      );
     };
+    const deleteAccount = await this.composio?.accountDeleter(scope, em).catch(unrevoked);
+    if (!deleteAccount) return () => Promise.resolve();
+    return () => deleteAccount(accountId).catch(unrevoked);
   }
 
   /**

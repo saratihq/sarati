@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -10,6 +10,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { fernetDecrypt, fernetEncrypt } from '../src/common/crypto/fernet';
 import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { gmailFake } from './support/gmail-fake';
@@ -83,7 +84,11 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   let dbUrl = '';
   let composio: Server;
   let gmail = '';
-  const composioAccounts = { created: new Set<string>(), deleted: new Set<string>() };
+  const composioAccounts = {
+    created: new Set<string>(),
+    deleted: new Set<string>(),
+    deletedWhileHeld: new Set<string>(),
+  };
 
   const owner = randomUUID();
   const member = randomUUID();
@@ -162,6 +167,18 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     connection: (await db.query(`SELECT 1 FROM connections WHERE id = $1`, [cluster.connection])).rows.length,
     revoked: composioAccounts.deleted.has(cluster.account),
   });
+
+  // Read on the test's own client, so it sees a connection row until the delete removing it commits.
+  const heldByConnection = async (account: string): Promise<boolean> => {
+    const { rows } = await db.query<{ credential: string }>(
+      `SELECT credential FROM connections WHERE auth_type = 'managed'`,
+    );
+    return rows.some(
+      (row) =>
+        (JSON.parse(fernetDecrypt(TEST_FERNET_KEY, row.credential)) as { connected_account_id?: string })
+          .connected_account_id === account,
+    );
+  };
 
   const leftAtComposio = (before: Set<string>): string[] =>
     [...composioAccounts.created].filter((id) => !before.has(id) && !composioAccounts.deleted.has(id));
@@ -422,8 +439,15 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
           composioAccounts.created.add(created);
           json(201, { redirect_url: 'https://connect.composio.test/lock', connected_account_id: created });
         } else if (req.method === 'DELETE' && url.startsWith('/api/v3/connected_accounts/')) {
-          composioAccounts.deleted.add(decodeURIComponent(url.slice('/api/v3/connected_accounts/'.length)));
-          json(200, { success: true });
+          const deleted = decodeURIComponent(url.slice('/api/v3/connected_accounts/'.length));
+          void heldByConnection(deleted).then(
+            (held) => {
+              if (held) composioAccounts.deletedWhileHeld.add(deleted);
+              composioAccounts.deleted.add(deleted);
+              json(200, { success: true });
+            },
+            (err: unknown) => json(500, { error: String(err) }),
+          );
         } else {
           json(404, { error: `unexpected ${req.method ?? ''} ${url}` });
         }
@@ -458,6 +482,12 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       .expect(201);
     gmail = connection.body.id as string;
   }, 30_000);
+
+  afterEach(() => {
+    const deletedWhileHeld = [...composioAccounts.deletedWhileHeld];
+    composioAccounts.deletedWhileHeld.clear();
+    expect(deletedWhileHeld).toEqual([]);
+  });
 
   afterAll(async () => {
     await pause(500);
@@ -745,6 +775,9 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         try {
           const firstDeleting = answer(deleteOrg(first.org));
           await held.arrived;
+          await expect(
+            db.query(`SELECT 1 FROM connections WHERE org_id = $1 FOR KEY SHARE NOWAIT`, [first.org]),
+          ).rejects.toMatchObject({ code: '55P03' });
           const secondDeleting = answer(deleteOrg(second.org));
           await meanwhile(secondDeleting);
           held.release();
@@ -765,6 +798,33 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         expect(await deadlocksSince(before)).toBe(0);
       },
     );
+
+    it("an org delete holding another org's environment its cluster connection fills a slot in lets a rename of that environment go ahead", async () => {
+      const t = await team('Org delete beside a rename of another org environment');
+      const { connection } = await clusterIn(t);
+      const other = await team('Environment the cluster connection fills');
+      await slotIn(other.org, other.env, 'slack', connection).expect(200);
+      const held = gateEmits('org.deleted');
+      try {
+        const deleting = statusOf(deleteOrg(t.org));
+        await held.arrived(0);
+        await expect(
+          db.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE NOWAIT`, [other.env]),
+        ).rejects.toMatchObject({ code: '55P03' });
+        const renaming = await within(
+          statusOf(
+            asOwner(http().patch(`/api/environments/${other.env}`), other.org).send({
+              name: `beside-${suffix()}`,
+            }),
+          ),
+        );
+        expect(renaming).toBe(200);
+        held.release(0);
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+    });
 
     it('a slot assign started while a connection delete holds the connection waits for it and answers 404', async () => {
       const t = await team('Assign beside a connection delete');
@@ -1001,6 +1061,37 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     }
     expect(await kept(cluster)).toEqual({ connection: 0, revoked: true });
     expect(await deadlocksSince(before)).toBe(0);
+  });
+
+  it("a cluster connection delete and an org delete still delete when the org's Composio key no longer decrypts, leaving the accounts at Composio", async () => {
+    const t = await team('Composio key that no longer decrypts');
+    const production = await clusterIn(t);
+    const staging = await asOwner(http().post(`/api/orgs/${t.org}/clusters/staging/connect`))
+      .send({ app: 'slack' })
+      .expect(201);
+    await db.query(
+      `UPDATE platform_secrets SET secret = $1 WHERE org_id = $2 AND name = 'composio_api_key'`,
+      [fernetEncrypt(randomBytes(32).toString('base64url'), 'a key under another FERNET_KEY'), t.org],
+    );
+    const deletes = composioAccounts.deleted.size;
+    const removing = await answer(
+      asOwner(http().delete(`/api/orgs/${t.org}/clusters/connections/${production.connection}`)),
+    );
+    const deleting = await answer(deleteOrg(t.org));
+    expect({ removing, deleting }).toEqual({
+      removing: { status: 200, detail: undefined },
+      deleting: { status: 200, detail: undefined },
+    });
+    const left = await db.query(
+      `SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1) AS org,
+              (SELECT count(*)::int FROM connections WHERE id = ANY($2::uuid[])) AS connections`,
+      [t.org, [production.connection, staging.body.connection_id as string]],
+    );
+    expect({ ...left.rows[0], deletes: composioAccounts.deleted.size - deletes }).toEqual({
+      org: false,
+      connections: 0,
+      deletes: 0,
+    });
   });
 
   it('an org delete that fails after deleting its cluster connections keeps them and their Composio accounts', async () => {
