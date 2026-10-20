@@ -516,15 +516,20 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         await promote(org, wfId, 'fire-a', v1!.id).expect(201);
       }
       const held = gateEmits(event);
+      const before = await deadlocks();
       const writing = write({ org, env, other });
       try {
         await held.arrived(0);
+        await expect(
+          db.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE NOWAIT`, [env]),
+        ).rejects.toMatchObject({ code: '55P03' });
         const run = await http().post(`/api/hooks/${fired}/fire-a`).send({ title: 'beside' }).expect(202);
         expect(await runRecordedWithin(run.body.run_id as string, 3_000)).toBe(true);
       } finally {
         held.restore();
       }
       expect(await writing).toBe(200);
+      expect(await deadlocksSince(before)).toBe(0);
     },
   );
 

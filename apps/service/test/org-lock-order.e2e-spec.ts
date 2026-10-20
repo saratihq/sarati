@@ -948,9 +948,10 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   it("a cluster connect replacing the connection a concurrent connect has just made deletes that connection's Composio account", async () => {
     const t = await team('Two cluster connects');
     await setOrgKey(t, 'composio_api_key').expect(200);
-    const before = new Set(composioAccounts.created);
-    const minted = (): string[] => [...composioAccounts.created].filter((id) => !before.has(id));
+    const known = new Set(composioAccounts.created);
+    const minted = (): string[] => [...composioAccounts.created].filter((id) => !known.has(id));
     const held = bounded(holdQuery(ORG_LOCK), 'a cluster connect');
+    const before = await deadlocks();
     try {
       const replacing = connectCluster(t).then((res) => ({
         status: res.status,
@@ -975,6 +976,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     } finally {
       held.restore();
     }
+    expect(await deadlocksSince(before)).toBe(0);
   });
 
   it("a cluster connection delete the org's delete follows at once still deletes the connection's Composio account, with the key the org had", async () => {
