@@ -1,5 +1,5 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { DBOS, type WorkflowStatus } from '@dbos-inc/dbos-sdk';
+import { DBOS, StatusString, type WorkflowStatus } from '@dbos-inc/dbos-sdk';
 
 import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
@@ -78,11 +78,24 @@ const runPlanWorkflow = DBOS.registerWorkflow(
   { name: RUN_PLAN_WORKFLOW },
 );
 
+// A workflow in one of these has ended, on whichever build ran it.
+const ENDED: ReadonlySet<string> = new Set([
+  StatusString.SUCCESS,
+  StatusString.ERROR,
+  StatusString.CANCELLED,
+  StatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED,
+]);
+
+// Whether the workflow runs under a name this build runs; one another build started is that build's to resume.
+function owned(status: WorkflowStatus): boolean {
+  return status.workflowName === RUN_PLAN_WORKFLOW;
+}
+
 // What `canResume` answers, for a workflow that exists.
 function resumable(status: WorkflowStatus): boolean {
   return (
-    status.status === 'PENDING' &&
-    status.workflowName === RUN_PLAN_WORKFLOW &&
+    status.status === StatusString.PENDING &&
+    owned(status) &&
     status.executorId === DBOS.executorID &&
     status.applicationVersion === DBOS.applicationVersion
   );
@@ -155,10 +168,13 @@ export class DbosRuntime {
     return status !== null && resumable(status);
   }
 
-  /** Whether the run has a workflow that nothing will take on to its end; `false` for a run that has none. */
+  /**
+   * Whether nothing will take the run's workflow on to its end: it has ended, or it runs under a name this build runs and
+   * this instance can't resume it. `false` for a run with no workflow, and for one another build started.
+   */
   async wontResume(runId: string): Promise<boolean> {
     const status = await DBOS.getWorkflowStatus(runId);
-    return status !== null && !resumable(status);
+    return status !== null && (ENDED.has(status.status) || (owned(status) && !resumable(status)));
   }
 
   /** Poll a durable run's status (and its outputs once it has completed). */

@@ -102,6 +102,9 @@ it recovers it:
 The run stays listed until its wait's window passes; then the reaper ends it in `error` with
 *Approval window expired before a decision was recorded.* Run the workflow again.
 
+A run a later version started is never refused this way after going back to this one: its decision
+is recorded here, and the run takes it once you upgrade again.
+
 ## A run reads "Decided by … the run has yet to take it"
 
 Someone decided, and the decision is waiting for the run to pick it up — the run is down, or catching

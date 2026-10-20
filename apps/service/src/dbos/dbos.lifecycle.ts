@@ -30,7 +30,7 @@ export class DbosLifecycle implements OnApplicationBootstrap, OnApplicationShutd
       return;
     }
     const systemDatabaseUrl = systemDatabaseUrlOf(env);
-    // Pin recovery identity so crash/deploy recovery is deterministic.
+    // Pin recovery identity so a restart picks up the runs in flight across it.
     const applicationVersion = env.dbosAppVersion || DBOS_APP_VERSION_DEFAULT;
     DBOS.setConfig({
       name: 'orchestr',
