@@ -9,6 +9,7 @@ import { EncryptionService } from '../common/crypto/encryption.service';
 import { errorMessage } from '../common/error-message';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { isIdShape, newId, now } from '../database/ids';
+import { rawMutateReturning } from '../database/raw-query';
 import { type AccountIdentity, storedAccount } from './account-identity';
 import { ComposioProvider, ComposioUpstreamError } from './composio.provider';
 import { OAuthExchangeError, refreshAccessToken, type OAuthTokenSet } from './oauth-token';
@@ -249,16 +250,17 @@ export class ConnectionsService implements RunAsAccounts {
 
   /** Persist a health transition; `active` clears the reason and `last_checked_at` records the verification. */
   async setStatus(id: string, status: ConnectionHealthStatus, reason: string | null = null): Promise<void> {
-    const before = await this.dataSource.manager.findOne(ConnectionEntity, {
-      where: { id },
-      select: { id: true, status: true },
-    });
-    await this.dataSource.manager.update(
-      ConnectionEntity,
-      { id },
-      { status, statusReason: status === 'active' ? null : reason, lastCheckedAt: now() },
+    // One statement reads the status it replaces under the row lock, so a concurrent change is never missed.
+    const [written] = await rawMutateReturning<{ before: string }>(
+      this.dataSource.manager,
+      `UPDATE connections c
+          SET status = $2, status_reason = $3, last_checked_at = $4
+         FROM (SELECT id, status FROM connections WHERE id = $1 FOR UPDATE) old
+        WHERE c.id = old.id
+       RETURNING old.status AS before`,
+      [id, status, status === 'active' ? null : reason, now()],
     );
-    if (before && before.status !== status) await this.reconcileTriggers(await this.listenersOf([id]));
+    if (written && written.before !== status) await this.reconcileTriggers(await this.listenersOf([id]));
   }
 
   // A trigger listens as its slot's account, and a webhook is deleted with it, only while it is active (#11): the workflows a change to these accounts can move.

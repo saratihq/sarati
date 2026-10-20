@@ -127,7 +127,7 @@ export async function createEnvironment(name: string): Promise<void> {
   await request("/environments", { method: "POST", body: JSON.stringify({ name }) });
 }
 
-/** Rename an environment. 409 on prod, and RenameMovesUrlsError until `confirmed` holds every hand-given URL it moves. */
+/** Rename an environment. 409 on prod or while a webhook there was registered with an account that isn't active, and RenameMovesUrlsError until `confirmed` holds every hand-given URL it moves. */
 export async function renameEnvironment(id: string, name: string, confirmed?: UrlChange[]): Promise<void> {
   const body = confirmed
     ? { name, confirm_url_changes: confirmed.map(({ workflow_id, trigger, from, to }) => ({ workflow_id, trigger, from, to })) }

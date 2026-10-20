@@ -1,4 +1,6 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -341,6 +343,38 @@ const oneClickConnection = async (provider: string): Promise<string> => {
   return managed.id;
 };
 
+// An account signed in with OAuth, renewed through `tokenUrl`; its token is still good for an hour.
+const oauthConnection = async (provider: string, tokenUrl: string): Promise<string> => {
+  const id = randomUUID();
+  const encryption = app.get(EncryptionService);
+  const client = {
+    clientId: 'slotfit',
+    clientSecret: 'slotfit-secret',
+    authUrl: tokenUrl,
+    tokenUrl,
+    scopes: [],
+  };
+  await db.query(
+    `INSERT INTO connections (id, user_id, provider, auth_type, credential, oauth_client, created_at, status)
+     VALUES ($1, $2, $3, 'oauth2', $4, $5, now(), 'active')`,
+    [
+      id,
+      userA,
+      provider,
+      encryption.encryptToken(JSON.stringify(oauthToken(3_600_000))),
+      encryption.encryptToken(JSON.stringify(client)),
+    ],
+  );
+  return id;
+};
+
+const oauthToken = (expiresInMs: number): Record<string, unknown> => ({
+  access_token: 'tok-oauth-slotfit',
+  token_type: 'Bearer',
+  refresh_token: 'refresh-slotfit',
+  expires_at: new Date(Date.now() + expiresInMs).toISOString(),
+});
+
 // An account that serves the rail's app: a one-click one for the Composio rail, a token one for the direct ones.
 const fitting = (rail: Rail): Promise<string> =>
   rail === 'composio' ? oneClickConnection(TRIGGERS.composio.app) : tokenConnection(TRIGGERS[rail].app);
@@ -506,6 +540,7 @@ const deliver = async (
   live: ActivationRow,
   id: string,
   stripeEvent = 'customer.created',
+  environment = 'production',
 ): Promise<Record<string, unknown>> => {
   if (rail === 'composio') {
     const sent = await http()
@@ -532,7 +567,7 @@ const deliver = async (
     .update(`${t}.${raw}`)
     .digest('hex');
   const sent = await http()
-    .post(`/api/hooks/${wfId}/production`)
+    .post(`/api/hooks/${wfId}/${environment}`)
     .set('Content-Type', 'application/json')
     .set('stripe-signature', `t=${t},v1=${signature}`)
     .send(raw)
@@ -562,6 +597,45 @@ const eventually = async (check: () => Promise<void>, withinMs = 5_000): Promise
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+};
+
+// Waits until `count` statements naming `table` wait on a lock.
+const lockWaiters = (count: number, table: string): Promise<void> =>
+  eventually(async () => {
+    const waiting = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1`,
+      [`%${table}%`],
+    );
+    expect(Number(waiting.rows[0]!.n)).toBe(count);
+  });
+
+// Parks every reconcile at a gate until `release`, recording the workflow each was for.
+const parkReconciles = (): {
+  started: (wfId: string) => number;
+  release: () => void;
+  restore: () => void;
+} => {
+  const reconciler = app.get(TriggerReconcilerService);
+  const reconcileNow = reconciler.reconcile.bind(reconciler);
+  let release = (): void => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const started: string[] = [];
+  const parked = jest
+    .spyOn(reconciler, 'reconcile')
+    .mockImplementation(async (wfId: string, opts?: { selfHeal?: boolean }) => {
+      started.push(wfId);
+      await gate;
+      return reconcileNow(wfId, opts);
+    });
+  return {
+    started: (wfId) => started.filter((id) => id === wfId).length,
+    release: () => release(),
+    restore: () => {
+      release();
+      parked.mockRestore();
+    },
+  };
 };
 
 // A live trigger on `rail` in a workspace of its own, its production slot holding a fitting account.
@@ -928,23 +1002,25 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       await setStatus(account, 'expired');
       await heldSaying(HELD('staging', rail), account);
 
+      // A held webhook can't move to the new URL, so its environment keeps its name.
+      const renamed = rail === 'webhook' ? 'staging' : 'preview';
       await asA(
         http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'preview' }),
-      ).expect(200);
-      await heldSaying(HELD('preview', rail), account);
+      ).expect(rail === 'webhook' ? 409 : 200);
+      await heldSaying(HELD(renamed, rail), account);
 
       await asA(http().delete(`/api/environments/${staging}/slots/${appSlug}`).set('X-Org-Id', org)).expect(
         200,
       );
-      await heldSaying(LAST_ERROR.empty('preview', appSlug, name, ''), null);
+      await heldSaying(LAST_ERROR.empty(renamed, appSlug, name, ''), null);
 
       const expired = await fitting(rail);
       await setStatus(expired, 'expired');
       await assignSlot(org, staging, appSlug, expired);
-      await heldSaying(LAST_ERROR.inactive('preview', appSlug, name, ''), null);
+      await heldSaying(LAST_ERROR.inactive(renamed, appSlug, name, ''), null);
 
       await putSlot(staging, appSlug, await tokenConnection(otherApp(rail)));
-      await heldSaying(LAST_ERROR.wrong_app('preview', appSlug, name, otherApp(rail)), null);
+      await heldSaying(LAST_ERROR.wrong_app(renamed, appSlug, name, otherApp(rail)), null);
 
       await asA(
         http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'qa' }),
@@ -954,6 +1030,165 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(standUps()).toBe(calledUp);
     },
   );
+
+  it.each(RAILS)(
+    'a live %s trigger whose slot is given an account of the wrong kind is torn down with the account it was stood up with, and stands up again once the slot serves it',
+    async (rail) => {
+      const { app: appSlug, name } = TRIGGERS[rail];
+      const { org, production, account, wf, live } = await liveTrigger(rail, 'wrong kind');
+      const store = await storeOf(live.id);
+      const [calledUp, calledDown] = [standUps(), teardowns()];
+      const refusal =
+        rail === 'composio'
+          ? NEEDS_MANAGED('production', appSlug, name)
+          : NEEDS_OWN('production', appSlug, name);
+
+      const wrongKind =
+        rail === 'composio' ? await tokenConnection(appSlug) : await oneClickConnection(appSlug);
+      await assignSlot(org, production, appSlug, wrongKind);
+      await eventually(async () =>
+        expect(await activation(wf, production)).toMatchObject({
+          id: live.id,
+          connection_id: null,
+          held: false,
+          composio_trigger_instance_id: null,
+          last_error: refusal,
+          materialized: { connection: null },
+        }),
+      );
+      expect(await storeOf(live.id)).toEqual({});
+      expect(standUps()).toBe(calledUp);
+      expect(teardowns()).toBe(calledDown + (rail === 'polling' ? 0 : 1));
+      if (rail === 'composio') {
+        expect(unsubscribed.mock.calls.at(-1)?.[1]).toBe(live.composio_trigger_instance_id);
+      }
+      if (rail === 'webhook') {
+        const hook = (store['webhook.registration'] as { registration: { subscriptionId: string } })
+          .registration.subscriptionId;
+        expect(stripeDeletes.at(-1)).toBe(hook);
+        expect(await pendingDeletes(wf)).toEqual([]);
+      }
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: true,
+        listening: false,
+        last_error: refusal,
+      });
+
+      await assignSlot(org, production, appSlug, account);
+      await eventually(async () =>
+        expect(await activation(wf, production)).toMatchObject({
+          id: live.id,
+          connection_id: account,
+          last_error: null,
+        }),
+      );
+      expect(await standUpsAs(rail, account)).toBe(2);
+    },
+  );
+
+  it("renaming an environment is refused while a webhook registered there was registered with an account that isn't active, naming each, and moves them once it is active again", async () => {
+    const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+    const { org, staging } = await workspace('rename held');
+    const account = await fitting('webhook');
+    await db.query(`UPDATE connections SET display_name = 'Billing' WHERE id = $1`, [account]);
+    await assignSlot(org, staging, appSlug, account);
+    const promoted = async (label: string): Promise<{ wf: string; live: ActivationRow; hook: string }> => {
+      const { wf, v1 } = await deploy(org, { ...triggerDoc(nodeType, name, props), name: label });
+      await asA(
+        http()
+          .post(`/api/workflows/${wf}/promote`)
+          .set('X-Org-Id', org)
+          .send({ environment: 'staging', version_id: v1 }),
+      ).expect(201);
+      await reconcile(wf);
+      const live = await activation(wf, staging);
+      expect(live).toMatchObject({ connection_id: account, last_error: null });
+      const record = (await storeOf(live.id))['webhook.registration'] as {
+        webhookUrl: string;
+        registration: { subscriptionId: string };
+      };
+      expect(record.webhookUrl).toMatch(new RegExp(`/api/hooks/${wf}/staging$`));
+      return { wf, live, hook: record.registration.subscriptionId };
+    };
+    const billing = await promoted('Billing');
+    const refunds = await promoted('Refunds');
+    const rename = (to: string): request.Test =>
+      asA(http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: to }));
+    const fix =
+      'tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
+    const entry = (wf: string, workflowName: string): Record<string, unknown> => ({
+      workflow_id: wf,
+      workflow_name: workflowName,
+      trigger_node_id: 'watch',
+      trigger_name: name,
+      app: 'stripe',
+      connection_id: account,
+      account_label: 'Billing',
+    });
+    const [calledUp, calledDown] = [standUps(), teardowns()];
+
+    // Refused as soon as the account isn't active, before a reconcile has held either trigger.
+    await setStatus(account, 'expired');
+    const both = await rename('qa').expect(409);
+    expect(both.body).toMatchObject({
+      detail: `Renaming 'staging' would leave 2 webhooks registered at their old URLs, which serve nothing, because the accounts they were registered with aren't active: "${name}" in "Billing" (stripe account Billing), "${name}" in "Refunds" (stripe account Billing) — before renaming, each account's owner ${fix}`,
+      held_webhooks: [entry(billing.wf, 'Billing'), entry(refunds.wf, 'Refunds')],
+    });
+    expect(both.body).not.toHaveProperty('url_changes');
+
+    // A webhook taken down meanwhile waits for its delete apart from the environment, so it no longer stops a rename.
+    await reconcile(billing.wf);
+    expect(await activation(billing.wf, staging)).toMatchObject({ held: true });
+    await asA(http().delete(`/api/workflows/${refunds.wf}`).set('X-Org-Id', org)).expect(200);
+    expect(await pendingDeletes(refunds.wf)).toEqual([
+      { hook: refunds.hook, last_error: "the account it was registered with isn't active" },
+    ]);
+    const one = await rename('qa').expect(409);
+    expect(one.body).toMatchObject({
+      detail: `Renaming 'staging' would leave "${name}" in "Billing" registered at its old URL, which serves nothing, because the stripe account it was registered with (Billing) isn't active — before renaming, its owner ${fix}`,
+      held_webhooks: [entry(billing.wf, 'Billing')],
+    });
+    expect((await db.query(`SELECT name FROM environments WHERE id = $1`, [staging])).rows).toEqual([
+      { name: 'staging' },
+    ]);
+    expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
+    expect(
+      await deliver('webhook', billing.wf, billing.live, 'D_STILL_STAGING', 'customer.created', 'staging'),
+    ).toMatchObject({
+      fired: 1,
+    });
+
+    await app.get(ConnectionsService).setStatus(account, 'active');
+    await eventually(async () => {
+      expect(await activation(billing.wf, staging)).toMatchObject({ held: false, last_error: null });
+      expect(await pendingDeletes(refunds.wf)).toEqual([]);
+    });
+    await rename('qa').expect(200);
+    await reconcile(billing.wf);
+
+    const moved = (await storeOf(billing.live.id))['webhook.registration'] as {
+      webhookUrl: string;
+      registration: { subscriptionId: string };
+    };
+    expect(moved.webhookUrl).toMatch(new RegExp(`/api/hooks/${billing.wf}/qa$`));
+    expect(stripeEndpoints.has(billing.hook)).toBe(false);
+    expect(stripeEndpoints.has(moved.registration.subscriptionId)).toBe(true);
+    expect(await activation(billing.wf, staging)).toMatchObject({
+      id: billing.live.id,
+      held: false,
+      last_error: null,
+    });
+    expect(
+      await deliver(
+        'webhook',
+        billing.wf,
+        await activation(billing.wf, staging),
+        'D_MOVED',
+        'customer.created',
+        'qa',
+      ),
+    ).toMatchObject({ fired: 1 });
+  });
 
   const POLLED = [
     { nodeType: 'slack.new_channel', app: 'slack', name: 'When a channel is created', other: 'github' },
@@ -1284,6 +1519,143 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       );
       await listening(null);
     });
+
+    it('of two changes to an account made at once, the later one reconciles its triggers by the status the earlier one wrote', async () => {
+      const { production, account, wf, live } = await liveTrigger('polling', 'two changes');
+      const earlier = new Client({ connectionString: process.env.DATABASE_URL });
+      const behind = new Client({ connectionString: process.env.DATABASE_URL });
+      await earlier.connect();
+      await behind.connect();
+      try {
+        // The earlier change's write, uncommitted, and a lock queued behind it, so the later change still waits once it commits.
+        await earlier.query('BEGIN');
+        await earlier.query(`UPDATE connections SET status = 'expired' WHERE id = $1`, [account]);
+        await behind.query('BEGIN');
+        const queued = behind.query(`SELECT 1 FROM connections WHERE id = $1 FOR UPDATE`, [account]);
+        await lockWaiters(1, 'connections');
+        const later = app.get(ConnectionsService).setStatus(account, 'active');
+        await lockWaiters(2, 'connections');
+        await earlier.query('COMMIT');
+        await queued;
+
+        // The reconcile the earlier change asked for holds the trigger.
+        await reconcile(wf);
+        expect(await activation(wf, production)).toMatchObject({
+          held: true,
+          last_error: HELD('production', 'polling'),
+        });
+
+        await behind.query('COMMIT');
+        await later;
+        await eventually(async () =>
+          expect(await activation(wf, production)).toMatchObject({
+            id: live.id,
+            held: false,
+            connection_id: account,
+            last_error: null,
+          }),
+        );
+      } finally {
+        await earlier.end();
+        await behind.end();
+      }
+    });
+
+    it('an account that flaps while its trigger is reconciled queues one more reconcile of it, not one per change', async () => {
+      const { production, account, wf, live } = await liveTrigger('polling', 'flaps');
+      const parked = parkReconciles();
+      try {
+        for (const status of [
+          'expired',
+          'active',
+          'expired',
+          'active',
+          'expired',
+          'active',
+          'expired',
+        ] as const) {
+          await app.get(ConnectionsService).setStatus(account, status);
+        }
+        await eventually(() => Promise.resolve(expect(parked.started(wf)).toBeGreaterThan(0)));
+        expect(parked.started(wf)).toBe(1);
+
+        parked.release();
+        await eventually(async () => {
+          expect(parked.started(wf)).toBe(2);
+          expect(await activation(wf, production)).toMatchObject({
+            id: live.id,
+            held: true,
+            last_error: HELD('production', 'polling'),
+          });
+        });
+      } finally {
+        parked.restore();
+      }
+    });
+
+    it.each(['a health check', 'a delivery its intake verifies'])(
+      'a live webhook held by an OAuth account is released when %s renews the account’s token',
+      async (renewal) => {
+        let grants = 0;
+        const tokens = createServer((req, res) => {
+          req.resume();
+          req.on('end', () => {
+            grants += 1;
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(
+              JSON.stringify({ access_token: `renewed-${grants}`, token_type: 'Bearer', expires_in: 3600 }),
+            );
+          });
+        });
+        await new Promise<void>((resolve) => tokens.listen(0, '127.0.0.1', resolve));
+        try {
+          const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+          const { org, production } = await workspace(`renewed by ${renewal}`);
+          const account = await oauthConnection(
+            appSlug,
+            `http://127.0.0.1:${(tokens.address() as AddressInfo).port}/token`,
+          );
+          await assignSlot(org, production, appSlug, account);
+          const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
+          const live = await activation(wf, production);
+          expect(live).toMatchObject({ connection_id: account, last_error: null });
+
+          await app.get(ConnectionsService).setStatus(account, 'expired', 'Access has expired');
+          await eventually(async () =>
+            expect(await activation(wf, production)).toMatchObject({
+              held: true,
+              last_error: HELD('production', 'webhook'),
+            }),
+          );
+          const calledUp = standUps();
+
+          if (renewal === 'a health check') {
+            const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
+            expect(checked.body).toMatchObject({
+              ok: true,
+              status: 'active',
+              detail: 'Access was renewed with the provider.',
+            });
+          } else {
+            const expired = app.get(EncryptionService).encryptToken(JSON.stringify(oauthToken(-60_000)));
+            await db.query(`UPDATE connections SET credential = $2 WHERE id = $1`, [account, expired]);
+            expect(await deliver('webhook', wf, live, 'D_RENEWS')).toMatchObject({ fired: 1 });
+          }
+          expect(grants).toBe(1);
+          await eventually(async () =>
+            expect(await activation(wf, production)).toMatchObject({
+              id: live.id,
+              held: false,
+              connection_id: account,
+              last_error: null,
+            }),
+          );
+          expect(standUps()).toBe(calledUp);
+        } finally {
+          await new Promise<void>((resolve) => tokens.close(() => resolve()));
+        }
+      },
+    );
   });
 });
 
@@ -1334,4 +1706,51 @@ describe('a change to an account reconciles the triggers listening as it through
     },
     60_000,
   );
+
+  it('an account that flaps while its triggers are reconciled leaves one job waiting for each of them, not one per change', async () => {
+    const { name, nodeType, props } = TRIGGERS.polling;
+    const { org, production, account, wf } = await liveTrigger('polling', 'flaps queued');
+    const { wf: other } = await deploy(org, { ...triggerDoc(nodeType, name, props), name: 'listens too' });
+    expect(await activation(other, production)).toMatchObject({ connection_id: account, last_error: null });
+    const workflows = [wf, other];
+    const parked = parkReconciles();
+    const waiting = async (wfId: string): Promise<number> =>
+      Number(
+        (
+          await db.query<{ n: string }>(
+            `SELECT count(*) AS n FROM pgboss.job
+              WHERE name = 'trigger-reconcile' AND state = 'created' AND data ->> 'workflowId' = $1`,
+            [wfId],
+          )
+        ).rows[0]!.n,
+      );
+    try {
+      const connections = app.get(ConnectionsService);
+      await connections.setStatus(account, 'expired');
+      // The worker takes one workflow's job and parks on it, so every later change finds the other's still waiting.
+      await eventually(
+        () => Promise.resolve(expect(workflows.map((id) => parked.started(id)).sort()).toEqual([0, 1])),
+        20_000,
+      );
+      const [first, second] = parked.started(wf) === 1 ? [wf, other] : [other, wf];
+      for (const status of ['active', 'expired', 'active', 'expired', 'active', 'expired'] as const) {
+        await connections.setStatus(account, status);
+      }
+      expect([await waiting(first), await waiting(second)]).toEqual([1, 1]);
+
+      parked.release();
+      await eventually(async () => {
+        expect([parked.started(first), parked.started(second)]).toEqual([2, 1]);
+        expect([await waiting(first), await waiting(second)]).toEqual([0, 0]);
+        for (const id of workflows) {
+          expect(await activation(id, production)).toMatchObject({
+            held: true,
+            last_error: HELD('production', 'polling'),
+          });
+        }
+      }, 20_000);
+    } finally {
+      parked.restore();
+    }
+  }, 60_000);
 });

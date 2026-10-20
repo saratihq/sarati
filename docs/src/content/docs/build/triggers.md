@@ -117,7 +117,8 @@ a polled trigger carries on from where it was.
 
 Renaming the environment replaces a webhook the same way, because the address the app calls carries
 the environment's name: the webhook at the old address is deleted and one is registered at the new
-one.
+one. While the account the webhook was registered with isn't active, neither can be done, so the
+rename is refused; see [Rename and delete](/run/environments/#rename-and-delete).
 
 If the app can't delete the old webhook, or doesn't answer within ten seconds, the new trigger goes
 live anyway, and the delete is tried again every fifteen minutes — even after you remove the trigger,

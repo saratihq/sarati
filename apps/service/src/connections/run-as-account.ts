@@ -226,8 +226,8 @@ function emptySlotMessage(environment: string, step: NamedStep): string {
   return `${environment} has no ${label} account assigned, so "${step.name}" can't run there — an owner assigns one under Integrations → Environments`;
 }
 
-// Reconnect connects a new account, which a slot holds only once an owner assigns it.
-const REVIVES_SLOT =
+/** What brings a slot's inactive account back, after "its owner": Reconnect connects a new account, which a slot holds only once assigned. */
+export const REVIVES_SLOT =
   'tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
 
 function inactiveSlotMessage(environment: string, step: NamedStep): string {

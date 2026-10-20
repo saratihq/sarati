@@ -85,6 +85,21 @@ is not listening and picks up from where it stopped once a **Test** under Integr
 account working, while a webhook or subscription still starts a run for each delivery. See
 [Environments](/run/environments/#triggers-listen-as-the-environments-account).
 
+## Renaming an environment says a webhook would be left at its old URL
+
+```
+Renaming 'staging' would leave "New customer" in "Billing" registered at its old URL, which serves
+nothing, because the stripe account it was registered with (Billing Stripe) isn't active — before
+renaming, its owner tests it under Integrations once it works again, or an owner reassigns the slot
+under Integrations → Environments
+```
+
+A webhook trigger in that environment is held: the account it was registered with at the app isn't
+active, and without it the webhook can be neither deleted nor registered again at the new URL. Once
+the account works again, a **Test** under Integrations brings it back; or assign the slot another
+account under **Integrations → Environments**, which registers the trigger anew as that account.
+Then rename. See [Rename and delete](/run/environments/#rename-and-delete).
+
 ## A run ends in `error`
 
 The run and the failing step both carry the reason, for example
