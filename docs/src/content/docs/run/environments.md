@@ -100,15 +100,34 @@ refusal lists the triggers apart from the steps, under `triggers`, with the same
  "triggers":[{"node_id":"watch","node_name":"New email","app":"gmail","reason":"inactive_slot"}]}
 ```
 
-A trigger already live in an environment whose account stops serving it is taken down, and the
-workflow overview shows why, naming the trigger and the environment as it is called now. Emptying or
-reassigning the slot does this at once; an account that stops being active is noticed within fifteen
-minutes, when pg-boss is enabled. If the slot changes again before it serves the trigger, or the
-environment is renamed, the reason changes with it. Creating a workflow is not refused this way: when
-its first version goes live, a trigger the account can't serve waits in the same way, with the reason
-on the overview. The trigger starts, fresh, once the environment has an account that serves it. A
-trigger that signs in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed —
-needs no account.
+A one-click (Composio) trigger — a subscription, or Gmail's polled new-mail trigger — runs only on a
+one-click account, so a slot account connected with its own key is refused as it is for a step that
+runs only on one:
+
+> staging's gmail account uses its own credentials, and "New email" runs only on a one-click
+> (managed) one, so it can't run there — reassign it under Integrations → Environments before
+> promoting here
+
+A live trigger whose own account stops being active is **held**, not taken down. What it set up at
+the app stays — a GitHub or Stripe webhook, a Composio subscription — and so does how far its feed
+had read. Nothing polls it and nothing is asked of the app, so the account is never used while it
+isn't active, and the workflow overview shows the trigger as not listening, with the reason. When
+that account is active again, the trigger carries on from where it stopped: a polled feed picks up
+what arrived while it was held. A change that needs the app — a new version's trigger settings, a
+renamed environment's webhook URL — waits until then, keeping what is live. The account is active
+again once a **Test** under Integrations finds it working, or it renews itself. **Reconnect**
+connects a new account instead, which the trigger listens as only once an owner assigns it to the
+slot.
+
+A live trigger is taken down when its slot is emptied, given another account, given another app's,
+or, for a one-click trigger, given one that uses its own credentials. It starts fresh once the slot
+serves it. These changes, and any change to an account — it stops or starts being active, or is
+removed — reconcile the triggers that listen as it straight away, not at the fifteen-minute sweep.
+If the slot changes again before it serves the trigger, or the environment is renamed, the reason
+changes with it. Creating a workflow is not refused this way: when its first version goes live, a
+trigger the account can't serve waits in the same way, with the reason on the overview. A trigger
+that signs in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed — needs no
+account.
 
 ## Rename and delete
 

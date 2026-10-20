@@ -8,7 +8,7 @@ import {
   type SlotRefusalReason,
   type StepRunAs,
 } from '../connections/run-as-account';
-import { triggerSlotApp } from '../triggers/canvas/trigger-kind';
+import { type TriggerSlot, triggerSlotOf } from '../triggers/canvas/trigger-kind';
 
 /** An environment a check predicts a run under. */
 export interface NamedEnvironment {
@@ -45,7 +45,7 @@ async function triggersRefusedIn(
       node_id: trigger.id,
       node_name: trigger.name,
       app: trigger.app,
-      managed_only: false,
+      managed_only: trigger.managedOnly,
       decision: await decideBySlot(trigger, await slotFor(trigger.app), () =>
         Promise.resolve(environment.name),
       ),
@@ -56,15 +56,15 @@ async function triggersRefusedIn(
 
 function appTriggersOf(
   document: unknown,
-): Array<{ id: string; name: string; app: string; connectionId: null }> {
+): Array<TriggerSlot & { id: string; name: string; connectionId: null }> {
   const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
   return nodes.flatMap((node) => {
     if (!isRecord(node) || typeof node.id !== 'string' || typeof node.node_type !== 'string') return [];
     const metadata = isRecord(node.metadata) ? node.metadata : undefined;
-    const app = triggerSlotApp({ node_type: node.node_type, ...(metadata ? { metadata } : {}) });
-    if (!app) return [];
+    const slot = triggerSlotOf({ node_type: node.node_type, ...(metadata ? { metadata } : {}) });
+    if (!slot) return [];
     const name = typeof node.name === 'string' && node.name !== '' ? node.name : node.id;
-    return [{ id: node.id, name, app, connectionId: null }];
+    return [{ id: node.id, name, ...slot, connectionId: null }];
   });
 }
 

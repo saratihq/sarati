@@ -126,6 +126,8 @@ export interface ActivationHealth {
   kind: string;
   /** `false` only when an operator paused it (desired-present but not firing). */
   active: boolean;
+  /** Held back by its environment's slot, so nothing polls it or is set up at its app; `last_error` says why and what fixes it. */
+  held_back_by_slot: boolean;
   status: 'paused' | 'error' | 'ok' | 'idle';
   last_polled_at: string | null;
   last_error: string | null;
@@ -475,10 +477,11 @@ export class TriggersService {
         .catch((err) =>
           this.logger.warn(`composio intake: activation ${row.id} fired run failed: ${String(err)}`),
         );
+      // A held trigger's delivery still fires, but its account still isn't active, so the hold's reason stays.
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
-        { lastPolledAt: now(), lastError: null },
+        { lastPolledAt: now(), ...(heldBack(row) ? {} : { lastError: null }) },
       );
       return 1;
     } catch (err) {
@@ -605,8 +608,8 @@ export class TriggersService {
       });
       // Removed or changed since the cycle loaded it, or not stood up as it reads: its store is not this row's.
       if (!row || !sameLiveTrigger(row, loaded) || !applyFinished(actualOf(row))) return null;
-      // Held back by its slot: nothing is stood up to poll, and `last_error` keeps the slot rule's refusal.
-      if (heldBackBySlot(actualOf(row))) return null;
+      // Held back by its slot: nothing is stood up or polled, and `last_error` keeps the slot rule's refusal.
+      if (heldBack(row)) return null;
       return this.pollLockedActivation(row);
     }).catch((err: unknown) => {
       this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);
@@ -813,6 +816,7 @@ export class TriggersService {
       trigger_type: row.triggerType,
       kind: row.kind,
       active: !row.paused,
+      held_back_by_slot: heldBack(row),
       status: activationStatus(row),
       last_polled_at: row.lastPolledAt?.toISOString() ?? null,
       last_error: row.lastError,
@@ -855,6 +859,10 @@ function runWithTimeout<T>(work: Promise<T>, ms: number, runId: string): Promise
 function holdsTrigger(ir: WorkflowIR, row: RuntimeTriggerActivationEntity): boolean {
   const node = ir.nodes.find((n) => n.id === row.triggerNodeId);
   return node?.node_type === row.triggerType && deepEqual(triggerPropsOf(node), row.props ?? {});
+}
+
+function heldBack(row: RuntimeTriggerActivationEntity): boolean {
+  return heldBackBySlot({ ...actualOf(row), held: row.held });
 }
 
 function sameLiveTrigger(a: RuntimeTriggerActivationEntity, b: RuntimeTriggerActivationEntity): boolean {

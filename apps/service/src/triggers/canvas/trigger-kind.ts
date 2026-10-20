@@ -28,22 +28,35 @@ function listensAsAccount(kind: ActivationKind, triggerType: string): boolean {
   return kind === 'registered_webhook' || kind === 'polling' || kind === 'composio_subscription';
 }
 
-function slotAppOf(kind: ActivationKind, triggerType: string): string | null {
-  return listensAsAccount(kind, triggerType) ? validatedAppSlug(triggerType) : null;
+// The Composio rails, subscribed or hand-polled, run only on a one-click (managed) account.
+function listensAsManagedAccount(kind: ActivationKind, triggerType: string): boolean {
+  return kind === 'composio_subscription' || (kind === 'polling' && !isSdkPollingTrigger(triggerType));
 }
 
-/** THE app whose environment slot a trigger node listens as, or null when it listens as none: the slot the reconciler stands it up on and a promote checks. */
-export function triggerSlotApp(
+/** The environment slot a trigger listens as: the app it is for, and whether only a one-click (managed) account serves it. */
+export interface TriggerSlot {
+  app: string;
+  managedOnly: boolean;
+}
+
+function slotOf(kind: ActivationKind, triggerType: string): TriggerSlot | null {
+  const app = listensAsAccount(kind, triggerType) ? validatedAppSlug(triggerType) : null;
+  return app ? { app, managedOnly: listensAsManagedAccount(kind, triggerType) } : null;
+}
+
+/** THE slot a trigger node listens as, or null when it listens as none: the slot the reconciler stands it up on and a promote checks. */
+export function triggerSlotOf(
   node: Pick<IRNode, 'node_type'> & { metadata?: Record<string, unknown> },
-): string | null {
+): TriggerSlot | null {
   if (!isTriggerNode(node)) return null;
   const kind = activationKindOf(node.node_type);
-  return kind === null ? null : slotAppOf(kind, node.node_type);
+  return kind === null ? null : slotOf(kind, node.node_type);
 }
 
-/** Whether an activation is held back: it listens as its environment's slot, which serves it no account, so nothing is stood up or polled. */
+/** Whether an activation is held back by its slot, so nothing is stood up or polled for it: it listens as one that serves it no account, or it is `held` — kept, while the account it was stood up with isn't active. */
 export function heldBackBySlot(
-  activation: Pick<MaterializedActivation, 'kind' | 'triggerType' | 'connection'>,
+  activation: Pick<MaterializedActivation, 'kind' | 'triggerType' | 'connection'> & { held?: boolean },
 ): boolean {
-  return activation.connection === null && slotAppOf(activation.kind, activation.triggerType) !== null;
+  if (activation.held === true) return true;
+  return activation.connection === null && slotOf(activation.kind, activation.triggerType) !== null;
 }

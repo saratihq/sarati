@@ -20,6 +20,7 @@ import {
   type SlotAccount,
 } from './run-as-account';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import {
   byoClientToConfig,
   OAuthProvidersService,
@@ -150,6 +151,7 @@ export class ConnectionsService implements RunAsAccounts {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
+    private readonly triggerSignals: TriggerSignalsService,
     // Absent → oauth2 credentials are returned as stored (no refresh possible).
     @Optional() private readonly oauthProviders?: OAuthProvidersService,
     // Absent → deleting a managed row skips the (best-effort anyway) Composio account cleanup.
@@ -207,6 +209,7 @@ export class ConnectionsService implements RunAsAccounts {
     const existing = await this.dataSource.manager.find(ConnectionEntity, {
       where: { orgId: cluster.orgId, environment: cluster.environment, provider },
     });
+    const listeners = await this.listenersOf(existing.map((row) => row.id));
     for (const row of existing) await this.revokeComposioAccount(row);
     try {
       await this.dataSource.transaction(async (em) => {
@@ -228,6 +231,7 @@ export class ConnectionsService implements RunAsAccounts {
       }
       throw err;
     }
+    await this.reconcileTriggers(listeners);
     return toSummary(entity);
   }
 
@@ -245,11 +249,35 @@ export class ConnectionsService implements RunAsAccounts {
 
   /** Persist a health transition; `active` clears the reason and `last_checked_at` records the verification. */
   async setStatus(id: string, status: ConnectionHealthStatus, reason: string | null = null): Promise<void> {
+    const before = await this.dataSource.manager.findOne(ConnectionEntity, {
+      where: { id },
+      select: { id: true, status: true },
+    });
     await this.dataSource.manager.update(
       ConnectionEntity,
       { id },
       { status, statusReason: status === 'active' ? null : reason, lastCheckedAt: now() },
     );
+    if (before && before.status !== status) await this.reconcileTriggers(await this.listenersOf([id]));
+  }
+
+  // A trigger listens as its slot's account only while that account is active (#11): the workflows a change to these accounts can move.
+  private async listenersOf(connectionIds: readonly string[]): Promise<string[]> {
+    if (connectionIds.length === 0) return [];
+    const rows: Array<{ workflow_id: string }> = await this.dataSource.manager.query(
+      `SELECT p.workflow_id
+         FROM environment_connections ec
+         JOIN workflow_env_pointers p ON p.environment_id = ec.environment_id
+        WHERE ec.connection_id = ANY($1::uuid[])
+       UNION
+       SELECT workflow_id FROM runtime_trigger_activations WHERE connection_id = ANY($1::uuid[])`,
+      [connectionIds],
+    );
+    return rows.map((row) => row.workflow_id);
+  }
+
+  private async reconcileTriggers(workflowIds: readonly string[]): Promise<void> {
+    for (const workflowId of workflowIds) await this.triggerSignals.enqueue(workflowId);
   }
 
   /** THE env-scoped resolver for `(environment_id, app)`: the slot's account and its owner, whom the step runs AS; null on an empty slot. */
@@ -453,9 +481,10 @@ export class ConnectionsService implements RunAsAccounts {
       where: { id, userId, orgId: IsNull() },
     });
     if (!row) return false;
+    const listeners = await this.listenersOf([id]);
     const res = await this.dataSource.manager.delete(ConnectionEntity, { id, userId, orgId: IsNull() });
     const removed = (res.affected ?? 0) > 0;
-    if (removed) await this.revokeComposioAccount(row);
+    if (removed) await this.removed(row, listeners);
     return removed;
   }
 
@@ -511,10 +540,17 @@ export class ConnectionsService implements RunAsAccounts {
   async deleteCluster(orgId: string, id: string): Promise<boolean> {
     const row = await this.dataSource.manager.findOne(ConnectionEntity, { where: { id, orgId } });
     if (!row) return false;
+    const listeners = await this.listenersOf([id]);
     const res = await this.dataSource.manager.delete(ConnectionEntity, { id, orgId });
     const removed = (res.affected ?? 0) > 0;
-    if (removed) await this.revokeComposioAccount(row);
+    if (removed) await this.removed(row, listeners);
     return removed;
+  }
+
+  // Deleting an account empties every slot it filled, so each workflow listening as it is reconciled.
+  private async removed(row: ConnectionEntity, listeners: readonly string[]): Promise<void> {
+    await this.revokeComposioAccount(row);
+    await this.reconcileTriggers(listeners);
   }
 
   /** Best-effort cascade revoking the Composio account; a failure must not resurrect the row — log and move on. */
@@ -680,13 +716,9 @@ export class ConnectionsService implements RunAsAccounts {
     await this.dataSource.manager.update(
       ConnectionEntity,
       { id: row.id },
-      {
-        credential: this.encryption.encryptToken(JSON.stringify(updated)),
-        status: 'active',
-        statusReason: null,
-        lastCheckedAt: now(),
-      },
+      { credential: this.encryption.encryptToken(JSON.stringify(updated)) },
     );
+    await this.setStatus(row.id, 'active');
     return updated;
   }
 

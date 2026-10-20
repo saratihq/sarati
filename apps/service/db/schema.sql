@@ -423,7 +423,8 @@ CREATE TABLE public.runtime_trigger_activations (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     materialized jsonb,
-    webhook_url text
+    webhook_url text,
+    held boolean DEFAULT false NOT NULL
 );
 
 

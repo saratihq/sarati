@@ -1303,22 +1303,22 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   });
 
   it('a retype that changes the rail tears down the OLD rail and stands up the new one', async () => {
-    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'retype rail'));
+    const { org, production } = await workspace('Retype rail');
+    await setPlatformKey(app, { kind: 'org', orgId: org }, 'composio_api_key', 'ck_e2e_fake_key');
+    await assignSlot(org, production, 'stripe', await tokenConnection('stripe', 'sk_test_rail', org));
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'retype rail'), org);
     const before = await activation(wfId);
     const oldEndpoint = await endpointOf(before.id);
     createSpy.mockClear();
-    // The prod stripe slot holds a direct connection; the Composio leg is shown it as managed.
-    const refSpy = jest.spyOn(app.get(ConnectionsService), 'managedRef').mockResolvedValue({
-      id: 'conn',
-      authType: 'managed',
-      status: 'active',
-      connectedAccountId: 'ca_stripe',
-    });
-    try {
-      await commitAndPublish(wfId, triggerDoc('stripe.subscription_created', {}, 'retype rail'));
-    } finally {
-      refSpy.mockRestore();
-    }
+    // The new rail runs only on a one-click account, so the slot takes one, unreconciled, before the retype is published.
+    const connections = app.get(ConnectionsService);
+    const oneClick = await connections.createManaged(userA, 'stripe', 'ca_stripe');
+    await connections.setStatus(oneClick.id, 'active');
+    await db.query(
+      `UPDATE environment_connections SET connection_id = $3 WHERE environment_id = $1 AND app = $2`,
+      [production, 'stripe', oneClick.id],
+    );
+    await commitAndPublish(wfId, triggerDoc('stripe.subscription_created', {}, 'retype rail'), org);
 
     expect(stripeEndpoints.has(oldEndpoint)).toBe(false);
     expect(await registration(before.id)).toBeNull();

@@ -172,6 +172,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     migration: '039_run_step_resumed_backfill.sql',
     probe: "SELECT 1 FROM pg_indexes WHERE indexname='ix_runtime_run_steps_resumed'",
   },
+  {
+    migration: '041_activation_held.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'",
+  },
 ];
 
 /**

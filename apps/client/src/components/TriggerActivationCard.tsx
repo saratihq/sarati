@@ -11,20 +11,32 @@ function truncateError(message: string): string {
   return oneLine.length > 120 ? `${oneLine.slice(0, 119)}…` : oneLine;
 }
 
-/** Runtime-health line: the most recent poll across ACTIVE activations, plus a note if any last failed. */
-function healthView(health: TriggerActivationHealth[] | null): {
-  checked: string;
+interface HealthView {
+  /** When the listening activations were last polled; null when none is listening. */
+  checked: string | null;
+  /** The environments whose account holds the trigger back, and each one's reason, which names its fix. */
+  heldBack: Array<{ environment: string; reason: string }>;
   error: string | null;
-} | null {
+}
+
+/** Runtime health across ACTIVE activations: the most recent poll of those listening, why any is held back, and the last failure. */
+function healthView(health: TriggerActivationHealth[] | null): HealthView | null {
   const active = (health ?? []).filter((h) => h.active);
   if (active.length === 0) return null;
 
-  const polls = active.map((h) => h.last_polled_at).filter((t): t is string => Boolean(t));
+  // A held-back activation's last_error is why it is held back, never a failed run.
+  const heldBack = active
+    .filter((h) => h.held_back_by_slot)
+    .map((h) => ({ environment: h.environment, reason: h.last_error ?? "" }));
+  const listening = active.filter((h) => !h.held_back_by_slot);
+  if (listening.length === 0) return { checked: null, heldBack, error: null };
+
+  const polls = listening.map((h) => h.last_polled_at).filter((t): t is string => Boolean(t));
   const lastPolled = polls.sort().at(-1) ?? null;
   const checked = lastPolled ? `Last checked ${timeAgo(lastPolled)}` : "Not polled yet";
 
-  const failed = active.filter((h) => h.last_error);
-  if (failed.length === 0) return { checked, error: null };
+  const failed = listening.filter((h) => h.last_error);
+  if (failed.length === 0) return { checked, heldBack, error: null };
 
   // Show the most-recently-polled failure; prefix the env only when several are live.
   const worst = failed.reduce((a, b) =>
@@ -33,7 +45,31 @@ function healthView(health: TriggerActivationHealth[] | null): {
   const multiEnv = new Set(active.map((h) => h.environment)).size > 1;
   const detail = truncateError(worst.last_error ?? "");
   const error = `Last run failed: ${multiEnv ? `${worst.environment}: ${detail}` : detail}`;
-  return { checked, error };
+  return { checked, heldBack, error };
+}
+
+// Live, held back by its environment's account in some or every environment, or not live yet.
+function statusOf(
+  manual: boolean,
+  liveVersion: number | null,
+  hasUnpublished: boolean,
+  runtime: HealthView | null,
+): { dot: string; text: string } {
+  if (manual) return { dot: "var(--orchestr-ink-subtle)", text: "Runs on demand — never fires on its own" };
+  if (liveVersion == null) {
+    return { dot: "var(--orchestr-warning)", text: "Not live yet — publish a version to start it" };
+  }
+  const heldIn = [...new Set((runtime?.heldBack ?? []).map((h) => h.environment))];
+  if (heldIn.length > 0) {
+    return {
+      dot: "var(--orchestr-warning)",
+      text: runtime?.checked == null ? "Not listening" : `Not listening in ${heldIn.join(", ")}`,
+    };
+  }
+  return {
+    dot: "var(--orchestr-success)",
+    text: hasUnpublished ? "Live — head has unpublished changes" : "Live",
+  };
 }
 
 /** Read-only trigger indicator for the overview — the trigger is configured on the canvas. */
@@ -63,19 +99,10 @@ export default function TriggerActivationCard({
           ? MessageCircle
           : Zap;
 
-  // Save ≠ Live: manual never auto-fires; anything else is live only once a
-  // version carrying it is published.
-  const status: { dot: string; text: string } = manual
-    ? { dot: "var(--orchestr-ink-subtle)", text: "Runs on demand — never fires on its own" }
-    : liveVersion != null
-      ? {
-          dot: "var(--orchestr-success)",
-          text: hasUnpublished ? "Live — head has unpublished changes" : "Live",
-        }
-      : { dot: "var(--orchestr-warning)", text: "Not live yet — publish a version to start it" };
-
   // Manual triggers never poll — they have no runtime health to show.
   const runtime = manual ? null : healthView(health ?? null);
+  // Save ≠ Live: manual never auto-fires; anything else is live only once a version carrying it is published.
+  const status = statusOf(manual, liveVersion, hasUnpublished, runtime);
 
   return (
     <section
@@ -118,9 +145,20 @@ export default function TriggerActivationCard({
 
       {runtime && (
         <div className="mt-1.5 flex flex-col gap-1">
-          <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
-            {runtime.checked}
-          </span>
+          {runtime.heldBack.map((h, i) => (
+            <span
+              key={`${h.environment}-${i}`}
+              className="text-[11px] leading-snug"
+              style={{ color: "var(--orchestr-warning)" }}
+            >
+              {h.reason}
+            </span>
+          ))}
+          {runtime.checked && (
+            <span className="text-[11px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              {runtime.checked}
+            </span>
+          )}
           {runtime.error && (
             <span
               className="text-[11px] leading-snug"

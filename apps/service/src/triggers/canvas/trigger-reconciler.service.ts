@@ -48,7 +48,7 @@ import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
 import { activationKeyOf, actualOf } from './activation-row';
-import { activationKindOf, heldBackBySlot, triggerSlotApp } from './trigger-kind';
+import { activationKindOf, heldBackBySlot, triggerSlotOf } from './trigger-kind';
 import {
   type ActivationKey,
   activationKeyString,
@@ -166,22 +166,26 @@ export class TriggerReconcilerService {
       if (ir) pointerInputs.push({ environmentId: p.environment_id, versionId: p.version_id, ir });
     }
 
+    const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
+    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
+    const actual = actualRows.map((r) => actualOf(r));
+
     // The pure derive is synchronous, so slots must be resolved up front.
     const slots = await this.resolveSlots(pointerInputs, envNameById);
     const desired = deriveDesiredActivations({
       workflowId,
       pointers: pointerInputs,
       kindOf: (node) => activationKindOf(node.node_type),
-      connectionOf: (envId, node) => connectionServing(slots.get(triggerKey(envId, node.id))),
+      connectionOf: (envId, node) =>
+        listensAs(
+          slots.get(triggerKey(envId, node.id)),
+          rowByKey.get(activationKeyString({ workflowId, environmentId: envId, triggerNodeId: node.id })),
+        ),
       webhookUrlOf: (envId, kind) =>
         kind === 'registered_webhook'
           ? this.webhookUrl({ workflowId, environmentId: envId }, envNameById)
           : null,
     });
-
-    const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
-    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
-    const actual = actualRows.map((r) => actualOf(r));
 
     const plan = reconcileActivations(desired, actual);
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
@@ -200,7 +204,7 @@ export class TriggerReconcilerService {
       const row = rowByKey.get(activationKeyString(d.key));
       if (row) await this.applyDelete(row, envNameById).catch((err) => this.applyFailed('delete', row, err));
     }
-    if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
+    if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan, slots);
     return pendingDeletes;
   }
 
@@ -213,6 +217,7 @@ export class TriggerReconcilerService {
     desired: DesiredActivation[],
     rowByKey: Map<string, RuntimeTriggerActivationEntity>,
     plan: ReconcilePlan,
+    slots: SlotReads,
   ): Promise<void> {
     // Rows the plan already stood up this sweep — don't pay a second upsert for them.
     const materialized = new Set<string>();
@@ -223,7 +228,7 @@ export class TriggerReconcilerService {
     const targets: Array<{ id: string; desired: DesiredActivation }> = [];
     for (const d of desired) {
       if (d.kind !== 'composio_subscription' || d.paused) continue;
-      if (heldBackBySlot(d)) continue;
+      if (heldBackBySlot({ ...d, held: isHeld(d, slots) })) continue;
       const keyStr = activationKeyString(d.key);
       if (materialized.has(keyStr)) continue;
       const row = rowByKey.get(keyStr);
@@ -293,7 +298,7 @@ export class TriggerReconcilerService {
 
   // ─── apply ───
 
-  private async applyCreate(desired: DesiredActivation, slots: SlotDecisions): Promise<void> {
+  private async applyCreate(desired: DesiredActivation, slots: SlotReads): Promise<void> {
     const id = newId();
     const ts = now();
     const heldBack = heldBackBySlot(desired);
@@ -311,6 +316,7 @@ export class TriggerReconcilerService {
       connectionOwnerUserId: desired.connection?.ownerUserId ?? null,
       paused: desired.paused,
       webhookUrl: desired.webhookUrl,
+      held: false,
       lastPolledAt: null,
       lastError: heldBack ? slotRefusal(desired, slots) : null,
       createdAt: ts,
@@ -331,25 +337,17 @@ export class TriggerReconcilerService {
     row: RuntimeTriggerActivationEntity,
     update: ActivationUpdate,
     envName: Map<string, string>,
-    slots: SlotDecisions,
+    slots: SlotReads,
   ): Promise<void> {
     const { desired } = update;
     const live = liveOf(row);
-    const heldBack = heldBackBySlot(desired);
-    row.kind = desired.kind;
-    row.triggerType = desired.triggerType;
-    row.versionId = desired.versionId;
-    row.props = desired.props;
-    row.connectionId = desired.connection?.connectionId ?? null;
-    row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
-    row.paused = desired.paused;
-    row.webhookUrl = desired.webhookUrl;
-    row.lastError = heldBack ? slotRefusal(desired, slots) : null;
-    row.updatedAt = now();
+    const held = isHeld(desired, slots);
+    const heldBack = heldBackBySlot({ ...desired, held });
+    describeRow(row, update, held, heldBack ? slotRefusal(desired, slots) : null);
     await withActivationLock(this.pool, row.id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-      // A 'keep' leaves the cursor/subscription untouched; a 'reset' tears down what is live and starts from now.
-      if (update.cursorAction === 'keep') return;
+      // A 'keep' leaves the cursor/subscription untouched, and a held row asks nothing of its app; a 'reset' tears down what is live and starts from now.
+      if (update.cursorAction === 'keep' || held) return;
       await this.teardown(row, live, envName);
       if (desired.paused || heldBack) {
         await this.recordMaterialized(row.id, desired);
@@ -844,20 +842,22 @@ export class TriggerReconcilerService {
   private async resolveSlots(
     pointers: EnvPointerInput[],
     envNameById: Map<string, string>,
-  ): Promise<SlotDecisions> {
+  ): Promise<SlotReads> {
     const reads = new Map<string, Promise<SlotAccount | null>>();
-    const decisions: SlotDecisions = new Map();
+    const decisions: SlotReads = new Map();
     for (const pointer of pointers) {
       const environment = envNameById.get(pointer.environmentId) ?? 'This environment';
       for (const node of pointer.ir.nodes) {
-        const app = triggerSlotApp(node);
-        if (!app) continue;
-        const readKey = `${pointer.environmentId}::${app}`;
-        const read = reads.get(readKey) ?? this.connections.resolveSlotConnection(pointer.environmentId, app);
+        const slot = triggerSlotOf(node);
+        if (!slot) continue;
+        const readKey = `${pointer.environmentId}::${slot.app}`;
+        const read =
+          reads.get(readKey) ?? this.connections.resolveSlotConnection(pointer.environmentId, slot.app);
         reads.set(readKey, read);
-        const trigger = { name: node.name || node.id, app, connectionId: null };
-        const decision = await decideBySlot(trigger, await read, () => Promise.resolve(environment));
-        decisions.set(triggerKey(pointer.environmentId, node.id), decision);
+        const account = await read;
+        const trigger = { name: node.name || node.id, ...slot, connectionId: null };
+        const decision = await decideBySlot(trigger, account, () => Promise.resolve(environment));
+        decisions.set(triggerKey(pointer.environmentId, node.id), { decision, account });
       }
     }
     return decisions;
@@ -929,37 +929,78 @@ function webhookLabel(webhook: RegisteredWebhook): string {
   return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }
 
-type SlotDecisions = Map<string, RunAsDecision>;
+// A trigger's slot as one reconcile reads it: the account in it, and whether that account serves the trigger.
+interface SlotRead {
+  decision: RunAsDecision;
+  account: SlotAccount | null;
+}
+
+type SlotReads = Map<string, SlotRead>;
 
 function triggerKey(environmentId: string, triggerNodeId: string): string {
   return `${environmentId}::${triggerNodeId}`;
 }
 
-// A trigger listens as its slot's account only while the slot serves it; otherwise as none, and stands nothing up.
-function connectionServing(decision: RunAsDecision | undefined): ConnectionRef | null {
-  return decision?.kind === 'account'
-    ? { connectionId: decision.connectionId, ownerUserId: decision.ownerUserId }
-    : null;
+// A trigger listens as its slot's account while the slot serves it; a live one whose own account only stops being active keeps it, held.
+function listensAs(
+  read: SlotRead | undefined,
+  row: RuntimeTriggerActivationEntity | undefined,
+): ConnectionRef | null {
+  if (!read) return null;
+  const { decision, account } = read;
+  if (decision.kind === 'account') {
+    return { connectionId: decision.connectionId, ownerUserId: decision.ownerUserId };
+  }
+  const live = row ? liveOf(row).connection : null;
+  const same = live !== null && live.connectionId === account?.id && live.ownerUserId === account.ownerUserId;
+  return decision.reason === 'inactive_slot' && same ? live : null;
 }
 
-function refusalOf(desired: DesiredActivation, slots: SlotDecisions): string | null {
-  const decision = slots.get(triggerKey(desired.key.environmentId, desired.key.triggerNodeId));
-  return decision?.kind === 'refused' ? decision.message : null;
+function refusalOf(desired: DesiredActivation, slots: SlotReads): string | null {
+  const read = slots.get(triggerKey(desired.key.environmentId, desired.key.triggerNodeId));
+  return read?.decision.kind === 'refused' ? read.decision.message : null;
+}
+
+// Refused, yet listening as an account: listensAs kept the one it was stood up with.
+function isHeld(desired: DesiredActivation, slots: SlotReads): boolean {
+  return desired.connection !== null && refusalOf(desired, slots) !== null;
 }
 
 // resolveSlots judges every trigger heldBackBySlot names, so a held-back one always has the rule's refusal.
-function slotRefusal(desired: DesiredActivation, slots: SlotDecisions): string {
+function slotRefusal(desired: DesiredActivation, slots: SlotReads): string {
   const refusal = refusalOf(desired, slots);
   if (refusal === null) throw new Error(`No slot decision for trigger node ${desired.key.triggerNodeId}`);
   return refusal;
 }
 
-// A held-back row the plan leaves alone is rewritten in place once its refusal changes: another unfit state, or a renamed environment.
+// A held row keeps what it was stood up as, and records only the version a 'keep' moves it to.
+function describeRow(
+  row: RuntimeTriggerActivationEntity,
+  { desired, cursorAction }: ActivationUpdate,
+  held: boolean,
+  refusal: string | null,
+): void {
+  if (!held || cursorAction === 'keep') row.versionId = desired.versionId;
+  if (!held) {
+    row.kind = desired.kind;
+    row.triggerType = desired.triggerType;
+    row.props = desired.props;
+    row.connectionId = desired.connection?.connectionId ?? null;
+    row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
+    row.paused = desired.paused;
+    row.webhookUrl = desired.webhookUrl;
+  }
+  row.held = held;
+  row.lastError = refusal;
+  row.updatedAt = now();
+}
+
+// A row the plan leaves alone is rewritten in place when its slot's answer changes: held, released, or refused in other words.
 function restatements(
   plan: ReconcilePlan,
   desired: DesiredActivation[],
   rowByKey: Map<string, RuntimeTriggerActivationEntity>,
-  slots: SlotDecisions,
+  slots: SlotReads,
 ): ActivationUpdate[] {
   const planned = new Set([
     ...plan.toCreate.map((d) => activationKeyString(d.key)),
@@ -968,10 +1009,10 @@ function restatements(
   return desired.flatMap((d): ActivationUpdate[] => {
     const keyStr = activationKeyString(d.key);
     const row = rowByKey.get(keyStr);
-    if (!row || planned.has(keyStr) || !heldBackBySlot(d)) return [];
-    const refusal = refusalOf(d, slots);
-    return refusal !== null && row.lastError !== refusal
-      ? [{ desired: d, actual: actualOf(row), cursorAction: 'keep' }]
-      : [];
+    if (!row || planned.has(keyStr)) return [];
+    const held = isHeld(d, slots);
+    const refusal = heldBackBySlot({ ...d, held }) ? refusalOf(d, slots) : null;
+    const restated = refusal !== null && row.lastError !== refusal;
+    return restated || row.held !== held ? [{ desired: d, actual: actualOf(row), cursorAction: 'keep' }] : [];
   });
 }

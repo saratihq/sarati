@@ -24,7 +24,8 @@ const SINGLE_DEFINITION = [
   // Constitution #11 — how a trigger is stood up, and which triggers listen as their environment's slot.
   { symbol: 'activationKindOf', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'listensAsAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
-  { symbol: 'triggerSlotApp', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'listensAsManagedAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'triggerSlotOf', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'heldBackBySlot', definedIn: 'triggers/canvas/trigger-kind.ts' },
 ] as const;
 
@@ -102,7 +103,7 @@ describe('vault: one definition site per load-bearing question', () => {
         .sort();
     const listeners = ['environments/env-slot-preflight.ts', 'triggers/canvas/trigger-reconciler.service.ts'];
 
-    expect(asking(/\btriggerSlotApp\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual(listeners);
+    expect(asking(/\btriggerSlotOf\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual(listeners);
     expect(asking(/\bdecideBySlot\s*\(/, 'connections/run-as-account.ts')).toEqual(listeners);
     expect(asking(/\bheldBackBySlot\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual([
       'triggers/canvas/trigger-reconciler.service.ts',
