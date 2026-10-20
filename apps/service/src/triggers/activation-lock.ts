@@ -32,11 +32,6 @@ export async function ifActivationUnlocked<T>(
   });
 }
 
-/** SQL true once the statement holds activation `idParam`'s lock beside other deliveries, till it ends; false, never waiting, while a stand-up, change, teardown, the sweep's re-subscribe or a poll holds or awaits it. */
-export function sharesActivationLock(idParam: string): string {
-  return `pg_try_advisory_xact_lock_shared(${ACTIVATION_LOCK_SPACE}, hashtext(${idParam}))`;
-}
-
 async function holding<T>(client: PoolClient, activationId: string, work: () => Promise<T>): Promise<T> {
   try {
     return await work();

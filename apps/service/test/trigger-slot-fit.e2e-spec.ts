@@ -19,6 +19,7 @@ import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { RuntimeTriggerActivationEntity } from '../src/database/entities/runtime-trigger-activation.entity';
 import { WorkflowVersionEntity } from '../src/database/entities/workflow-version.entity';
+import * as ids from '../src/database/ids';
 import { PG_POOL } from '../src/database/tokens';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
@@ -814,6 +815,17 @@ const advisoryWaits = async (): Promise<number> =>
       )
     ).rows[0]!.n,
   );
+
+// Whether a session holds activation `activationId`'s lock, as a reconcile takes it.
+const activationLocked = async (activationId: string): Promise<boolean> =>
+  (
+    await db.query<{ locked: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+          WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.granted
+            AND l.classid = 7301 AND l.objid = hashtext($1)::oid AND l.objsubid = 2) AS locked`,
+      [activationId],
+    )
+  ).rows[0]!.locked;
 
 // A Composio event on a live trigger's subscription, its answer awaited by the caller.
 const composioEvent = (live: ActivationRow, id: string): Promise<request.Response> =>
@@ -1661,12 +1673,12 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
-  it('a Composio delivery that claimed its row before its trigger was held writes nothing over the hold, so its reason stands', async () => {
-    const { production, account, wf, live } = await liveTrigger('composio', 'claimed before held');
-    // Parks the delivery once it has claimed its row and read it to decide what it records, before it writes.
+  it('a Composio delivery that read its row to record its fire before its trigger was held writes nothing over the hold, so its reason stands', async () => {
+    const { production, account, wf, live } = await liveTrigger('composio', 'read row before held');
+    // Parks the delivery once it has read its row to decide what it records, before it writes.
     const parked = parkActivationRead(live.id);
     try {
-      const sent = composioEvent(live, 'claimed_before_held');
+      const sent = composioEvent(live, 'read_row_before_held');
       await parked.reached;
       await setStatus(account, 'expired');
       await reconcile(wf);
@@ -1685,36 +1697,56 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     }
   });
 
-  it.each(['before it claims its row', 'once it has claimed its row'] as const)(
-    'a Composio delivery that arrived first and records %s, after a later one, leaves the later one’s failed fire recorded',
-    async (when) => {
-      const { production, wf, live } = await liveTrigger('composio', `recorded ${when}`);
-      const parked = when === 'before it claims its row' ? parkPointerRead(wf) : parkActivationRead(live.id);
-      try {
-        const first = composioEvent(live, `first_${when.length}`);
-        await parked.reached;
-        jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
-          throw new Error('the version does not compile');
-        });
-        const second = await composioEvent(live, `second_${when.length}`);
-        expect(second.status).toBe(202);
-        expect(second.body).toMatchObject({ fired: 0 });
-        const recorded = await activation(wf, production);
-        expect(recorded).toMatchObject({ last_error: 'the version does not compile' });
-        parked.release();
-        expect((await first).body).toMatchObject({ fired: 1 });
-        expect(await activation(wf, production)).toMatchObject({
-          last_error: 'the version does not compile',
-          last_polled_at: recorded.last_polled_at,
-        });
-      } finally {
-        parked.restore();
-      }
-    },
-  );
+  it('a Composio delivery whose row another delivery records after it read it reads the row again and records its own failed fire', async () => {
+    const { org, production, wf, live } = await liveTrigger('composio', 'recorded after another');
+    jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+      throw new Error('the version does not compile');
+    });
+    const parked = parkActivationRead(live.id);
+    try {
+      const failed = composioEvent(live, 'failed_then_parked');
+      await parked.reached;
+      expect((await composioEvent(live, 'fired_meanwhile')).body).toMatchObject({ fired: 1 });
+      const meanwhile = await activation(wf, production);
+      expect(meanwhile).toMatchObject({ last_error: null });
+      expect(meanwhile.last_polled_at).not.toBeNull();
+      parked.release();
+      expect((await failed).body).toMatchObject({ fired: 0 });
+      const recorded = await activation(wf, production);
+      expect(recorded).toMatchObject({ last_error: 'the version does not compile' });
+      expect(recorded.last_polled_at!.getTime()).toBeGreaterThan(meanwhile.last_polled_at!.getTime());
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        status: 'error',
+        last_error: 'the version does not compile',
+      });
+    } finally {
+      parked.restore();
+    }
+  });
 
-  it('a burst of Composio deliveries while a reconcile holds their activation’s lock never waits for it: each answers, readiness stays up, and the row is that reconcile’s', async () => {
-    const { production, wf, live } = await liveTrigger('composio', 'burst under reconcile');
+  it('a Composio delivery after the service’s clock steps back records its failed fire, and the next delivery’s fire clears it', async () => {
+    const { org, production, wf, live } = await liveTrigger('composio', 'clock steps back');
+    expect((await composioEvent(live, 'before_the_step')).body).toMatchObject({ fired: 1 });
+    expect(await shownOn(org, wf, production)).toMatchObject({ status: 'ok', last_error: null });
+    const behind = jest.spyOn(ids, 'now').mockImplementation(() => new Date(Date.now() - 30_000));
+    try {
+      jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
+        throw new Error('the version does not compile');
+      });
+      expect((await composioEvent(live, 'failed_behind')).body).toMatchObject({ fired: 0 });
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        status: 'error',
+        last_error: 'the version does not compile',
+      });
+      expect((await composioEvent(live, 'fired_behind')).body).toMatchObject({ fired: 1 });
+      expect(await shownOn(org, wf, production)).toMatchObject({ status: 'ok', last_error: null });
+    } finally {
+      behind.mockRestore();
+    }
+  });
+
+  it('a burst of Composio deliveries while a reconcile holds their activation’s lock never waits for it: each answers, readiness stays up, and their fires are recorded', async () => {
+    const { org, production, wf, live } = await liveTrigger('composio', 'burst under reconcile');
     let release = (): void => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let arrive = (): void => undefined;
@@ -1728,9 +1760,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     const healing = reconcile(wf, { selfHeal: true });
     try {
       await reached;
-      jest.spyOn(app.get(RuntimeCompiler), 'compile').mockImplementationOnce(() => {
-        throw new Error('the version does not compile');
-      });
+      expect(await activationLocked(live.id)).toBe(true);
       // More deliveries than the service's pool has connections.
       const BURST = 25;
       let answered = 0;
@@ -1742,29 +1772,30 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       );
       await eventually(() => Promise.resolve(expect(answered).toBe(BURST)));
       const answers = await Promise.all(sent);
-      expect(answers.map((res) => res.status)).toEqual(Array.from({ length: BURST }, () => 202));
-      expect(answers.filter((res) => (res.body as { fired: number }).fired === 1)).toHaveLength(BURST - 1);
+      expect(answers.map((res) => [res.status, (res.body as { fired: number }).fired])).toEqual(
+        Array.from({ length: BURST }, () => [202, 1]),
+      );
       expect(await advisoryWaits()).toBe(0);
       await http().get('/api/ready').expect(200);
       expect(await withActivationLock(app.get(PG_POOL), randomUUID(), () => Promise.resolve('ran'))).toBe(
         'ran',
       );
-      expect(await activation(wf, production)).toMatchObject({
-        last_error: null,
-        last_polled_at: live.last_polled_at,
-      });
+      expect(await activationLocked(live.id)).toBe(true);
+      expect((await activation(wf, production)).last_polled_at).not.toBeNull();
+      expect(await shownOn(org, wf, production)).toMatchObject({ status: 'ok', last_error: null });
     } finally {
       release();
       await healing;
     }
   });
 
-  it('a Composio delivery that claimed its row before a reconcile took its activation’s lock records nothing while that reconcile holds it', async () => {
-    const { production, wf, live } = await liveTrigger('composio', 'claimed before reconcile');
+  it('a Composio delivery that read its row to record its failed fire before a reconcile took its activation’s lock records it while that reconcile holds it, and the next delivery’s fire clears it', async () => {
+    const { org, production, wf, live } = await liveTrigger('composio', 'read row before reconcile');
     let release = (): void => undefined;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let arrive = (): void => undefined;
     const reached = new Promise<void>((resolve) => (arrive = resolve));
+    // The sweep's self-heal re-subscribes under the activation's lock; Composio answers it only at the gate.
     subscribed.mockImplementationOnce(async () => {
       arrive();
       await gate;
@@ -1776,18 +1807,29 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     const parked = parkActivationRead(live.id);
     let healing: Promise<void> | undefined;
     try {
-      const sent = composioEvent(live, 'claimed_before_reconcile');
+      const sent = composioEvent(live, 'read_row_before_reconcile');
       await parked.reached;
       healing = reconcile(wf, { selfHeal: true });
       await reached;
+      expect(await activationLocked(live.id)).toBe(true);
       parked.release();
       expect((await sent).body).toMatchObject({ fired: 0 });
-      expect(await activation(wf, production)).toMatchObject({ last_error: null });
+      const failed = await activation(wf, production);
+      expect(failed).toMatchObject({ last_error: 'the version does not compile' });
+      expect(failed.last_polled_at).not.toBeNull();
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        status: 'error',
+        last_error: 'the version does not compile',
+      });
+      expect((await composioEvent(live, 'fired_during_reconcile')).body).toMatchObject({ fired: 1 });
+      expect(await activationLocked(live.id)).toBe(true);
+      expect(await shownOn(org, wf, production)).toMatchObject({ status: 'ok', last_error: null });
     } finally {
       parked.restore();
       release();
       await healing;
     }
+    expect(await shownOn(org, wf, production)).toMatchObject({ status: 'ok', last_error: null });
   });
 
   it('Composio deliveries recording their fires while every data-source connection is busy take none of the pool readiness, reconciles and polls share, so readiness stays up', async () => {

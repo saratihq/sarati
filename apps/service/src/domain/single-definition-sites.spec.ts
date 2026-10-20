@@ -290,6 +290,12 @@ describe('vault: one definition site per load-bearing question', () => {
       'em.find(RuntimeTriggerActivationEntity, { where: { paused: false, ...(live ? { held: false } : {}) } });',
       'em.find(RuntimeTriggerActivationEntity, { where: [...(live ? [{ held: false }] : [])] });',
       'em.find(RuntimeTriggerActivationEntity, { where: given ?? { held: false } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false } ?? given });',
+      'em.find(RuntimeTriggerActivationEntity, { where: given || { held: false } });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false } || given });',
+      'em.find(RuntimeTriggerActivationEntity, { where: { held: false } && given });',
+      'em.find(RuntimeTriggerActivationEntity, { where: live ? { paused: false } : { held: false } });',
+      'em.find(WorkflowEntity, { where: { activation: { held: true } } });',
       'em.update(RuntimeTriggerActivationEntity, live ? { id, held: false } : { id }, { lastError });',
     ];
     const unnamed = [
@@ -303,6 +309,7 @@ describe('vault: one definition site per load-bearing question', () => {
       "qb.where('a.id = :id', { id: 'held' });",
       'em.update(RuntimeTriggerActivationEntity, { id }, live ? { held: true } : { lastError });',
       'const shown = live ? { held: true } : {};',
+      'em.find(RuntimeTriggerActivationEntity, { where: (given ?? { held: true }) ? { id } : { paused: false } });',
     ];
 
     expect(named.filter((source) => heldInQueries(source).length !== 1)).toEqual([]);

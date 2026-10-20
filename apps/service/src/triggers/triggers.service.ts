@@ -14,7 +14,7 @@ import { isRecord } from '../common/json-util';
 import type { EnvConfig } from '../config/env.config';
 import { ConnectionsService } from '../connections/connections.service';
 import { isIdShape, newId, now } from '../database/ids';
-import { rawMutate, rawMutateReturning } from '../database/raw-query';
+import { rawMutate, rawQuery } from '../database/raw-query';
 import { ComposioWebhookDeliveryEntity } from '../database/entities/composio-webhook-delivery.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { RuntimeTriggerActivationEntity } from '../database/entities/runtime-trigger-activation.entity';
@@ -25,7 +25,7 @@ import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
 import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
-import { ifActivationUnlocked, sharesActivationLock } from './activation-lock';
+import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
@@ -458,15 +458,13 @@ export class TriggersService {
 
   /**
    * Fire ONE activation for a verified Composio delivery — resolve/compile synchronously, run fire-and-forget. Returns 1
-   * when dispatched. A failed fire is logged, and lands on `last_error` unless the row is held back, a delivery that
-   * arrived later is recorded, or a stand-up, change, teardown, the sweep's re-subscribe or a poll holds or awaits its lock.
+   * when dispatched. A failed fire is logged, and lands on `last_error` unless the row is held back, whose reason stands.
    */
   private async fireComposioActivation(
     row: RuntimeTriggerActivationEntity,
     payload: unknown,
     deliveryAccountId: string | null,
   ): Promise<number> {
-    const arrived = now();
     // Defense in depth: never fire another connected account's event as this owner.
     if (deliveryAccountId && !(await this.activationAccountMatches(row, deliveryAccountId))) {
       this.logger.warn(
@@ -476,24 +474,23 @@ export class TriggersService {
     }
     const fired = await this.startComposioRun(row, payload);
     if (fired === null) return 0;
+    const outcome = fired === true ? null : activationError(fired.error);
     const em = this.dataSource.manager;
     try {
-      // Claimed under the activation's lock, shared with other deliveries and never waited for, by the latest to arrive.
-      const [claim] = await rawMutateReturning<{ version: string }>(
-        em,
-        `UPDATE runtime_trigger_activations SET last_polled_at = $2
-          WHERE id = $1 AND (last_polled_at IS NULL OR last_polled_at <= $2) AND ${sharesActivationLock('$3')}
-          RETURNING xmin::text AS version`,
-        [row.id, arrived, row.id],
-      );
-      const current = claim && (await em.findOne(RuntimeTriggerActivationEntity, { where: { id: row.id } }));
-      // Written only over the row as claimed, so a hold or a later delivery written since stands.
-      if (claim && current && !heldBack(current)) {
-        await rawMutate(
+      // Written only over the row as read (its xmin), read again whenever another write lands first, so a hold's reason stands.
+      let recorded = 0;
+      while (recorded === 0) {
+        const [read] = await rawQuery<{ version: string }>(
           em,
-          `UPDATE runtime_trigger_activations SET last_error = $3
-            WHERE id = $1 AND xmin = $2::xid AND ${sharesActivationLock('$4')}`,
-          [row.id, claim.version, fired === true ? null : activationError(fired.error), row.id],
+          `SELECT xmin::text AS version FROM runtime_trigger_activations WHERE id = $1`,
+          [row.id],
+        );
+        const current = read && (await em.findOne(RuntimeTriggerActivationEntity, { where: { id: row.id } }));
+        if (!current) break;
+        recorded = await rawMutate(
+          em,
+          `UPDATE runtime_trigger_activations SET last_polled_at = $3, last_error = $4 WHERE id = $1 AND xmin = $2::xid`,
+          [row.id, read.version, now(), heldBack(current) ? current.lastError : outcome],
         );
       }
     } catch (err) {
