@@ -15,6 +15,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
 import {
   buildDirectAuth,
+  buildLazyDirectAuth,
   buildObservedDirectAuth,
   ConnectionGoneError,
   loadTriggerOptions,
@@ -141,12 +142,19 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** The TRUST BOUNDARY for untrusted public-endpoint input: a bad signature throws 401 before anything fires. */
+  /** The TRUST BOUNDARY for untrusted public-endpoint input: a bad signature throws 401 before anything fires; the account's credential is resolved only if the trigger asks its app for something, and with no account (`auth` null) none is sent. */
   async handleRequest(
     ctx: SdkWebhookContext & { request: WebhookRequest; registration?: WebhookRegistration },
   ): Promise<unknown[]> {
     const trigger = this.require(ctx.type);
-    const auth = await this.authFor(ctx.externalUserId, ctx.auth, trigger);
+    const auth =
+      ctx.auth === null
+        ? buildDirectAuth(trigger.auth, { type: 'none' }, this.fetchImpl)
+        : buildLazyDirectAuth(
+            trigger.auth,
+            () => resolveTriggerCredential(this.connections, ctx.externalUserId, ctx.auth, trigger.auth),
+            this.fetchImpl,
+          );
     // Verify against the PROVIDER-minted secret when the handle carries one — verifying a provider-minted
     // subscription against the random secret WE generated would 401 every real delivery.
     const minted = ctx.registration?.signingSecret;
@@ -162,8 +170,8 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** Delete the subscription named by `registration`; throws {@link WebhookCredentialError} when retrying cannot help. */
-  async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<void> {
+  /** Delete the subscription named by `registration`, resolving whether the app itself answered that it deleted it; throws {@link WebhookCredentialError} when retrying cannot help. */
+  async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<boolean> {
     const trigger = this.require(ctx.type);
     if (ctx.auth === null && trigger.auth.type !== 'none') {
       throw new WebhookCredentialError('no account is recorded for it');
@@ -197,6 +205,8 @@ export class SdkWebhookProvider {
       }
       throw err;
     }
+    // A 404 an app's delete treats as already gone, or a delete its app never reports on, proves nothing.
+    return this.reportsFailedDelete(ctx.type) && answeredDeleted(last);
   }
 
   private require(type: string): WebhookTrigger<never, unknown> {
@@ -214,6 +224,10 @@ export class SdkWebhookProvider {
     const credential = await resolveTriggerCredential(this.connections, externalUserId, auth, trigger.auth);
     return buildDirectAuth(trigger.auth, credential, this.fetchImpl);
   }
+}
+
+function answeredDeleted(response: NormalizedResponse | null): boolean {
+  return response !== null && response.status >= 200 && response.status < 300;
 }
 
 // A 403 that is a rate limit (GitHub answers both with it) passes, so a later retry can still succeed.

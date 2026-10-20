@@ -46,7 +46,7 @@ import {
 import { SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
-import { webhookUrlFor } from './webhook-url';
+import { servedWebhookUrl } from './webhook-url';
 import { activationKeyOf, actualOf, holdsTrigger } from './activation-row';
 import {
   activationKindOf,
@@ -492,7 +492,7 @@ export class TriggerReconcilerService {
   }
 
   // A delete still running past the wait stays in the fence, so a stand-up handed its handle waits for it to land.
-  private boundedDelete(webhook: RegisteredWebhook): Promise<void> {
+  private boundedDelete(webhook: RegisteredWebhook): Promise<boolean> {
     const attempt = this.deleteFence.deleting(webhook, () =>
       this.disableWebhook(webhook, new InMemoryStore()),
     );
@@ -539,7 +539,7 @@ export class TriggerReconcilerService {
     };
   }
 
-  private disableWebhook(webhook: RegisteredWebhook, store: ProviderStore): Promise<void> {
+  private disableWebhook(webhook: RegisteredWebhook, store: ProviderStore): Promise<boolean> {
     return this.sdkWebhooks.disable({
       externalUserId: webhook.connection?.ownerUserId ?? '',
       type: webhook.triggerType,
@@ -641,22 +641,24 @@ export class TriggerReconcilerService {
     }
   }
 
-  // A stand-up its app refuses at the address of a webhook whose own account isn't active deletes that webhook with its own active account, for the same app (#11).
+  // A stand-up its app refuses at the address of a webhook whose own account isn't active deletes that webhook with its own active account, for the same app, only where the app answers that it deleted it (#11).
   private async deletedAs(
     entry: TriggerRetiredWebhookEntity,
     account: ConnectionRef | null,
   ): Promise<boolean> {
     if (account === null || (await this.statusOf(account)) !== 'active') return false;
+    const waits = `${webhookLabel(entry.webhook)} was not deleted with the account standing a trigger up at its address, so it waits for its own`;
     try {
-      await this.disableWebhook({ ...entry.webhook, connection: account }, new InMemoryStore());
-    } catch (err) {
-      this.logger.warn(
-        `${webhookLabel(entry.webhook)} was not deleted with the account standing a trigger up at its address, so it waits for its own: ${errorMessage(err)}`,
+      const deleted = await this.disableWebhook(
+        { ...entry.webhook, connection: account },
+        new InMemoryStore(),
       );
+      if (!deleted) this.logger.warn(`${waits}: the app did not answer that it deleted it`);
+      return deleted;
+    } catch (err) {
+      this.logger.warn(`${waits}: ${errorMessage(err)}`);
       return false;
     }
-    this.noteUnreportedDelete(entry.webhook, entry.workflowId);
-    return true;
   }
 
   // An app that upserts (Typeform's per-URL tag) hands a new registration an old one's handle; deleting it would take the new one down.
@@ -919,7 +921,7 @@ export class TriggerReconcilerService {
     envName: Map<string, string>,
   ): string {
     const name = envName.get(key.environmentId) ?? key.environmentId;
-    return webhookUrlFor(this.publicBaseUrl(), key.workflowId, name);
+    return servedWebhookUrl(this.config.get('env', { infer: true }), key.workflowId, name);
   }
 
   private async loadIrs(versionIds: string[]): Promise<Map<string, WorkflowIR>> {
@@ -943,11 +945,6 @@ export class TriggerReconcilerService {
       { id: activationId },
       { lastError: activationError(err) },
     );
-  }
-
-  private publicBaseUrl(): string {
-    const env = this.config.get('env', { infer: true });
-    return (env.publicBaseUrl || `http://localhost:${env.port}`).replace(/\/+$/, '');
   }
 }
 
@@ -1041,7 +1038,7 @@ function slotReason(
   );
 }
 
-// A held trigger fires or resumes only while the version its pointer names holds it as it is live, as its intake and poll check.
+// A held trigger fires or resumes only while the version its pointer names holds it as it is live, a webhook at the URL served for it.
 function whileHeld(row: RuntimeTriggerActivationEntity, desired: DesiredActivation): WhileHeld {
   if (!holdsTrigger(row, desired)) return 'waits';
   return firesWhileHeld(liveOf(row).kind) ? 'fires' : 'resumes';

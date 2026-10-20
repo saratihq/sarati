@@ -1,3 +1,4 @@
+import type { EnvConfig } from '../../config/env.config';
 import { isIdShape } from '../../database/ids';
 import { canonicalEnvName } from '../../environments/env-name';
 
@@ -28,6 +29,15 @@ export function chatPathFor(workflowId: string, environment: string): string {
 /** The absolute URL, given a public base (a trailing slash on the base is trimmed). */
 export function webhookUrlFor(baseUrl: string, workflowId: string, environment: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${webhookPathFor(workflowId, environment)}`;
+}
+
+/** The URL this service serves a workflow's webhooks in `environment` at: under `PUBLIC_BASE_URL`, else on localhost. */
+export function servedWebhookUrl(
+  env: Pick<EnvConfig, 'publicBaseUrl' | 'port'>,
+  workflowId: string,
+  environment: string,
+): string {
+  return webhookUrlFor(env.publicBaseUrl || `http://localhost:${env.port}`, workflowId, environment);
 }
 
 /**

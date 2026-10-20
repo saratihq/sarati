@@ -134,10 +134,10 @@ Linear is the exception: the Linear trigger does not report a failed delete, so 
 not delete stays in Linear and nothing retries it. The service log names every Linear webhook it
 deletes, with its address (at warn level), so one still in Linear can be found and deleted there.
 
-A registration that failed to start shows its error on the workflow overview and is retried every
-fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
-polled trigger whose feed could not be read when it started is not checked, so it never fires the
-items that were already in its feed.
+A registration that failed to start shows its error on the workflow overview, which reads **Not
+listening**, and is retried every fifteen minutes, and when the service starts. Until it has
+started, the trigger fires nothing: a polled trigger whose feed could not be read when it started is
+not checked, so it never fires the items that were already in its feed.
 
 ## Localhost and inbound triggers
 

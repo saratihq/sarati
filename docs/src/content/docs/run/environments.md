@@ -126,26 +126,33 @@ had read:
   arrived while it was held.
 - A webhook or a subscription still receives what its app sends, and each delivery still starts a
   run, so the overview shows it as **Held**. A GitHub, Stripe or other webhook the service verifies
-  itself still resolves the account's credential for each delivery, renewing an OAuth token about
-  to expire, as it always does; a renewal that succeeds makes the account active again, which
-  releases the hold. A step of that run that calls the app as the account is refused, as any step is
-  while the account isn't active.
+  itself checks each delivery with the webhook's signing secret alone, never with the account, so a
+  delivery fires however the account stopped working, and none renews its token. A trigger that reads
+  more from the app to describe the event, as ClickUp's reads the task, reads with no credential while
+  it is held, and the run starts with what the delivery carried. A step of that run that calls the
+  app as the account is refused, as any step is while the account isn't active.
 - Nothing is changed at the app with the account while it isn't active. A new version's trigger
   settings wait until the account is active again, keeping what is live. Meanwhile what the app
   sends is for the old trigger, so it starts no run, and a polled feed isn't polled, so the overview
   shows the trigger as **Not listening** and its reason says the change waits. Once the account is
   active again the change is made and the trigger starts afresh, without what happened at the app
-  meanwhile. A webhook's move to a new public URL for the service waits too, while the app keeps
-  sending to the old one. Renaming the environment is refused instead, because the webhook would
-  stay at a URL that no longer serves it; see [Rename and delete](#rename-and-delete).
+  meanwhile. A webhook's move to a new public URL for the service waits too, and so does its move
+  for a rename made just before the account stopped being active: the app keeps sending to the old
+  URL, which no longer serves the trigger, so it reads as **Not listening** in the same words. Any
+  later rename is refused instead, because the webhook would stay at a URL that no longer serves it;
+  see [Rename and delete](#rename-and-delete).
 - A webhook taken down meanwhile — its trigger removed or replaced, its slot given another account,
   its workflow or environment deleted — is deleted at the app once that account is active again; if
   the account is removed first, the log names the webhook to delete in the app. An app that keeps one
   webhook per address, such as GitHub, refuses the trigger registered anew as the slot's new account
-  while the old webhook is there, so the old one is deleted with the new account first.
+  while the old webhook is there, so the old one is deleted with the new account first, once the app
+  answers that it deleted it. If the new account can't reach it — GitHub answers an account that
+  can't administer the repository as if the webhook weren't there — the delete waits for the
+  account that registered it, and the trigger's reason gives the app's refusal.
 
 The overview gives the reason, and what makes the account active again. A trigger whose stand-up
 never finished had nothing live to hold, so it waits as a new one does, saying it can't run there.
+Until a stand-up finishes, the overview shows a trigger as **Not listening**, with the app's error.
 
 A live trigger is taken down when its slot is emptied, given another account, given another app's,
 or given one of the wrong kind: one that uses its own credentials for a one-click trigger, or a

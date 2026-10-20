@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import type { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
@@ -12,6 +13,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
+import type { EnvConfig } from '../src/config/env.config';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
@@ -56,8 +58,15 @@ let endpointSeq = 0;
 const githubHooks = new Map<string, string>();
 // Each GitHub hook delete, and the headers it was sent with.
 const githubDeletes: Array<{ hook: string; headers: string }> = [];
+// The GitHub accounts that can't administer the repositories here, which GitHub answers with a 404, as for one they can't see.
+const githubOutsiders = new Set<string>();
 let githubSeq = 100;
 const github = (method: string, path: string, init: Parameters<FetchLike>[1]): FetchLikeResponse => {
+  const headers = JSON.stringify(init?.headers ?? {});
+  if (method === 'DELETE') githubDeletes.push({ hook: path, headers });
+  if ([...githubOutsiders].some((account) => headers.includes(`tok-github-${account}`))) {
+    return json(404, { message: 'Not Found' });
+  }
   if (method === 'POST' && path.endsWith('/hooks')) {
     const body = typeof init?.body === 'string' ? init.body : '{}';
     const url = String((JSON.parse(body) as { config?: { url?: string } }).config?.url);
@@ -72,10 +81,26 @@ const github = (method: string, path: string, init: Parameters<FetchLike>[1]): F
     return json(201, { id: githubSeq });
   }
   if (method === 'DELETE') {
-    githubDeletes.push({ hook: path, headers: JSON.stringify(init?.headers ?? {}) });
     return githubHooks.delete(path) ? json(204, {}) : json(404, { message: 'Not Found' });
   }
   return json(404, { message: 'Not Found' });
+};
+
+// The credential each read of a ClickUp task was sent with, '' for none: a ClickUp delivery names a task, which its trigger reads.
+const clickupTaskReads: string[] = [];
+let clickupSeq = 0;
+const clickup = (method: string, path: string, init: Parameters<FetchLike>[1]): FetchLikeResponse => {
+  if (method === 'POST' && path.endsWith('/webhook')) {
+    clickupSeq += 1;
+    const id = `cu_slotfit_${clickupSeq}`;
+    return json(200, { id, webhook: { id, secret: `cu_secret_${clickupSeq}` } });
+  }
+  if (method === 'GET' && path.startsWith('/api/v2/task/')) {
+    const credential = init?.headers?.authorization ?? '';
+    clickupTaskReads.push(credential);
+    return credential ? json(200, { name: 'Ship it' }) : json(401, { err: 'Token invalid' });
+  }
+  return json(404, {});
 };
 
 const webhookFetch: FetchLike = (input, init) => {
@@ -83,6 +108,7 @@ const webhookFetch: FetchLike = (input, init) => {
   const url = new URL(String(input));
   const path = url.pathname;
   if (url.host === 'api.github.com') return Promise.resolve(github(method, path, init));
+  if (url.host === 'api.clickup.com') return Promise.resolve(clickup(method, path, init));
   if (method === 'POST' && path === '/v1/webhook_endpoints') {
     endpointSeq += 1;
     stripeEndpoints.add(`we_slotfit_${endpointSeq}`);
@@ -230,14 +256,16 @@ const NEEDS_OWN = (env: string, app: string, name: string): string =>
   `${env}'s ${app} account is one-click (managed), and "${name}" runs only on one that uses its own credentials, so it can't run there — an owner assigns ${/^[aeiou]/.test(app) ? 'an' : 'a'} ${app} account that uses its own credentials under Integrations → Environments`;
 
 // The words a live trigger held while its account isn't active says: a poll waits, what a webhook's or subscription's app sends still runs, and with a change to it waiting neither runs.
+const FIRES = (appSlug: string): string =>
+  `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
+const HELD_AS = (env: string, appSlug: string, name: string, meanwhile = FIRES(appSlug)): string =>
+  `${env}'s ${appSlug} account isn't active, so "${name}" is held: ${meanwhile} — the account's owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`;
 const HELD = (env: string, rail: Rail, changeWaits = false): string => {
   const { app: appSlug, name } = TRIGGERS[rail];
-  const fires = `what ${appSlug} sends still starts runs, and nothing is changed at ${appSlug} until the account is active again`;
   const resumes = "it isn't polled, and picks up from where it stopped once the account is active again";
   const waits = `a change to it waits, so it starts no run until the account is active again, and then starts afresh, without what happened at ${appSlug} meanwhile`;
-  const unchanged = rail === 'polling' ? resumes : fires;
-  const meanwhile = changeWaits ? waits : unchanged;
-  return `${env}'s ${appSlug} account isn't active, so "${name}" is held: ${meanwhile} — the account's owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`;
+  if (changeWaits) return HELD_AS(env, appSlug, name, waits);
+  return rail === 'polling' ? HELD_AS(env, appSlug, name, resumes) : HELD_AS(env, appSlug, name);
 };
 
 interface ActivationRow {
@@ -406,6 +434,33 @@ const oauthToken = (expiresInMs: number): Record<string, unknown> => ({
   expires_at: new Date(Date.now() + expiresInMs).toISOString(),
 });
 
+// A provider's token endpoint on loopback, answering every grant with `status`: a renewal, or a refusal of the refresh token.
+const tokenEndpoint = async (
+  status: 200 | 400,
+): Promise<{ url: string; grants: () => number; close: () => Promise<void> }> => {
+  let grants = 0;
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      grants += 1;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify(
+          status === 200
+            ? { access_token: `renewed-${grants}`, token_type: 'Bearer', expires_in: 3600 }
+            : { error: 'invalid_grant' },
+        ),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/token`,
+    grants: () => grants,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+};
+
 // An account that serves the rail's app: a one-click one for the Composio rail, a token one for the direct ones.
 const fitting = (rail: Rail): Promise<string> =>
   rail === 'composio' ? oneClickConnection(TRIGGERS.composio.app) : tokenConnection(TRIGGERS[rail].app);
@@ -522,6 +577,15 @@ const activation = async (wfId: string, envId: string): Promise<ActivationRow> =
   return rows.rows[0]!;
 };
 
+// The intake URL an activation's webhook is registered at, as its row records it.
+const webhookUrlOf = async (activationId: string): Promise<string | null> =>
+  (
+    await db.query<{ webhook_url: string | null }>(
+      `SELECT webhook_url FROM runtime_trigger_activations WHERE id = $1`,
+      [activationId],
+    )
+  ).rows[0]!.webhook_url;
+
 // The activation's cursors and registration, as stored.
 const storeOf = async (activationId: string): Promise<Record<string, unknown>> => {
   const rows = await db.query<{ key: string; value: unknown }>(
@@ -572,6 +636,7 @@ const deliver = async (
   id: string,
   stripeEvent = 'customer.created',
   environment = 'production',
+  answered = 202,
 ): Promise<Record<string, unknown>> => {
   if (rail === 'composio') {
     const sent = await http()
@@ -602,7 +667,7 @@ const deliver = async (
     .set('Content-Type', 'application/json')
     .set('stripe-signature', `t=${t},v1=${signature}`)
     .send(raw)
-    .expect(202);
+    .expect(answered);
   return sent.body as Record<string, unknown>;
 };
 
@@ -942,6 +1007,104 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
+  const LAPSES = [
+    'a check finds its credential unreadable',
+    'its OAuth token lapses with no way to renew it',
+    'its provider refuses to renew its lapsed OAuth token',
+  ] as const;
+
+  it.each(LAPSES)(
+    'a live webhook whose account stops being active because %s is held, and what its app sends still starts runs, verified without that account',
+    async (lapse) => {
+      const tokens = await tokenEndpoint(400);
+      try {
+        const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+        const { org, production } = await workspace(`lapses: ${lapse}`);
+        const byToken = lapse === LAPSES[0];
+        const account = byToken ? await tokenConnection(appSlug) : await oauthConnection(appSlug, tokens.url);
+        await assignSlot(org, production, appSlug, account);
+        const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
+        const live = await activation(wf, production);
+        expect(live).toMatchObject({ connection_id: account, held: false, last_error: null });
+
+        const lapsed = { ...oauthToken(-60_000), ...(lapse === LAPSES[1] ? { refresh_token: null } : {}) };
+        const credential = byToken ? '' : app.get(EncryptionService).encryptToken(JSON.stringify(lapsed));
+        await db.query(`UPDATE connections SET credential = $2 WHERE id = $1`, [account, credential]);
+        // Its intake asks nothing of the account, so a delivery fires before any check finds it lapsed.
+        expect(await deliver('webhook', wf, live, `D_LAPSED_${lapse}`)).toMatchObject({ fired: 1 });
+        expect(tokens.grants()).toBe(0);
+
+        const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
+        expect(checked.body).toMatchObject({ ok: false, status: byToken ? 'failed' : 'expired' });
+        const grants = tokens.grants();
+        await eventually(async () =>
+          expect(await activation(wf, production)).toMatchObject({
+            held: true,
+            last_error: HELD('production', 'webhook'),
+          }),
+        );
+        expect(await shownOn(org, wf, production)).toMatchObject({
+          held_back_by_slot: true,
+          listening: true,
+          last_error: HELD('production', 'webhook'),
+        });
+
+        for (const n of [1, 2]) {
+          expect(await deliver('webhook', wf, live, `D_HELD_${n}_${lapse}`)).toMatchObject({ fired: 1 });
+        }
+        await eventually(async () => expect(await triggerRuns(wf)).toHaveLength(3));
+        expect(tokens.grants()).toBe(grants);
+        expect(await activation(wf, production)).toMatchObject({
+          held: true,
+          last_error: HELD('production', 'webhook'),
+        });
+      } finally {
+        await tokens.close();
+      }
+    },
+  );
+
+  it('a held ClickUp webhook, whose trigger reads the task each delivery names, still starts a run for each, reading with no credential while its account is not active', async () => {
+    const name = 'On a new task';
+    const { org, production } = await workspace('held clickup');
+    const account = await tokenConnection('clickup');
+    await assignSlot(org, production, 'clickup', account);
+    const { wf } = await deploy(org, triggerDoc('clickup.new_task', name, { teamId: 'T_SLOTFIT' }));
+    const live = await activation(wf, production);
+    expect(live).toMatchObject({ connection_id: account, held: false, last_error: null });
+    const record = (await storeOf(live.id))['webhook.registration'] as {
+      registration: { signingSecret: string };
+    };
+    const created = async (taskId: string): Promise<Record<string, unknown>> => {
+      const raw = JSON.stringify({ event: 'taskCreated', task_id: taskId, webhook_id: 'cu_slotfit' });
+      const sent = await http()
+        .post(`/api/hooks/${wf}/production`)
+        .set('Content-Type', 'application/json')
+        .set('x-signature', createHmac('sha256', record.registration.signingSecret).update(raw).digest('hex'))
+        .send(raw)
+        .expect(202);
+      return sent.body as Record<string, unknown>;
+    };
+    const reads = clickupTaskReads.length;
+    expect(await created('T_LIVE')).toMatchObject({ fired: 1 });
+    expect(clickupTaskReads.slice(reads)).toEqual([`tok-clickup-${account}`]);
+
+    await db.query(`UPDATE connections SET credential = '' WHERE id = $1`, [account]);
+    const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
+    expect(checked.body).toMatchObject({ ok: false, status: 'failed' });
+    await eventually(async () =>
+      expect(await activation(wf, production)).toMatchObject({
+        held: true,
+        last_error: HELD_AS('production', 'clickup', name),
+      }),
+    );
+    expect(await shownOn(org, wf, production)).toMatchObject({ held_back_by_slot: true, listening: true });
+
+    expect(await created('T_HELD')).toMatchObject({ fired: 1 });
+    expect(clickupTaskReads.slice(reads)).toEqual([`tok-clickup-${account}`, '']);
+    await eventually(async () => expect(await triggerRuns(wf)).toHaveLength(2));
+  });
+
   it.each(RAILS)(
     'a live %s trigger whose slot moves to another account that is not active is torn down and held back, as an emptied slot tears one down',
     async (rail) => {
@@ -1025,6 +1188,103 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     },
   );
 
+  it('a held webhook whose intake URL a new public base URL moves waits there, saying it starts no run and reading as not listening, and moves once the account is active again', async () => {
+    const { org, production, account, wf, live } = await liveTrigger('webhook', 'base moves');
+    const store = await storeOf(live.id);
+    const hook = (store['webhook.registration'] as { registration: { subscriptionId: string } }).registration
+      .subscriptionId;
+    await setStatus(account, 'expired');
+    await reconcile(wf);
+    expect(await activation(wf, production)).toMatchObject({
+      held: true,
+      last_error: HELD('production', 'webhook'),
+    });
+    const [calledUp, calledDown] = [standUps(), teardowns()];
+    const registeredAt = await webhookUrlOf(live.id);
+    expect(registeredAt).toMatch(new RegExp(`/api/hooks/${wf}/production$`));
+
+    const env = app.get<ConfigService<{ env: EnvConfig }, true>>(ConfigService).get('env', { infer: true });
+    const previous = env.publicBaseUrl;
+    env.publicBaseUrl = 'https://new-tunnel.example.com';
+    try {
+      await reconcile(wf);
+      const waiting = HELD('production', 'webhook', true);
+      expect(await activation(wf, production)).toEqual({ ...live, held: true, last_error: waiting });
+      expect(await webhookUrlOf(live.id)).toBe(registeredAt);
+      expect(await storeOf(live.id)).toEqual(store);
+      expect([standUps(), teardowns()]).toEqual([calledUp, calledDown]);
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: true,
+        listening: false,
+        last_error: waiting,
+      });
+
+      await setStatus(account, 'active');
+      await reconcile(wf);
+      expect(await webhookUrlOf(live.id)).toBe(`https://new-tunnel.example.com/api/hooks/${wf}/production`);
+      expect(stripeEndpoints.has(hook)).toBe(false);
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: false,
+        listening: true,
+        last_error: null,
+      });
+    } finally {
+      env.publicBaseUrl = previous;
+    }
+  });
+
+  it('a held webhook whose environment was renamed while its account was still active waits at its old URL, which serves nothing, saying it starts no run and reading as not listening, and moves once the account is active again', async () => {
+    const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+    const { org, staging } = await workspace('renamed then held');
+    const account = await fitting('webhook');
+    await assignSlot(org, staging, appSlug, account);
+    const { wf, v1 } = await deploy(org, triggerDoc(nodeType, name, props));
+    await asA(
+      http()
+        .post(`/api/workflows/${wf}/promote`)
+        .set('X-Org-Id', org)
+        .send({ environment: 'staging', version_id: v1 }),
+    ).expect(201);
+    await reconcile(wf);
+    const live = await activation(wf, staging);
+    expect(live).toMatchObject({ connection_id: account, last_error: null });
+    const hook = (
+      (await storeOf(live.id))['webhook.registration'] as { registration: { subscriptionId: string } }
+    ).registration.subscriptionId;
+
+    // The rename passes while the account is active, and its reconcile runs only once the account no longer is.
+    const parked = parkReconciles();
+    try {
+      await asA(
+        http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'preview' }),
+      ).expect(200);
+      await setStatus(account, 'expired');
+    } finally {
+      parked.restore();
+    }
+    await reconcile(wf);
+
+    const waiting = HELD('preview', 'webhook', true);
+    expect(await activation(wf, staging)).toMatchObject({ id: live.id, held: true, last_error: waiting });
+    expect(await webhookUrlOf(live.id)).toMatch(new RegExp(`/api/hooks/${wf}/staging$`));
+    expect(await shownOn(org, wf, staging)).toMatchObject({
+      environment: 'preview',
+      held_back_by_slot: true,
+      listening: false,
+      last_error: waiting,
+    });
+    expect(
+      await deliver('webhook', wf, live, 'D_OLD_NAME', 'customer.created', 'staging', 404),
+    ).toMatchObject({ detail: 'Webhook not found' });
+    expect(await triggerRuns(wf)).toEqual([]);
+
+    await setStatus(account, 'active');
+    await reconcile(wf);
+    expect(await webhookUrlOf(live.id)).toMatch(new RegExp(`/api/hooks/${wf}/preview$`));
+    expect(stripeEndpoints.has(hook)).toBe(false);
+    expect(await shownOn(org, wf, staging)).toMatchObject({ held_back_by_slot: false, listening: true });
+  });
+
   it.each(RAILS.flatMap((rail) => STAND_UPS.map((which): [Rail, string] => [rail, which])))(
     'a %s trigger whose account stops being active after %s failed is held back with the refusal, never held, and stands up once the account is active again',
     async (rail, which) => {
@@ -1063,6 +1323,12 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       } else {
         expect(failed.materialized).toBeNull();
       }
+      // Nothing is registered, subscribed or polled for it, so it is not listening, though nothing holds it back.
+      expect(await shownOn(org, wf, production)).toMatchObject({
+        held_back_by_slot: false,
+        listening: false,
+        last_error: refused,
+      });
       const [calledUp, calledDown] = [standUps(), teardowns()];
 
       await setStatus(account, 'expired');
@@ -1095,6 +1361,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         materialized: { connection: { connectionId: account } },
       });
       expect(standUps()).toBe(calledUp + 1);
+      expect(await shownOn(org, wf, production)).toMatchObject({ held_back_by_slot: false, listening: true });
     },
   );
 
@@ -1149,6 +1416,69 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       last_error: null,
     });
     expect(await push(wf, moved.secret, 'sha-moved')).toMatchObject({ fired: 1 });
+  });
+
+  it('a held GitHub webhook whose slot is reassigned to an account that cannot reach its repository keeps the old hook, whose delete waits for the account that registered it and is made once it is active again', async () => {
+    const name = 'On push';
+    const { org, production } = await workspace('reassign held github outsider');
+    const first = await tokenConnection('github');
+    await assignSlot(org, production, 'github', first);
+    const { wf } = await deploy(org, triggerDoc('github.new_push', name, { owner: 'acme', repo: 'held' }));
+    const live = await activation(wf, production);
+    const record = (await storeOf(live.id))['webhook.registration'] as {
+      webhookUrl: string;
+      registration: { subscriptionId: string };
+    };
+    const id = record.registration.subscriptionId;
+    const hook = `/repos/acme/held/hooks/${id}`;
+    const deletedAs = (): string[] =>
+      githubDeletes
+        .filter((d) => d.hook === hook)
+        .map((d) => (d.headers.includes(`tok-github-${first}`) ? 'first' : 'other'));
+    const hooksHere = (): string[] =>
+      [...githubHooks].filter(([, url]) => url === record.webhookUrl).map(([at]) => at);
+
+    await setStatus(first, 'expired');
+    await reconcile(wf);
+    expect(await activation(wf, production)).toMatchObject({ held: true });
+
+    const outsider = await tokenConnection('github');
+    githubOutsiders.add(outsider);
+    await assignSlot(org, production, 'github', outsider);
+    await reconcile(wf);
+    await app.get(TriggerReconcilerService).retriesSettled();
+
+    // The outsider's delete answered 404, which proves nothing, so the hook stays and its delete waits for its own account.
+    expect(await activation(wf, production)).toMatchObject({
+      id: live.id,
+      connection_id: outsider,
+      held: false,
+      last_error: expect.stringContaining('404'),
+    });
+    expect(hooksHere()).toEqual([hook]);
+    const outsiderDeletes = deletedAs();
+    expect(outsiderDeletes.length).toBeGreaterThan(0);
+    expect(outsiderDeletes).not.toContain('first');
+    expect(await pendingDeletes(wf)).toEqual([
+      { hook: id, last_error: "the account it was registered with isn't active" },
+    ]);
+
+    await app.get(ConnectionsService).setStatus(first, 'active');
+    await eventually(async () => expect(await pendingDeletes(wf)).toEqual([]));
+    expect(deletedAs().filter((by) => by === 'first')).toEqual(['first']);
+    expect(deletedAs().at(-1)).toBe('first');
+    expect(hooksHere()).toEqual([]);
+
+    await assignSlot(org, production, 'github', first);
+    await reconcile(wf);
+    expect(await activation(wf, production)).toMatchObject({
+      id: live.id,
+      connection_id: first,
+      held: false,
+      last_error: null,
+    });
+    expect(hooksHere()).toHaveLength(1);
+    expect(hooksHere()).not.toContain(hook);
   });
 
   it.each(['held', 'held back', 'released'] as const)(
@@ -1991,69 +2321,51 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       }
     });
 
-    it.each(['a health check', 'a delivery its intake verifies'])(
-      'a live webhook held by an OAuth account is released when %s renews the account’s token',
-      async (renewal) => {
-        let grants = 0;
-        const tokens = createServer((req, res) => {
-          req.resume();
-          req.on('end', () => {
-            grants += 1;
-            res.writeHead(200, { 'content-type': 'application/json' });
-            res.end(
-              JSON.stringify({ access_token: `renewed-${grants}`, token_type: 'Bearer', expires_in: 3600 }),
-            );
-          });
+    it('a live webhook held by an OAuth account is released when a health check renews the account’s token, and a delivery meanwhile fires without renewing it', async () => {
+      const tokens = await tokenEndpoint(200);
+      try {
+        const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
+        const { org, production } = await workspace('renewed by a health check');
+        const account = await oauthConnection(appSlug, tokens.url);
+        await assignSlot(org, production, appSlug, account);
+        const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
+        const live = await activation(wf, production);
+        expect(live).toMatchObject({ connection_id: account, last_error: null });
+
+        await app.get(ConnectionsService).setStatus(account, 'expired', 'Access has expired');
+        await eventually(async () =>
+          expect(await activation(wf, production)).toMatchObject({
+            held: true,
+            last_error: HELD('production', 'webhook'),
+          }),
+        );
+        const calledUp = standUps();
+        const expired = app.get(EncryptionService).encryptToken(JSON.stringify(oauthToken(-60_000)));
+        await db.query(`UPDATE connections SET credential = $2 WHERE id = $1`, [account, expired]);
+        expect(await deliver('webhook', wf, live, 'D_UNRENEWED')).toMatchObject({ fired: 1 });
+        expect(tokens.grants()).toBe(0);
+        expect(await activation(wf, production)).toMatchObject({ held: true });
+
+        const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
+        expect(checked.body).toMatchObject({
+          ok: true,
+          status: 'active',
+          detail: 'Access was renewed with the provider.',
         });
-        await new Promise<void>((resolve) => tokens.listen(0, '127.0.0.1', resolve));
-        try {
-          const { app: appSlug, name, nodeType, props } = TRIGGERS.webhook;
-          const { org, production } = await workspace(`renewed by ${renewal}`);
-          const account = await oauthConnection(
-            appSlug,
-            `http://127.0.0.1:${(tokens.address() as AddressInfo).port}/token`,
-          );
-          await assignSlot(org, production, appSlug, account);
-          const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
-          const live = await activation(wf, production);
-          expect(live).toMatchObject({ connection_id: account, last_error: null });
-
-          await app.get(ConnectionsService).setStatus(account, 'expired', 'Access has expired');
-          await eventually(async () =>
-            expect(await activation(wf, production)).toMatchObject({
-              held: true,
-              last_error: HELD('production', 'webhook'),
-            }),
-          );
-          const calledUp = standUps();
-
-          if (renewal === 'a health check') {
-            const checked = await asA(http().post(`/api/connections/${account}/test`)).expect(200);
-            expect(checked.body).toMatchObject({
-              ok: true,
-              status: 'active',
-              detail: 'Access was renewed with the provider.',
-            });
-          } else {
-            const expired = app.get(EncryptionService).encryptToken(JSON.stringify(oauthToken(-60_000)));
-            await db.query(`UPDATE connections SET credential = $2 WHERE id = $1`, [account, expired]);
-            expect(await deliver('webhook', wf, live, 'D_RENEWS')).toMatchObject({ fired: 1 });
-          }
-          expect(grants).toBe(1);
-          await eventually(async () =>
-            expect(await activation(wf, production)).toMatchObject({
-              id: live.id,
-              held: false,
-              connection_id: account,
-              last_error: null,
-            }),
-          );
-          expect(standUps()).toBe(calledUp);
-        } finally {
-          await new Promise<void>((resolve) => tokens.close(() => resolve()));
-        }
-      },
-    );
+        expect(tokens.grants()).toBe(1);
+        await eventually(async () =>
+          expect(await activation(wf, production)).toMatchObject({
+            id: live.id,
+            held: false,
+            connection_id: account,
+            last_error: null,
+          }),
+        );
+        expect(standUps()).toBe(calledUp);
+      } finally {
+        await tokens.close();
+      }
+    });
   });
 });
 

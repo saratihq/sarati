@@ -116,6 +116,14 @@ describe("TriggerActivationCard", () => {
     expect(screen.getByText(/^Last checked/)).toBeTruthy();
   });
 
+  it("shows a trigger whose stand-up failed as not listening, with the app's error, never as live", () => {
+    card([activation({ status: "error", listening: false, last_error: "slack refused the stand-up" })]);
+
+    expect(screen.getByText("Not listening")).toBeTruthy();
+    expect(screen.queryByText("Live")).toBeNull();
+    expect(screen.getByText(/slack refused the stand-up/)).toBeTruthy();
+  });
+
   it("shows a listening trigger whose last poll failed as live, with the failure", () => {
     card([activation({ status: "error", last_polled_at: new Date().toISOString(), last_error: "Slack answered 500" })]);
 

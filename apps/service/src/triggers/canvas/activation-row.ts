@@ -33,8 +33,9 @@ export function actualOf(row: RuntimeTriggerActivationEntity): ActualActivation 
   };
 }
 
-/** A trigger as an activation holds it: its node type and props. */
-export type HeldTrigger = Pick<DesiredActivation, 'triggerType' | 'props'>;
+/** A trigger as an activation holds it: its node type and props, and where named, the URL its webhook is served at. */
+export type HeldTrigger = Pick<DesiredActivation, 'triggerType' | 'props'> &
+  Partial<Pick<DesiredActivation, 'webhookUrl'>>;
 
 /** The trigger node `triggerNodeId` of a version, as an activation would hold it; null when the version has none by that id. */
 export function triggerOf(ir: WorkflowIR, triggerNodeId: string): HeldTrigger | null {
@@ -42,13 +43,16 @@ export function triggerOf(ir: WorkflowIR, triggerNodeId: string): HeldTrigger | 
   return node ? { triggerType: node.node_type, props: triggerPropsOf(node) } : null;
 }
 
-/** Whether a row holds `trigger` as it is live — same node type and props — which a delivery or a poll needs to fire that trigger's version (#11). */
+/** Whether a row holds `trigger` as it is live — same node type and props, and a registered webhook at the URL `trigger` names, if any — which a delivery or a poll needs to fire that trigger's version (#11). */
 export function holdsTrigger(
-  row: Pick<RuntimeTriggerActivationEntity, 'triggerType' | 'props'>,
+  row: Pick<RuntimeTriggerActivationEntity, 'kind' | 'triggerType' | 'props' | 'webhookUrl'>,
   trigger: HeldTrigger | null,
 ): boolean {
+  if (trigger?.triggerType !== row.triggerType || !deepEqual(trigger.props, row.props ?? {})) return false;
   return (
-    trigger !== null && trigger.triggerType === row.triggerType && deepEqual(trigger.props, row.props ?? {})
+    trigger.webhookUrl === undefined ||
+    row.kind !== 'registered_webhook' ||
+    trigger.webhookUrl === row.webhookUrl
   );
 }
 

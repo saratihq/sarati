@@ -1,4 +1,5 @@
 import {
+  ActionError,
   type AuthHandle,
   type AuthScheme,
   createAuth,
@@ -17,6 +18,7 @@ import {
 import { appSlugOf, serializeAuthScheme } from './sdk-actions.registry';
 
 import { DomainError } from '../common/domain-error';
+import { errorMessage } from '../common/error-message';
 import { ConnectionsService, MANAGED_TOKEN_PREFIX } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
 import { extractToken, toDirectCredential, unusableCredential } from './sdk-auth';
@@ -70,6 +72,34 @@ export function buildDirectAuth(
   return fetchImpl
     ? createDirectAuth(scheme, credential, { fetchImpl })
     : createDirectAuth(scheme, credential);
+}
+
+/** {@link buildDirectAuth} whose credential is resolved only once a request is sent, so a handler that sends none never needs it. */
+export function buildLazyDirectAuth(
+  scheme: AuthScheme,
+  resolve: () => Promise<DirectCredential>,
+  fetchImpl?: FetchLike,
+): AuthHandle {
+  let direct: DirectTransport | undefined;
+  let resolving: Promise<DirectTransport> | undefined;
+  const transport = (): Promise<DirectTransport> =>
+    (resolving ??= resolve().then(
+      (credential) =>
+        (direct = new DirectTransport({ scheme, credential, ...(fetchImpl ? { fetchImpl } : {}) })),
+      (err: unknown) => {
+        throw new ActionError({
+          code: 'auth_missing',
+          message: errorMessage(err),
+          retryable: false,
+          cause: err,
+        });
+      },
+    ));
+  return createAuth(scheme, {
+    kind: 'direct',
+    redact: (text) => direct?.redact(text) ?? text,
+    send: async (request) => (await transport()).send(request),
+  });
 }
 
 /** {@link buildDirectAuth}, reporting every response it receives to `onResponse`. */

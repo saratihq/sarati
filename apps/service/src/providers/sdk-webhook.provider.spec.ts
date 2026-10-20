@@ -214,7 +214,7 @@ describe('SdkWebhookProvider', () => {
   });
 
   describe('disable — whether a failed delete is worth retrying', () => {
-    const disable = (provider: SdkWebhookProvider, auth: Record<string, unknown> | null): Promise<void> =>
+    const disable = (provider: SdkWebhookProvider, auth: Record<string, unknown> | null): Promise<boolean> =>
       provider.disable({
         externalUserId: 'u1',
         auth,
@@ -270,5 +270,39 @@ describe('SdkWebhookProvider', () => {
       );
       expect(fetch.calls).toEqual([]);
     });
+
+    it.each([
+      [204, true],
+      [404, false],
+    ])('a delete the app answers with a %i says whether the app deleted it: %s', async (status, deleted) => {
+      const provider = new SdkWebhookProvider(undefined, answering(status));
+      await expect(disable(provider, { token: 'ghp_inline' })).resolves.toBe(deleted);
+    });
+  });
+
+  it('verifies and shapes a delivery without resolving its account, which it asks for only when the trigger calls its app', async () => {
+    const getCredential = jest.fn().mockRejectedValue(new Error('access token expired'));
+    const provider = new SdkWebhookProvider({ getCredential } as unknown as ConnectionsService, stubFetch());
+    const body = { ref: 'refs/heads/main', after: 'abc123', repository: { full_name: 'octo/hello' } };
+    const raw = JSON.stringify(body);
+    const events = await provider.handleRequest({
+      externalUserId: 'u1',
+      type: 'github.new_push',
+      props: PROPS,
+      auth: { connectionId: 'conn-lapsed' },
+      store: new InMemoryStore(),
+      webhookUrl: '',
+      secret: 'our-secret',
+      request: {
+        headers: {
+          'x-github-event': 'push',
+          'x-hub-signature-256': `sha256=${createHmac('sha256', 'our-secret').update(raw).digest('hex')}`,
+        },
+        body,
+        rawBody: raw,
+      },
+    });
+    expect(events).toHaveLength(1);
+    expect(getCredential).not.toHaveBeenCalled();
   });
 });

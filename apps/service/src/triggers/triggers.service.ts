@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { Pool } from 'pg';
 import { In } from 'typeorm';
@@ -10,6 +11,7 @@ import { withDeadline } from '../common/deadline';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
+import type { EnvConfig } from '../config/env.config';
 import { ConnectionsService } from '../connections/connections.service';
 import { isIdShape, newId, now } from '../database/ids';
 import { ComposioWebhookDeliveryEntity } from '../database/entities/composio-webhook-delivery.entity';
@@ -28,6 +30,7 @@ import { DbActivationStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
 import { firesWhileHeld, heldBackBySlot } from './canvas/trigger-kind';
+import { servedWebhookUrl } from './canvas/webhook-url';
 import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -129,7 +132,7 @@ export interface ActivationHealth {
   active: boolean;
   /** Held back or held by its environment's slot, so nothing is stood up, polled or changed at its app for it; `last_error` says why and what fixes it. */
   held_back_by_slot: boolean;
-  /** Whether it takes events now: not while paused or held back, and while held only a webhook or subscription the version its environment points at still holds as it is live. */
+  /** Whether it takes events now: not while paused, held back or its last stand-up unfinished, and while held only a webhook or subscription the version its environment points at still holds as it is live, a webhook at the URL served for it. */
   listening: boolean;
   status: 'paused' | 'error' | 'ok' | 'idle';
   last_polled_at: string | null;
@@ -168,6 +171,7 @@ export class TriggersService {
     private readonly agentStepBus: AgentStepBus,
     private readonly triggerCatalog: TriggerCatalogService,
     private readonly platformKeys: PlatformKeysService,
+    private readonly config: ConfigService<{ env: EnvConfig }, true>,
     @Inject(PG_POOL) private readonly pool: Pool,
   ) {}
 
@@ -319,7 +323,8 @@ export class TriggersService {
         externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
         type: node.node_type,
         props: triggerPropsOf(node),
-        auth: row.connectionId ? { connectionId: row.connectionId } : null,
+        // A held trigger's account isn't active, so nothing is sent with it (#11).
+        auth: row.connectionId && !row.held ? { connectionId: row.connectionId } : null,
         store,
         // Only read by enable/disable (registration), never by verify/transform.
         webhookUrl: '',
@@ -753,13 +758,17 @@ export class TriggersService {
     return { wf, env, versionId, ir: version.workflowIr as unknown as WorkflowIR };
   }
 
-  // A held webhook or subscription fires what its app sends only while the version its environment points at holds it as it is live.
+  // A held webhook or subscription fires what its app sends only while the version its environment points at holds it as it is live, a webhook at the URL served for it.
   private async firingWhileHeld(rows: RuntimeTriggerActivationEntity[]): Promise<Set<string>> {
     const firing = new Set<string>();
+    const env = this.config.get('env', { infer: true });
     for (const row of rows) {
       if (!row.held || !firesWhileHeld(actualOf(row).kind)) continue;
       const target = await this.pointedTarget(row);
-      if ('ir' in target && holdsTrigger(row, triggerOf(target.ir, row.triggerNodeId))) firing.add(row.id);
+      if (!('ir' in target)) continue;
+      const trigger = triggerOf(target.ir, row.triggerNodeId);
+      const webhookUrl = servedWebhookUrl(env, row.workflowId, target.env.name);
+      if (holdsTrigger(row, trigger && { ...trigger, webhookUrl })) firing.add(row.id);
     }
     return firing;
   }
@@ -857,7 +866,7 @@ export class TriggersService {
       kind: row.kind,
       active: !row.paused,
       held_back_by_slot: heldBack(row),
-      listening: !row.paused && (!heldBack(row) || firing.has(row.id)),
+      listening: !row.paused && applyFinished(actualOf(row)) && (!heldBack(row) || firing.has(row.id)),
       status: activationStatus(row),
       last_polled_at: row.lastPolledAt?.toISOString() ?? null,
       last_error: row.lastError,
