@@ -1644,13 +1644,23 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       expect(await deadlocksSince(before)).toBe(0);
     });
 
-    // Retried until neither the org's own scan order nor the run lookup's starts at the lowest id, so only id order on both sides keeps the deletes apart.
-    const crossedRuns = async (): Promise<{
+    interface ScanOrders {
+      created: string[];
+      byId: string[];
+      byHeap: string[];
+      byName: string[];
+      byLookup: string[];
+    }
+
+    interface RunsInFour {
       org: string;
       envs: Array<{ id: string; name: string }>;
       callee: { calledId: string; versionId: string };
       runIds: string[];
-    }> => {
+    }
+
+    // An org with four custom environments and an org-less callee with a sub-workflow run in each, retried with a fresh org until `fits` the orders each scan takes them in.
+    const runsInFour = async (fits: (orders: ScanOrders) => boolean): Promise<RunsInFour> => {
       for (let attempt = 0; attempt < 20; attempt++) {
         const org = await workspace('Org delete beside sub-workflow runs in four environments');
         const envs: Array<{ id: string; name: string }> = [];
@@ -1661,12 +1671,12 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         const callee = await orglessCallee('org-less callee in four environments');
         const runIds: string[] = [];
         for (const env of envs) runIds.push(await subWorkflowRun(callee, org, env));
-        const ids = envs.map((env) => env.id);
-        const scans = await db.query<{ lowest: string; by_heap: string; by_name: string }>(
-          `SELECT (SELECT id FROM environments WHERE id = ANY($1::uuid[]) ORDER BY id LIMIT 1) AS lowest,
-                  (SELECT id FROM environments WHERE id = ANY($1::uuid[]) ORDER BY ctid LIMIT 1) AS by_heap,
-                  (SELECT id FROM environments WHERE id = ANY($1::uuid[]) ORDER BY lower(name) LIMIT 1) AS by_name`,
-          [ids],
+        const created = envs.map((env) => env.id);
+        const scans = await db.query<{ by_id: string[]; by_heap: string[]; by_name: string[] }>(
+          `SELECT array_agg(id::text ORDER BY id) AS by_id, array_agg(id::text ORDER BY ctid) AS by_heap,
+                  array_agg(id::text ORDER BY lower(name)) AS by_name
+             FROM environments WHERE id = ANY($1::uuid[])`,
+          [created],
         );
         const lookup = await db.query<{ id: string }>(
           `SELECT e.id FROM environments e
@@ -1674,16 +1684,31 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
               FOR KEY SHARE OF e`,
           [callee.calledId],
         );
-        const scan = scans.rows[0]!;
-        if (![scan.by_heap, scan.by_name, lookup.rows[0]!.id].includes(scan.lowest)) {
-          return { org, envs, callee, runIds };
-        }
+        const { by_id: byId, by_heap: byHeap, by_name: byName } = scans.rows[0]!;
+        const byLookup = lookup.rows.map((row) => row.id);
+        if (fits({ created, byId, byHeap, byName, byLookup })) return { org, envs, callee, runIds };
       }
-      throw new Error('no four environments whose scan orders start anywhere but the lowest id');
+      throw new Error('no four environments in the scan orders this test needs');
     };
 
+    const allUnlinked = async ({ callee, envs, runIds }: RunsInFour): Promise<unknown> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM workflows WHERE id = $1) AS workflow,
+                  (SELECT count(*)::int FROM environments WHERE id = ANY($2::uuid[])) AS environments,
+                  (SELECT count(*)::int FROM runtime_runs
+                    WHERE id = ANY($3::text[]) AND status = 'completed' AND workflow_id IS NULL
+                      AND workflow_version_id IS NULL AND environment_id IS NULL) AS unlinked`,
+          [callee.calledId, envs.map((env) => env.id), runIds],
+        )
+      ).rows[0];
+
     it("an org delete and the delete of an org-less workflow whose sub-workflow runs ran in four of the org's environments both delete, with the environment that delete locks first held", async () => {
-      const { org, envs, callee, runIds } = await crossedRuns();
+      // No scan order but id order starts at the lowest id, so only id order on both sides keeps the deletes apart.
+      const four = await runsInFour(
+        ({ byId, byHeap, byName, byLookup }) => ![byHeap[0], byName[0], byLookup[0]].includes(byId[0]),
+      );
+      const { org, envs, callee } = four;
       const holders = await Promise.all(
         envs.map(async (env) => {
           const client = new Client({ connectionString: dbUrl });
@@ -1713,15 +1738,50 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       } finally {
         await Promise.all(holders.map((h) => h.client.end()));
       }
-      const left = await db.query(
-        `SELECT EXISTS (SELECT 1 FROM workflows WHERE id = $1) AS workflow,
-                (SELECT count(*)::int FROM environments WHERE id = ANY($2::uuid[])) AS environments,
-                (SELECT count(*)::int FROM runtime_runs
-                  WHERE id = ANY($3::text[]) AND status = 'completed' AND workflow_id IS NULL
-                    AND workflow_version_id IS NULL AND environment_id IS NULL) AS unlinked`,
-        [callee.calledId, envs.map((env) => env.id), runIds],
+      expect(await allUnlinked(four)).toEqual({
+        workflow: false,
+        environments: 0,
+        unlinked: four.runIds.length,
+      });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it("an org delete and the delete of an org-less workflow whose sub-workflow runs ran in four of the org's environments both delete, with the org delete held on the second environment its cascade reaches, ahead of the lowest id", async () => {
+      // The cascade reaches e0 then e1, by heap and by name, and the lowest id comes later, so the org delete is part-way through its environments when the workflow delete starts.
+      const four = await runsInFour(
+        ({ created, byId, byHeap, byName }) =>
+          byHeap.join() === created.join() &&
+          byName.join() === created.join() &&
+          !created.slice(0, 2).includes(byId[0]!),
       );
-      expect(left.rows[0]).toEqual({ workflow: false, environments: 0, unlinked: runIds.length });
+      const { org, envs, callee } = four;
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM environments WHERE id = $1 FOR KEY SHARE`, [envs[1]!.id]);
+        const { rows } = await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`);
+        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        await lockWaiters(1);
+        const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${callee.calledId}`)));
+        await lockWaiters(2);
+        const waiting = await db.query<{ pid: number; blockers: number[] }>(
+          `SELECT pid, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        const orgWait = waiting.rows.find((w) => w.blockers.includes(rows[0]!.pid));
+        expect(waiting.rows.filter((w) => w !== orgWait).map((w) => w.blockers)).toEqual([[orgWait?.pid]]);
+        await holder.query('COMMIT');
+        expect({ workflow: await wfDeleting, org: await orgDeleting }).toEqual({ workflow: 200, org: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await allUnlinked(four)).toEqual({
+        workflow: false,
+        environments: 0,
+        unlinked: four.runIds.length,
+      });
       expect(await deadlocksSince(before)).toBe(0);
     });
   });

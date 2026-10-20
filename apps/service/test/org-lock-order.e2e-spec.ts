@@ -19,6 +19,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 interface Team {
   org: string;
   env: string;
+  envName: string;
   invite: string;
   token: string;
   cluster?: string;
@@ -32,13 +33,17 @@ interface Writer {
   event?: string;
   /** Rows the write needs beyond a team's. */
   prepare?: (team: Team) => Promise<void>;
-  /** Where the lands-first test holds the write: just before its event or just after its org lock; null when the org delete's own work before its transaction races it. */
+  /** Where the lands-first test holds the write: just before its event or just after its org lock; null when the org delete removes what the write would before its transaction. */
   heldAt: 'event' | 'org lock' | null;
+  /** What an org delete answers with 409 once the write has landed, when the org delete removes the org otherwise. */
+  refusal?: string;
   /** What the write answers once the org is gone, when not "Organization not found". */
   gone?: string;
 }
 
 const ORG_LOCK = /FROM organizations WHERE id = \$1 FOR KEY SHARE/;
+const HAS_WORKFLOW =
+  'This organization still has 1 workflow — move or delete them before deleting the organization.';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 
@@ -110,6 +115,8 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   const statusOf = (r: request.Test): Promise<number> => r.then((res) => res.status);
   const answer = (r: request.Test): Promise<{ status: number; detail: unknown }> =>
     r.then((res) => ({ status: res.status, detail: res.body.detail }));
+  const within = <T>(work: PromiseLike<T>): Promise<T | 'blocked'> =>
+    Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
   const deleteOrg = (org: string): request.Test => asOwner(http().delete(`/api/orgs/${org}`));
 
   // An org with a second member, a custom environment and a pending invite: one row of each kind its delete cascades into.
@@ -120,15 +127,15 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       .send({ email: 'member-lock@e2e.local' })
       .expect(201);
     await asMember(http().post(`/api/orgs/invites/${joining.body.token as string}/accept`)).expect(200);
-    const env = await asOwner(http().post('/api/environments'), org)
-      .send({ name: `env-${suffix()}` })
-      .expect(201);
+    const envName = `env-${suffix()}`;
+    const env = await asOwner(http().post('/api/environments'), org).send({ name: envName }).expect(201);
     const pending = await asOwner(http().post(`/api/orgs/${org}/invites`))
       .send({ email: `pending-${suffix()}@e2e.local` })
       .expect(201);
     return {
       org,
       env: env.body.id as string,
+      envName,
       invite: pending.body.id as string,
       token: pending.body.token as string,
     };
@@ -170,6 +177,13 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       name: 'a member leaving',
       event: 'org.member_left',
       send: (t) => asMember(http().delete(`/api/orgs/${t.org}/members/${member}`)),
+      status: 200,
+      heldAt: 'event',
+    },
+    {
+      name: 'a member removed',
+      event: 'org.member_removed',
+      send: (t) => asOwner(http().delete(`/api/orgs/${t.org}/members/${member}`)),
       status: 200,
       heldAt: 'event',
     },
@@ -267,7 +281,9 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       },
       send: connectCluster,
       status: 201,
-      heldAt: null,
+      heldAt: 'org lock',
+      refusal:
+        'A connection was added to this organization while it was being deleted — delete the organization again to remove it too.',
     },
     {
       name: 'a cluster connection delete',
@@ -284,14 +300,16 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       event: 'workflow.created',
       send: (t) => asOwner(http().post('/api/deploy'), t.org).send({ workflow_json: webhookDoc('Deployed') }),
       status: 201,
-      heldAt: null,
+      heldAt: 'org lock',
+      refusal: HAS_WORKFLOW,
     },
     {
       name: "a member's workflow draft",
       event: 'workflow.created',
       send: (t) => asMember(http().post('/api/deploy'), t.org).send({ workflow_json: webhookDoc('Drafted') }),
       status: 201,
-      heldAt: null,
+      heldAt: 'org lock',
+      refusal: HAS_WORKFLOW,
     },
   ];
 
@@ -437,7 +455,8 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   for (const writer of WRITERS) {
     const event = writer.event ?? '';
     if (writer.heldAt) {
-      it(`${writer.name} holding the org row when an org delete starts lands first, and the org delete then removes the org`, async () => {
+      const then = writer.refusal ? 'refuses with 409' : 'removes the org';
+      it(`${writer.name} holding the org row when an org delete starts lands first, and the org delete then ${then}`, async () => {
         const t = await team(`${writer.name}, then an org delete`);
         await writer.prepare?.(t);
         const landed = (await outcome(t.org, event)).events;
@@ -446,15 +465,20 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         try {
           const writing = statusOf(writer.send(t));
           await held.arrived;
-          const deleting = statusOf(deleteOrg(t.org));
+          const deleting = answer(deleteOrg(t.org));
           await lockWaiters(1);
           held.release();
           expect(await writing).toBe(writer.status);
-          expect(await deleting).toBe(200);
+          expect(await deleting).toEqual(
+            writer.refusal ? { status: 409, detail: writer.refusal } : { status: 200, detail: undefined },
+          );
         } finally {
           held.restore();
         }
-        expect(await outcome(t.org, event)).toEqual({ org: false, events: writer.event ? landed + 1 : 0 });
+        expect(await outcome(t.org, event)).toEqual({
+          org: writer.refusal !== undefined,
+          events: writer.event ? landed + 1 : 0,
+        });
         expect(await deadlocksSince(before)).toBe(0);
       });
     }
@@ -488,8 +512,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
 
   it('a write holding the org row lets an org rename and another write under the org go ahead', async () => {
     const t = await team('Writes side by side');
-    const within = <T>(work: PromiseLike<T>): Promise<T | 'blocked'> =>
-      Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
     const held = bounded(
       holdQuery(/FROM organizations WHERE id = \$1 FOR /, 'after'),
       'an environment create',
@@ -643,6 +665,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       const t = await team('Assign beside a connection delete');
       const { connection } = await personal();
       const held = bounded(holdQuery(/FROM organizations\s+WHERE id IN/, 'after'), 'a connection delete');
+      const before = await deadlocks();
       try {
         const removing = statusOf(asOwner(http().delete(`/api/connections/${connection}?force=true`)));
         await held.arrived;
@@ -658,6 +681,65 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         connection,
       ]);
       expect(slots.rows).toEqual([]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+  });
+
+  describe("a slot assign and its environment's delete", () => {
+    const LOCK_NOT_AVAILABLE = { code: '55P03' };
+    const slotsIn = async (env: string): Promise<unknown[]> =>
+      (await db.query(`SELECT 1 FROM environment_connections WHERE environment_id = $1`, [env])).rows;
+    const removeEnv = (t: Team): request.Test => asOwner(http().delete(`/api/environments/${t.env}`), t.org);
+
+    it('a slot assign started while an environment delete holds the environment waits for it and answers 404', async () => {
+      const t = await team('Assign beside an environment delete');
+      const held = gateEmits('environment.deleted');
+      const before = await deadlocks();
+      try {
+        const removing = statusOf(removeEnv(t));
+        await held.arrived(0);
+        await expect(
+          db.query(`SELECT 1 FROM environments WHERE id = $1 FOR KEY SHARE NOWAIT`, [t.env]),
+        ).rejects.toMatchObject(LOCK_NOT_AVAILABLE);
+        const assigning = answer(fillSlot(t));
+        await lockWaiters(1);
+        held.release(0);
+        expect({ removing: await removing, assigning: await assigning }).toEqual({
+          removing: 200,
+          assigning: { status: 404, detail: 'Environment not found' },
+        });
+      } finally {
+        held.restore();
+      }
+      expect(await slotsIn(t.env)).toEqual([]);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a slot assign holding its environment when the environment delete starts lands first, and the delete then removes the slot', async () => {
+      const t = await team('Environment delete beside an assign');
+      const held = bounded(
+        holdQuery(/SELECT connection_id FROM environment_connections WHERE environment_id/),
+        'a slot assign',
+      );
+      const before = await deadlocks();
+      try {
+        const assigning = statusOf(fillSlot(t));
+        await held.arrived;
+        await expect(
+          db.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE NOWAIT`, [t.env]),
+        ).rejects.toMatchObject(LOCK_NOT_AVAILABLE);
+        const removing = statusOf(removeEnv(t));
+        await lockWaiters(1);
+        held.release();
+        expect({ assigning: await assigning, removing: await removing }).toEqual({
+          assigning: 200,
+          removing: 200,
+        });
+      } finally {
+        held.restore();
+      }
+      expect(await slotsIn(t.env)).toEqual([]);
+      expect(await deadlocksSince(before)).toBe(0);
     });
   });
 
@@ -756,6 +838,49 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       expect(await settled(t)).toEqual({ joined: [joiner], invite: joiner, revoked: 0 });
       expect(await deadlocksSince(before)).toBe(0);
     });
+  });
+
+  it('a workflow created while an org delete waits for the org row is counted, so a promote of it lands and the org delete answers 409', async () => {
+    const t = await team('Promote beside an org delete');
+    const writer = new Client({ connectionString: dbUrl });
+    await writer.connect();
+    const promoted = gateEmits('workflow.promoted');
+    const before = await deadlocks();
+    try {
+      await writer.query('BEGIN');
+      await writer.query(`SELECT 1 FROM organizations WHERE id = $1 FOR KEY SHARE`, [t.org]);
+      const deleting = answer(deleteOrg(t.org));
+      await lockWaiters(1);
+      const deployed = await asOwner(http().post('/api/deploy'), t.org)
+        .send({ workflow_json: webhookDoc('Created beside an org delete') })
+        .expect(201);
+      const workflow = deployed.body.workflow_id as string;
+      const listed = await asOwner(http().get(`/api/workflows/${workflow}/versions`), t.org).expect(200);
+      const [v1] = listed.body.versions as Array<{ id: string }>;
+      const promoting = statusOf(
+        asOwner(http().post(`/api/workflows/${workflow}/promote`), t.org).send({
+          environment: t.envName,
+          version_id: v1!.id,
+        }),
+      );
+      await promoted.arrived(0);
+      await expect(
+        db.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE NOWAIT`, [t.env]),
+      ).rejects.toMatchObject({ code: '55P03' });
+      await writer.query('COMMIT');
+      const refused = await within(deleting);
+      promoted.release(0);
+      expect({ refused, promoting: await promoting }).toEqual({
+        refused: { status: 409, detail: HAS_WORKFLOW },
+        promoting: 201,
+      });
+      const kept = await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [workflow]);
+      expect(kept.rows).toEqual([{ org_id: t.org }]);
+    } finally {
+      promoted.restore();
+      await writer.end();
+    }
+    expect(await deadlocksSince(before)).toBe(0);
   });
 
   it('a second org delete started while one is in flight waits for it and answers 404', async () => {

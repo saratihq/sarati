@@ -191,7 +191,7 @@ export class EnvironmentsService {
     const name = this.validName(rawName);
     const renamed = await this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, orgId);
-      const env = await this.byIdForOrg(em, orgId, envId, true);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be renamed`, 409);
       if (env.name === UAT_ENV)
@@ -310,7 +310,7 @@ export class EnvironmentsService {
   ): Promise<{ replaced_connection_id: string | null; also_in_environments: string[] }> {
     const result = await this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, orgId);
-      const env = await this.byIdForOrg(em, orgId, envId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_key_share');
       // Visibility = ownership: a foreign or malformed-id connection is an indistinguishable 404.
       const notFound = new DomainError('Connection not found', 404);
       if (!isIdShape(connectionId)) throw notFound;
@@ -502,13 +502,13 @@ export class EnvironmentsService {
     em: EntityManager,
     orgId: string,
     envId: string,
-    lock = false,
+    lock?: 'for_no_key_update' | 'for_key_share',
   ): Promise<EnvironmentEntity> {
     const notFound = new DomainError('Environment not found', 404);
     if (!isIdShape(envId)) throw notFound;
     const env = await em.findOne(EnvironmentEntity, {
       where: { id: envId, orgId },
-      ...(lock ? { lock: { mode: 'for_no_key_update' as const } } : {}),
+      ...(lock ? { lock: { mode: lock } } : {}),
     });
     if (!env) throw notFound;
     return env;

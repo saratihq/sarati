@@ -7,6 +7,7 @@ import { IsNull, type DataSource, type EntityManager } from 'typeorm';
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
 import { OrgInviteEntity } from '../database/entities/org-invite.entity';
+import { ConnectionEntity } from '../database/entities/connection.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -107,20 +108,21 @@ export class OrgManagementService {
   /** Delete a non-personal org; refuses while workflows remain, memberships/invites/keys cascade. */
   async deleteOrg(org: OrganizationEntity, actorId: string): Promise<void> {
     if (org.isPersonal) throw new DomainError('The personal organization cannot be deleted');
-    // Refuse while workflows remain (they'd be orphaned via the SET-NULL FK).
-    const workflows = await this.dataSource.manager.count(WorkflowEntity, { where: { orgId: org.id } });
-    if (workflows > 0) {
-      throw new DomainError(
-        `This organization still has ${workflows} workflow${workflows === 1 ? '' : 's'} — move or delete them before deleting the organization.`,
-        409,
-      );
-    }
+    await this.refuseWhileWorkflows(this.dataSource.manager, org.id);
     // Tear down cluster connections FIRST: no FK, so the org delete would orphan live third-party grants.
     const clusters = await this.connections.listClusters(org.id);
     for (const c of clusters) await this.connections.deleteCluster(org.id, c.id);
 
     await this.dataSource.transaction(async (em) => {
-      await lockOrgForDelete(em, org.id);
+      await lockOrgForDelete(em, org.id, async () => {
+        await this.refuseWhileWorkflows(em, org.id);
+        if ((await em.count(ConnectionEntity, { where: { orgId: org.id } })) > 0) {
+          throw new DomainError(
+            'A connection was added to this organization while it was being deleted — delete the organization again to remove it too.',
+            409,
+          );
+        }
+      });
       await this.events.emit(em, {
         orgId: org.id,
         actorUserId: actorId,
@@ -131,6 +133,17 @@ export class OrgManagementService {
       });
       await em.delete(OrganizationEntity, { id: org.id });
     });
+  }
+
+  private async refuseWhileWorkflows(em: EntityManager, orgId: string): Promise<void> {
+    // They'd be orphaned via the SET-NULL FK.
+    const workflows = await em.count(WorkflowEntity, { where: { orgId } });
+    if (workflows > 0) {
+      throw new DomainError(
+        `This organization still has ${workflows} workflow${workflows === 1 ? '' : 's'} — move or delete them before deleting the organization.`,
+        409,
+      );
+    }
   }
 
   async listMembers(orgId: string): Promise<Array<Record<string, unknown>>> {

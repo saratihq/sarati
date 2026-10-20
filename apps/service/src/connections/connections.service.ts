@@ -459,7 +459,6 @@ export class ConnectionsService implements RunAsAccounts {
     return removed;
   }
 
-  /** Delete the connections `where` names, and by cascade their slots, under {@link lockConnectionsForDelete}; how many it deleted. */
   private async deleteWithSlots(
     em: EntityManager,
     where: FindOptionsWhere<ConnectionEntity>,

@@ -154,7 +154,6 @@ function normalizeExecuteError(error: unknown): string | null {
 
 export type ManagedAccountStatus = 'pending' | 'active' | 'expired' | 'failed';
 
-/** A minted Connect Link. */
 export interface ComposioLink {
   redirectUrl: string;
   connectedAccountId: string;
@@ -295,11 +294,7 @@ export class ComposioProvider {
     const connectedAccountId = body.connected_account_id;
     const discard = async (): Promise<void> => {
       try {
-        await this.send(
-          apiKey,
-          'DELETE',
-          `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
-        );
+        await this.deleteAccountWith(apiKey, connectedAccountId);
       } catch (err) {
         this.logger.warn(`Composio account ${connectedAccountId} could not be deleted: ${errorMessage(err)}`);
       }
@@ -323,11 +318,11 @@ export class ComposioProvider {
 
   /** Delete the Composio connected account (revokes their custody of the grant). */
   async deleteAccount(scope: PlatformKeyScope, connectedAccountId: string): Promise<void> {
-    await this.request(
-      scope,
-      'DELETE',
-      `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
-    );
+    await this.deleteAccountWith(await this.requireApiKey(scope), connectedAccountId);
+  }
+
+  private async deleteAccountWith(apiKey: string, connectedAccountId: string): Promise<void> {
+    await this.send(apiKey, 'DELETE', `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`);
   }
 
   /** The connected account's non-secret metadata for `auth.data.*`, cached per account; raw tokens are never surfaced. */

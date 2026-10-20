@@ -16,7 +16,7 @@ async function lockOrg(
   if (rows.length === 0) throw gone;
 }
 
-/** The first lock of every write under an org: FOR KEY SHARE, so it queues behind an org delete and throws `gone` once the org is gone, never deadlocking with the delete's cascade or failing a foreign-key check on the org (constitution row 20). */
+/** The first lock of every write under an org: FOR KEY SHARE, so it waits for an org delete holding the org row and throws `gone` if the org went with it, never deadlocking with the delete's cascade or failing a foreign-key check on the org, and one that takes it first holds that delete off until it commits (constitution row 20). */
 export function lockOrgForWrite(em: EntityManager, orgId: string, gone = orgGone()): Promise<void> {
   return lockOrg(em, orgId, 'FOR KEY SHARE', gone);
 }
@@ -29,9 +29,14 @@ export function lockInvite(
   return em.findOne(OrgInviteEntity, { where, lock: { mode: 'pessimistic_write' } });
 }
 
-/** An org delete's first locks: the org row FOR UPDATE, so a second delete and every {@link lockOrgForWrite} write wait for it and then answer 404, then its environments in id order, the order a workflow delete takes them in (constitution rows 11 and 20). */
-export async function lockOrgForDelete(em: EntityManager, orgId: string): Promise<void> {
+/** An org delete's first locks: the org row FOR UPDATE, granted once every {@link lockOrgForWrite} write holding it has committed, so `refuse` then sees what they wrote and every later write, a second delete included, waits and answers 404 if the org goes; then its environments FOR UPDATE in id order, the order a workflow delete takes them in (constitution rows 11 and 20). */
+export async function lockOrgForDelete(
+  em: EntityManager,
+  orgId: string,
+  refuse: () => Promise<void>,
+): Promise<void> {
   await lockOrg(em, orgId, 'FOR UPDATE', orgGone());
+  await refuse();
   await rawQuery(em, `SELECT 1 FROM environments WHERE org_id = $1 ORDER BY id FOR UPDATE`, [orgId]);
 }
 
