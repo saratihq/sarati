@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource, EntityManager } from 'typeorm';
+import { IsNull, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
@@ -18,7 +18,7 @@ import {
 import { rawQuery } from '../database/raw-query';
 import { EventsService } from '../events/events.service';
 import { isUniqueViolation } from '../database/pg-errors';
-import { lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
+import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
 
 const INVITE_TTL_DAYS = 14;
 
@@ -334,9 +334,7 @@ export class OrgManagementService {
   async revokeInvite(orgId: string, actorId: string, inviteId: string): Promise<void> {
     await this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, orgId);
-      const invite = isIdShape(inviteId)
-        ? await em.findOne(OrgInviteEntity, { where: { id: inviteId, orgId } })
-        : null;
+      const invite = isIdShape(inviteId) ? await lockInvite(em, { id: inviteId, orgId }) : null;
       if (!invite || invite.acceptedAt) throw new DomainError('Invite not found', 404);
       await em.delete(OrgInviteEntity, { id: invite.id });
       await this.events.emit(em, {
@@ -377,9 +375,11 @@ export class OrgManagementService {
     try {
       return await this.dataSource.transaction(async (em) => {
         const spent = new DomainError('Invite not found or expired', 404);
-        const invite = await em.findOne(OrgInviteEntity, { where: { token } });
+        const sought = await em.findOne(OrgInviteEntity, { where: { token } });
+        if (!sought) throw spent;
+        await lockOrgForWrite(em, sought.orgId, spent);
+        const invite = await lockInvite(em, { id: sought.id });
         if (!invite) throw spent;
-        await lockOrgForWrite(em, invite.orgId, spent);
         const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
 
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
@@ -394,7 +394,12 @@ export class OrgManagementService {
           role: invite.role,
           createdAt: now(),
         });
-        await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
+        const { affected } = await em.update(
+          OrgInviteEntity,
+          { id: invite.id, acceptedAt: IsNull() },
+          { acceptedBy: userId, acceptedAt: now() },
+        );
+        if (affected !== 1) throw spent;
         await this.events.emit(em, {
           orgId: org.id,
           actorUserId: userId,

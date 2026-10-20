@@ -1,6 +1,7 @@
-import type { EntityManager } from 'typeorm';
+import type { EntityManager, FindOptionsWhere } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
+import { OrgInviteEntity } from '../database/entities/org-invite.entity';
 import { rawQuery } from '../database/raw-query';
 
 const orgGone = (): DomainError => new DomainError('Organization not found', 404);
@@ -18,6 +19,14 @@ async function lockOrg(
 /** The first lock of every write under an org: FOR KEY SHARE, so it queues behind an org delete and throws `gone` once the org is gone, never deadlocking with the delete's cascade or failing a foreign-key check on the org (constitution row 20). */
 export function lockOrgForWrite(em: EntityManager, orgId: string, gone = orgGone()): Promise<void> {
   return lockOrg(em, orgId, 'FOR KEY SHARE', gone);
+}
+
+/** An invite's accept and revoke lock its row FOR UPDATE after the org row, so they take turns on one invite and each judges the row as the other left it (constitution row 20). */
+export function lockInvite(
+  em: EntityManager,
+  where: FindOptionsWhere<OrgInviteEntity>,
+): Promise<OrgInviteEntity | null> {
+  return em.findOne(OrgInviteEntity, { where, lock: { mode: 'pessimistic_write' } });
 }
 
 /** An org delete's first locks: the org row FOR UPDATE, so a second delete and every {@link lockOrgForWrite} write wait for it and then answer 404, then its environments in id order, the order a workflow delete takes them in (constitution rows 11 and 20). */

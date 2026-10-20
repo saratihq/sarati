@@ -82,9 +82,11 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   const owner = randomUUID();
   const member = randomUUID();
   const joiner = randomUUID();
+  const rival = randomUUID();
   const ownerKey = 'ork_e2e_owner_lock_aaaaaaaaaaaaaaaaaaaaa';
   const memberKey = 'ork_e2e_member_lock_bbbbbbbbbbbbbbbbbbbb';
   const joinerKey = 'ork_e2e_joiner_lock_cccccccccccccccccccc';
+  const rivalKey = 'ork_e2e_rival_lock_dddddddddddddddddddddd';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
@@ -97,6 +99,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   const asOwner = as(ownerKey);
   const asMember = as(memberKey);
   const asJoiner = as(joinerKey);
+  const asRival = as(rivalKey);
   const suffix = (): string => randomUUID().slice(0, 8);
 
   const { gateEmits, holdQuery, lockWaiters, deadlocks, deadlocksSince } = lockProbes(
@@ -323,27 +326,29 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       `INSERT INTO users (id, email, name, created_at, updated_at)
        VALUES ($1, 'owner-lock@e2e.local', 'Owner', now(), now()),
               ($2, 'member-lock@e2e.local', 'Member', now(), now()),
-              ($3, 'joiner-lock@e2e.local', 'Joiner', now(), now())`,
-      [owner, member, joiner],
+              ($3, 'joiner-lock@e2e.local', 'Joiner', now(), now()),
+              ($4, 'rival-lock@e2e.local', 'Rival', now(), now())`,
+      [owner, member, joiner, rival],
     );
-    const personal = [randomUUID(), randomUUID(), randomUUID()];
+    const personal = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
     await db.query(
       `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
        VALUES ($1, 'Owner', true, now(), now()), ($2, 'Member', true, now(), now()),
-              ($3, 'Joiner', true, now(), now())`,
+              ($3, 'Joiner', true, now(), now()), ($4, 'Rival', true, now(), now())`,
       personal,
     );
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $3, $4, 'owner', now()),
-              (gen_random_uuid(), $5, $6, 'owner', now())`,
-      [personal[0], owner, personal[1], member, personal[2], joiner],
+              (gen_random_uuid(), $5, $6, 'owner', now()), (gen_random_uuid(), $7, $8, 'owner', now())`,
+      [personal[0], owner, personal[1], member, personal[2], joiner, personal[3], rival],
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
        VALUES (gen_random_uuid(), $1, 'owner', $2, $3, now()),
               (gen_random_uuid(), $4, 'member', $5, $6, now()),
-              (gen_random_uuid(), $7, 'joiner', $8, $9, now())`,
+              (gen_random_uuid(), $7, 'joiner', $8, $9, now()),
+              (gen_random_uuid(), $10, 'rival', $11, $12, now())`,
       [
         owner,
         hash(ownerKey),
@@ -354,6 +359,9 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         joiner,
         hash(joinerKey),
         joinerKey.slice(0, 12),
+        rival,
+        hash(rivalKey),
+        rivalKey.slice(0, 12),
       ],
     );
 
@@ -650,6 +658,103 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         connection,
       ]);
       expect(slots.rows).toEqual([]);
+    });
+  });
+
+  describe('an invite accept beside a revoke or a second accept of the same invite', () => {
+    const accept = (who: typeof asJoiner, t: Team): request.Test =>
+      who(http().post(`/api/orgs/invites/${t.token}/accept`));
+    const revoke = (t: Team): request.Test =>
+      asOwner(http().delete(`/api/orgs/${t.org}/invites/${t.invite}`));
+    const spent = { status: 404, detail: 'Invite not found or expired' };
+
+    const holdsInvite = (t: Team): Promise<void> =>
+      expect(
+        db.query(`SELECT 1 FROM org_invites WHERE id = $1 FOR UPDATE NOWAIT`, [t.invite]),
+      ).rejects.toMatchObject({ code: '55P03' });
+
+    // Parks an accept by the joiner at its membership insert, past its invite lock: the insert's foreign-key check waits for the joiner's row.
+    const parkJoiner = async (): Promise<Client> => {
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query(`SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, [joiner]);
+      return holder;
+    };
+
+    const settled = async (
+      t: Team,
+    ): Promise<{ joined: string[]; invite: string | null; revoked: number }> => {
+      const { rows } = await db.query<{ joined: string[] | null; invite: string | null; revoked: number }>(
+        `SELECT (SELECT array_agg(user_id::text ORDER BY user_id) FROM org_members
+                  WHERE org_id = $1 AND user_id = ANY($2::uuid[])) AS joined,
+                (SELECT coalesce(accepted_by::text, 'pending') FROM org_invites WHERE id = $3) AS invite,
+                (SELECT count(*)::int FROM domain_events
+                  WHERE type = 'org.invite_revoked' AND subject_id = $3::text) AS revoked`,
+        [t.org, [joiner, rival], t.invite],
+      );
+      const row = rows[0]!;
+      return { joined: row.joined ?? [], invite: row.invite, revoked: row.revoked };
+    };
+
+    it('an invite revoke holding the invite when an accept of it starts lands first, and the accept answers 404 as for a spent invite', async () => {
+      const t = await team('Revoke, then accept');
+      const held = gateEmits('org.invite_revoked');
+      const before = await deadlocks();
+      try {
+        const revoking = statusOf(revoke(t));
+        await held.arrived(0);
+        await holdsInvite(t);
+        const accepting = answer(accept(asJoiner, t));
+        await lockWaiters(1);
+        held.release(0);
+        expect({ revoke: await revoking, accept: await accepting }).toEqual({ revoke: 200, accept: spent });
+      } finally {
+        held.restore();
+      }
+      expect(await settled(t)).toEqual({ joined: [], invite: null, revoked: 1 });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an invite accept holding the invite when a revoke of it starts lands first, and the revoke answers 404', async () => {
+      const t = await team('Accept, then revoke');
+      const holder = await parkJoiner();
+      const before = await deadlocks();
+      try {
+        const accepting = answer(accept(asJoiner, t));
+        await lockWaiters(1);
+        await holdsInvite(t);
+        const revoking = answer(revoke(t));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect({ accept: (await accepting).status, revoke: await revoking }).toEqual({
+          accept: 200,
+          revoke: { status: 404, detail: 'Invite not found' },
+        });
+      } finally {
+        await holder.end();
+      }
+      expect(await settled(t)).toEqual({ joined: [joiner], invite: joiner, revoked: 0 });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an invite accept holding the invite when a second account accepts it lands first, and the second answers 404 as for a spent invite', async () => {
+      const t = await team('Two accepts of one invite');
+      const holder = await parkJoiner();
+      const before = await deadlocks();
+      try {
+        const first = answer(accept(asJoiner, t));
+        await lockWaiters(1);
+        await holdsInvite(t);
+        const second = answer(accept(asRival, t));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect({ first: (await first).status, second: await second }).toEqual({ first: 200, second: spent });
+      } finally {
+        await holder.end();
+      }
+      expect(await settled(t)).toEqual({ joined: [joiner], invite: joiner, revoked: 0 });
+      expect(await deadlocksSince(before)).toBe(0);
     });
   });
 
