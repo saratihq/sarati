@@ -50,6 +50,16 @@ module.exports = {
       to: { path: '^src/(ir/(diff|merge)|compiler)' },
     },
     {
+      name: 'e2e-harness-realm-loads-no-app',
+      severity: 'error',
+      comment:
+        'Jest gives every suite the globals of the realm its e2e harness runs in, so app code the ' +
+        'harness loads (class-validator keeps its metadata on the global) is shared by every suite ' +
+        'and keeps each one in memory until the run ends.',
+      from: { path: '^test/support' },
+      to: { path: '^src', pathNot: '^src/config/default-database-url\\.ts$' },
+    },
+    {
       name: 'no-orphans',
       severity: 'error',
       comment:

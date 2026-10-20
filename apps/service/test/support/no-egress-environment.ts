@@ -20,6 +20,12 @@ export default class NoEgressEnvironment extends TestEnvironment {
     return super.setup();
   }
 
+  override async teardown(): Promise<void> {
+    // Node keeps the process's first 250 fetch timings, each holding the suite whose fetch recorded it.
+    performance.clearResourceTimings();
+    return super.teardown();
+  }
+
   handleTestEvent(event: Circus.Event, state: Circus.State): void {
     if (event.name === 'test_done') this.report(event.test.errors);
     else if (isSuiteHookEnd(event) || event.name === 'run_finish') this.report(state.unhandledErrors);

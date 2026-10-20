@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
-import { DEFAULT_DATABASE_URL } from '../../src/config/env.config';
+import { DEFAULT_DATABASE_URL } from '../../src/config/default-database-url';
 
 /** Canonical baseline schema — the same file the OSS `db:init` bootstrap applies. */
 const SCHEMA_PATH = join(__dirname, '..', '..', 'db', 'schema.sql');

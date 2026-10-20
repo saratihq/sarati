@@ -27,7 +27,7 @@
     "db:migrate": "node scripts/migrate-db.mjs",
     "db:release": "pnpm db:init && pnpm db:migrate",
     "catalog:build:composio": "node scripts/build-composio-catalog.mjs",
-    "depcruise": "depcruise src --config .dependency-cruiser.cjs",
+    "depcruise": "depcruise src test/support/global-setup.ts test/support/global-teardown.ts test/support/no-egress-environment.ts --config .dependency-cruiser.cjs",
     "golden:record": "ts-node --transpile-only test/golden/record.ts",
     "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm depcruise && pnpm test && pnpm test:e2e",
     "auth:set-password": "node dist/scripts/set-password.cli.js",
