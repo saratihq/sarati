@@ -62,6 +62,20 @@ curl "http://localhost:8080/api/workflows/<id>/webhook-secret?node_id=trigger&en
 
 `{"secret_present":false}` means verification is on with nothing to verify against.
 
+## A promote or publish says a trigger or step "can't run there"
+
+```
+staging's gmail account isn't active, so "New email" can't run there — its owner reconnects it under
+Integrations, or an owner reassigns the slot under Integrations → Environments before promoting here
+```
+
+The environment's account for that app can't serve what the message names: there is none, it is for
+another app, or it isn't active. A trigger listens as the environment's account even when it names
+one of its own, so picking an account on the trigger does not help. Fix the slot under
+**Integrations → Environments** and promote again. The same words on the workflow overview mean a
+trigger that was live lost its account; it starts again once the slot is fixed. See
+[Environments](/run/environments/#triggers-listen-as-the-environments-account).
+
 ## A run ends in `error`
 
 The run and the failing step both carry the reason, for example

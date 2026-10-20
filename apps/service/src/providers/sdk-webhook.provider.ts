@@ -53,6 +53,36 @@ interface SdkWebhookContext {
   secret: string;
 }
 
+/** PUBLIC type → SDK trigger. Only registered-webhook (onEnable) triggers belong here. */
+const WEBHOOK_TRIGGERS = new Map<string, WebhookTrigger<never, unknown>>([
+  [actions.github.NEW_PUSH_TYPE, actions.github.newPush as unknown as WebhookTrigger<never, unknown>],
+  [actions.github.NEW_ISSUE_TYPE, actions.github.newIssue as unknown as WebhookTrigger<never, unknown>],
+  [
+    actions.github.NEW_PULL_REQUEST_TYPE,
+    actions.github.newPullRequest as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [
+    actions.stripe.PAYMENT_SUCCEEDED_TYPE,
+    actions.stripe.paymentSucceeded as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [actions.stripe.NEW_CUSTOMER_TYPE, actions.stripe.newCustomer as unknown as WebhookTrigger<never, unknown>],
+  [
+    actions.typeform.NEW_RESPONSE_TYPE,
+    actions.typeform.newResponse as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [
+    actions.calendly.NEW_INVITEE_TYPE,
+    actions.calendly.newInvitee as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [actions.linear.NEW_ISSUE_TYPE, actions.linear.newIssue as unknown as WebhookTrigger<never, unknown>],
+  [actions.clickup.NEW_TASK_TYPE, actions.clickup.newTask as unknown as WebhookTrigger<never, unknown>],
+]);
+
+/** Whether `type` is an SDK registered-webhook trigger. */
+export function isSdkWebhookTrigger(type: string): boolean {
+  return WEBHOOK_TRIGGERS.has(type);
+}
+
 /**
  * Runs the SDK's REGISTERED-webhook triggers IN-PROCESS (the intake must answer a signature check per request).
  * Owns credential resolution and the SDK glue — auth-handle construction, the store adapter, request shaping.
@@ -61,33 +91,7 @@ interface SdkWebhookContext {
 export class SdkWebhookProvider {
   private readonly logger = new Logger(SdkWebhookProvider.name);
 
-  /** PUBLIC type → SDK trigger. Only registered-webhook (onEnable) triggers belong here. */
-  private readonly registry = new Map<string, WebhookTrigger<never, unknown>>([
-    [actions.github.NEW_PUSH_TYPE, actions.github.newPush as unknown as WebhookTrigger<never, unknown>],
-    [actions.github.NEW_ISSUE_TYPE, actions.github.newIssue as unknown as WebhookTrigger<never, unknown>],
-    [
-      actions.github.NEW_PULL_REQUEST_TYPE,
-      actions.github.newPullRequest as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.stripe.PAYMENT_SUCCEEDED_TYPE,
-      actions.stripe.paymentSucceeded as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.stripe.NEW_CUSTOMER_TYPE,
-      actions.stripe.newCustomer as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.typeform.NEW_RESPONSE_TYPE,
-      actions.typeform.newResponse as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.calendly.NEW_INVITEE_TYPE,
-      actions.calendly.newInvitee as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [actions.linear.NEW_ISSUE_TYPE, actions.linear.newIssue as unknown as WebhookTrigger<never, unknown>],
-    [actions.clickup.NEW_TASK_TYPE, actions.clickup.newTask as unknown as WebhookTrigger<never, unknown>],
-  ]);
+  private readonly registry = WEBHOOK_TRIGGERS;
 
   constructor(
     @Optional() private readonly connections?: ConnectionsService,
@@ -96,7 +100,7 @@ export class SdkWebhookProvider {
 
   /** Whether `type` is an SDK registered-webhook trigger (drives the triggers-service branch). */
   isRegisteredWebhook(type: string): boolean {
-    return this.registry.has(type);
+    return isSdkWebhookTrigger(type);
   }
 
   /** Whether a failed delete of this trigger's webhook reaches the caller; Linear's never does. */

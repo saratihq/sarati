@@ -82,6 +82,30 @@ as an owner reassigning the slot:
 A run already there stops before that step calls the app, naming the step and the environment as it
 is called now.
 
+### Triggers listen as the environment's account
+
+An app trigger — a GitHub or Stripe webhook, a polled Slack or Gmail feed, a one-click (Composio)
+subscription — listens as its environment's account for its app, whether or not it names an account
+of its own. Promoting, publishing or restoring a version whose trigger that account can't serve is
+refused the same way, naming the trigger:
+
+> staging has no gmail account assigned, so "New email" can't run there — assign one under
+> Integrations → Environments before promoting here
+
+An account for another app, or one that isn't active, is refused in the words a step's is. The
+refusal lists the triggers apart from the steps, under `triggers`, with the same reasons:
+
+```
+{"code":"environment_slots_inactive","environment":"staging","apps":["gmail"],"steps":[],
+ "triggers":[{"node_id":"watch","node_name":"New email","app":"gmail","reason":"inactive_slot"}]}
+```
+
+A trigger already live in an environment whose account stops serving it is taken down, and the
+workflow overview shows why in the same words. Emptying or reassigning the slot does this at once; an
+account that stops being active is noticed within fifteen minutes, when pg-boss is enabled. The
+trigger starts again, fresh, once the environment has an account that serves it. A trigger that signs
+in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed — needs no account.
+
 ## Rename and delete
 
 An environment's name is part of its URLs, so renaming `staging` to `qa` moves

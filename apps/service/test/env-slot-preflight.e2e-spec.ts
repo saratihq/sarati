@@ -346,7 +346,7 @@ describe('env slot preflight (e2e, isolated DB)', () => {
     expect(promoted.body.status).toBe('promoted');
   });
 
-  it('refuses an app trigger naming an account whose app has no slot there, in the words it always had', async () => {
+  it('refuses an app trigger whose app has no slot there, naming it as a step is named', async () => {
     const gmailConn = randomUUID();
     await db.query(
       `INSERT INTO connections (id, user_id, provider, auth_type, credential, status) VALUES ($1, $2, 'gmail', 'token', 'x', 'active')`,
@@ -384,9 +384,13 @@ describe('env slot preflight (e2e, isolated DB)', () => {
       http().post(`/api/workflows/${wf}/promote`).send({ environment: 'staging', version_id: v1 }),
     ).expect(428);
     expect(refused.body.detail).toBe(
-      "The staging environment has no connection for gmail — assign it to staging's slot before promoting here",
+      'staging has no gmail account assigned, so "New email" can\'t run there — assign one under Integrations → Environments before promoting here',
     );
-    expect(refused.body).not.toHaveProperty('code');
-    expect(refused.body).not.toHaveProperty('steps');
+    expect(refused.body).toMatchObject({
+      code: 'environment_slots_empty',
+      apps: ['gmail'],
+      steps: [],
+      triggers: [{ node_id: 'watch', node_name: 'New email', app: 'gmail', reason: 'empty_slot' }],
+    });
   });
 });

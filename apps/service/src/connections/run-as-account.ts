@@ -132,11 +132,11 @@ export async function decideRunAs(
 ): Promise<RunAsDecision> {
   const nameOf = async () => (await environmentNamed(scope, accounts)) ?? '';
   if (scope.environmentId) {
-    return bySlot(step, await accounts.resolveSlotConnection(scope.environmentId, step.app), nameOf);
+    return decideBySlot(step, await accounts.resolveSlotConnection(scope.environmentId, step.app), nameOf);
   }
   if (scope.environment && scope.orgId) {
     const slot = await accounts.resolveClusterConnection(scope.orgId, scope.environment, step.app);
-    return bySlot(step, slot, nameOf);
+    return decideBySlot(step, slot, nameOf);
   }
   return forRunner(step, scope.externalUserId, accounts);
 }
@@ -254,7 +254,8 @@ export async function lostAccountMessage(
   return lost === 'removed' ? emptySlotMessage(environment, step) : inactiveSlotMessage(environment, step);
 }
 
-async function bySlot(
+/** The slot half of {@link decideRunAs}: whether an environment's account for the step's app, already read, serves it — the rule an app trigger listens by too (#11). */
+export async function decideBySlot(
   step: RunAsStep,
   slot: SlotAccount | null,
   nameOf: () => Promise<string>,

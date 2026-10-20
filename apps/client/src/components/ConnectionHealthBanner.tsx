@@ -1,44 +1,62 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle } from "lucide-react";
 import * as api from "@/api/client";
 import type { Connection } from "@/api/client";
 import { appDisplayName } from "@/lib/connections";
 
-/**
- * Warns when a step of this workflow references a non-active connection. Derived client-side by
- * joining `parameters.connectionId` against the caller's own connections — unseen ones are skipped.
- */
-export default function ConnectionHealthBanner({ nodes }: { nodes: Record<string, unknown>[] | null }) {
-  const [connections, setConnections] = useState<Connection[] | null>(null);
+type Nodes = Record<string, unknown>[];
+
+const inactive = (c: Connection): boolean => (c.status ?? "active") !== "active";
+
+// The accounts steps choose, joined against the caller's own connections; unseen ones are skipped.
+async function chosenBroken(nodes: Nodes): Promise<Connection[]> {
+  const chosen = new Set(
+    nodes.flatMap((node) => {
+      const id = (node as { parameters?: Record<string, unknown> }).parameters?.connectionId;
+      return typeof id === "string" && id ? [id] : [];
+    }),
+  );
+  const { connections } = await api.listConnections();
+  return connections.filter((c) => chosen.has(c.id) && inactive(c));
+}
+
+// A step the run-as rule finds no active account for runs as your only one once it is reconnected; `?app=` matches as the rule does.
+async function onlyAccountBroken(nodes: Nodes): Promise<Connection[]> {
+  const { steps } = await api.runAsAccounts({ nodes });
+  const unserved = steps.filter((s) => s.state === "none");
+  const apps = [...new Set(unserved.map((s) => s.app))];
+  const broken = await Promise.all(
+    apps.map(async (app) => {
+      const managedOnly = unserved.every((s) => s.app !== app || s.managed_only);
+      const { connections } = await api.listConnections(app);
+      return connections.filter((c) => inactive(c) && (!managedOnly || c.auth_type === "managed"));
+    }),
+  );
+  return broken.flat();
+}
+
+/** Warns when a step would run as a connection that isn't active — one it chose, or its only one, as the run-as rule answers. */
+export default function ConnectionHealthBanner({ nodes }: { nodes: Nodes | null }) {
+  const [found, setFound] = useState<{ nodes: Nodes; broken: Connection[] } | null>(null);
   useEffect(() => {
+    if (!nodes) return;
     let cancelled = false;
-    api
-      .listConnections()
-      .then(({ connections: c }) => {
-        if (!cancelled) setConnections(c);
-      })
-      .catch(() => {
-        /* best-effort surface — on failure the banner simply stays hidden */
-      });
+    const quiet = (): Connection[] => [];
+    void Promise.all([chosenBroken(nodes).catch(quiet), onlyAccountBroken(nodes).catch(quiet)]).then((halves) => {
+      if (cancelled) return;
+      const byId = new Map(halves.flat().map((c) => [c.id, c]));
+      setFound({ nodes, broken: [...byId.values()] });
+    });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [nodes]);
 
-  const broken = useMemo(() => {
-    if (!nodes || !connections) return [];
-    const referenced = new Set<string>();
-    for (const node of nodes) {
-      const params = (node as { parameters?: Record<string, unknown> }).parameters;
-      const id = params?.connectionId;
-      if (typeof id === "string" && id) referenced.add(id);
-    }
-    return connections.filter((c) => referenced.has(c.id) && (c.status ?? "active") !== "active");
-  }, [nodes, connections]);
-
+  // An answer for another document never shows over this one.
+  const broken = found && found.nodes === nodes ? found.broken : [];
   if (broken.length === 0) return null;
 
   const names = [...new Set(broken.map((c) => c.display_name || appDisplayName(c.provider)))];

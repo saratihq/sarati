@@ -2,7 +2,7 @@ import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 
 import type { ConnectionsService } from '../connections/connections.service';
 import { InMemoryStore } from './provider-store';
-import { SdkPollingProvider } from './sdk-polling.provider';
+import { SdkPollingProvider, sdkPollingTriggerSignsIn } from './sdk-polling.provider';
 
 /** A minimal JSON FetchLikeResponse. */
 function res(status: number, body: unknown): FetchLikeResponse {
@@ -43,13 +43,12 @@ describe('SdkPollingProvider', () => {
   });
 
   it('reports which triggers need a connection (none-scheme vs oauth)', () => {
-    const provider = new SdkPollingProvider();
     // rss/hackernews/http are no-auth — they fire with NO connection.
-    expect(provider.needsConnection('rss.new_item')).toBe(false);
-    expect(provider.needsConnection('hackernews.new_story')).toBe(false);
-    expect(provider.needsConnection('http.new_item')).toBe(false);
+    expect(sdkPollingTriggerSignsIn('rss.new_item')).toBe(false);
+    expect(sdkPollingTriggerSignsIn('hackernews.new_story')).toBe(false);
+    expect(sdkPollingTriggerSignsIn('http.new_item')).toBe(false);
     // slack.new_channel authenticates with a connection.
-    expect(provider.needsConnection('slack.new_channel')).toBe(true);
+    expect(sdkPollingTriggerSignsIn('slack.new_channel')).toBe(true);
   });
 
   it('exposes the four polling triggers in the catalog with the right auth flag', () => {

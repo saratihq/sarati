@@ -850,7 +850,9 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
 
     expect(stripeEndpoints.has(endpoint)).toBe(false);
     expect(await registration(id)).toBeNull();
-    expect((await activation(wfId)).last_error).toMatch(/No connection in this environment's slot/);
+    expect((await activation(wfId)).last_error).toBe(
+      'production has no stripe account assigned, so "When it happens" can\'t run there — an owner assigns one under Integrations → Environments',
+    );
   });
 
   it('a retype whose new registration failed stands it up on the next reconcile', async () => {
@@ -1538,7 +1540,9 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(warnings(mark).filter((w) => w.includes(endpoint))).toEqual([
       expect.stringMatching(/can never be deleted.*delete it there/),
     ]);
-    expect((await activation(wfId)).last_error).toMatch(/No connection in this environment's slot/);
+    expect((await activation(wfId)).last_error).toBe(
+      'production has no stripe account assigned, so "When it happens" can\'t run there — an owner assigns one under Integrations → Environments',
+    );
   });
 
   it('a pending delete outlives its workflow and is retried by the sweep', async () => {

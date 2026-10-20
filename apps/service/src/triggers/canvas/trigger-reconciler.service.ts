@@ -10,23 +10,21 @@ import type { DataSource } from 'typeorm';
 import { runBounded } from '../../common/bounded';
 import { withDeadline } from '../../common/deadline';
 import { errorMessage } from '../../common/error-message';
-import { isTriggerNode } from '../../compiler/compile-ir';
 import { ConnectionsService } from '../../connections/connections.service';
+import { decideBySlot, type RunAsDecision, type SlotAccount } from '../../connections/run-as-account';
 import type { EnvConfig } from '../../config/env.config';
 import { newId, now } from '../../database/ids';
 import { rawMutate, rawQuery } from '../../database/raw-query';
 import { RuntimeTriggerActivationEntity } from '../../database/entities/runtime-trigger-activation.entity';
 import { TriggerRetiredWebhookEntity } from '../../database/entities/trigger-retired-webhook.entity';
 import { PG_POOL } from '../../database/tokens';
-import type { IRNode, WorkflowIR } from '../../ir/models';
-import { composioTriggerSpec } from '../../providers/composio-trigger.registry';
+import type { WorkflowIR } from '../../ir/models';
 import { ComposioTriggerProvider } from '../../providers/composio-trigger.provider';
 import {
   MANAGED_INTEGRATION_PROVIDER,
   type ManagedIntegrationProvider,
 } from '../../providers/managed-integration-provider';
 import { InMemoryStore, type ProviderStore } from '../../providers/provider-store';
-import { validatedAppSlug } from '../../providers/sdk-actions.registry';
 import { SdkPollingProvider } from '../../providers/sdk-polling.provider';
 import {
   SdkWebhookProvider,
@@ -45,21 +43,15 @@ import {
   sameRegistration,
   webhookRegistrationOf,
 } from '../registered-webhook';
-import {
-  AGENT_TOOL_PUBLIC,
-  INCOMING_CHAT_PUBLIC,
-  INCOMING_WEBHOOK_PUBLIC,
-  MANUAL_TRIGGER,
-} from '../trigger-catalog.service';
-import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
+import { SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
 import { activationKeyOf, actualOf } from './activation-row';
+import { activationKindOf, listensAsAccount, triggerSlotApp } from './trigger-kind';
 import {
   type ActivationKey,
   activationKeyString,
-  type ActivationKind,
   applyFinished,
   type ConnectionRef,
   type DesiredActivation,
@@ -175,12 +167,12 @@ export class TriggerReconcilerService {
     }
 
     // The pure derive is synchronous, so slots must be resolved up front.
-    const connByEnvApp = await this.resolveConnections(pointerInputs);
+    const slots = await this.resolveSlots(pointerInputs, envNameById);
     const desired = deriveDesiredActivations({
       workflowId,
       pointers: pointerInputs,
-      kindOf: (node) => this.kindOf(node),
-      connectionOf: (envId, node) => connByEnvApp.get(slotKey(envId, node)) ?? null,
+      kindOf: (node) => activationKindOf(node.node_type),
+      connectionOf: (envId, node) => connectionServing(slots.get(triggerKey(envId, node.id))),
       webhookUrlOf: (envId, kind) =>
         kind === 'registered_webhook'
           ? this.webhookUrl({ workflowId, environmentId: envId }, envNameById)
@@ -195,12 +187,14 @@ export class TriggerReconcilerService {
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
     // rest of the sweep — the next reconcile re-converges.
     for (const d of plan.toCreate) {
-      await this.applyCreate(d).catch((err) => this.logApplyError('create', d.key, err));
+      await this.applyCreate(d, slots).catch((err) => this.logApplyError('create', d.key, err));
     }
     for (const u of plan.toUpdate) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
       if (row)
-        await this.applyUpdate(row, u, envNameById).catch((err) => this.applyFailed('update', row, err));
+        await this.applyUpdate(row, u, envNameById, slots).catch((err) =>
+          this.applyFailed('update', row, err),
+        );
     }
     for (const d of plan.toDelete) {
       const row = rowByKey.get(activationKeyString(d.key));
@@ -229,7 +223,7 @@ export class TriggerReconcilerService {
     const targets: Array<{ id: string; desired: DesiredActivation }> = [];
     for (const d of desired) {
       if (d.kind !== 'composio_subscription' || d.paused) continue;
-      if (this.needsConnection(d) && d.connection === null) continue; // unfilled slot → last_error, not a subscribe
+      if (listensAsAccount(d.kind, d.triggerType) && d.connection === null) continue; // unfilled slot → last_error, not a subscribe
       const keyStr = activationKeyString(d.key);
       if (materialized.has(keyStr)) continue;
       const row = rowByKey.get(keyStr);
@@ -299,10 +293,10 @@ export class TriggerReconcilerService {
 
   // ─── apply ───
 
-  private async applyCreate(desired: DesiredActivation): Promise<void> {
+  private async applyCreate(desired: DesiredActivation, slots: SlotDecisions): Promise<void> {
     const id = newId();
     const ts = now();
-    const missingSlot = this.needsConnection(desired) && desired.connection === null;
+    const missingSlot = listensAsAccount(desired.kind, desired.triggerType) && desired.connection === null;
     const standsUp = !missingSlot && !desired.paused;
     const row = this.dataSource.manager.create(RuntimeTriggerActivationEntity, {
       id,
@@ -318,7 +312,7 @@ export class TriggerReconcilerService {
       paused: desired.paused,
       webhookUrl: desired.webhookUrl,
       lastPolledAt: null,
-      lastError: missingSlot ? this.slotError(desired) : null,
+      lastError: missingSlot ? slotError(desired, slots) : null,
       createdAt: ts,
       updatedAt: ts,
       // Paused or unslotted stands nothing up, so that much is already in effect.
@@ -337,10 +331,11 @@ export class TriggerReconcilerService {
     row: RuntimeTriggerActivationEntity,
     update: ActivationUpdate,
     envName: Map<string, string>,
+    slots: SlotDecisions,
   ): Promise<void> {
     const { desired } = update;
     const live = liveOf(row);
-    const missingSlot = this.needsConnection(desired) && desired.connection === null;
+    const missingSlot = listensAsAccount(desired.kind, desired.triggerType) && desired.connection === null;
     row.kind = desired.kind;
     row.triggerType = desired.triggerType;
     row.versionId = desired.versionId;
@@ -349,7 +344,7 @@ export class TriggerReconcilerService {
     row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
     row.paused = desired.paused;
     row.webhookUrl = desired.webhookUrl;
-    row.lastError = missingSlot ? this.slotError(desired) : null;
+    row.lastError = missingSlot ? slotError(desired, slots) : null;
     row.updatedAt = now();
     await withActivationLock(this.pool, row.id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
@@ -841,76 +836,27 @@ export class TriggerReconcilerService {
 
   // ─── resolution helpers ───
 
-  /**
-   * Classify an IR trigger node into an activation kind, or `null` when it has NO runtime
-   * activation — the manual trigger must never become a pollable one.
-   */
-  private kindOf(node: IRNode): ActivationKind | null {
-    // Neither fires on its own: the manual trigger waits for a Run, the tool trigger for a caller
-    // . Without this a tool trigger falls through to the Composio rail and asks for a
-    // connection slot it can never have.
-    if (node.node_type === MANUAL_TRIGGER || node.node_type === AGENT_TOOL_PUBLIC) return null;
-    if (node.node_type === INCOMING_WEBHOOK_PUBLIC) {
-      return 'webhook';
-    }
-    if (node.node_type === INCOMING_CHAT_PUBLIC) return 'chat';
-    if (node.node_type === ORCHESTR_SCHEDULE) return 'schedule';
-    if (this.sdkWebhooks.isRegisteredWebhook(node.node_type)) return 'registered_webhook';
-    if (this.sdkPolling.isPollingTrigger(node.node_type)) return 'polling';
-    // The hand-polled Composio-poll exceptions keep OUR poll cycle; everything else
-    // `<app>.<trigger>` rides the Composio native-subscription rail.
-    if (composioTriggerSpec(node.node_type)) return 'polling';
-    return 'composio_subscription';
-  }
-
-  /** Pre-resolve every env slot the desired activations reference, once per (env, app). */
-  private async resolveConnections(pointers: EnvPointerInput[]): Promise<Map<string, ConnectionRef | null>> {
-    const map = new Map<string, ConnectionRef | null>();
+  /** Each trigger node's slot under each env pointer, read once per (env, app) and judged by the run-as slot rule (#18). */
+  private async resolveSlots(
+    pointers: EnvPointerInput[],
+    envNameById: Map<string, string>,
+  ): Promise<SlotDecisions> {
+    const reads = new Map<string, Promise<SlotAccount | null>>();
+    const decisions: SlotDecisions = new Map();
     for (const pointer of pointers) {
+      const environment = envNameById.get(pointer.environmentId) ?? 'This environment';
       for (const node of pointer.ir.nodes) {
-        if (!isTriggerNode(node)) continue;
-        const app = validatedAppSlug(node.node_type);
-        if (this.isNativeKind(node) || !app) continue;
-        // A `none`-scheme SDK polling trigger resolves no connection — skip the slot lookup.
-        if (
-          this.sdkPolling.isPollingTrigger(node.node_type) &&
-          !this.sdkPolling.needsConnection(node.node_type)
-        )
-          continue;
-        const key = slotKey(pointer.environmentId, node);
-        if (map.has(key)) continue;
-        const slot = await this.connections.resolveSlotConnection(pointer.environmentId, app);
-        map.set(key, slot ? { connectionId: slot.id, ownerUserId: slot.ownerUserId } : null);
+        const app = triggerSlotApp(node);
+        if (!app) continue;
+        const readKey = `${pointer.environmentId}::${app}`;
+        const read = reads.get(readKey) ?? this.connections.resolveSlotConnection(pointer.environmentId, app);
+        reads.set(readKey, read);
+        const trigger = { name: node.name || node.id, app, connectionId: null };
+        const decision = await decideBySlot(trigger, await read, () => Promise.resolve(environment));
+        decisions.set(triggerKey(pointer.environmentId, node.id), decision);
       }
     }
-    return map;
-  }
-
-  private isNativeKind(node: IRNode): boolean {
-    return (
-      node.node_type === INCOMING_WEBHOOK_PUBLIC ||
-      node.node_type === INCOMING_CHAT_PUBLIC ||
-      node.node_type === ORCHESTR_SCHEDULE
-    );
-  }
-
-  /**
-   * Whether this activation resolves a provider connection. The SDK polling rail is
-   * per-trigger, so consult the trigger's own auth scheme rather than assuming by kind.
-   */
-  private needsConnection(desired: DesiredActivation): boolean {
-    if (desired.kind === 'polling' && this.sdkPolling.isPollingTrigger(desired.triggerType)) {
-      return this.sdkPolling.needsConnection(desired.triggerType);
-    }
-    return (
-      desired.kind === 'registered_webhook' ||
-      desired.kind === 'polling' ||
-      desired.kind === 'composio_subscription'
-    );
-  }
-
-  private slotError(desired: DesiredActivation): string {
-    return `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
+    return decisions;
   }
 
   private webhookUrl(
@@ -979,6 +925,22 @@ function webhookLabel(webhook: RegisteredWebhook): string {
   return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }
 
-function slotKey(environmentId: string, node: IRNode): string {
-  return `${environmentId}::${validatedAppSlug(node.node_type) ?? ''}`;
+type SlotDecisions = Map<string, RunAsDecision>;
+
+function triggerKey(environmentId: string, triggerNodeId: string): string {
+  return `${environmentId}::${triggerNodeId}`;
+}
+
+// A trigger listens as its slot's account only while the slot serves it; otherwise as none, and stands nothing up.
+function connectionServing(decision: RunAsDecision | undefined): ConnectionRef | null {
+  return decision?.kind === 'account'
+    ? { connectionId: decision.connectionId, ownerUserId: decision.ownerUserId }
+    : null;
+}
+
+function slotError(desired: DesiredActivation, slots: SlotDecisions): string {
+  const decision = slots.get(triggerKey(desired.key.environmentId, desired.key.triggerNodeId));
+  return decision?.kind === 'refused'
+    ? decision.message
+    : `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
 }

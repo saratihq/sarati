@@ -20,6 +20,11 @@ const SINGLE_DEFINITION = [
   { symbol: 'providersServing', definedIn: 'connections/run-as-account.ts' },
   { symbol: 'actionNeedsAccount', definedIn: 'providers/sdk-actions.registry.ts' },
   { symbol: 'actionNeedsManagedAccount', definedIn: 'providers/sdk-actions.registry.ts' },
+  { symbol: 'decideBySlot', definedIn: 'connections/run-as-account.ts' },
+  // Constitution #11 — how a trigger is stood up, and which triggers listen as their environment's slot.
+  { symbol: 'activationKindOf', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'listensAsAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'triggerSlotApp', definedIn: 'triggers/canvas/trigger-kind.ts' },
 ] as const;
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -85,6 +90,19 @@ describe('vault: one definition site per load-bearing question', () => {
       'environments/env-slot-preflight.ts',
       'triggers/canvas/trigger-reconciler.service.ts',
     ]);
+  });
+
+  /** Constitution #11: the reconciler and the promote preflight ask one predicate which triggers listen as a slot, and judge that slot by #18's rule. */
+  it('a trigger listens as the slot one predicate names, judged by the run-as slot rule', () => {
+    const asking = (call: RegExp, definedIn: string): string[] =>
+      sources()
+        .filter((f) => f.rel !== definedIn && call.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    const listeners = ['environments/env-slot-preflight.ts', 'triggers/canvas/trigger-reconciler.service.ts'];
+
+    expect(asking(/\btriggerSlotApp\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual(listeners);
+    expect(asking(/\bdecideBySlot\s*\(/, 'connections/run-as-account.ts')).toEqual(listeners);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */
