@@ -19,13 +19,12 @@ import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { RuntimeTriggerActivationEntity } from '../database/entities/runtime-trigger-activation.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
-import { rawMutateReturning } from '../database/raw-query';
 import { PG_POOL } from '../database/tokens';
 import { canonicalEnvName } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
 import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
-import { ifActivationUnlocked } from './activation-lock';
+import { ifActivationUnlocked, withActivationLock } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
@@ -500,17 +499,22 @@ export class TriggersService {
     } catch (error) {
       failure = { error };
     }
-    // Decided in the write: a row held, or held back with no account, by then keeps its slot's reason, so a fire of it that failed is the operator's to read.
-    const [written] = await rawMutateReturning<{ kept: boolean }>(
-      this.dataSource.manager,
-      `UPDATE runtime_trigger_activations
-          SET last_polled_at = $2,
-              last_error = CASE WHEN held OR connection_id IS NULL THEN last_error ELSE $3 END
-        WHERE id = $1
-        RETURNING held OR connection_id IS NULL AS kept`,
-      [row.id, now(), failure === null ? null : activationError(failure.error)],
-    );
-    if (written?.kept && failure !== null) {
+    const lastError = failure === null ? null : activationError(failure.error);
+    // Decided under the activation's lock, which every hold, release and teardown is written under: a row held back by then keeps its slot's reason, so a fire of it that failed is the operator's to read.
+    const kept = await withActivationLock(this.pool, row.id, async () => {
+      const current = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
+        where: { id: row.id },
+      });
+      if (!current) return false;
+      const keeps = heldBack(current);
+      await this.dataSource.manager.update(
+        RuntimeTriggerActivationEntity,
+        { id: row.id },
+        keeps ? { lastPolledAt: now() } : { lastPolledAt: now(), lastError },
+      );
+      return keeps;
+    });
+    if (kept && failure !== null) {
       this.logger.warn(
         `composio intake: held activation ${row.id} did not fire: ${errorMessage(failure.error)}`,
       );

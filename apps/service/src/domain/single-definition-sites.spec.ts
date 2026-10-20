@@ -114,6 +114,10 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(asking(/\bheldBackBySlot\s*\(/, kindSite)).toEqual(runtime);
     expect(asking(/\bfiresWhileHeld\s*\(/, kindSite)).toEqual(runtime);
     expect(asking(/\bholdsTrigger\s*\(/, 'triggers/canvas/activation-row.ts')).toEqual(runtime);
+    // SQL that decides on an activation's `held` column answers heldBackBySlot where the callers above can't see it.
+    const heldInSql =
+      /\b(?:WHEN|OR|AND|NOT|WHERE)\s+(?:\w+\.)?held\b|\b(?:\w+\.)?held\s+(?:OR|AND|IS|THEN)\b/;
+    expect(asking(heldInSql, kindSite)).toEqual([]);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

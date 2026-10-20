@@ -9,6 +9,7 @@ import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 import { Client } from 'pg';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
@@ -16,6 +17,7 @@ import { EncryptionService } from '../src/common/crypto/encryption.service';
 import type { EnvConfig } from '../src/config/env.config';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { RuntimeTriggerActivationEntity } from '../src/database/entities/runtime-trigger-activation.entity';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { SDK_WEBHOOK_FETCH, SdkWebhookProvider } from '../src/providers/sdk-webhook.provider';
@@ -1481,6 +1483,67 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
     expect(hooksHere()).not.toContain(hook);
   });
 
+  it('a held GitHub webhook whose slot is reassigned to an account that stops being active while it stands up keeps the old hook, which no account that is not active deletes, and moves once that account is active again', async () => {
+    const name = 'On push';
+    const { org, production } = await workspace('reassign held github lapsing');
+    const first = await tokenConnection('github');
+    await assignSlot(org, production, 'github', first);
+    const { wf } = await deploy(org, triggerDoc('github.new_push', name, { owner: 'acme', repo: 'lapsing' }));
+    const live = await activation(wf, production);
+    const record = (await storeOf(live.id))['webhook.registration'] as {
+      webhookUrl: string;
+      registration: { subscriptionId: string };
+    };
+    const id = record.registration.subscriptionId;
+    const hook = `/repos/acme/lapsing/hooks/${id}`;
+    const deletesWith = (account: string): number =>
+      githubDeletes.filter((d) => d.hook === hook && d.headers.includes(`tok-github-${account}`)).length;
+    const hooksHere = (): string[] =>
+      [...githubHooks].filter(([, url]) => url === record.webhookUrl).map(([at]) => at);
+
+    await setStatus(first, 'expired');
+    await reconcile(wf);
+    expect(await activation(wf, production)).toMatchObject({ held: true });
+
+    const second = await tokenConnection('github');
+    const sdk = app.get(SdkWebhookProvider);
+    // A check finds the new account failed while its stand-up is at GitHub, which refuses a second hook at the address.
+    registered.mockImplementationOnce(async (ctx: Parameters<SdkWebhookProvider['enable']>[0]) => {
+      await setStatus(second, 'failed');
+      return SdkWebhookProvider.prototype.enable.call(sdk, ctx);
+    });
+    await assignSlot(org, production, 'github', second);
+    await reconcile(wf);
+    await app.get(TriggerReconcilerService).retriesSettled();
+
+    expect(deletesWith(second)).toBe(0);
+    expect(deletesWith(first)).toBe(0);
+    expect(hooksHere()).toEqual([hook]);
+    expect(await pendingDeletes(wf)).toEqual([
+      { hook: id, last_error: "the account it was registered with isn't active" },
+    ]);
+    expect(await standUpsAs('webhook', second)).toBe(1);
+    expect(await shownOn(org, wf, production)).toMatchObject({ listening: false });
+
+    await setStatus(second, 'active');
+    await reconcile(wf);
+    await app.get(TriggerReconcilerService).retriesSettled();
+
+    expect(await activation(wf, production)).toMatchObject({
+      id: live.id,
+      connection_id: second,
+      held: false,
+      last_error: null,
+    });
+    expect(await standUpsAs('webhook', second)).toBe(3);
+    expect(deletesWith(second)).toBe(1);
+    expect(deletesWith(first)).toBe(0);
+    expect(hooksHere()).toHaveLength(1);
+    expect(hooksHere()).not.toContain(hook);
+    expect(await pendingDeletes(wf)).toEqual([]);
+    expect(await shownOn(org, wf, production)).toMatchObject({ listening: true });
+  });
+
   it.each(['held', 'held back', 'released'] as const)(
     'a Composio delivery that read its row before its trigger was %s leaves the reason that change wrote, or records its own failed fire',
     async (change) => {
@@ -1530,6 +1593,65 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       }
     },
   );
+
+  it('a Composio delivery recording its fire as its trigger is held decides under the activation’s lock, so the hold waits for it and its reason stands', async () => {
+    const { production, account, wf, live } = await liveTrigger('composio', 'decides under lock');
+    const manager = app.get(DataSource).manager;
+    const findNow = manager.findOne.bind(manager) as (entity: unknown, options: unknown) => Promise<unknown>;
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let arrive = (): void => undefined;
+    const reached = new Promise<void>((resolve) => (arrive = resolve));
+    let armed = true;
+    // Parks the delivery once it has read its row to decide what it records, before it writes.
+    const parked = jest.spyOn(manager, 'findOne').mockImplementation((async (
+      entity: unknown,
+      options: { where?: { id?: unknown } },
+    ) => {
+      const found = await findNow(entity, options);
+      if (armed && entity === RuntimeTriggerActivationEntity && options.where?.id === live.id) {
+        armed = false;
+        arrive();
+        await gate;
+      }
+      return found;
+    }) as unknown as typeof manager.findOne);
+    const advisoryWaits = async (): Promise<number> =>
+      Number(
+        (
+          await db.query<{ n: string }>(
+            `SELECT count(*) AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`,
+          )
+        ).rows[0]!.n,
+      );
+    try {
+      const sent = http()
+        .post('/api/hooks/composio')
+        .set('Content-Type', 'application/json')
+        .set('webhook-id', 'msg_decides_under_lock')
+        .send({ metadata: { trigger_id: live.composio_trigger_instance_id }, data: { id: 'under lock' } })
+        .then((res) => res);
+      await reached;
+      await setStatus(account, 'expired');
+      let reconciled = false;
+      const holding = reconcile(wf).then(() => {
+        reconciled = true;
+      });
+      // The hold waits on the lock the delivery holds; were the delivery's decision not under it, the hold would land first.
+      await eventually(async () => expect(reconciled || (await advisoryWaits()) > 0).toBe(true));
+      release();
+      expect((await sent).status).toBe(202);
+      await holding;
+      expect(await activation(wf, production)).toMatchObject({
+        held: true,
+        last_error: HELD('production', 'composio'),
+      });
+    } finally {
+      release();
+      parked.mockRestore();
+    }
+  });
 
   it.each(['retyped to a schedule', 'deleted with its workflow'])(
     'a held webhook trigger %s asks nothing of its app with the account that is not active, and its webhook is deleted once that account is active again',
