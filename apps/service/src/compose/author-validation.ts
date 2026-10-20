@@ -11,6 +11,13 @@ import { accountRefFields, accountRefText } from '../runtime/account-ref';
 /** A node id is a caller-assigned stable identifier (invariant #13) — this is its ONE format rule. */
 export const NODE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,59}$/;
 
+/** Why `id` can't be a node's id, or null when it can. */
+export function nodeIdProblem(id: string): string | null {
+  return NODE_ID_RE.test(id)
+    ? null
+    : `Node id "${id}" is invalid — use a short identifier (letters, digits, _ or -, max 60 chars).`;
+}
+
 /** The minimum a node must show to be categorised: its type, plus the app-trigger marker. */
 type CategorizableNode = Pick<DocNode, 'node_type'> & { metadata?: Record<string, unknown> };
 
@@ -114,13 +121,9 @@ function checkNodes(
 ): void {
   const seen = new Set<string>();
   for (const node of nodes) {
-    if (!NODE_ID_RE.test(node.id)) {
-      errors.push({
-        code: 'invalid_node_id',
-        node_id: node.id,
-        node_name: node.name,
-        message: `Node id "${node.id}" is invalid — use a short identifier (letters, digits, _ or -, max 60 chars).`,
-      });
+    const idProblem = nodeIdProblem(node.id);
+    if (idProblem) {
+      errors.push({ code: 'invalid_node_id', node_id: node.id, node_name: node.name, message: idProblem });
     }
     if (seen.has(node.id)) {
       errors.push({

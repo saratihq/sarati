@@ -34,6 +34,8 @@ interface ServiceOptions {
   service: string;
   databaseUrl: string;
   earlier?: boolean;
+  /** Boots through `test/golden/r0-boot.ts` with this model behind the agent node: one that calls a tool every turn. */
+  model?: 'tool-every-turn';
   env?: Record<string, string>;
 }
 
@@ -52,7 +54,7 @@ export async function startService(
   opts: ServiceOptions,
 ): Promise<ServiceProcess & { answered: Promise<void> }> {
   const port = await freePort();
-  const entry = opts.earlier ? join(__dirname, '..', 'golden', 'r0-boot.ts') : 'src/main.ts';
+  const entry = opts.earlier || opts.model ? join(__dirname, '..', 'golden', 'r0-boot.ts') : 'src/main.ts';
   let log = '';
   const child = spawn(process.execPath, ['-r', 'ts-node/register/transpile-only', entry], {
     cwd: opts.service,
@@ -67,6 +69,7 @@ export async function startService(
       DBOS_ENABLED: 'true',
       THROTTLE_LIMIT: '10000',
       ORCHESTR_HTTP_ALLOWED_HOSTS: '127.0.0.1',
+      ...(opts.model ? { GOLDEN_MODEL: opts.model } : {}),
       ...opts.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

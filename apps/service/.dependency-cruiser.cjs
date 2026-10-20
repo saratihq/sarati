@@ -31,6 +31,15 @@ module.exports = {
       to: { path: '^src', pathNot: '^src/(compiler|ir|runtime|common)' },
     },
     {
+      name: 'moat-dbos-confined',
+      severity: 'error',
+      comment:
+        'A durable run issues its ops through its sequencer, so only src/dbos talks to DBOS ' +
+        '(constitution #19).',
+      from: { path: '^src', pathNot: '^src/dbos' },
+      to: { path: '@dbos-inc/dbos-sdk' },
+    },
+    {
       name: 'moat-mcp-answers-nothing-itself',
       severity: 'error',
       comment:

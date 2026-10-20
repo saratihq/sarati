@@ -268,10 +268,11 @@ function withheldSteps(
   return (trace ?? []).flatMap((entry, i) => {
     const marker = dryRunMarkerOf(entry.output);
     if (!marker) return [];
+    const node = entry.node ?? entry.nodeId;
     return [
       {
         id: `${entry.nodeId}:${i}`,
-        name: nameOf.get(entry.nodeId) ?? entry.nodeId,
+        name: nameOf.get(node) ?? node,
         summary: withheldSummary(marker),
       },
     ];

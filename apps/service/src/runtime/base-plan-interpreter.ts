@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
 import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
-import { PassThroughDurableStep, type DurableStep } from '../providers/durable-step';
+import { PassThroughDurableStep, type DurableStep, type ParkHooks } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import {
   AgentStepsExhausted,
@@ -25,11 +25,11 @@ import { CodeRunner, type CodeInput } from './code-runner';
 import { evaluateCondition, type Condition } from './conditions';
 import { resolveReference, resolveReferences } from './reference-resolver';
 import { eventTopicFor } from './event-wait';
-import { assertAnswerableTopic, PARK_DELAY_ABOVE_MS, timerTopicFor } from './timer-wait';
+import { assertAnswerableTopic } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
 import type { RunResult, TraceEntry } from './run-plan';
-import type { SubWorkflowRunner } from './sub-workflow-runner';
+import type { SubWorkflowCall, SubWorkflowRunner } from './sub-workflow-runner';
 
 export interface RunOptions {
   /** Our end-user identity — scopes connections/accounts per tenant. */
@@ -57,10 +57,20 @@ export interface RunOptions {
   chatChannelKey?: string | null;
   /** Sub-workflow-as-tool call depth; bounded by {@link MAX_SUB_WORKFLOW_DEPTH}. Absent → 0. */
   subWorkflowDepth?: number;
-  /** The ONE tree-wide sub-workflow invocation budget; absent at a top level → a fresh one. */
+  /** The legacy engine's in-memory sub-workflow invocation budget, shared by a run tree; absent at a top level → a fresh one. */
   subWorkflowBudget?: { remaining: number };
   /** Waits another wait on their topic can be parked beside receive on their own step's topic; off only for a run from before that existed. Default true. */
   sharedTopicsByStep?: boolean;
+  /** Every wait receives on its own step's topic, as a run on the sequenced engine does. */
+  everyWaitByStep?: boolean;
+  /** Each sub-workflow call an agent makes is charged once, inside its own step, against its run tree's one durable count. */
+  budgetCharged?: boolean;
+  /** The run a nested run's sub-workflow calls are charged to; absent at a top level, which is its own root. */
+  subWorkflowRoot?: string;
+  /** The runs between the run tree's root and this one, this one last; empty for the root. */
+  subWorkflowLineage?: readonly string[];
+  /** Each error lane's steps are keyed under its source, so two copies of one handler never share a key; off only on the legacy engine. Default true. */
+  ownErrorLanePaths?: boolean;
 }
 
 /** Threaded through the recursion so nested action ids stay durable-key-unique. */
@@ -86,11 +96,32 @@ export interface RunContext {
   chatChannelKey: string | null;
   /** Sub-workflow call depth — 0 at the top level, +1 per nested entry. */
   subWorkflowDepth: number;
-  /** ONE mutable invocation counter shared by reference across the whole run tree —
-   *  bounds total sub-workflow WORK, which the per-branch depth cap cannot. */
+  /** Where agent calls are counted in memory (the legacy engine, a run in process), ONE counter shared by reference
+   *  across the whole run tree — bounds total sub-workflow WORK, which the per-branch depth cap cannot. */
   subWorkflowBudget: { remaining: number };
   /** Wait nodes that receive on their own step's topic, because another wait on theirs can be parked beside them. */
   routedWaits: ReadonlySet<object>;
+  /** Whether an agent's sub-workflow calls are charged durably, inside their own steps, rather than counted in memory. */
+  budgetCharged: boolean;
+  /** The root of this run's tree, which its agents' sub-workflow calls are charged to. */
+  subWorkflowRoot: string;
+  /** The runs between the root and this one, this one last; empty for the root. */
+  subWorkflowLineage: readonly string[];
+  /** Whether an error lane runs under `<path><source id>#error/` rather than its source's own path. */
+  ownErrorLanePaths: boolean;
+}
+
+// Take one call from an in-memory budget, or none once it is spent.
+function spendInMemory(budget: { remaining: number }): boolean {
+  if (budget.remaining <= 0) return false;
+  budget.remaining -= 1;
+  return true;
+}
+
+function subWorkflowBudgetSpent(): Error {
+  return new Error(
+    `Sub-workflow invocation budget (${MAX_SUB_WORKFLOW_INVOCATIONS}) exhausted for this run — too many sub-workflow calls in one run. Reduce how often the agents call sub-workflows.`,
+  );
 }
 
 /** Run-time recursion bound on sub-workflow-as-tool nesting depth; exceeding it is a tool error. */
@@ -274,12 +305,16 @@ export abstract class BasePlanInterpreter {
       // A nested run inherits the root's counter by reference; a top-level run mints a fresh one.
       subWorkflowBudget: opts.subWorkflowBudget ?? { remaining: MAX_SUB_WORKFLOW_INVOCATIONS },
       routedWaits: opts.sharedTopicsByStep === false ? new Set() : routedWaits,
+      budgetCharged: opts.budgetCharged === true,
+      subWorkflowRoot: opts.subWorkflowRoot ?? opts.runId ?? plan.id,
+      subWorkflowLineage: opts.subWorkflowLineage ?? [],
+      ownErrorLanePaths: opts.ownErrorLanePaths !== false,
     };
     const scope: Record<string, unknown> = { ...(opts.initialScope ?? {}) };
     this.logger.log(`run plan ${plan.id}: ${plan.nodes.length} node(s)`);
     try {
       try {
-        await schedule(plan.nodes, scope, '', ctx);
+        await ctx.durable.root(() => schedule(plan.nodes, scope, '', ctx));
       } catch (err) {
         // An error lane ran to completion — the run is DONE and SUCCESSFUL.
         if (err instanceof ErrorLaneHalt) {
@@ -388,23 +423,52 @@ export abstract class BasePlanInterpreter {
     const unresolved = new Set<string>();
     const input = resolveReferences(node.input, scope, (ref) => unresolved.add(ref));
     await this.warn(ctx, stepKey, [...unresolved].map(unresolvedNote));
-    const recorded = await ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
-      runner.run(
-        { workflowId: node.workflowId, input },
-        {
-          externalUserId: ctx.externalUserId,
-          environment: ctx.environment,
-          environmentId: ctx.environmentId,
-          orgId: ctx.orgId,
-          parentRunId: ctx.runId,
-          callKey: stepKey,
-          depth: ctx.subWorkflowDepth,
-          budget: ctx.subWorkflowBudget,
-          dryRun: ctx.dryRun,
-        },
-      ),
+    return leafScopeValue(
+      'callWorkflow',
+      await this.subWorkflowStep(runner, ctx, stepKey, { workflowId: node.workflowId, input }),
     );
-    return leafScopeValue('callWorkflow', recorded);
+  }
+
+  // One sub-workflow call as its step; `admit`, when given, runs first inside the step, so a refusal is its recorded outcome.
+  private subWorkflowStep(
+    runner: SubWorkflowRunner,
+    ctx: RunContext,
+    stepKey: string,
+    call: SubWorkflowCall,
+    admit?: () => Promise<void>,
+  ): Promise<unknown> {
+    return ctx.durable.run(`${ctx.planId}:${stepKey}`, async () => {
+      await admit?.();
+      return runner.run(call, {
+        externalUserId: ctx.externalUserId,
+        environment: ctx.environment,
+        environmentId: ctx.environmentId,
+        orgId: ctx.orgId,
+        parentRunId: ctx.runId,
+        callKey: stepKey,
+        depth: ctx.subWorkflowDepth,
+        budget: ctx.subWorkflowBudget,
+        dryRun: ctx.dryRun,
+        ownErrorLanePaths: ctx.ownErrorLanePaths,
+        budgetCharged: ctx.budgetCharged,
+        rootRunId: ctx.subWorkflowRoot,
+        lineage: ctx.subWorkflowLineage,
+      });
+    });
+  }
+
+  // Charge one agent call to the run tree's durable count, once per call however often its step runs, or refuse it.
+  private async chargeSubWorkflowCall(ctx: RunContext, stepKey: string): Promise<void> {
+    const record = ctx.record;
+    const allowed = record
+      ? await record.recorder.chargeSubWorkflowCall(
+          ctx.subWorkflowRoot,
+          `${ctx.runId}|${stepKey}`,
+          MAX_SUB_WORKFLOW_INVOCATIONS,
+          ctx.subWorkflowLineage,
+        )
+      : spendInMemory(ctx.subWorkflowBudget);
+    if (!allowed) throw subWorkflowBudgetSpent();
   }
 
   /**
@@ -438,7 +502,7 @@ export abstract class BasePlanInterpreter {
       );
       scope[node.id] = output;
       const warnings = ctx.stepWarnings.get(stepKey);
-      ctx.trace.push({ nodeId: stepKey, output, ...(warnings?.length ? { warnings } : {}) });
+      ctx.trace.push({ nodeId: stepKey, node: node.id, output, ...(warnings?.length ? { warnings } : {}) });
     } catch (err) {
       // A fatal error, a cancel among them, unwinds the run: no error lane or continue-on-fail may absorb it.
       if (ctx.durable.isFatal(err)) throw err;
@@ -457,7 +521,7 @@ export abstract class BasePlanInterpreter {
       // successors and then ends the run. Never both lanes.
       if (runErrorLane) {
         scope[node.id] = captured;
-        ctx.trace.push({ nodeId: stepKey, output: captured });
+        ctx.trace.push({ nodeId: stepKey, node: node.id, output: captured });
         if (ctx.record) await ctx.record.recorder.stepContinued(ctx.record.runId, stepKey);
         await runErrorLane();
         throw new ErrorLaneHalt();
@@ -465,7 +529,7 @@ export abstract class BasePlanInterpreter {
       // Continue-on-fail: tolerate the throw; any other node halts the run.
       if (node.onError !== 'continue') throw err;
       scope[node.id] = captured;
-      ctx.trace.push({ nodeId: stepKey, output: captured });
+      ctx.trace.push({ nodeId: stepKey, node: node.id, output: captured });
       if (ctx.record) await ctx.record.recorder.stepContinued(ctx.record.runId, stepKey);
     }
   }
@@ -478,33 +542,17 @@ export abstract class BasePlanInterpreter {
     ctx: RunContext,
   ): Promise<void> {
     const stepKey = `${path}${node.id}`;
-    const record = ctx.record;
     const waited = await this.recorded(ctx, stepKey, node.id, 'delay', async () => {
       // Dry run: don't actually make the preview wait.
       if (ctx.dryRun) return withheldDelay(node.ms);
-      if (node.ms <= PARK_DELAY_ABOVE_MS) {
-        await ctx.durable.sleep(`${ctx.planId}:${stepKey}`, node.ms);
-        return null;
-      }
-      // A long wait PARKS: the run leaves flight, so the wall-clock cap that reaps a stuck run
-      // never applies to one that is deliberately asleep. Nobody can send to a timer topic — its
-      // own timeout is the wake.
-      const topic = timerTopicFor(stepKey);
-      const sleeping = ctx.durable.waitForEvent(`${ctx.planId}:${stepKey}`, topic, node.ms);
-      // Handled at once: a cancel can reject it while the park below is still being written.
-      sleeping.catch(() => undefined);
-      const due =
-        (await record?.recorder.stepWaiting(record.runId, stepKey, topic, node.ms)) ??
-        new Date(Date.now() + node.ms);
-      try {
-        await sleeping;
-      } finally {
-        await record?.recorder.stepResumed(record.runId, stepKey);
-      }
-      return { slept_until: due.toISOString() };
+      const due = await ctx.durable.delay(
+        { name: `${ctx.planId}:${stepKey}`, stepKey, ms: node.ms },
+        this.parkHooks(ctx, stepKey),
+      );
+      return due && { slept_until: due.toISOString() };
     });
     // Still no scope output, but a dry run's trace accounts for every step it did not carry out.
-    if (ctx.dryRun) ctx.trace.push({ nodeId: stepKey, output: waited });
+    if (ctx.dryRun) ctx.trace.push({ nodeId: stepKey, node: node.id, output: waited });
   }
 
   /** Human-in-the-loop wait leaf — identical across interpreters. */
@@ -523,26 +571,38 @@ export abstract class BasePlanInterpreter {
       assertAnswerableTopic(node.id, node.topic);
       // Dry run: don't park the preview waiting for a human — return a stub.
       if (ctx.dryRun) return withheldWait();
-      // Registered before the park is written; with no run history there is no step to route an event by.
+      // With no run history there is no step to route an event by.
       const deliveryTopic = record && ctx.routedWaits.has(node) ? eventTopicFor(stepKey) : null;
-      const wait = ctx.durable.waitForEvent(
-        `${ctx.planId}:${stepKey}`,
-        deliveryTopic ?? node.topic,
-        node.timeoutMs,
+      return ctx.durable.waitForEvent(
+        {
+          name: `${ctx.planId}:${stepKey}`,
+          stepKey,
+          topic: node.topic,
+          deliveryTopic,
+          timeoutMs: node.timeoutMs,
+        },
+        this.parkHooks(ctx, stepKey),
       );
-      wait.catch(() => undefined);
-      await record?.recorder.stepWaiting(record.runId, stepKey, node.topic, node.timeoutMs, deliveryTopic);
-      let answered = false;
-      try {
-        const payload = await wait;
-        answered = payload !== null;
-        return payload ?? null;
-      } finally {
-        await record?.recorder.stepResumed(record.runId, stepKey, answered);
-      }
     });
     scope[node.id] = payload;
-    ctx.trace.push({ nodeId: stepKey, output: payload });
+    ctx.trace.push({ nodeId: stepKey, node: node.id, output: payload });
+  }
+
+  private parkHooks(ctx: RunContext, stepKey: string): ParkHooks {
+    const record = ctx.record;
+    return {
+      parked: async (park) =>
+        (await record?.recorder.stepWaiting(
+          record.runId,
+          stepKey,
+          park.topic,
+          park.durationMs,
+          park.deliveryTopic,
+        )) ?? null,
+      resumed: async (answered) => {
+        await record?.recorder.stepResumed(record.runId, stepKey, answered);
+      },
+    };
   }
 
   /**
@@ -638,13 +698,14 @@ export abstract class BasePlanInterpreter {
   ): Promise<void> {
     const branchScopes = Array.from({ length: branchCount }, () => ({ ...scope }));
     // Every branch settles before one's failure ends the node, so nothing is still running as the run unwinds.
-    const settled = await Promise.allSettled(
-      branchScopes.map((branchScope, i) => runBranch(branchScope, i, `${path}${node.id}|${i}/`)),
+    const outcomes = await ctx.durable.joinAll(
+      branchScopes.map((branchScope, i) =>
+        ctx.durable.spawn(() => runBranch(branchScope, i, `${path}${node.id}|${i}/`)),
+      ),
     );
-    const rejected = settled.filter((outcome) => outcome.status === 'rejected');
+    const failures = outcomes.flatMap((outcome) => (outcome.ok ? [] : [outcome.error]));
     // A fatal failure wins over any other, an error lane's halt included.
-    const failed = rejected.find((outcome) => ctx.durable.isFatal(outcome.reason)) ?? rejected[0];
-    if (failed) throw failed.reason;
+    if (failures.length > 0) throw failures.find((error) => ctx.durable.isFatal(error)) ?? failures[0];
     // Merge each branch's new outputs back into the shared scope.
     for (const branchScope of branchScopes) {
       for (const key of Object.keys(branchScope)) {
@@ -888,35 +949,21 @@ export abstract class BasePlanInterpreter {
     if (tool.kind === 'workflow') {
       const runner = this.subWorkflowRunner;
       if (!runner) throw new Error('sub-workflow tools are not available in this runtime');
-      // BREADTH guard: charged HERE because this is where unbounded fan-out can come
-      // from — how often a MODEL calls is its own choice. One counter for the whole run tree;
-      // check-then-decrement with NO await between, so concurrent tool calls can't both slip past.
-      if (ctx.subWorkflowBudget.remaining <= 0) {
-        throw new Error(
-          `Sub-workflow invocation budget (${MAX_SUB_WORKFLOW_INVOCATIONS}) exhausted for this run — too many sub-workflow calls in one run. Reduce how often the agents call sub-workflows.`,
+      const target = { workflowId: tool.workflowId, input: call.input };
+      // BREADTH guard: charged HERE because this is where unbounded fan-out can come from — how often a MODEL calls is
+      // its own choice. The sequenced engine charges inside the call's step; the legacy one in its glue, as it always has.
+      if (ctx.budgetCharged) {
+        return this.subWorkflowStep(runner, ctx, stepKey, target, () =>
+          this.chargeSubWorkflowCall(ctx, stepKey),
         );
       }
-      ctx.subWorkflowBudget.remaining -= 1;
+      // Check-then-decrement with NO await between, so concurrent tool calls can't both slip past.
+      if (!spendInMemory(ctx.subWorkflowBudget)) throw subWorkflowBudgetSpent();
       // The whole sub-run is the parent's single checkpoint and runs AS the caller (same tenant +
       // env scope). `callKey` + `parentRunId` seed a deterministic sub-run id so a crash re-run
       // re-issues the SAME step idempotency keys — the SDK rail dedupes on them, but the
       // Composio rail carries none, so a non-idempotent Composio sub-step is at-least-once.
-      return ctx.durable.run(`${ctx.planId}:${stepKey}`, () =>
-        runner.run(
-          { workflowId: tool.workflowId, input: call.input },
-          {
-            externalUserId: ctx.externalUserId,
-            environment: ctx.environment,
-            environmentId: ctx.environmentId,
-            orgId: ctx.orgId,
-            parentRunId: ctx.runId,
-            callKey: stepKey,
-            depth: ctx.subWorkflowDepth,
-            budget: ctx.subWorkflowBudget,
-            dryRun: ctx.dryRun,
-          },
-        ),
-      );
+      return this.subWorkflowStep(runner, ctx, stepKey, target);
     }
 
     // Action tool: base props (already ref-translated at compile time) overlaid by the
@@ -1051,7 +1098,7 @@ export abstract class BasePlanInterpreter {
       await recorder.stepFinished(runId, stepKey, output, null);
     }
     await this.warn(ctx, stepKey, [...refs].map(unresolvedNote));
-    ctx.trace.push({ nodeId: stepKey, output, warnings: ctx.stepWarnings.get(stepKey) ?? [] });
+    ctx.trace.push({ nodeId: stepKey, node: nodeId, output, warnings: ctx.stepWarnings.get(stepKey) ?? [] });
   }
 
   /**

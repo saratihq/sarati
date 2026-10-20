@@ -204,11 +204,15 @@ describe('run handle: run_id, bounded wait, and debuggable failure (e2e, isolate
   });
 
   it('a step failure that is already a domain refusal keeps its status AND gains the run handle', async () => {
-    const res = await request(app.getHttpServer())
-      .post('/api/runs/from-ir')
-      // No rail runs `nope.do`: the provider refuses (400), which is the caller's document problem.
-      .send({ workflow_ir: failingIr(node('boom', 'nope.do', {})) })
-      .expect(400);
+    const plan = {
+      id: 'failing',
+      nodes: [
+        { kind: 'action', id: 'ok', actionId: 'text.concat', props: { texts: ['fine'], separator: '' } },
+        { kind: 'action', id: 'boom', actionId: 'nope.do', props: {} },
+      ],
+    };
+    // No rail runs `nope.do`: the provider refuses (400), which is the caller's document problem.
+    const res = await request(app.getHttpServer()).post('/api/runs').send({ plan }).expect(400);
 
     expect(typeof res.body.run_id).toBe('string');
     expect(res.body.failed_node_id).toBe('boom');
@@ -221,15 +225,17 @@ describe('run handle: run_id, bounded wait, and debuggable failure (e2e, isolate
   it('a compile failure still 400s, says why, and hands back the run it recorded', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/runs/from-ir')
-      .send({ workflow_ir: ir('uncompilable', [node('mystery', 'mystery', {})]) })
+      .send({
+        workflow_ir: ir('uncompilable', [node('mystery', 'orchestr:code', { language: 'js', code: '' })]),
+      })
       .expect(400);
-    expect(String(res.body.detail)).toContain("isn't runnable on this engine yet (mystery)");
+    expect(String(res.body.detail)).toContain('Code node "mystery" needs a non-empty "code" snippet');
     expect(res.body.failed_node_id).toBeNull(); // nothing ran, so no node failed
     expect(res.body.steps).toEqual([]);
 
     const detail = await request(app.getHttpServer()).get(`/api/runs/${res.body.run_id}`).expect(200);
     expect(detail.body.status).toBe('error');
-    expect(String(detail.body.error)).toContain("isn't runnable on this engine yet");
+    expect(String(detail.body.error)).toContain('needs a non-empty "code" snippet');
   });
 
   it('async: the body must carry exactly one document, and a dry run is never durable', async () => {

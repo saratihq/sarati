@@ -12,12 +12,13 @@ import {
   type AgentStepSink,
   type AgentToolCatalog,
 } from './agent';
+import type { Lane } from '../providers/durable-step';
 import { BasePlanInterpreter, type RunContext, type RunOptions } from './base-plan-interpreter';
 import { BLOB_STORE, type BlobStore } from './blob-store';
 import { CodeRunner } from './code-runner';
 import { routedPort } from './conditions';
 import type { DagIfNode, DagNode, DagPlan, DagSwitchNode, Guard } from './dag-plan';
-import { waitsRoutedByStep } from './event-wait';
+import { everyWait, waitsRoutedByStep } from './event-wait';
 import type { RunResult } from './run-plan';
 
 /** Default bound on how many READY-and-live nodes run at once (slice 5); no user-facing knob. */
@@ -60,7 +61,7 @@ export class DagInterpreter extends BasePlanInterpreter {
       plan,
       opts,
       (nodes, scope, path, ctx) => this.schedule(nodes, scope, path, ctx),
-      waitsRoutedByStep(plan),
+      opts.everyWaitByStep ? everyWait(plan) : waitsRoutedByStep(plan),
     );
   }
 
@@ -127,7 +128,7 @@ export class DagInterpreter extends BasePlanInterpreter {
 
     let halted = false; // once a node fails / error-lane-halts: launch no NEW work
     let haltError: unknown = null; // the first outcome to propagate after draining
-    const active = new Set<Promise<void>>();
+    const active = new Map<Lane, string>();
 
     // Unblock a settled node's dependents; enqueue any that are now ready.
     const settle = (id: string): void => {
@@ -182,33 +183,28 @@ export class DagInterpreter extends BasePlanInterpreter {
           settle(node.id);
           continue;
         }
-        const promise = this.executeLiveNode(node, scope, path, ctx)
-          .then(() => {
-            ran.add(node.id);
-            settle(node.id);
-          })
-          .catch((err: unknown) => {
-            // A failure or an ErrorLaneHalt stops NEW work; the first fatal outcome wins, else the first outcome.
-            // In-flight siblings are NOT cancelled (a provider call can't be un-fired) — the
-            // driver below drains them before rethrowing, so no write is lost.
-            if (!halted || (ctx.durable.isFatal(err) && !ctx.durable.isFatal(haltError))) {
-              halted = true;
-              haltError = err;
-            }
-          })
-          .finally(() => {
-            active.delete(promise);
-          });
-        active.add(promise);
+        active.set(
+          ctx.durable.spawn(() => this.executeLiveNode(node, scope, path, ctx)),
+          node.id,
+        );
       }
     };
 
-    // Drive the wave until everything settles, or (on halt) every in-flight promise drains.
-    // Chained promises always RESOLVE (the `.catch` swallows), so the race never throws —
-    // propagation flows through `halted`/`haltError`.
+    // Drive the wave until everything settles, or (on halt) every in-flight lane drains. In-flight siblings are NOT
+    // cancelled (a provider call can't be un-fired), so no write is lost.
     pump();
     while (active.size > 0) {
-      await Promise.race(active);
+      const { lane, outcome } = await ctx.durable.joinAny([...active.keys()]);
+      const id = active.get(lane)!;
+      active.delete(lane);
+      if (outcome.ok) {
+        ran.add(id);
+        settle(id);
+      } else if (!halted || (ctx.durable.isFatal(outcome.error) && !ctx.durable.isFatal(haltError))) {
+        // A failure or an ErrorLaneHalt stops NEW work; the first fatal outcome wins, else the first outcome.
+        halted = true;
+        haltError = outcome.error;
+      }
       pump();
     }
     // Recorded after the wave, never inside it — the pump must stay synchronous.
@@ -225,6 +221,19 @@ export class DagInterpreter extends BasePlanInterpreter {
     if (halted) throw haltError instanceof Error ? haltError : new Error(String(haltError));
   }
 
+  // A nested plan run in place under its source's own path; a lane that runs throws ErrorLaneHalt.
+  private errorLane(
+    node: { id: string; onErrorBranch?: DagPlan },
+    scope: Record<string, unknown>,
+    path: string,
+    ctx: RunContext,
+  ): (() => Promise<void>) | null {
+    const lane = node.onErrorBranch;
+    if (!lane || lane.nodes.length === 0) return null;
+    const lanePath = ctx.ownErrorLanePaths ? `${path}${node.id}#error/` : path;
+    return () => this.schedule(lane.nodes, scope, lanePath, ctx);
+  }
+
   /**
    * Execute ONE live, work-bearing node (everything but the pure routers the scheduler settles
    * inline). Sub-plans recurse through the SAME scheduler, so the bound holds at every nesting level.
@@ -237,28 +246,10 @@ export class DagInterpreter extends BasePlanInterpreter {
   ): Promise<void> {
     switch (node.kind) {
       case 'action':
-        // The error lane is a nested DagPlan run in place, passed as a callback so the
-        // base executor never sees the plan shape; a lane that runs throws ErrorLaneHalt.
-        return this.executeAction(
-          node,
-          scope,
-          path,
-          ctx,
-          node.onErrorBranch && node.onErrorBranch.nodes.length > 0
-            ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
-            : null,
-        );
+        return this.executeAction(node, scope, path, ctx, this.errorLane(node, scope, path, ctx));
       case 'code':
         // The snippet runs in the WASM sandbox, honouring the same error lane as an action.
-        return this.executeCode(
-          node,
-          scope,
-          path,
-          ctx,
-          node.onErrorBranch && node.onErrorBranch.nodes.length > 0
-            ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
-            : null,
-        );
+        return this.executeCode(node, scope, path, ctx, this.errorLane(node, scope, path, ctx));
       case 'forEach':
         return this.executeForEach(node, scope, path, ctx, (childScope, childPath) =>
           this.schedule(node.body.nodes, childScope, childPath, ctx),
@@ -280,27 +271,11 @@ export class DagInterpreter extends BasePlanInterpreter {
       case 'agent':
         // The durable tool-calling loop runs in the base executor, routing a
         // max_steps exhaustion into the same error lane as an action failure.
-        return this.executeAgent(
-          node,
-          scope,
-          path,
-          ctx,
-          node.onErrorBranch && node.onErrorBranch.nodes.length > 0
-            ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
-            : null,
-        );
+        return this.executeAgent(node, scope, path, ctx, this.errorLane(node, scope, path, ctx));
       case 'callWorkflow':
         // The child runs nested through the same seam an agent's sub-workflow tool uses,
         // and a failure inside it routes into this node's error lane like any other.
-        return this.executeCallWorkflow(
-          node,
-          scope,
-          path,
-          ctx,
-          node.onErrorBranch && node.onErrorBranch.nodes.length > 0
-            ? () => this.schedule(node.onErrorBranch!.nodes, scope, path, ctx)
-            : null,
-        );
+        return this.executeCallWorkflow(node, scope, path, ctx, this.errorLane(node, scope, path, ctx));
       case 'delay':
         return this.executeDelay(node, scope, path, ctx);
       case 'waitForEvent':

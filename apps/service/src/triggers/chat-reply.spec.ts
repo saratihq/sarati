@@ -40,7 +40,11 @@ function ir(nodes: IRNode[], edges: IREdge[]): WorkflowIR {
   };
 }
 function result(outputs: Record<string, unknown>, order: string[]): RunResult {
-  return { planId: 'p', outputs, trace: order.map((nodeId) => ({ nodeId, output: outputs[nodeId] })) };
+  return {
+    planId: 'p',
+    outputs,
+    trace: order.map((node) => ({ nodeId: node, node, output: outputs[node] })),
+  };
 }
 
 describe('extractChatReply — the deterministic terminal-node rule', () => {
@@ -70,6 +74,27 @@ describe('extractChatReply — the deterministic terminal-node rule', () => {
     expect(extractChatReply(doc, result(outputs, ['a', 'b', 'leafA', 'leafB']))).toBe('B');
     // Flip the execution order → leafA is now last.
     expect(extractChatReply(doc, result(outputs, ['b', 'a', 'leafB', 'leafA']))).toBe('A');
+  });
+
+  it('multiple leaves: an error lane’s handler that ran last wins, though its step is keyed under its source', () => {
+    // chat → a → leafA ; chat → boom, whose error lane is h.
+    const doc = ir(
+      [node('chat', 'orchestr:chat'), node('a'), node('leafA'), node('boom'), node('h')],
+      [
+        edge('chat', 'a'),
+        edge('a', 'leafA'),
+        edge('chat', 'boom'),
+        { ...edge('boom', 'h'), port_type: 'error' },
+      ],
+    );
+    const outputs = { a: '1', leafA: 'A', boom: { error: { message: 'x' } }, h: 'H' };
+    const trace = [
+      { nodeId: 'a', node: 'a', output: '1' },
+      { nodeId: 'leafA', node: 'leafA', output: 'A' },
+      { nodeId: 'boom', node: 'boom', output: outputs.boom },
+      { nodeId: 'boom#error/h', node: 'h', output: 'H' },
+    ];
+    expect(extractChatReply(doc, { planId: 'p', outputs, trace })).toBe('H');
   });
 
   it('SEAM: a future first-class orchestr:respond node takes precedence over the leaf rule', () => {

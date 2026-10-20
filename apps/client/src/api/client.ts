@@ -1222,7 +1222,10 @@ export async function getReviewTestReadiness(
 
 /** One executed step in a sync run's trace; `nodeId` includes the loop/branch path when inside one. */
 export interface RunTraceEntry {
+  /** The step's key: its node id under the branch, loop round or error lane it ran in. */
   nodeId: string;
+  /** The node's own id; absent from a service before it carried one. */
+  node?: string;
   output: unknown;
   /** Non-fatal honesty notes: inputs the rail ignored, or `{{refs}}` that resolved to nothing. */
   warnings?: string[];

@@ -612,3 +612,13 @@ describe('compileWorkflowIrDag — agent param round-trip (client↔service cont
     expect(tool.actionId).toBe(ACTION);
   });
 });
+
+describe('compileWorkflowIrDag node ids', () => {
+  it('refuses a node id holding a character step keys are built from, as an error lane’s handler too', () => {
+    for (const id of ['a|b', 'a/b', 'a#error/h', 'a:b']) {
+      const refusal = `Node id "${id}" can't contain "|", "/", "#" or ":" — they build its step's key`;
+      expect(() => compileWorkflowIrDag(ir([act(id)], []))).toThrow(refusal);
+      expect(() => compileWorkflowIrDag(ir([act('boom'), act(id)], [errEdge('boom', id)]))).toThrow(refusal);
+    }
+  });
+});

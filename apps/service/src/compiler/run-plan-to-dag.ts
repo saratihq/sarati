@@ -11,6 +11,7 @@ import type {
 import type { RunNode, RunPlan } from '../runtime/run-plan';
 import { assertAnswerableTopic } from '../runtime/timer-wait';
 import { toDagCodeNode } from './code-node';
+import { assertStepKeyId } from './step-key-id';
 
 /**
  * Lower a nested-tree `RunPlan` (the raw, client-supplied shape) to a flat `DagPlan`, so there is
@@ -50,6 +51,7 @@ function lowerList(nodes: RunNode[], entry: Guard[]): Lowered {
 
 /** Lower ONE tree node (recursing into its children) under its incoming `guards`. */
 function lowerNode(node: RunNode, guards: Guard[]): Lowered {
+  assertStepKeyId(node.id);
   const exit: Guard[] = [{ source: node.id, port: 0 }];
   switch (node.kind) {
     case 'action': {
