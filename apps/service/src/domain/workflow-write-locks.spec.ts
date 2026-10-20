@@ -18,6 +18,10 @@ const SCHEMA = join(SERVICE, 'db', 'schema.sql');
 const CREATES = 'creates the workflow, which nothing else can reach before it commits';
 const ACTIVATION =
   "an activation's own row or store, under its advisory lock; a workflow delete is refused while any activation is left";
+const ACTIVATION_RECORD =
+  "an activation's own row, written only over the row as it read it (its xmin); a workflow delete is refused while any activation is left";
+const ACTIVATION_FAILURE =
+  "an activation's own row, recording an apply that failed once its lock was released; a workflow delete is refused while any activation is left";
 const ENV_POINTERS =
   "an environment's pointers: it locks the env row or only the pointer rows, never a workflow row, and a workflow delete is refused while any pointer is left";
 const RUN_HISTORY =
@@ -68,7 +72,7 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
   },
   'service:triggers/triggers.service.ts#fireComposioActivation#runtime_trigger_activations': {
     in: 'autocommit',
-    why: ACTIVATION,
+    why: ACTIVATION_RECORD,
   },
   'service:triggers/triggers.service.ts#pollLockedActivation#runtime_trigger_activations': {
     in: 'autocommit',
@@ -76,7 +80,7 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
   },
   'service:triggers/canvas/trigger-reconciler.service.ts#applyFailed#runtime_trigger_activations': {
     in: 'autocommit',
-    why: ACTIVATION,
+    why: ACTIVATION_FAILURE,
   },
   'service:triggers/canvas/trigger-reconciler.service.ts#applyUpdate#runtime_trigger_activations': {
     in: 'autocommit',
