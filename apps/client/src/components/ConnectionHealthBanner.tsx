@@ -5,18 +5,21 @@ import Link from "next/link";
 import { AlertTriangle } from "lucide-react";
 import * as api from "@/api/client";
 import type { Connection } from "@/api/client";
+import { isAppTriggerNode } from "@/lib/constants";
 import { appDisplayName } from "@/lib/connections";
 
 type Nodes = Record<string, unknown>[];
 
 const inactive = (c: Connection): boolean => (c.status ?? "active") !== "active";
 
-// The accounts steps choose, joined against the caller's own connections; unseen ones are skipped.
+type ChoosingNode = { node_type?: unknown; metadata?: Record<string, unknown>; parameters?: Record<string, unknown> };
+
+// The accounts steps choose, joined against the caller's own connections; unseen ones are skipped. A trigger listens as its environment's account, never one it names.
 async function chosenBroken(nodes: Nodes): Promise<Connection[]> {
   const chosen = new Set(
-    nodes.flatMap((node) => {
-      const id = (node as { parameters?: Record<string, unknown> }).parameters?.connectionId;
-      return typeof id === "string" && id ? [id] : [];
+    (nodes as ChoosingNode[]).flatMap((node) => {
+      const id = node.parameters?.connectionId;
+      return typeof id === "string" && id && !isAppTriggerNode(node.node_type, node.metadata) ? [id] : [];
     }),
   );
   const { connections } = await api.listConnections();

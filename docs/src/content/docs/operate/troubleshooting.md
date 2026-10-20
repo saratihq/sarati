@@ -72,8 +72,9 @@ Integrations, or an owner reassigns the slot under Integrations → Environments
 The environment's account for that app can't serve what the message names: there is none, it is for
 another app, or it isn't active. A trigger listens as the environment's account even when it names
 one of its own, so picking an account on the trigger does not help. Fix the slot under
-**Integrations → Environments** and promote again. The same words on the workflow overview mean a
-trigger that was live lost its account; it starts again once the slot is fixed. See
+**Integrations → Environments** and promote again. The same reason on the workflow overview means a
+trigger is waiting for the environment's account: it lost it, or its workflow was created without
+one. It starts once the slot is fixed. See
 [Environments](/run/environments/#triggers-listen-as-the-environments-account).
 
 ## A run ends in `error`

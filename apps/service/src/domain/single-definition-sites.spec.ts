@@ -25,6 +25,7 @@ const SINGLE_DEFINITION = [
   { symbol: 'activationKindOf', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'listensAsAccount', definedIn: 'triggers/canvas/trigger-kind.ts' },
   { symbol: 'triggerSlotApp', definedIn: 'triggers/canvas/trigger-kind.ts' },
+  { symbol: 'heldBackBySlot', definedIn: 'triggers/canvas/trigger-kind.ts' },
 ] as const;
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -103,6 +104,10 @@ describe('vault: one definition site per load-bearing question', () => {
 
     expect(asking(/\btriggerSlotApp\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual(listeners);
     expect(asking(/\bdecideBySlot\s*\(/, 'connections/run-as-account.ts')).toEqual(listeners);
+    expect(asking(/\bheldBackBySlot\s*\(/, 'triggers/canvas/trigger-kind.ts')).toEqual([
+      'triggers/canvas/trigger-reconciler.service.ts',
+      'triggers/triggers.service.ts',
+    ]);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

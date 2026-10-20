@@ -14,6 +14,7 @@ import { ConnectionsService } from '../src/connections/connections.service';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { SDK_POLLING_FETCH, SdkPollingProvider } from '../src/providers/sdk-polling.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
+import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
 import { setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -134,6 +135,7 @@ interface ActivationRow {
   id: string;
   connection_id: string | null;
   last_error: string | null;
+  last_polled_at: Date | null;
   composio_trigger_instance_id: string | null;
   materialized: { connection: { connectionId: string } | null } | null;
 }
@@ -219,18 +221,35 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         .send({ connection_id: connectionId }),
     ).expect(200);
 
-  const deploy = async (org: string, doc: Record<string, unknown>): Promise<{ wf: string; v1: string }> => {
+  const deploy = async (
+    org: string,
+    doc: Record<string, unknown>,
+  ): Promise<{ wf: string; v1: string; created: Record<string, unknown> }> => {
     const deployed = await asA(
       http().post('/api/deploy').set('X-Org-Id', org).send({ workflow_json: doc }),
     ).expect(201);
     const wf = deployed.body.workflow_id as string;
     const versions = await asA(http().get(`/api/workflows/${wf}/versions`).set('X-Org-Id', org)).expect(200);
-    return { wf, v1: (versions.body.versions as Array<{ id: string }>)[0]!.id };
+    return {
+      wf,
+      v1: (versions.body.versions as Array<{ id: string }>)[0]!.id,
+      created: deployed.body as Record<string, unknown>,
+    };
+  };
+
+  // What the workflow overview reads for a trigger's health.
+  const shownOn = async (org: string, wfId: string, envId: string): Promise<Record<string, unknown>> => {
+    const health = await asA(
+      http().get(`/api/triggers/activations?workflow_id=${wfId}`).set('X-Org-Id', org),
+    ).expect(200);
+    return (health.body.activations as Array<Record<string, unknown>>).find(
+      (a) => a.environment_id === envId,
+    )!;
   };
 
   const activation = async (wfId: string, envId: string): Promise<ActivationRow> => {
     const rows = await db.query<ActivationRow>(
-      `SELECT id, connection_id, last_error, composio_trigger_instance_id, materialized
+      `SELECT id, connection_id, last_error, last_polled_at, composio_trigger_instance_id, materialized
          FROM runtime_trigger_activations WHERE workflow_id = $1 AND environment_id = $2`,
       [wfId, envId],
     );
@@ -380,16 +399,19 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       const { app: appSlug, name, nodeType, props } = TRIGGERS[rail];
       const { org, production } = await workspace(`reconcile ${rail} ${fault}`);
       const unfit = await breakSlot(rail, fault, [production]);
-      const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
-      await reconcile(wf);
+      const refusal = LAST_ERROR[fault]('production', appSlug, name, otherApp(rail));
+      const { wf, created } = await deploy(org, triggerDoc(nodeType, name, props));
+      expect(created).toMatchObject({ is_live: true, activated: false, activation_error: refusal });
 
       const held = await activation(wf, production);
       expect(held).toMatchObject({
         connection_id: null,
         composio_trigger_instance_id: null,
-        last_error: LAST_ERROR[fault]('production', appSlug, name, otherApp(rail)),
+        last_error: refusal,
         materialized: { connection: null },
       });
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({ id: held.id, last_error: refusal });
       expect(await standUpsAs(rail, unfit)).toBe(0);
 
       const serving = await fitting(rail);
@@ -414,10 +436,11 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       const { org, production } = await workspace(`goes inactive ${rail}`);
       const account = await fitting(rail);
       await assignSlot(org, production, appSlug, account);
-      const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
-      await reconcile(wf);
+      const { wf, created } = await deploy(org, triggerDoc(nodeType, name, props));
+      expect(created).toMatchObject({ is_live: true, activated: true, activation_error: null });
       const live = await activation(wf, production);
       expect(live).toMatchObject({ connection_id: account, last_error: null });
+      expect(await standUpsAs(rail, account)).toBe(1);
       const instance = live.composio_trigger_instance_id;
       const unsubscribedBefore = unsubscribed.mock.calls.length;
 
@@ -441,6 +464,127 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(await standUpsAs(rail, account)).toBe(2);
     },
   );
+
+  it.each(RAILS)(
+    "a held-back %s trigger's last_error follows its slot through every unfit state and an environment rename, standing nothing up",
+    async (rail) => {
+      const { app: appSlug, name, nodeType, props } = TRIGGERS[rail];
+      const { org, production, staging } = await workspace(`restates ${rail}`);
+      const account = await fitting(rail);
+      await assignSlot(org, production, appSlug, account);
+      await assignSlot(org, staging, appSlug, account);
+      const { wf, v1 } = await deploy(org, triggerDoc(nodeType, name, props));
+      await asA(
+        http()
+          .post(`/api/workflows/${wf}/promote`)
+          .set('X-Org-Id', org)
+          .send({ environment: 'staging', version_id: v1 }),
+      ).expect(201);
+      await reconcile(wf);
+      const live = await activation(wf, staging);
+      expect(live).toMatchObject({ connection_id: account, last_error: null });
+      const standUps = await standUpsAs(rail, account);
+
+      const heldSaying = async (words: string): Promise<void> => {
+        await reconcile(wf);
+        expect(await activation(wf, staging)).toMatchObject({
+          id: live.id,
+          connection_id: null,
+          composio_trigger_instance_id: null,
+          last_error: words,
+        });
+        expect(await shownOn(org, wf, staging)).toMatchObject({ status: 'error', last_error: words });
+      };
+
+      await db.query(`UPDATE connections SET status = 'expired' WHERE id = $1`, [account]);
+      await heldSaying(LAST_ERROR.inactive('staging', appSlug, name, ''));
+
+      await asA(http().delete(`/api/environments/${staging}/slots/${appSlug}`).set('X-Org-Id', org)).expect(
+        200,
+      );
+      await heldSaying(LAST_ERROR.empty('staging', appSlug, name, ''));
+
+      const expired = await fitting(rail);
+      await db.query(`UPDATE connections SET status = 'expired' WHERE id = $1`, [expired]);
+      await assignSlot(org, staging, appSlug, expired);
+      await heldSaying(LAST_ERROR.inactive('staging', appSlug, name, ''));
+
+      await putSlot(staging, appSlug, await tokenConnection(otherApp(rail)));
+      await heldSaying(LAST_ERROR.wrong_app('staging', appSlug, name, otherApp(rail)));
+
+      await asA(
+        http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'qa' }),
+      ).expect(200);
+      await heldSaying(LAST_ERROR.wrong_app('qa', appSlug, name, otherApp(rail)));
+
+      expect(await standUpsAs(rail, account)).toBe(standUps);
+      expect(await standUpsAs(rail, expired)).toBe(0);
+    },
+  );
+
+  const POLLED = [
+    { nodeType: 'slack.new_channel', app: 'slack', name: 'When a channel is created', other: 'github' },
+    {
+      nodeType: 'gmail.gmail_new_email_received',
+      app: 'gmail',
+      name: 'When new mail arrives',
+      other: 'slack',
+    },
+  ] as const;
+
+  it.each(
+    POLLED.flatMap((trigger) =>
+      FAULTS.map((fault): [string, Fault, (typeof POLLED)[number]] => [trigger.nodeType, fault, trigger]),
+    ),
+  )(
+    "a %s trigger held back by a slot that is %s is never polled, so its last_error stays the rule's refusal",
+    async (_type, fault, { nodeType, app: appSlug, name, other }) => {
+      const { org, production } = await workspace(`never polled ${nodeType} ${fault}`);
+      if (fault !== 'empty') {
+        const held = await tokenConnection(
+          fault === 'inactive' ? appSlug : other,
+          fault === 'inactive' ? 'expired' : 'active',
+        );
+        await putSlot(production, appSlug, held);
+      }
+      const refusal = LAST_ERROR[fault]('production', appSlug, name, other);
+      const { wf } = await deploy(org, triggerDoc(nodeType, name, {}));
+      const held = await activation(wf, production);
+      expect(held).toMatchObject({ connection_id: null, last_error: refusal, last_polled_at: null });
+
+      await app.get(TriggersService).runActivationPollCycle();
+      expect(await activation(wf, production)).toMatchObject({ last_error: refusal, last_polled_at: null });
+      expect(await shownOn(org, wf, production)).toMatchObject({ status: 'error', last_error: refusal });
+
+      // A row a poll overwrote before this release says why again at its next reconcile.
+      await db.query(
+        `UPDATE runtime_trigger_activations SET last_error = 'connect the app first' WHERE id = $1`,
+        [held.id],
+      );
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({ last_error: refusal, last_polled_at: null });
+    },
+  );
+
+  it('holds back no trigger for a slot the preflight asks no slot for: one whose type names no app', async () => {
+    const { org, staging } = await workspace('names no app');
+    const { wf, v1 } = await deploy(org, triggerDoc('Acme.new_deal', 'Nameless', {}));
+    await asA(
+      http()
+        .post(`/api/workflows/${wf}/promote`)
+        .set('X-Org-Id', org)
+        .send({ environment: 'staging', version_id: v1 }),
+    ).expect(201);
+    const subscribes = subscribed.mock.calls.length;
+    await reconcile(wf);
+
+    expect(await activation(wf, staging)).toMatchObject({
+      connection_id: null,
+      last_error: 'The trigger type "Acme.new_deal" names no app, so no environment\'s account can serve it',
+      materialized: null,
+    });
+    expect(subscribed.mock.calls.length).toBe(subscribes);
+  });
 
   it('promotes a trigger that signs in to nothing, and a native one, with no slot at all, and stands the poll up without an account', async () => {
     const { org, staging } = await workspace('needs no slot');

@@ -101,10 +101,14 @@ refusal lists the triggers apart from the steps, under `triggers`, with the same
 ```
 
 A trigger already live in an environment whose account stops serving it is taken down, and the
-workflow overview shows why in the same words. Emptying or reassigning the slot does this at once; an
-account that stops being active is noticed within fifteen minutes, when pg-boss is enabled. The
-trigger starts again, fresh, once the environment has an account that serves it. A trigger that signs
-in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed — needs no account.
+workflow overview shows why, naming the trigger and the environment as it is called now. Emptying or
+reassigning the slot does this at once; an account that stops being active is noticed within fifteen
+minutes, when pg-boss is enabled. If the slot changes again before it serves the trigger, or the
+environment is renamed, the reason changes with it. Creating a workflow is not refused this way: when
+its first version goes live, a trigger the account can't serve waits in the same way, with the reason
+on the overview. The trigger starts, fresh, once the environment has an account that serves it. A
+trigger that signs in to nothing — a schedule, an incoming webhook or chat, an RSS or HTTP feed —
+needs no account.
 
 ## Rename and delete
 

@@ -87,6 +87,23 @@ describe("ConnectionHealthBanner", () => {
     );
   });
 
+  it("never flags the account an app trigger names, which it never listens as", async () => {
+    const expired = connection("g1", "gmail", "expired");
+    connections([expired], { gmail: [expired] });
+    runAsAccounts.mockResolvedValue({ steps: [] });
+    const watch = {
+      id: "watch",
+      node_type: "gmail.new_email",
+      metadata: { trigger: true },
+      parameters: { connectionId: "g1" },
+    };
+    render(<ConnectionHealthBanner nodes={[watch]} />);
+
+    await waitFor(() => expect(listConnections).toHaveBeenCalledWith());
+    await waitFor(() => expect(runAsAccounts).toHaveBeenCalled());
+    expect(screen.queryByTestId("connection-health-banner")).not.toBeInTheDocument();
+  });
+
   it("still flags an account a step chose that isn't active, and keeps it when the run-as ask fails", async () => {
     connections([connection("c1", "slack", "expired")]);
     runAsAccounts.mockRejectedValue(new Error("offline"));

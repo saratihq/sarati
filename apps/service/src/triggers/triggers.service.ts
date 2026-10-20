@@ -26,6 +26,7 @@ import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf } from './canvas/activation-row';
 import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
+import { heldBackBySlot } from './canvas/trigger-kind';
 import { webhookRegistrationOf } from './registered-webhook';
 import { EnvPointersService, PROD_ENV } from '../workflows/env-pointers.service';
 import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
@@ -604,6 +605,8 @@ export class TriggersService {
       });
       // Removed or changed since the cycle loaded it, or not stood up as it reads: its store is not this row's.
       if (!row || !sameLiveTrigger(row, loaded) || !applyFinished(actualOf(row))) return null;
+      // Held back by its slot: nothing is stood up to poll, and `last_error` keeps the slot rule's refusal.
+      if (heldBackBySlot(actualOf(row))) return null;
       return this.pollLockedActivation(row);
     }).catch((err: unknown) => {
       this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);

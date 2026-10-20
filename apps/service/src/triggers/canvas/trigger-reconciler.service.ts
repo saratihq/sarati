@@ -48,7 +48,7 @@ import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
 import { webhookUrlFor } from './webhook-url';
 import { activationKeyOf, actualOf } from './activation-row';
-import { activationKindOf, listensAsAccount, triggerSlotApp } from './trigger-kind';
+import { activationKindOf, heldBackBySlot, triggerSlotApp } from './trigger-kind';
 import {
   type ActivationKey,
   activationKeyString,
@@ -189,7 +189,7 @@ export class TriggerReconcilerService {
     for (const d of plan.toCreate) {
       await this.applyCreate(d, slots).catch((err) => this.logApplyError('create', d.key, err));
     }
-    for (const u of plan.toUpdate) {
+    for (const u of [...plan.toUpdate, ...restatements(plan, desired, rowByKey, slots)]) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
       if (row)
         await this.applyUpdate(row, u, envNameById, slots).catch((err) =>
@@ -223,7 +223,7 @@ export class TriggerReconcilerService {
     const targets: Array<{ id: string; desired: DesiredActivation }> = [];
     for (const d of desired) {
       if (d.kind !== 'composio_subscription' || d.paused) continue;
-      if (listensAsAccount(d.kind, d.triggerType) && d.connection === null) continue; // unfilled slot → last_error, not a subscribe
+      if (heldBackBySlot(d)) continue;
       const keyStr = activationKeyString(d.key);
       if (materialized.has(keyStr)) continue;
       const row = rowByKey.get(keyStr);
@@ -296,8 +296,8 @@ export class TriggerReconcilerService {
   private async applyCreate(desired: DesiredActivation, slots: SlotDecisions): Promise<void> {
     const id = newId();
     const ts = now();
-    const missingSlot = listensAsAccount(desired.kind, desired.triggerType) && desired.connection === null;
-    const standsUp = !missingSlot && !desired.paused;
+    const heldBack = heldBackBySlot(desired);
+    const standsUp = !heldBack && !desired.paused;
     const row = this.dataSource.manager.create(RuntimeTriggerActivationEntity, {
       id,
       workflowId: desired.key.workflowId,
@@ -312,10 +312,10 @@ export class TriggerReconcilerService {
       paused: desired.paused,
       webhookUrl: desired.webhookUrl,
       lastPolledAt: null,
-      lastError: missingSlot ? slotError(desired, slots) : null,
+      lastError: heldBack ? slotRefusal(desired, slots) : null,
       createdAt: ts,
       updatedAt: ts,
-      // Paused or unslotted stands nothing up, so that much is already in effect.
+      // Paused or held back stands nothing up, so that much is already in effect.
       materialized: standsUp ? null : materializedOf(desired),
     });
     await withActivationLock(this.pool, id, async () => {
@@ -335,7 +335,7 @@ export class TriggerReconcilerService {
   ): Promise<void> {
     const { desired } = update;
     const live = liveOf(row);
-    const missingSlot = listensAsAccount(desired.kind, desired.triggerType) && desired.connection === null;
+    const heldBack = heldBackBySlot(desired);
     row.kind = desired.kind;
     row.triggerType = desired.triggerType;
     row.versionId = desired.versionId;
@@ -344,14 +344,14 @@ export class TriggerReconcilerService {
     row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
     row.paused = desired.paused;
     row.webhookUrl = desired.webhookUrl;
-    row.lastError = missingSlot ? slotError(desired, slots) : null;
+    row.lastError = heldBack ? slotRefusal(desired, slots) : null;
     row.updatedAt = now();
     await withActivationLock(this.pool, row.id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
       // A 'keep' leaves the cursor/subscription untouched; a 'reset' tears down what is live and starts from now.
       if (update.cursorAction === 'keep') return;
       await this.teardown(row, live, envName);
-      if (desired.paused || missingSlot) {
+      if (desired.paused || heldBack) {
         await this.recordMaterialized(row.id, desired);
         return;
       }
@@ -725,7 +725,11 @@ export class TriggerReconcilerService {
       );
     }
     const conn = desired.connection;
-    if (!conn) throw new Error('No connection resolved for this Composio trigger'); // guarded by missingSlot
+    if (!conn) {
+      throw new Error(
+        `The trigger type "${desired.triggerType}" names no app, so no environment's account can serve it`,
+      );
+    }
     const ref = await this.connections.managedRef(conn.ownerUserId, conn.connectionId);
     if (!ref) throw new Error(`Connection ${conn.connectionId} not found`);
     if (ref.authType !== 'managed' || !ref.connectedAccountId) {
@@ -938,9 +942,36 @@ function connectionServing(decision: RunAsDecision | undefined): ConnectionRef |
     : null;
 }
 
-function slotError(desired: DesiredActivation, slots: SlotDecisions): string {
+function refusalOf(desired: DesiredActivation, slots: SlotDecisions): string | null {
   const decision = slots.get(triggerKey(desired.key.environmentId, desired.key.triggerNodeId));
-  return decision?.kind === 'refused'
-    ? decision.message
-    : `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
+  return decision?.kind === 'refused' ? decision.message : null;
+}
+
+// resolveSlots judges every trigger heldBackBySlot names, so a held-back one always has the rule's refusal.
+function slotRefusal(desired: DesiredActivation, slots: SlotDecisions): string {
+  const refusal = refusalOf(desired, slots);
+  if (refusal === null) throw new Error(`No slot decision for trigger node ${desired.key.triggerNodeId}`);
+  return refusal;
+}
+
+// A held-back row the plan leaves alone is rewritten in place once its refusal changes: another unfit state, or a renamed environment.
+function restatements(
+  plan: ReconcilePlan,
+  desired: DesiredActivation[],
+  rowByKey: Map<string, RuntimeTriggerActivationEntity>,
+  slots: SlotDecisions,
+): ActivationUpdate[] {
+  const planned = new Set([
+    ...plan.toCreate.map((d) => activationKeyString(d.key)),
+    ...plan.toUpdate.map((u) => activationKeyString(u.actual.key)),
+  ]);
+  return desired.flatMap((d): ActivationUpdate[] => {
+    const keyStr = activationKeyString(d.key);
+    const row = rowByKey.get(keyStr);
+    if (!row || planned.has(keyStr) || !heldBackBySlot(d)) return [];
+    const refusal = refusalOf(d, slots);
+    return refusal !== null && row.lastError !== refusal
+      ? [{ desired: d, actual: actualOf(row), cursorAction: 'keep' }]
+      : [];
+  });
 }
