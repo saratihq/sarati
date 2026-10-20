@@ -18,7 +18,7 @@ import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
-import { lockWorkflowForPointerMove } from './workflow-row-lock';
+import { lockRunEnvironments, lockWorkflowForPointerMove } from './workflow-row-lock';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
 export interface DraftCreateInput {
@@ -226,6 +226,7 @@ export class WorkflowLifecycleService {
 
     await this.dataSource.transaction(async (tx) => {
       await lockDeletable(tx, { workflowId: wf.id }, `'${wf.name}'`);
+      await lockRunEnvironments(tx, wf.id);
       // The circular FKs must be broken before the cascade delete.
       await tx.query(
         `UPDATE workflows SET active_version_id = NULL, default_branch_id = NULL WHERE id = $1`,

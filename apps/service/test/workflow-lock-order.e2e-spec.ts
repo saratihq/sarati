@@ -161,6 +161,11 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
   const remove = (org: string, wfId: string): request.Test =>
     as(http().delete(`/api/workflows/${wfId}`), org);
 
+  const removeEnv = (org: string, env: string): request.Test =>
+    as(http().delete(`/api/environments/${env}`), org);
+
+  const suffix = (): string => randomUUID().slice(0, 8);
+
   const statusOf = (r: request.Test): Promise<number> => r.then((res) => res.status);
 
   const deadlocks = async (): Promise<number> => {
@@ -1153,9 +1158,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
           payload: { d: 1 },
         }),
       );
-    const removeEnv = (org: string, env: string): request.Test =>
-      as(http().delete(`/api/environments/${env}`), org);
-    const suffix = (): string => randomUUID().slice(0, 8);
 
     let deliver: jest.SpyInstance;
     beforeEach(() => {
@@ -1513,5 +1515,96 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         expect(await deadlocksSince(before)).toBe(0);
       },
     );
+  });
+
+  describe('a workflow delete and an environment delete over a run they share', () => {
+    const shared = async (
+      name: string,
+    ): Promise<{ org: string; wfId: string; env: string; versionId: string; runId: string }> => {
+      const org = await workspace(name);
+      const wfId = await deploy(org, name);
+      const envName = `shared-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const [v1] = await versions(org, wfId);
+      const runId = `${user}:shared-${suffix()}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, finished_at,
+                                   workflow_id, workflow_version_id, environment, environment_id, org_id)
+         VALUES ($1, $1, $2, 'plan-shared', 'completed', now(), now(), $3, $4, $5, $6, $7)`,
+        [runId, user, wfId, v1!.id, envName, env, org],
+      );
+      await as(http().put(`/api/workflows/${wfId}/webhook-secret`), org)
+        .send({ node_id: 'trigger', secret: 's', environment: envName })
+        .expect(200);
+      return { org, wfId, env, versionId: v1!.id, runId };
+    };
+
+    const leftBehind = async (wfId: string, env: string, runId: string): Promise<Record<string, unknown>> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM workflows WHERE id = $1) AS workflow,
+                  EXISTS (SELECT 1 FROM environments WHERE id = $2) AS environment,
+                  (SELECT count(*)::int FROM webhook_trigger_secrets
+                    WHERE workflow_id = $1 OR environment_id = $2) AS secrets,
+                  (SELECT json_build_object('workflow_id', workflow_id, 'workflow_version_id', workflow_version_id,
+                                            'environment_id', environment_id, 'status', status)
+                     FROM runtime_runs WHERE id = $3) AS run`,
+          [wfId, env, runId],
+        )
+      ).rows[0] as Record<string, unknown>;
+
+    const LOCK_NOT_AVAILABLE = '55P03';
+    const lockedNow = (table: 'environments' | 'runtime_runs', id: string): Promise<unknown> =>
+      db.query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE NOWAIT`, [id]);
+
+    const cleared = {
+      workflow: false,
+      environment: false,
+      secrets: 0,
+      run: { workflow_id: null, workflow_version_id: null, environment_id: null, status: 'completed' },
+    };
+
+    it('an environment delete holding its row when the workflow delete starts finishes first, and both delete', async () => {
+      const { org, wfId, env, runId } = await shared('Env delete then workflow delete');
+      const held = holdQuery(/DELETE FROM environments WHERE id/);
+      const before = await deadlocks();
+      try {
+        const envDeleting = statusOf(removeEnv(org, env));
+        await held.arrived;
+        await expect(lockedNow('environments', env)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const wfDeleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        held.release();
+        expect(await envDeleting).toBe(200);
+        expect(await wfDeleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+      expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a workflow delete held mid-cascade, past the run, when the environment delete starts finishes first, and both delete', async () => {
+      const { org, wfId, env, versionId, runId } = await shared('Workflow delete then env delete');
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM workflow_versions WHERE id = $1 FOR KEY SHARE`, [versionId]);
+        const wfDeleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        await expect(lockedNow('runtime_runs', runId)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const envDeleting = statusOf(removeEnv(org, env));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect(await wfDeleting).toBe(200);
+        expect(await envDeleting).toBe(200);
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
   });
 });

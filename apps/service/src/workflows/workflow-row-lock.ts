@@ -28,3 +28,14 @@ export async function lockWorkflowForPointerMove(em: EntityManager, workflowId: 
   if (!(await lockRow(em, workflowId, 'FOR NO KEY UPDATE')))
     throw new DomainError(`Workflow ${workflowId} not found`, 404);
 }
+
+/** A workflow delete's lock after its row and before it touches a run: the environments its runs ran in, FOR KEY SHARE, so an environment delete over the same runs takes turns with it (constitution row 11). */
+export async function lockRunEnvironments(em: EntityManager, workflowId: string): Promise<void> {
+  await rawQuery(
+    em,
+    `SELECT 1 FROM environments e
+      WHERE e.id IN (SELECT r.environment_id FROM runtime_runs r WHERE r.workflow_id = $1)
+        FOR KEY SHARE OF e`,
+    [workflowId],
+  );
+}
