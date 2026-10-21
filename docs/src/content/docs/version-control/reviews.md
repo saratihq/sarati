@@ -43,8 +43,8 @@ the step, or whose account for it isn't active, is refused outright rather than 
 > under Integrations → Environments, or test on Default (your connections)
 
 > production's gmail account isn't active, so "Email me the report" can't run there — its owner
-> reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments,
-> or test on Default (your connections)
+> tests it under Integrations once it works again, or an owner reassigns the slot under Integrations →
+> Environments, or test on Default (your connections)
 
 The result is **Passed**, **Failing** or **Inconclusive** — the target failed too, so it can't tell —
 plus every output field that moved:

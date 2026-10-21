@@ -1,14 +1,13 @@
 import { DomainError } from '../common/domain-error';
 import { isRecord } from '../common/json-util';
-import { isTriggerNode } from '../compiler/compile-ir';
 import {
-  connectionIdOf,
   planRunAs,
+  REVIVES_SLOT,
   type RunAsAccounts,
   type SlotRefusalReason,
   type StepRunAs,
 } from '../connections/run-as-account';
-import { validatedAppSlug } from '../providers/sdk-actions.registry';
+import { decideTriggerSlots, type TriggerNode } from '../triggers/canvas/trigger-kind';
 
 /** An environment a check predicts a run under. */
 export interface NamedEnvironment {
@@ -28,36 +27,41 @@ export async function stepsRefusedIn(
   return plan.filter((step) => step.decision.kind === 'refused');
 }
 
-// The apps of the app triggers naming an account that find no slot under `environment` — the slot their activation listens as.
-async function triggerAppsUnslottedIn(
+// The app triggers whose slot under `environment`, the account their activation would listen as, can't serve them.
+async function triggersRefusedIn(
   document: unknown,
   environment: NamedEnvironment,
   accounts: Pick<RunAsAccounts, 'resolveSlotConnection'>,
-): Promise<string[]> {
-  const apps = triggerAppsNamingAccounts(document);
-  const slots = await Promise.all(apps.map((app) => accounts.resolveSlotConnection(environment.id, app)));
-  return apps.filter((_app, i) => slots[i] === null);
-}
-
-function triggerAppsNamingAccounts(document: unknown): string[] {
-  const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
-  const apps = nodes.flatMap((node) => {
-    if (!isRecord(node) || typeof node.node_type !== 'string') return [];
-    const metadata = isRecord(node.metadata) ? node.metadata : undefined;
-    if (!isTriggerNode({ node_type: node.node_type, ...(metadata ? { metadata } : {}) })) return [];
-    const app = validatedAppSlug(node.node_type);
-    return app && connectionIdOf(node.parameters) !== null ? [app] : [];
-  });
-  return [...new Set(apps)].sort();
-}
-
-function triggerSlotsEmpty(environment: string, apps: string[]): DomainError {
-  const one = apps.length === 1;
-  return new DomainError(
-    `The ${environment} environment has no connection for ${apps.join(', ')} — assign ${one ? 'it' : 'them'} to ` +
-      `${environment}'s ${one ? 'slot' : 'slots'} before promoting here`,
-    428,
+): Promise<StepRunAs[]> {
+  const decided = await decideTriggerSlots(triggerNodesOf(document), environment.name, (app) =>
+    accounts.resolveSlotConnection(environment.id, app),
   );
+  return decided
+    .filter((trigger) => trigger.decision.kind === 'refused')
+    .map((trigger) => ({
+      node_id: trigger.nodeId,
+      node_name: trigger.name,
+      app: trigger.slot.app,
+      managed_only: trigger.slot.managedOnly,
+      decision: trigger.decision,
+    }));
+}
+
+function triggerNodesOf(document: unknown): TriggerNode[] {
+  const nodes = isRecord(document) && Array.isArray(document.nodes) ? document.nodes : [];
+  return nodes.flatMap((node) => {
+    if (!isRecord(node) || typeof node.id !== 'string' || typeof node.node_type !== 'string') return [];
+    const metadata = isRecord(node.metadata) ? node.metadata : undefined;
+    const name = typeof node.name === 'string' ? node.name : undefined;
+    return [
+      {
+        id: node.id,
+        node_type: node.node_type,
+        ...(name ? { name } : {}),
+        ...(metadata ? { metadata } : {}),
+      },
+    ];
+  });
 }
 
 // A clause may name a model provider beside an app, so every clause names each by its slug.
@@ -82,35 +86,49 @@ const CLAUSES: ReadonlyArray<[SlotRefusalReason, Clause]> = [
       } only on a one-click (managed) one, so ${steps.length === 1 ? 'it' : 'they'} can't run there`,
   ],
   [
+    'needs_own_credentials_slot',
+    (env, steps) =>
+      `${env}'s ${accountsOf(steps, 'account is', 'accounts are')} one-click (managed), and ${namesOf(steps)} ${
+        steps.length === 1 ? 'runs only on one that uses its' : 'run only on ones that use their'
+      } own credentials, so ${steps.length === 1 ? 'it' : 'they'} can't run there`,
+  ],
+  [
     'inactive_slot',
     (env, steps) =>
       `${env}'s ${accountsOf(steps, "account isn't", "accounts aren't")} active, so ${namesOf(steps)} can't run there`,
   ],
 ];
 
-/** The 428 a check refuses with, naming the environment, the apps its slots can't run and the steps that need them. */
+/** The 428 a check refuses with, naming the environment, the apps its slots can't run and the triggers and steps that need them. */
 export function slotRefusalError(
   environment: NamedEnvironment,
   steps: StepRunAs[],
   fix: string,
+  triggers: StepRunAs[] = [],
 ): DomainError {
+  const refused = [...triggers, ...steps];
   const present = new Set(
-    CLAUSES.map(([reason]) => reason).filter((reason) => withReason(steps, reason).length > 0),
+    CLAUSES.map(([reason]) => reason).filter((reason) => withReason(refused, reason).length > 0),
   );
   const clauses = CLAUSES.filter(([reason]) => present.has(reason)).map(([reason, clause]) =>
-    clause(environment.name, withReason(steps, reason)),
+    clause(environment.name, withReason(refused, reason)),
   );
-  return new DomainError(`${clauses.join('; ')} — ${remedyFor(present, steps)}${fix}`, 428, {
+  return new DomainError(`${clauses.join('; ')} — ${remedyFor(present, refused)}${fix}`, 428, {
     code: codeOf(present),
     environment: environment.name,
-    apps: appsOf(steps),
-    steps: steps.map((step) => ({
-      node_id: step.node_id,
-      node_name: step.node_name,
-      app: step.app,
-      reason: step.decision.kind === 'refused' ? step.decision.reason : null,
-    })),
+    apps: appsOf(refused),
+    steps: steps.map(refusedNode),
+    ...(triggers.length > 0 ? { triggers: triggers.map(refusedNode) } : {}),
   });
+}
+
+function refusedNode(node: StepRunAs): Record<string, unknown> {
+  return {
+    node_id: node.node_id,
+    node_name: node.node_name,
+    app: node.app,
+    reason: node.decision.kind === 'refused' ? node.decision.reason : null,
+  };
 }
 
 function codeOf(present: ReadonlySet<SlotRefusalReason>): string {
@@ -118,12 +136,12 @@ function codeOf(present: ReadonlySet<SlotRefusalReason>): string {
   return present.has('inactive_slot') ? 'environment_slots_inactive' : 'environment_slots_unfit';
 }
 
-// A slot is assigned or reassigned under Environments; an account that only isn't active is also mended by reconnecting it.
+// A slot is assigned or reassigned under Environments; an account that only isn't active also comes back once a test finds it working.
 function remedyFor(present: ReadonlySet<SlotRefusalReason>, steps: StepRunAs[]): string {
   if (present.size === 1 && present.has('inactive_slot')) {
     return appsOf(steps).length > 1
-      ? 'their owners reconnect them under Integrations, or an owner reassigns the slots under Integrations → Environments'
-      : 'its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments';
+      ? 'their owners test them under Integrations once they work again, or an owner reassigns the slots under Integrations → Environments'
+      : `its owner ${REVIVES_SLOT}`;
   }
   const empty = present.has('empty_slot');
   const held = [...present].some((reason) => reason !== 'empty_slot');
@@ -158,14 +176,15 @@ function namesOf(steps: StepRunAs[]): string {
   );
 }
 
-/** Refuse to point an environment at a version it cannot run — an app trigger naming an account with no slot to listen as, or a step its slots can't run. */
+/** Refuse to point an environment at a version it cannot run — an app trigger its slot can't serve, or a step its slots can't run. */
 export async function assertEnvSlotsCover(
   document: unknown,
   environment: NamedEnvironment,
   accounts: RunAsAccounts,
 ): Promise<void> {
-  const unslotted = await triggerAppsUnslottedIn(document, environment, accounts);
-  if (unslotted.length > 0) throw triggerSlotsEmpty(environment.name, unslotted);
-  const refused = await stepsRefusedIn(document, environment, accounts);
-  if (refused.length > 0) throw slotRefusalError(environment, refused, ' before promoting here');
+  const triggers = await triggersRefusedIn(document, environment, accounts);
+  const steps = await stepsRefusedIn(document, environment, accounts);
+  if (triggers.length + steps.length > 0) {
+    throw slotRefusalError(environment, steps, ' before promoting here', triggers);
+  }
 }

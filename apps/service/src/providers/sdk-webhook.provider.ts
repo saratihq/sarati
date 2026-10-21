@@ -15,6 +15,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import type { ProviderStore } from './provider-store';
 import {
   buildDirectAuth,
+  buildLazyDirectAuth,
   buildObservedDirectAuth,
   ConnectionGoneError,
   loadTriggerOptions,
@@ -53,6 +54,36 @@ interface SdkWebhookContext {
   secret: string;
 }
 
+/** PUBLIC type → SDK trigger. Only registered-webhook (onEnable) triggers belong here. */
+const WEBHOOK_TRIGGERS = new Map<string, WebhookTrigger<never, unknown>>([
+  [actions.github.NEW_PUSH_TYPE, actions.github.newPush as unknown as WebhookTrigger<never, unknown>],
+  [actions.github.NEW_ISSUE_TYPE, actions.github.newIssue as unknown as WebhookTrigger<never, unknown>],
+  [
+    actions.github.NEW_PULL_REQUEST_TYPE,
+    actions.github.newPullRequest as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [
+    actions.stripe.PAYMENT_SUCCEEDED_TYPE,
+    actions.stripe.paymentSucceeded as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [actions.stripe.NEW_CUSTOMER_TYPE, actions.stripe.newCustomer as unknown as WebhookTrigger<never, unknown>],
+  [
+    actions.typeform.NEW_RESPONSE_TYPE,
+    actions.typeform.newResponse as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [
+    actions.calendly.NEW_INVITEE_TYPE,
+    actions.calendly.newInvitee as unknown as WebhookTrigger<never, unknown>,
+  ],
+  [actions.linear.NEW_ISSUE_TYPE, actions.linear.newIssue as unknown as WebhookTrigger<never, unknown>],
+  [actions.clickup.NEW_TASK_TYPE, actions.clickup.newTask as unknown as WebhookTrigger<never, unknown>],
+]);
+
+/** Whether `type` is an SDK registered-webhook trigger. */
+export function isSdkWebhookTrigger(type: string): boolean {
+  return WEBHOOK_TRIGGERS.has(type);
+}
+
 /**
  * Runs the SDK's REGISTERED-webhook triggers IN-PROCESS (the intake must answer a signature check per request).
  * Owns credential resolution and the SDK glue — auth-handle construction, the store adapter, request shaping.
@@ -61,33 +92,7 @@ interface SdkWebhookContext {
 export class SdkWebhookProvider {
   private readonly logger = new Logger(SdkWebhookProvider.name);
 
-  /** PUBLIC type → SDK trigger. Only registered-webhook (onEnable) triggers belong here. */
-  private readonly registry = new Map<string, WebhookTrigger<never, unknown>>([
-    [actions.github.NEW_PUSH_TYPE, actions.github.newPush as unknown as WebhookTrigger<never, unknown>],
-    [actions.github.NEW_ISSUE_TYPE, actions.github.newIssue as unknown as WebhookTrigger<never, unknown>],
-    [
-      actions.github.NEW_PULL_REQUEST_TYPE,
-      actions.github.newPullRequest as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.stripe.PAYMENT_SUCCEEDED_TYPE,
-      actions.stripe.paymentSucceeded as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.stripe.NEW_CUSTOMER_TYPE,
-      actions.stripe.newCustomer as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.typeform.NEW_RESPONSE_TYPE,
-      actions.typeform.newResponse as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [
-      actions.calendly.NEW_INVITEE_TYPE,
-      actions.calendly.newInvitee as unknown as WebhookTrigger<never, unknown>,
-    ],
-    [actions.linear.NEW_ISSUE_TYPE, actions.linear.newIssue as unknown as WebhookTrigger<never, unknown>],
-    [actions.clickup.NEW_TASK_TYPE, actions.clickup.newTask as unknown as WebhookTrigger<never, unknown>],
-  ]);
+  private readonly registry = WEBHOOK_TRIGGERS;
 
   constructor(
     @Optional() private readonly connections?: ConnectionsService,
@@ -96,7 +101,7 @@ export class SdkWebhookProvider {
 
   /** Whether `type` is an SDK registered-webhook trigger (drives the triggers-service branch). */
   isRegisteredWebhook(type: string): boolean {
-    return this.registry.has(type);
+    return isSdkWebhookTrigger(type);
   }
 
   /** Whether a failed delete of this trigger's webhook reaches the caller; Linear's never does. */
@@ -137,12 +142,19 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** The TRUST BOUNDARY for untrusted public-endpoint input: a bad signature throws 401 before anything fires. */
+  /** The TRUST BOUNDARY for untrusted public-endpoint input: a bad signature throws 401 before anything fires; the account's credential is resolved only if the trigger asks its app for something, and with no account (`auth` null) none is sent. */
   async handleRequest(
     ctx: SdkWebhookContext & { request: WebhookRequest; registration?: WebhookRegistration },
   ): Promise<unknown[]> {
     const trigger = this.require(ctx.type);
-    const auth = await this.authFor(ctx.externalUserId, ctx.auth, trigger);
+    const auth =
+      ctx.auth === null
+        ? buildDirectAuth(trigger.auth, { type: 'none' }, this.fetchImpl)
+        : buildLazyDirectAuth(
+            trigger.auth,
+            () => resolveTriggerCredential(this.connections, ctx.externalUserId, ctx.auth, trigger.auth),
+            this.fetchImpl,
+          );
     // Verify against the PROVIDER-minted secret when the handle carries one — verifying a provider-minted
     // subscription against the random secret WE generated would 401 every real delivery.
     const minted = ctx.registration?.signingSecret;
@@ -158,8 +170,8 @@ export class SdkWebhookProvider {
     });
   }
 
-  /** Delete the subscription named by `registration`; throws {@link WebhookCredentialError} when retrying cannot help. */
-  async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<void> {
+  /** Delete the subscription named by `registration`, resolving whether the app itself answered that it deleted it; throws {@link WebhookCredentialError} when retrying cannot help. */
+  async disable(ctx: SdkWebhookContext & { registration?: WebhookRegistration }): Promise<boolean> {
     const trigger = this.require(ctx.type);
     if (ctx.auth === null && trigger.auth.type !== 'none') {
       throw new WebhookCredentialError('no account is recorded for it');
@@ -193,6 +205,8 @@ export class SdkWebhookProvider {
       }
       throw err;
     }
+    // A 404 an app's delete treats as already gone, or a delete its app never reports on, proves nothing.
+    return this.reportsFailedDelete(ctx.type) && answeredDeleted(last);
   }
 
   private require(type: string): WebhookTrigger<never, unknown> {
@@ -210,6 +224,10 @@ export class SdkWebhookProvider {
     const credential = await resolveTriggerCredential(this.connections, externalUserId, auth, trigger.auth);
     return buildDirectAuth(trigger.auth, credential, this.fetchImpl);
   }
+}
+
+function answeredDeleted(response: NormalizedResponse | null): boolean {
+  return response !== null && response.status >= 200 && response.status < 300;
 }
 
 // A 403 that is a rate limit (GitHub answers both with it) passes, so a later retry can still succeed.

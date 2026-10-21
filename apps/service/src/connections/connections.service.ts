@@ -9,6 +9,7 @@ import { EncryptionService } from '../common/crypto/encryption.service';
 import { errorMessage } from '../common/error-message';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { isIdShape, newId, now } from '../database/ids';
+import { rawMutateReturning, rawQuery } from '../database/raw-query';
 import { type AccountIdentity, storedAccount } from './account-identity';
 import { ComposioProvider, ComposioUpstreamError } from './composio.provider';
 import { OAuthExchangeError, refreshAccessToken, type OAuthTokenSet } from './oauth-token';
@@ -21,6 +22,7 @@ import {
 } from './run-as-account';
 import { lockConnectionsForDelete, lockOrgForWrite } from '../orgs/org-row-lock';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import {
   byoClientToConfig,
   OAuthProvidersService,
@@ -124,14 +126,14 @@ export interface ManagedConnectionRef {
   connectedAccountId: string | null;
 }
 
-/** Connections a transaction deleted, with what revokes their Composio accounts once it commits. */
+/** Connections a transaction deleted, with what to run once it commits. */
 export interface ConnectionRemoval {
   deleted: number;
-  /** Logs a failure, never throws. */
-  revoke: () => Promise<void>;
+  /** Revokes their Composio accounts, then reconciles every workflow listening as them, read once the delete commits; logs a failure, never throws. */
+  afterCommit: () => Promise<void>;
 }
 
-const NOTHING_REMOVED: ConnectionRemoval = { deleted: 0, revoke: () => Promise.resolve() };
+const NOTHING_REMOVED: ConnectionRemoval = { deleted: 0, afterCommit: () => Promise.resolve() };
 
 export interface CreateConnectionInput {
   /** The app this account is for — the public slug, e.g. `slack`. */
@@ -160,6 +162,7 @@ export class ConnectionsService implements RunAsAccounts {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
+    private readonly triggerSignals: TriggerSignalsService,
     // Absent → oauth2 credentials are returned as stored (no refresh possible).
     @Optional() private readonly oauthProviders?: OAuthProvidersService,
     // Absent → deleting a managed row skips the (best-effort anyway) Composio account cleanup.
@@ -212,7 +215,7 @@ export class ConnectionsService implements RunAsAccounts {
       return toSummary(entity);
     }
 
-    // One account per app per env: the swap replaces whichever row holds it when the swap runs, and revokes that one's grant.
+    // One account per app per env: the swap replaces whichever row holds it when the swap runs, revokes that one's grant and reconciles what listened as it.
     const replaced = await this.dataSource
       .transaction(async (em) => {
         await lockOrgForWrite(em, cluster.orgId);
@@ -235,7 +238,7 @@ export class ConnectionsService implements RunAsAccounts {
         }
         throw err;
       });
-    await replaced.revoke();
+    await replaced.afterCommit();
     return toSummary(entity);
   }
 
@@ -253,11 +256,52 @@ export class ConnectionsService implements RunAsAccounts {
 
   /** Persist a health transition; `active` clears the reason and `last_checked_at` records the verification. */
   async setStatus(id: string, status: ConnectionHealthStatus, reason: string | null = null): Promise<void> {
-    await this.dataSource.manager.update(
-      ConnectionEntity,
-      { id },
-      { status, statusReason: status === 'active' ? null : reason, lastCheckedAt: now() },
+    // One statement reads the status it replaces under the row lock, so a concurrent change is never missed.
+    const [written] = await rawMutateReturning<{ before: string }>(
+      this.dataSource.manager,
+      `UPDATE connections c
+          SET status = $2, status_reason = $3, last_checked_at = $4
+         FROM (SELECT id, status FROM connections WHERE id = $1 FOR NO KEY UPDATE) old
+        WHERE c.id = old.id
+       RETURNING old.status AS before`,
+      [id, status, status === 'active' ? null : reason, now()],
     );
+    if (written && written.before !== status) {
+      const em = this.dataSource.manager;
+      await this.reconcileTriggers(await this.listenersOf(em, [id], await this.slotEnvironmentsOf(em, [id])));
+    }
+  }
+
+  private async slotEnvironmentsOf(em: EntityManager, connectionIds: readonly string[]): Promise<string[]> {
+    const rows = await rawQuery<{ environment_id: string }>(
+      em,
+      `SELECT DISTINCT environment_id FROM environment_connections WHERE connection_id = ANY($1::uuid[])`,
+      [connectionIds],
+    );
+    return rows.map((row) => row.environment_id);
+  }
+
+  // A trigger listens as its slot's account, and a webhook is deleted with it, only while it is active (#11): the workflows a change to these accounts, whose slots are in `environments`, can move.
+  private async listenersOf(
+    em: EntityManager,
+    connectionIds: readonly string[],
+    environments: readonly string[],
+  ): Promise<string[]> {
+    const rows = await rawQuery<{ workflow_id: string }>(
+      em,
+      `SELECT workflow_id FROM workflow_env_pointers WHERE environment_id = ANY($2::uuid[])
+       UNION
+       SELECT workflow_id FROM runtime_trigger_activations WHERE connection_id = ANY($1::uuid[])
+       UNION
+       SELECT workflow_id FROM trigger_retired_webhooks
+        WHERE webhook -> 'connection' ->> 'connectionId' = ANY($1::uuid[]::text[])`,
+      [connectionIds, environments],
+    );
+    return rows.map((row) => row.workflow_id);
+  }
+
+  private async reconcileTriggers(workflowIds: readonly string[]): Promise<void> {
+    for (const workflowId of workflowIds) await this.triggerSignals.enqueue(workflowId);
   }
 
   /** THE env-scoped resolver for `(environment_id, app)`: the slot's account and its owner, whom the step runs AS; null on an empty slot. */
@@ -468,7 +512,7 @@ export class ConnectionsService implements RunAsAccounts {
       await lockFirst?.(em);
       return this.deleteWithSlots(em, where);
     });
-    await removal.revoke();
+    await removal.afterCommit();
     return removal.deleted > 0;
   }
 
@@ -481,20 +525,33 @@ export class ConnectionsService implements RunAsAccounts {
     return this.deleteLocked(em, await lockConnectionsForDelete(em, found));
   }
 
-  /** Deletes connections `ids`, which the caller's transaction holds FOR UPDATE, and their slots; `revoke` then uses the keys their scopes have now, since an org's delete takes the org's key with it. */
+  /** Deletes connections `ids`, which the caller's transaction holds FOR UPDATE, and their slots, reading first the environments those slots are in; `afterCommit` revokes with the keys their scopes have now, since an org's delete takes the org's key with it, then reconciles what listens as them. */
   async deleteLocked(em: EntityManager, ids: string[]): Promise<ConnectionRemoval> {
     if (ids.length === 0) return NOTHING_REMOVED;
     const revokes: Array<() => Promise<void>> = [];
     for (const row of await em.find(ConnectionEntity, { where: { id: In(ids) } })) {
       revokes.push(await this.revocation(em, row));
     }
+    const environments = await this.slotEnvironmentsOf(em, ids);
     const { affected } = await em.delete(ConnectionEntity, { id: In(ids) });
     return {
       deleted: affected ?? 0,
-      revoke: async () => {
+      afterCommit: async () => {
         for (const revoke of revokes) await revoke();
+        await this.reconcileRemoved(ids, environments);
       },
     };
+  }
+
+  // Read once the delete commits, so a pointer moved into `environments` meanwhile is listed here or its own reconcile reads the slot empty; fail-open, since the delete has committed.
+  private async reconcileRemoved(ids: readonly string[], environments: readonly string[]): Promise<void> {
+    try {
+      await this.reconcileTriggers(await this.listenersOf(this.dataSource.manager, ids, environments));
+    } catch (err) {
+      this.logger.warn(
+        `Connections ${ids.join(', ')}: what listens as them could not be read, so their removal reconciled nothing: ${errorMessage(err)}`,
+      );
+    }
   }
 
   /** How many cluster connections in an org a given member owns (env steps run AS them). */
@@ -711,13 +768,9 @@ export class ConnectionsService implements RunAsAccounts {
     await this.dataSource.manager.update(
       ConnectionEntity,
       { id: row.id },
-      {
-        credential: this.encryption.encryptToken(JSON.stringify(updated)),
-        status: 'active',
-        statusReason: null,
-        lastCheckedAt: now(),
-      },
+      { credential: this.encryption.encryptToken(JSON.stringify(updated)) },
     );
+    await this.setStatus(row.id, 'active');
     return updated;
   }
 

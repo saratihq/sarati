@@ -507,7 +507,7 @@ describe('ActionRouterProvider', () => {
     expect(err).toMatchObject({
       status: 428,
       message:
-        "staging's trello account isn't active, so \"Add a board\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments",
+        "staging's trello account isn't active, so \"Add a board\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments",
     });
     expect(managedRef).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();

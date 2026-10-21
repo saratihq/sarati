@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { AuthModule } from '../auth/auth.module';
 import type { EnvConfig } from '../config/env.config';
 import { EnvironmentsModule } from '../environments/environments.module';
+import { TriggerSignalsModule } from '../triggers/trigger-signals.module';
 import { ComposioProvider } from './composio.provider';
 import { ComposioExecutionProvider } from './composio-execution.provider';
 import { ConnectionsController } from './connections.controller';
@@ -19,8 +20,8 @@ import { OAuthService } from './oauth.service';
  * the Composio (managed-row) half is inert without COMPOSIO_API_KEY and the BYO token/oauth2 paths never touch it.
  */
 @Module({
-  // EnvironmentsModule: the delete endpoint consults slot references.
-  imports: [AuthModule, EnvironmentsModule],
+  // EnvironmentsModule: the delete endpoint consults slot references. TriggerSignalsModule: an account's change reconciles the triggers listening as it.
+  imports: [AuthModule, EnvironmentsModule, TriggerSignalsModule],
   providers: [
     ConnectionsService,
     OAuthService,

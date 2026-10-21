@@ -290,7 +290,7 @@ export class EnvPointersService {
     return result;
   }
 
-  /** Refuse a publish or promote whose steps would find no account in the environment's slots; creating a workflow never asks. */
+  /** Refuse a promote, publish or restore whose steps or app triggers the environment's slots can't serve, by the run-as slot rule; creating a workflow never asks. */
   async assertEnvCanRun(
     em: EntityManager,
     wf: WorkflowEntity,
