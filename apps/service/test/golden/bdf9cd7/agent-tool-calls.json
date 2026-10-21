@@ -1,8 +1,8 @@
 {
-  "build": "4bd5caa9b5823584f5bc148e0bb1a96604c7ad4d",
-  "recordedAt": 1792437374758,
+  "build": "bdf9cd749b85af69992166e976f613e77e030088",
+  "recordedAt": 1792469018504,
   "runId": "golden-agent-tool-calls",
-  "orgId": "912535c6-706e-4069-888a-3b50d9467216",
+  "orgId": "510ec429-4c6f-494c-b6f6-af8b7afabde0",
   "app": {
     "runtime_runs": [
       {
@@ -57,14 +57,14 @@
         "status": "waiting",
         "outputs": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:14.630225+04:00",
+        "started_at": "2026-10-20T08:03:38.373939+04:00",
         "finished_at": null,
         "workflow_id": null,
         "source": "manual",
         "waiting_node_id": "approve",
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:14.655111+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:14.655111+04:00",
+        "waiting_since": "2026-10-20T08:03:38.409031+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:38.409031+04:00",
         "decided_by": null,
         "decided_at": null,
         "environment": null,
@@ -74,12 +74,12 @@
         "dry_run": false,
         "parent_run_id": null,
         "parent_step_key": null,
-        "org_id": "912535c6-706e-4069-888a-3b50d9467216"
+        "org_id": "510ec429-4c6f-494c-b6f6-af8b7afabde0"
       }
     ],
     "runtime_run_steps": [
       {
-        "id": "d59d4e2b-5003-454c-80be-aeeb38988dcb",
+        "id": "411c7bd5-5d89-4bdd-bedd-4be5e345c557",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-agent-tool-calls",
         "step_key": "agent",
         "node_id": "agent",
@@ -114,8 +114,8 @@
           "usage": {}
         },
         "error": null,
-        "started_at": "2026-10-19T23:16:14.642942+04:00",
-        "finished_at": "2026-10-19T23:16:14.654693+04:00",
+        "started_at": "2026-10-20T08:03:38.397052+04:00",
+        "finished_at": "2026-10-20T08:03:38.408472+04:00",
         "pinned": false,
         "continued": false,
         "attempts": 1,
@@ -132,7 +132,7 @@
         "decided_at": null
       },
       {
-        "id": "6fbcf21b-2de8-4442-a067-bca5fb0d5a4d",
+        "id": "8121247d-9c7d-4466-8bd9-63e3b0cc856e",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-agent-tool-calls",
         "step_key": "approve",
         "node_id": "approve",
@@ -140,15 +140,15 @@
         "status": "running",
         "output": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:14.655111+04:00",
+        "started_at": "2026-10-20T08:03:38.409031+04:00",
         "finished_at": null,
         "pinned": false,
         "continued": false,
         "attempts": 1,
         "warnings": null,
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:14.655111+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:14.655111+04:00",
+        "waiting_since": "2026-10-20T08:03:38.409031+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:38.409031+04:00",
         "claimed_at": null,
         "delivery_topic": null,
         "claimed_by": null,
@@ -172,8 +172,8 @@
         "output": null,
         "error": null,
         "executor_id": "local",
-        "created_at": 1792437374635,
-        "updated_at": 1792437374636,
+        "created_at": 1792469018379,
+        "updated_at": 1792469018379,
         "application_version": "orchestr-1",
         "application_id": "",
         "class_name": null,
@@ -182,13 +182,13 @@
         "queue_name": null,
         "workflow_timeout_ms": null,
         "workflow_deadline_epoch_ms": null,
-        "inputs": "{\"json\":[{\"plan\":{\"id\":\"golden\",\"nodes\":[{\"kind\":\"agent\",\"id\":\"agent\",\"name\":\"agent\",\"systemPrompt\":\"You look things up.\",\"model\":{\"provider\":\"claude\",\"model\":\"claude-opus-4-8\"},\"maxSteps\":5,\"input\":\"Look it up.\",\"tools\":[{\"kind\":\"action\",\"name\":\"lookup\",\"stepName\":\"tool\",\"actionId\":\"text.concat\",\"props\":{\"texts\":[\"looked-up\"],\"separator\":\"\"}}],\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"agent\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-agent-tool-calls\",\"initialScope\":null,\"pins\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"912535c6-706e-4069-888a-3b50d9467216\",\"chatChannelKey\":null,\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.pins\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"],\"0.chatChannelKey\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"golden\",\"nodes\":[{\"kind\":\"agent\",\"id\":\"agent\",\"name\":\"agent\",\"systemPrompt\":\"You look things up.\",\"model\":{\"provider\":\"claude\",\"model\":\"claude-opus-4-8\"},\"maxSteps\":5,\"input\":\"Look it up.\",\"tools\":[{\"kind\":\"action\",\"name\":\"lookup\",\"stepName\":\"tool\",\"actionId\":\"text.concat\",\"props\":{\"texts\":[\"looked-up\"],\"separator\":\"\"}}],\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"agent\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-agent-tool-calls\",\"initialScope\":null,\"pins\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"510ec429-4c6f-494c-b6f6-af8b7afabde0\",\"chatChannelKey\":null,\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.pins\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"],\"0.chatChannelKey\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
         "started_at_epoch_ms": null,
         "deduplication_id": null,
         "priority": 0,
         "queue_partition_key": null,
         "forked_from": null,
-        "owner_xid": "e71d51d6-0117-4402-b27c-41b1b61fd2d1",
+        "owner_xid": "5739b957-d869-40f5-9ed7-6680fa5aca21",
         "parent_workflow_id": null,
         "serialization": "js_superjson",
         "delay_until_epoch_ms": null,
@@ -207,8 +207,8 @@
         "error": null,
         "function_name": "golden:agent#0:model",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437374644,
-        "completed_at_epoch_ms": 1792437374647,
+        "started_at_epoch_ms": 1792469018398,
+        "completed_at_epoch_ms": 1792469018401,
         "serialization": "js_superjson"
       },
       {
@@ -218,8 +218,8 @@
         "error": null,
         "function_name": "golden:agent#0:tool:c1",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437374649,
-        "completed_at_epoch_ms": 1792437374651,
+        "started_at_epoch_ms": 1792469018403,
+        "completed_at_epoch_ms": 1792469018406,
         "serialization": "js_superjson"
       },
       {
@@ -229,21 +229,117 @@
         "error": null,
         "function_name": "golden:agent#1:model",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437374652,
-        "completed_at_epoch_ms": 1792437374653,
+        "started_at_epoch_ms": 1792469018406,
+        "completed_at_epoch_ms": 1792469018407,
         "serialization": "js_superjson"
       },
       {
         "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-agent-tool-calls",
         "function_id": 4,
-        "output": "1792437974656",
+        "output": "1792469618410",
         "error": null,
         "function_name": "DBOS.sleep",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437374656,
-        "completed_at_epoch_ms": 1792437374656,
+        "started_at_epoch_ms": 1792469018411,
+        "completed_at_epoch_ms": 1792469018411,
         "serialization": "portable_json"
       }
     ]
+  },
+  "outcome": {
+    "status": "completed",
+    "error": null,
+    "outputs": {
+      "agent": {
+        "text": "found it",
+        "steps": [
+          {
+            "step_index": 0,
+            "kind": "model",
+            "text": "looking it up"
+          },
+          {
+            "step_index": 1,
+            "kind": "tool",
+            "tool": "lookup",
+            "input": {},
+            "output": "looked-up"
+          },
+          {
+            "step_index": 2,
+            "kind": "model",
+            "text": "found it"
+          },
+          {
+            "step_index": 3,
+            "kind": "final",
+            "text": "found it"
+          }
+        ],
+        "usage": {}
+      },
+      "approve": {
+        "for": "approve"
+      }
+    },
+    "steps": [
+      {
+        "step_key": "agent",
+        "kind": "agent",
+        "status": "completed",
+        "output": {
+          "text": "found it",
+          "steps": [
+            {
+              "step_index": 0,
+              "kind": "model",
+              "text": "looking it up"
+            },
+            {
+              "step_index": 1,
+              "kind": "tool",
+              "tool": "lookup",
+              "input": {},
+              "output": "looked-up"
+            },
+            {
+              "step_index": 2,
+              "kind": "model",
+              "text": "found it"
+            },
+            {
+              "step_index": 3,
+              "kind": "final",
+              "text": "found it"
+            }
+          ],
+          "usage": {}
+        },
+        "error": null,
+        "waiting_topic": null,
+        "delivery_topic": null,
+        "decided_by_user": null
+      },
+      {
+        "step_key": "approve",
+        "kind": "waitForEvent",
+        "status": "completed",
+        "output": {
+          "for": "approve"
+        },
+        "error": null,
+        "waiting_topic": null,
+        "delivery_topic": null,
+        "decided_by_user": true
+      }
+    ],
+    "ops": [
+      "golden:agent#0:model",
+      "golden:agent#0:tool:c1",
+      "golden:agent#1:model",
+      "DBOS.recv",
+      "DBOS.sleep"
+    ],
+    "children": []
   }
 }

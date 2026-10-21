@@ -127,6 +127,14 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
   },
   'service:runs/runs.service.ts#cancelRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:dbos/recovery-guard.ts#admit#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runtime/run-recorder.service.ts#chargeSubWorkflowCall#runtime_runs': {
+    in: 'transaction',
+    why: RUN_LOCK,
+  },
+  'service:runtime/run-recorder.service.ts#forgetSubWorkflowCharges#runtime_runs': {
+    in: 'transaction',
+    why: RUN_LOCK,
+  },
   'agent:composer/thread-store.ts#resolve#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#deleteThread#composer_threads': { in: 'autocommit', why: THREAD },
   'agent:composer/thread-store.ts#append#composer_thread_events': { in: 'autocommit', why: THREAD },
@@ -149,7 +157,7 @@ const OPAQUE_READS: Record<string, string> = {
   'service:dbos/recovery-guard.ts#legacyRuns': "sends alreadyEnded's read of a run's status, a SELECT",
   'service:dbos/recovery-guard.ts#resumability':
     "sends readResumability's reads of a run's history, every one a SELECT",
-  'service:scripts/legacy-report.cli.ts#main':
+  'service:scripts/legacy-report.cli.ts#report':
     "sends readResumability's reads of a run's history, every one a SELECT",
 };
 
@@ -245,6 +253,7 @@ interface App {
 interface Verdict {
   offenders: string[];
   exempted: Set<string>;
+  opaque: Set<string>;
   transactions: string[];
   byHand: string[];
 }
@@ -471,7 +480,13 @@ function sqlText(node: ts.Node): string | undefined {
 /** Reads every source file of an app and judges each write to a guarded table. */
 function judge(app: App, guarded: Set<string>): Verdict {
   const { checker } = app;
-  const verdict: Verdict = { offenders: [], exempted: new Set(), transactions: [], byHand: [] };
+  const verdict: Verdict = {
+    offenders: [],
+    exempted: new Set(),
+    opaque: new Set(),
+    transactions: [],
+    byHand: [],
+  };
   const relative = (node: ts.Node): string => node.getSourceFile().fileName.slice(app.src.length + 1);
   const where = (node: ts.Node): string =>
     `${app.app}:${relative(node)}:${node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1}`;
@@ -747,12 +762,13 @@ function judge(app: App, guarded: Set<string>): Verdict {
         node.expression.name.text === 'query' &&
         kindOf(checker, node.expression.expression, (n) => CONNECTIONS.has(n)) &&
         (!node.arguments[0] || sqlText(node.arguments[0]) === undefined) &&
-        !(memberKey(node) in OPAQUE_READS) &&
         !PASS_THROUGH[memberKey(node)]
       ) {
-        verdict.offenders.push(
-          `${where(node)} — SQL this cannot read: ${node.arguments[0]?.getText() ?? 'none'}`,
-        );
+        if (memberKey(node) in OPAQUE_READS) verdict.opaque.add(memberKey(node));
+        else
+          verdict.offenders.push(
+            `${where(node)} — SQL this cannot read: ${node.arguments[0]?.getText() ?? 'none'}`,
+          );
       }
       const orm = ormWrite(app, node, guarded);
       if (orm) reach(node, classify(orm.manager), orm.table);
@@ -814,5 +830,11 @@ describe('vault: every write under a workflow locks the workflow row first (cons
     const used = new Set(verdicts.flatMap((v) => [...v.exempted]));
 
     expect(Object.keys(UNLOCKED).filter((key) => !used.has(key))).toEqual([]);
+  });
+
+  it('lists no opaque read that no longer sends SQL this cannot read', () => {
+    const used = new Set(verdicts.flatMap((v) => [...v.opaque]));
+
+    expect(Object.keys(OPAQUE_READS).filter((key) => !used.has(key))).toEqual([]);
   });
 });

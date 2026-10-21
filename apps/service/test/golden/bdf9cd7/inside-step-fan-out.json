@@ -1,8 +1,8 @@
 {
-  "build": "4bd5caa9b5823584f5bc148e0bb1a96604c7ad4d",
-  "recordedAt": 1792437366135,
+  "build": "bdf9cd749b85af69992166e976f613e77e030088",
+  "recordedAt": 1792469010288,
   "runId": "golden-inside-step-fan-out",
-  "orgId": "d6e0839f-1f0f-421a-85b4-78a795daf6e6",
+  "orgId": "196f8194-dc20-404c-a178-a0f6c7aaadd2",
   "app": {
     "runtime_runs": [
       {
@@ -26,7 +26,7 @@
                       "actionId": "http.send_request",
                       "props": {
                         "method": "GET",
-                        "url": "http://127.0.0.1:54381/answer"
+                        "url": "http://127.0.0.1:52657/answer"
                       },
                       "guards": []
                     }
@@ -41,7 +41,7 @@
                       "actionId": "http.send_request",
                       "props": {
                         "method": "GET",
-                        "url": "http://127.0.0.1:54381/hold"
+                        "url": "http://127.0.0.1:52657/hold"
                       },
                       "guards": []
                     }
@@ -55,7 +55,7 @@
         "status": "running",
         "outputs": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:05.989062+04:00",
+        "started_at": "2026-10-20T08:03:30.149313+04:00",
         "finished_at": null,
         "workflow_id": null,
         "source": "api",
@@ -72,12 +72,12 @@
         "dry_run": false,
         "parent_run_id": null,
         "parent_step_key": null,
-        "org_id": "d6e0839f-1f0f-421a-85b4-78a795daf6e6"
+        "org_id": "196f8194-dc20-404c-a178-a0f6c7aaadd2"
       }
     ],
     "runtime_run_steps": [
       {
-        "id": "db160cfb-8835-4526-8a40-060b1b5f4eee",
+        "id": "7823ff7e-df28-4e9f-9577-52f1721546c7",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
         "step_key": "fork|0/a",
         "node_id": "a",
@@ -88,7 +88,7 @@
           "headers": {
             "connection": "keep-alive",
             "content-type": "application/json",
-            "date": "Mon, 19 Oct 2026 19:16:06 GMT",
+            "date": "Tue, 20 Oct 2026 04:03:30 GMT",
             "keep-alive": "timeout=5",
             "transfer-encoding": "chunked"
           },
@@ -97,8 +97,8 @@
           }
         },
         "error": null,
-        "started_at": "2026-10-19T23:16:06.005188+04:00",
-        "finished_at": "2026-10-19T23:16:06.027444+04:00",
+        "started_at": "2026-10-20T08:03:30.173899+04:00",
+        "finished_at": "2026-10-20T08:03:30.19787+04:00",
         "pinned": false,
         "continued": false,
         "attempts": 1,
@@ -115,7 +115,7 @@
         "decided_at": null
       },
       {
-        "id": "b8afe3fd-3d42-43e4-9ad9-21cac1bc18fe",
+        "id": "da3abe20-9cd7-4015-b022-b6c5c6417358",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
         "step_key": "fork|1/b",
         "node_id": "b",
@@ -123,7 +123,7 @@
         "status": "running",
         "output": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:06.005236+04:00",
+        "started_at": "2026-10-20T08:03:30.173934+04:00",
         "finished_at": null,
         "pinned": false,
         "continued": false,
@@ -155,8 +155,8 @@
         "output": null,
         "error": null,
         "executor_id": "local",
-        "created_at": 1792437365995,
-        "updated_at": 1792437365995,
+        "created_at": 1792469010153,
+        "updated_at": 1792469010154,
         "application_version": "orchestr-1",
         "application_id": "",
         "class_name": null,
@@ -165,13 +165,13 @@
         "queue_name": null,
         "workflow_timeout_ms": null,
         "workflow_deadline_epoch_ms": null,
-        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-inside-step-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"action\",\"id\":\"a\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:54381/answer\"},\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"action\",\"id\":\"b\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:54381/hold\"},\"guards\":[]}]}],\"guards\":[]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"d6e0839f-1f0f-421a-85b4-78a795daf6e6\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-inside-step-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"action\",\"id\":\"a\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:52657/answer\"},\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"action\",\"id\":\"b\",\"actionId\":\"http.send_request\",\"props\":{\"method\":\"GET\",\"url\":\"http://127.0.0.1:52657/hold\"},\"guards\":[]}]}],\"guards\":[]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"196f8194-dc20-404c-a178-a0f6c7aaadd2\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
         "started_at_epoch_ms": null,
         "deduplication_id": null,
         "priority": 0,
         "queue_partition_key": null,
         "forked_from": null,
-        "owner_xid": "13d9c444-4e4f-4016-b563-da3d19e27db8",
+        "owner_xid": "7f1f531f-d675-484b-9eec-ea590b1565f6",
         "parent_workflow_id": null,
         "serialization": "js_superjson",
         "delay_until_epoch_ms": null,
@@ -186,12 +186,12 @@
       {
         "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-inside-step-fan-out",
         "function_id": 0,
-        "output": "{\"json\":{\"output\":{\"status\":200,\"headers\":{\"connection\":\"keep-alive\",\"content-type\":\"application/json\",\"date\":\"Mon, 19 Oct 2026 19:16:06 GMT\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":{\"ok\":true}}},\"__dbos_serializer\":\"superjson\"}",
+        "output": "{\"json\":{\"output\":{\"status\":200,\"headers\":{\"connection\":\"keep-alive\",\"content-type\":\"application/json\",\"date\":\"Tue, 20 Oct 2026 04:03:30 GMT\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":{\"ok\":true}}},\"__dbos_serializer\":\"superjson\"}",
         "error": null,
         "function_name": "plan-golden-inside-step-fan-out:fork|0/a",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437366006,
-        "completed_at_epoch_ms": 1792437366024,
+        "started_at_epoch_ms": 1792469010176,
+        "completed_at_epoch_ms": 1792469010195,
         "serialization": "js_superjson"
       }
     ]

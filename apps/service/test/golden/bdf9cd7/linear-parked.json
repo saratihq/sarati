@@ -1,8 +1,8 @@
 {
-  "build": "4bd5caa9b5823584f5bc148e0bb1a96604c7ad4d",
-  "recordedAt": 1792437361912,
+  "build": "bdf9cd749b85af69992166e976f613e77e030088",
+  "recordedAt": 1792468998667,
   "runId": "golden-linear-parked",
-  "orgId": "dceece28-ac35-4f67-8eb1-5863eafd3f12",
+  "orgId": "d9f9f2cc-d75c-4536-baa8-fc35591b43c5",
   "app": {
     "runtime_runs": [
       {
@@ -36,14 +36,14 @@
         "status": "waiting",
         "outputs": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:01.777638+04:00",
+        "started_at": "2026-10-20T08:03:18.522392+04:00",
         "finished_at": null,
         "workflow_id": null,
         "source": "api",
         "waiting_node_id": "approve",
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:01.817633+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:01.817633+04:00",
+        "waiting_since": "2026-10-20T08:03:18.579289+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:18.579289+04:00",
         "decided_by": null,
         "decided_at": null,
         "environment": null,
@@ -53,12 +53,12 @@
         "dry_run": false,
         "parent_run_id": null,
         "parent_step_key": null,
-        "org_id": "dceece28-ac35-4f67-8eb1-5863eafd3f12"
+        "org_id": "d9f9f2cc-d75c-4536-baa8-fc35591b43c5"
       }
     ],
     "runtime_run_steps": [
       {
-        "id": "7d712280-d02b-48d0-9e98-6a930d68d388",
+        "id": "f2c9c6df-858c-494f-bd95-aa02a1f15cc1",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-linear-parked",
         "step_key": "approve",
         "node_id": "approve",
@@ -66,15 +66,15 @@
         "status": "running",
         "output": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:01.817633+04:00",
+        "started_at": "2026-10-20T08:03:18.579289+04:00",
         "finished_at": null,
         "pinned": false,
         "continued": false,
         "attempts": 1,
         "warnings": null,
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:01.817633+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:01.817633+04:00",
+        "waiting_since": "2026-10-20T08:03:18.579289+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:18.579289+04:00",
         "claimed_at": null,
         "delivery_topic": null,
         "claimed_by": null,
@@ -84,7 +84,7 @@
         "decided_at": null
       },
       {
-        "id": "5b14b59e-2082-4203-99e2-0e5e6255800c",
+        "id": "08792031-1087-406c-90de-44b3745761a2",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-linear-parked",
         "step_key": "prep",
         "node_id": "prep",
@@ -94,8 +94,8 @@
           "ran": "prep"
         },
         "error": null,
-        "started_at": "2026-10-19T23:16:01.787154+04:00",
-        "finished_at": "2026-10-19T23:16:01.817036+04:00",
+        "started_at": "2026-10-20T08:03:18.547413+04:00",
+        "finished_at": "2026-10-20T08:03:18.578542+04:00",
         "pinned": false,
         "continued": false,
         "attempts": 1,
@@ -126,8 +126,8 @@
         "output": null,
         "error": null,
         "executor_id": "local",
-        "created_at": 1792437361780,
-        "updated_at": 1792437361780,
+        "created_at": 1792468998527,
+        "updated_at": 1792468998528,
         "application_version": "orchestr-1",
         "application_id": "",
         "class_name": null,
@@ -136,13 +136,13 @@
         "queue_name": null,
         "workflow_timeout_ms": null,
         "workflow_deadline_epoch_ms": null,
-        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-linear-parked\",\"nodes\":[{\"kind\":\"code\",\"id\":\"prep\",\"code\":\"return { ran: 'prep' };\",\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"prep\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-linear-parked\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"dceece28-ac35-4f67-8eb1-5863eafd3f12\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-linear-parked\",\"nodes\":[{\"kind\":\"code\",\"id\":\"prep\",\"code\":\"return { ran: 'prep' };\",\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"prep\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-linear-parked\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"d9f9f2cc-d75c-4536-baa8-fc35591b43c5\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
         "started_at_epoch_ms": null,
         "deduplication_id": null,
         "priority": 0,
         "queue_partition_key": null,
         "forked_from": null,
-        "owner_xid": "9df2052b-bcb7-4fce-a954-66849f6688a0",
+        "owner_xid": "6c551726-295c-4914-9b28-0b2f84e87570",
         "parent_workflow_id": null,
         "serialization": "js_superjson",
         "delay_until_epoch_ms": null,
@@ -161,21 +161,65 @@
         "error": null,
         "function_name": "plan-golden-linear-parked:prep",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437361787,
-        "completed_at_epoch_ms": 1792437361814,
+        "started_at_epoch_ms": 1792468998548,
+        "completed_at_epoch_ms": 1792468998575,
         "serialization": "js_superjson"
       },
       {
         "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-linear-parked",
         "function_id": 2,
-        "output": "1792437961818",
+        "output": "1792469598580",
         "error": null,
         "function_name": "DBOS.sleep",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437361819,
-        "completed_at_epoch_ms": 1792437361819,
+        "started_at_epoch_ms": 1792468998581,
+        "completed_at_epoch_ms": 1792468998581,
         "serialization": "portable_json"
       }
     ]
+  },
+  "outcome": {
+    "status": "completed",
+    "error": null,
+    "outputs": {
+      "prep": {
+        "ran": "prep"
+      },
+      "approve": {
+        "for": "approve"
+      }
+    },
+    "steps": [
+      {
+        "step_key": "approve",
+        "kind": "waitForEvent",
+        "status": "completed",
+        "output": {
+          "for": "approve"
+        },
+        "error": null,
+        "waiting_topic": null,
+        "delivery_topic": null,
+        "decided_by_user": true
+      },
+      {
+        "step_key": "prep",
+        "kind": "code",
+        "status": "completed",
+        "output": {
+          "ran": "prep"
+        },
+        "error": null,
+        "waiting_topic": null,
+        "delivery_topic": null,
+        "decided_by_user": null
+      }
+    ],
+    "ops": [
+      "plan-linear-parked:prep",
+      "DBOS.recv",
+      "DBOS.sleep"
+    ],
+    "children": []
   }
 }

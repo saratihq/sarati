@@ -1,6 +1,7 @@
 import { Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
 import { DbosDurableStep } from './dbos-durable-step';
+import type { SequencedOps } from './run-sequencer';
 
 /**
  * Test support, not in the production bundle: a model of DBOS 4.23.6's per-workflow op log, held to the real SDK by
@@ -69,7 +70,8 @@ export interface OpRow {
   id: number;
   name: string;
   output?: unknown;
-  error?: { name: string; message: string };
+  /** As DBOS records an error: its name, its message and its own fields. */
+  error?: { name: string; message: string } & Record<string, unknown>;
   /** Who issued the op — what DBOS would have to compare to catch a swap it can't see. */
   intent?: string;
   recordedAt: number;
@@ -193,8 +195,11 @@ export interface FaultSlot {
 export class SimExecution {
   private counter = 0;
   private live = 0;
+  private liveSteps = 0;
   private alive = true;
   readonly rowless: RowlessSlot[] = [];
+  /** The name each id this execution reserved was taken for, in id order: its op-to-id map. */
+  readonly issued: string[] = [];
 
   constructor(
     private readonly wf: SimWorkflow,
@@ -211,13 +216,18 @@ export class SimExecution {
     return this.live;
   }
 
+  /** Of those, the steps: a body that may still be running, and whose row is still to be written. */
+  get stepsInFlight(): number {
+    return this.liveSteps;
+  }
+
   crash(): void {
     this.alive = false;
   }
 
   /** A step whose lookup raises `error`, as DBOS raises a fatal one: it takes its id, records nothing and never runs. */
-  failStepAtLookup(error: Error): Promise<never> {
-    const id = this.reserve();
+  failStepAtLookup(name: string, error: Error): Promise<never> {
+    const id = this.reserve(name);
     this.rowless.push({ id, why: 'fatal at lookup' });
     return this.track(async () => {
       await this.lookup();
@@ -226,13 +236,14 @@ export class SimExecution {
   }
 
   runStep<T>(fn: () => Promise<T>, name: string, intent: string = name): Promise<T> {
-    const id = this.reserve();
-    return this.track(async () => {
+    const id = this.reserve(name);
+    this.liveSteps += 1;
+    const step = this.track(async () => {
       await this.lookup();
       const row = this.wf.rows.get(id);
       if (row) {
         this.checkSlot(id, name, row);
-        if (row.error) throw Object.assign(new Error(row.error.message), { name: row.error.name });
+        if (row.error) throw Object.assign(new Error(row.error.message), clone(row.error));
         return clone(row.output as T);
       }
       if (this.wf.hasRecorded(name)) this.wf.stats.reruns.push(name);
@@ -246,7 +257,7 @@ export class SimExecution {
         this.wf.record({
           id,
           name,
-          error: { name: e.name, message: e.message },
+          error: { ...clone({ ...e }), name: e.name, message: e.message },
           intent,
           recordedAt: this.now(),
         });
@@ -257,10 +268,15 @@ export class SimExecution {
       this.wf.record({ id, name, output: clone(output), intent, recordedAt: this.now() });
       return clone(output);
     });
+    const settled = (): void => {
+      this.liveSteps -= 1;
+    };
+    step.then(settled, settled);
+    return step;
   }
 
   sleepms(ms: number, intent?: string): Promise<void> {
-    const id = this.reserve();
+    const id = this.reserve(SLEEP);
     if (ms <= 0) {
       this.rowless.push({ id, why: 'zero sleep' });
       return Promise.resolve();
@@ -274,8 +290,8 @@ export class SimExecution {
   }
 
   recv<T>(topic: string, timeout?: RecvTimeout, intent?: string): Promise<T | null> {
-    const id = this.reserve();
-    const timeoutId = this.reserve();
+    const id = this.reserve(RECV);
+    const timeoutId = this.reserve(SLEEP);
     return this.track(async () => {
       await this.lookup();
       const row = this.wf.rows.get(id);
@@ -315,7 +331,8 @@ export class SimExecution {
     return running;
   }
 
-  private reserve(): number {
+  private reserve(name: string): number {
+    this.issued.push(name);
     return this.counter++;
   }
 
@@ -390,11 +407,21 @@ export class SimDbosDurableStep extends DbosDurableStep {
     return this.execution.sleepms(ms, name);
   }
 
-  override waitForEvent<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null> {
+  override receive<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return this.execution.recv<T>(topic, timeoutMs / 1000, name);
   }
 
   override waitInStep(ms: number): Promise<void> {
     return this.clock.sleep(ms);
   }
+}
+
+/** The sequencer's DBOS calls over the model, each passing its unit's name as the intent. */
+export function simOps(execution: SimExecution, clock: VirtualClock): SequencedOps {
+  return {
+    runStep: (fn, name) => execution.runStep(fn, name),
+    sleepms: (ms, name) => execution.sleepms(ms, name),
+    recv: (topic, options, name) => execution.recv(topic, options, name),
+    now: () => clock.now(),
+  };
 }

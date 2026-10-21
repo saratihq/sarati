@@ -1,8 +1,8 @@
 {
-  "build": "4bd5caa9b5823584f5bc148e0bb1a96604c7ad4d",
-  "recordedAt": 1792437372615,
+  "build": "bdf9cd749b85af69992166e976f613e77e030088",
+  "recordedAt": 1792469016476,
   "runId": "golden-parked-after-fan-out",
-  "orgId": "1209d37a-d10c-4f81-b832-ffb318943224",
+  "orgId": "4c1f3c91-c5a5-4b46-8c3c-e6b656587bcc",
   "app": {
     "runtime_runs": [
       {
@@ -59,14 +59,14 @@
         "status": "waiting",
         "outputs": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:12.478112+04:00",
+        "started_at": "2026-10-20T08:03:36.336602+04:00",
         "finished_at": null,
         "workflow_id": null,
         "source": "api",
         "waiting_node_id": "approve",
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:12.533836+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:12.533836+04:00",
+        "waiting_since": "2026-10-20T08:03:36.397635+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:36.397635+04:00",
         "decided_by": null,
         "decided_at": null,
         "environment": null,
@@ -76,12 +76,12 @@
         "dry_run": false,
         "parent_run_id": null,
         "parent_step_key": null,
-        "org_id": "1209d37a-d10c-4f81-b832-ffb318943224"
+        "org_id": "4c1f3c91-c5a5-4b46-8c3c-e6b656587bcc"
       }
     ],
     "runtime_run_steps": [
       {
-        "id": "85efc7d1-b984-4f0d-bb2e-b78a13318241",
+        "id": "2759670e-1ba8-463a-8cd2-c4996fe31945",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
         "step_key": "approve",
         "node_id": "approve",
@@ -89,15 +89,15 @@
         "status": "running",
         "output": null,
         "error": null,
-        "started_at": "2026-10-19T23:16:12.533836+04:00",
+        "started_at": "2026-10-20T08:03:36.397635+04:00",
         "finished_at": null,
         "pinned": false,
         "continued": false,
         "attempts": 1,
         "warnings": null,
         "waiting_topic": "approval",
-        "waiting_since": "2026-10-19T23:16:12.533836+04:00",
-        "waiting_timeout_at": "2026-10-19T23:26:12.533836+04:00",
+        "waiting_since": "2026-10-20T08:03:36.397635+04:00",
+        "waiting_timeout_at": "2026-10-20T08:13:36.397635+04:00",
         "claimed_at": null,
         "delivery_topic": null,
         "claimed_by": null,
@@ -107,7 +107,7 @@
         "decided_at": null
       },
       {
-        "id": "a4f45e50-342a-421a-8bc6-beac74eb9630",
+        "id": "b07a87d2-62d7-4757-b8e8-b13a6e844a6a",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
         "step_key": "fork|0/a",
         "node_id": "a",
@@ -117,8 +117,8 @@
           "ran": "a"
         },
         "error": null,
-        "started_at": "2026-10-19T23:16:12.495754+04:00",
-        "finished_at": "2026-10-19T23:16:12.533422+04:00",
+        "started_at": "2026-10-20T08:03:36.360368+04:00",
+        "finished_at": "2026-10-20T08:03:36.396952+04:00",
         "pinned": false,
         "continued": false,
         "attempts": 1,
@@ -135,7 +135,7 @@
         "decided_at": null
       },
       {
-        "id": "31df8675-7c4b-4b54-96a2-23a3d999f812",
+        "id": "e524b1a9-b696-4149-97ea-6fae684330fe",
         "run_id": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
         "step_key": "fork|1/b",
         "node_id": "b",
@@ -145,8 +145,8 @@
           "ran": "b"
         },
         "error": null,
-        "started_at": "2026-10-19T23:16:12.495755+04:00",
-        "finished_at": "2026-10-19T23:16:12.533212+04:00",
+        "started_at": "2026-10-20T08:03:36.360397+04:00",
+        "finished_at": "2026-10-20T08:03:36.396773+04:00",
         "pinned": false,
         "continued": false,
         "attempts": 1,
@@ -177,8 +177,8 @@
         "output": null,
         "error": null,
         "executor_id": "local",
-        "created_at": 1792437372484,
-        "updated_at": 1792437372485,
+        "created_at": 1792469016342,
+        "updated_at": 1792469016342,
         "application_version": "orchestr-1",
         "application_id": "",
         "class_name": null,
@@ -187,13 +187,13 @@
         "queue_name": null,
         "workflow_timeout_ms": null,
         "workflow_deadline_epoch_ms": null,
-        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-parked-after-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"code\",\"id\":\"a\",\"code\":\"return { ran: 'a' };\",\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"code\",\"id\":\"b\",\"code\":\"return { ran: 'b' };\",\"guards\":[]}]}],\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"fork\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"1209d37a-d10c-4f81-b832-ffb318943224\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
+        "inputs": "{\"json\":[{\"plan\":{\"id\":\"plan-golden-parked-after-fan-out\",\"nodes\":[{\"kind\":\"parallel\",\"id\":\"fork\",\"branches\":[{\"id\":\"fork#branch0\",\"nodes\":[{\"kind\":\"code\",\"id\":\"a\",\"code\":\"return { ran: 'a' };\",\"guards\":[]}]},{\"id\":\"fork#branch1\",\"nodes\":[{\"kind\":\"code\",\"id\":\"b\",\"code\":\"return { ran: 'b' };\",\"guards\":[]}]}],\"guards\":[]},{\"kind\":\"waitForEvent\",\"id\":\"approve\",\"topic\":\"approval\",\"timeoutMs\":600000,\"guards\":[{\"source\":\"fork\",\"port\":0}]}]},\"externalUserId\":\"00000000-0000-0000-0000-000000000001\",\"runId\":\"00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out\",\"initialScope\":null,\"environment\":null,\"environmentId\":null,\"orgId\":\"4c1f3c91-c5a5-4b46-8c3c-e6b656587bcc\",\"sharedTopicsByStep\":true}],\"meta\":{\"values\":{\"0.initialScope\":[\"undefined\"],\"0.environment\":[\"undefined\"],\"0.environmentId\":[\"undefined\"]}},\"__dbos_serializer\":\"superjson\"}",
         "started_at_epoch_ms": null,
         "deduplication_id": null,
         "priority": 0,
         "queue_partition_key": null,
         "forked_from": null,
-        "owner_xid": "22d180b2-fa94-45d2-a8d8-bc6734df6efa",
+        "owner_xid": "fe7fc83e-b3b9-4008-9375-ded59f44bf47",
         "parent_workflow_id": null,
         "serialization": "js_superjson",
         "delay_until_epoch_ms": null,
@@ -212,8 +212,8 @@
         "error": null,
         "function_name": "plan-golden-parked-after-fan-out:fork|0/a",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437372497,
-        "completed_at_epoch_ms": 1792437372530,
+        "started_at_epoch_ms": 1792469016361,
+        "completed_at_epoch_ms": 1792469016394,
         "serialization": "js_superjson"
       },
       {
@@ -223,19 +223,19 @@
         "error": null,
         "function_name": "plan-golden-parked-after-fan-out:fork|1/b",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437372497,
-        "completed_at_epoch_ms": 1792437372530,
+        "started_at_epoch_ms": 1792469016362,
+        "completed_at_epoch_ms": 1792469016394,
         "serialization": "js_superjson"
       },
       {
         "workflow_uuid": "00000000-0000-0000-0000-000000000001:golden-parked-after-fan-out",
         "function_id": 3,
-        "output": "1792437972535",
+        "output": "1792469616399",
         "error": null,
         "function_name": "DBOS.sleep",
         "child_workflow_id": null,
-        "started_at_epoch_ms": 1792437372535,
-        "completed_at_epoch_ms": 1792437372535,
+        "started_at_epoch_ms": 1792469016399,
+        "completed_at_epoch_ms": 1792469016399,
         "serialization": "portable_json"
       }
     ]

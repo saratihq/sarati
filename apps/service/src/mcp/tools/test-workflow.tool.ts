@@ -48,6 +48,8 @@ const Input = z.object({
 
 const Step = z.object({
   node_id: z.string(),
+  /** The step's key: its node id under the branch, loop round or error lane it ran in. */
+  step_key: z.string(),
   /** Honesty notes from the rail — the step still succeeded. */
   warnings: z.array(z.string()),
 });
@@ -77,7 +79,11 @@ function isHandle(outcome: RunOutcome): outcome is RunHandle {
 }
 
 function stepsOf(result: RunResult): z.infer<typeof Step>[] {
-  return result.trace.map((entry) => ({ node_id: entry.nodeId, warnings: entry.warnings ?? [] }));
+  return result.trace.map((entry) => ({
+    node_id: entry.node,
+    step_key: entry.nodeId,
+    warnings: entry.warnings ?? [],
+  }));
 }
 
 /**
@@ -123,6 +129,7 @@ export class TestWorkflowTool implements McpTool {
       initialScope: args.trigger_payload ? { trigger: args.trigger_payload } : undefined,
       dryRun,
       awaitMs: args.await_ms ?? DEFAULT_AWAIT_MS,
+      authored: args.workflow_ir !== undefined,
     });
 
     return this.report(outcome, dryRun, ctx, ir);

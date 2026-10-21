@@ -156,6 +156,19 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     expect(typeof res.data.confirmation_token).toBe('string');
   });
 
+  it.each([
+    ['spelling an error lane copy’s step key', 'a#error/h'],
+    ['outside the authored id format', 'a.b'],
+  ])('refuses a document with a node id %s before any step runs', async (_what, id) => {
+    posts = 0;
+    const ir = doc('refused');
+    (ir.nodes as Array<Record<string, unknown>>)[0]!.id = id;
+    const res = await call(dryKey, { workflow_ir: ir });
+    expect(res.ok).toBe(false);
+    expect(res.text).toContain(`Node id "${id}"`);
+    expect(posts).toBe(0);
+  });
+
   it('a preview-only key cannot fire for real, however it asks', async () => {
     posts = 0;
     const dry = await call(dryKey, { workflow_ir: doc('nope') });

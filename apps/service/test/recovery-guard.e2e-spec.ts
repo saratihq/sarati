@@ -8,15 +8,16 @@ import { promisify } from 'node:util';
 import { Client } from 'pg';
 
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
+import { RUN_PLAN_V2_WORKFLOW } from '../src/dbos/run-plan-workflow';
 import { failedNodeIdOf, NOT_RESUMED_STEP_ERROR } from '../src/runs/run-failure';
-import { GOLDEN_DIR, restoreGoldenHistory } from './support/golden-history';
+import { GOLDEN_DIR, PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { bootService, startService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 const WINDOW_MS = 10 * 60_000;
-// The last engine change before the guard, and v0.2.23, the release before it; its waits on one topic all share a receive.
-const LATEST = '4bd5caa';
+// v0.2.24, the build before this one, and v0.2.23, the release before it, whose waits on one topic all share a receive.
+const LATEST = PREVIOUS_BUILD;
 const RELEASED = '0af0a76';
 const EXPOSED = [
   'inside-step-fan-out',
@@ -46,9 +47,10 @@ describe('the recovery guard (e2e)', () => {
   let dbos: Client;
   let service: ServiceProcess | undefined;
   const hits = new Map<string, number>();
+  let slowAnswers = false;
   const fixture = createHttpServer((req, res) => {
     hits.set(req.url ?? '', (hits.get(req.url ?? '') ?? 0) + 1);
-    if (req.url === '/slow') return;
+    if (req.url === '/slow' && !slowAnswers) return;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end('{"ok":true}');
   });
@@ -221,10 +223,12 @@ describe('the recovery guard (e2e)', () => {
       });
     }, 120_000);
 
-    it('reports, reading only, which runs in flight would resume, which would fail and which had ended', () => {
+    it('reports, reading only, which runs an earlier version started would resume, which would fail and which had ended', () => {
       const lines = report.trim().split('\n');
       const failing = RECORDED_EXPOSED.length + 1;
-      expect(lines[0]).toBe('Runs in flight, as of now; each is judged again when it recovers.');
+      expect(lines[0]).toBe(
+        'Runs an earlier version started, in flight as of now; each is judged again when it recovers.',
+      );
       expect(lines).toHaveLength(RECORDED_RESUMABLE.length + failing + 1 + 2);
       for (const golden of RECORDED_RESUMABLE) {
         expect(lines).toContain(`would resume  ${MOCK_USER_ID}:${runIdOf(golden)}`);
@@ -241,9 +245,9 @@ describe('the recovery guard (e2e)', () => {
       expect(endedByReport).toBe(0);
     });
 
-    it('counts at boot how many runs in flight can resume, how many will fail and how many had ended', () => {
+    it('counts at boot how many runs an earlier version started can resume, how many will fail and how many had ended', () => {
       expect(service!.log()).toContain(
-        `Runs in flight at boot: ${RECORDED_RESUMABLE.length} can resume, ${RECORDED_EXPOSED.length + 1} can't be resumed safely and will fail, 1 had already ended`,
+        `Runs an earlier version started, in flight at boot: ${RECORDED_RESUMABLE.length} can resume, ${RECORDED_EXPOSED.length + 1} can't be resumed safely and will fail, 1 had already ended`,
       );
     });
 
@@ -511,7 +515,22 @@ describe('the recovery guard (e2e)', () => {
       'other-executor': { executor: 'elsewhere' },
       'later-build-ended': { name: 'orchestr.runPlan.later', status: 'ERROR' },
     };
+    // A run this build started on the sequenced engine, parked, whose workflow is then another executor's.
+    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
+    expect(
+      (await post('/api/runs/async', { run_id: 'v2-elsewhere', plan: { id: 'plan-v2-elsewhere', nodes } }))
+        .status,
+    ).toBe(201);
+    await eventually(
+      () => parkedSteps('v2-elsewhere'),
+      (rows) => rows.length === 1,
+      'v2-elsewhere parked',
+    );
     await reboot(async () => {
+      await dbos.query(
+        `UPDATE dbos.workflow_status SET executor_id = 'elsewhere' WHERE workflow_uuid = $1 AND name = $2`,
+        [`${MOCK_USER_ID}:v2-elsewhere`, RUN_PLAN_V2_WORKFLOW],
+      );
       for (const [runId, as] of Object.entries(workflows)) {
         await restoreGoldenHistory(db, dbos, `${LATEST}/linear-parked`, runId);
         await dbos.query(
@@ -526,7 +545,7 @@ describe('the recovery guard (e2e)', () => {
     expect((await decide('later-build', 'approve')).status).toBe(200);
     expect(await runOf('later-build')).toMatchObject({ status: 'waiting' });
     expect(await stepsWhere('later-build', 'claimed_by IS NOT NULL')).toHaveLength(1);
-    for (const runId of ['other-executor', 'later-build-ended']) {
+    for (const runId of ['other-executor', 'v2-elsewhere', 'later-build-ended']) {
       const refused = await decide(runId, 'approve');
       expect(refused.status).toBe(409);
       expect(((await refused.json()) as { detail: string }).detail).toBe(
@@ -534,6 +553,33 @@ describe('the recovery guard (e2e)', () => {
       );
       expect(await stepsWhere(runId, 'claimed_at IS NOT NULL')).toEqual([]);
     }
+  }, 120_000);
+
+  it('takes the decision for a healthy run parked on the sequenced engine', async () => {
+    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
+    expect(
+      (await post('/api/runs/async', { run_id: 'healthy-v2', plan: { id: 'plan-healthy-v2', nodes } }))
+        .status,
+    ).toBe(201);
+    await eventually(
+      () => parkedSteps('healthy-v2'),
+      (rows) => rows.length === 1,
+      'healthy-v2 parked',
+    );
+    const [workflow] = (
+      await dbos.query<{ name: string }>(`SELECT name FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
+        `${MOCK_USER_ID}:healthy-v2`,
+      ])
+    ).rows;
+    expect(workflow?.name).toBe(RUN_PLAN_V2_WORKFLOW);
+    expect((await decide('healthy-v2', 'approve')).status).toBe(200);
+    expect(
+      await eventually(
+        () => runOf('healthy-v2'),
+        (row) => row?.status === 'completed',
+        'healthy-v2 done',
+      ),
+    ).toEqual({ status: 'completed', error: null });
   }, 120_000);
 
   it('refuses a decision for a run whose workflow ended while its row still waits, as when its recovery gave up', async () => {
@@ -608,7 +654,7 @@ describe('the recovery guard (e2e)', () => {
     );
   }, 120_000);
 
-  it('resumes a run parked before its fan-out, then refuses it once a crash catches it inside', async () => {
+  it('never judges a run this version started: caught inside its fan-out, it resumes and finishes', async () => {
     const get = (id: string) => ({
       kind: 'action',
       id,
@@ -642,17 +688,19 @@ describe('the recovery guard (e2e)', () => {
       'the fan-out under way',
     );
 
-    await reboot();
+    await reboot(() => {
+      slowAnswers = true;
+      return Promise.resolve();
+    });
     expect(
       await eventually(
         () => runOf('live'),
-        (row) => row?.status === 'error',
-        'live ended',
+        (row) => row?.status === 'completed',
+        'live done',
       ),
-    ).toEqual({
-      status: 'error',
-      error: NOT_RESUMABLE['side-by-side'],
-    });
-    expect([hits.get('/slow'), hits.get('/fast')]).toEqual([1, 1]);
+    ).toEqual({ status: 'completed', error: null });
+    // The recorded step never runs again; the one in flight at the crash does, as any unrecorded step does.
+    expect([hits.get('/slow'), hits.get('/fast')]).toEqual([2, 1]);
+    expect(service!.log()).not.toContain(`Run ${MOCK_USER_ID}:live can't be resumed`);
   }, 120_000);
 });

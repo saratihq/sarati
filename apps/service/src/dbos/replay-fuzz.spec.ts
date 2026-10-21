@@ -15,12 +15,23 @@ import {
   type Yield,
 } from '../runtime/random-dag-plan.testkit';
 import { replayRoutes, verdict as guardVerdict } from '../runtime/recovery-exposure';
-import { EXECUTION, FUZZ_SCOPE, audit, crashAndReplay, type ReplayVerdict } from './replay-fuzz.testkit';
+import {
+  EXECUTION,
+  FUZZ_SCOPE,
+  audit,
+  cancelDuring,
+  crashAndReplay,
+  faultDuring,
+  type Engine,
+  type ReplayVerdict,
+} from './replay-fuzz.testkit';
 import { SLEEP, type OpRow } from './sim-dbos.testkit';
 
 const SEEDS = 400;
 const ROUTED_SEEDS = 200;
 const CRASH_POINTS = [0.1, 0.3, 0.5, 0.7, 0.9];
+// A cancel is seen at the next op, or within one 10 s recv poll; a step body already running is the most added to that.
+const CANCEL_BOUND_MS = 11_000;
 
 interface Totals {
   loud: number;
@@ -31,9 +42,13 @@ interface Totals {
   stuck: number;
   budgetRefusals: number;
   inFlightAtEnd: number;
+  inFlightAtHealthyEnd: number;
+  diverged: number;
   wrongLane: number;
   drifted: number;
   answeredNull: number;
+  stepsInFlightAtEnd: number;
+  writesAfterEnd: number;
   hanging: number[];
   /** Audit violations of runs that did not diverge. */
   badLogs: string[];
@@ -53,6 +68,7 @@ const wentWrong = (verdict: ReplayVerdict): boolean =>
     verdict.silent +
     verdict.reruns +
     verdict.misdelivered +
+    verdict.diverged +
     verdict.wrongLane +
     verdict.drifted +
     verdict.answeredNull >
@@ -85,8 +101,8 @@ const REASONS: Array<[RegExp, string]> = [
   [/can't be read/, 'unreadable model turn'],
 ];
 
-/** Every plan, uninterrupted, then killed and replayed on today's engine, summed. */
-async function fuzz(): Promise<Totals> {
+/** Every plan, uninterrupted, then killed and replayed on `engine`, summed; on the legacy engine, judged by its recovery guard too. */
+async function fuzz(engine: Engine): Promise<Totals> {
   const totals: Totals = {
     loud: 0,
     silent: 0,
@@ -96,9 +112,13 @@ async function fuzz(): Promise<Totals> {
     stuck: 0,
     budgetRefusals: 0,
     inFlightAtEnd: 0,
+    inFlightAtHealthyEnd: 0,
+    diverged: 0,
     wrongLane: 0,
     drifted: 0,
     answeredNull: 0,
+    stepsInFlightAtEnd: 0,
+    writesAfterEnd: 0,
     hanging: [],
     badLogs: [],
     anyBadLog: 0,
@@ -108,7 +128,7 @@ async function fuzz(): Promise<Totals> {
   };
   for (let seed = 1; seed <= SEEDS; seed++) {
     const plan = randomDagPlan(seeded(seed));
-    const verdict = await crashAndReplay(plan, seed);
+    const verdict = await crashAndReplay(plan, seed, engine);
     if (!verdict.firstSettled) totals.hanging.push(seed);
     const diverged = verdict.loud + verdict.silent + verdict.reruns + verdict.misdelivered > 0;
     const logs = diverged ? verdict.firstAudit : [...verdict.firstAudit, ...verdict.replayAudit];
@@ -122,9 +142,14 @@ async function fuzz(): Promise<Totals> {
     totals.stuck += verdict.stuck ? 1 : 0;
     totals.budgetRefusals += verdict.budgetRefusals;
     totals.inFlightAtEnd += verdict.inFlightAtEnd;
+    totals.inFlightAtHealthyEnd += verdict.inFlightAtHealthyEnd;
+    totals.diverged += verdict.diverged;
     totals.wrongLane += verdict.wrongLane;
     totals.drifted += verdict.drifted;
     totals.answeredNull += verdict.answeredNull;
+    totals.stepsInFlightAtEnd += verdict.stepsInFlightAtEnd;
+    totals.writesAfterEnd += verdict.writesAfterEnd;
+    if (engine !== 'legacy') continue;
     if (wentWrong(verdict)) totals.mispaired.push(seed);
     const judged = judgedAtCrash(plan, verdict);
     if (!judged.resumable) {
@@ -136,16 +161,18 @@ async function fuzz(): Promise<Totals> {
   const { hanging, badLogs, mispaired, refused, reasons, ...counts } = totals;
   const safeRefused = refused.filter((seed) => !mispaired.includes(seed)).length;
   process.stdout.write(
-    `today's engine over ${SEEDS} plans: ${JSON.stringify({ ...counts, hanging: hanging.length, badLogs: badLogs.length })}\n` +
-      `the recovery guard: ${mispaired.length} replays went wrong, ${refused.length} refused ` +
-      `(${refused.length - safeRefused} of them went wrong, ${safeRefused} would have replayed safely), ` +
-      `by reason ${JSON.stringify(reasons)}\n`,
+    `${engine} over ${SEEDS} plans: ${JSON.stringify({ ...counts, hanging: hanging.length, badLogs: badLogs.length })}\n` +
+      (engine === 'legacy'
+        ? `the recovery guard: ${mispaired.length} replays went wrong, ${refused.length} refused ` +
+          `(${refused.length - safeRefused} of them went wrong, ${safeRefused} would have replayed safely), ` +
+          `by reason ${JSON.stringify(reasons)}\n`
+        : ''),
   );
   return totals;
 }
 
 let legacy: Promise<Totals> | undefined;
-const fuzzOnce = (): Promise<Totals> => (legacy ??= fuzz());
+const fuzzOnce = (): Promise<Totals> => (legacy ??= fuzz('legacy'));
 
 describe('crash-and-replay fuzz over SimDBOS', () => {
   const unhandled: unknown[] = [];
@@ -184,7 +211,77 @@ describe('crash-and-replay fuzz over SimDBOS', () => {
     expect(legacy.drifted).toBeGreaterThan(0);
     expect(legacy.answeredNull).toBeGreaterThan(0);
     expect(legacy.budgetRefusals).toBeGreaterThan(0);
-    expect([legacy.fatalLost, legacy.inFlightAtEnd]).toEqual([0, 0]);
+    expect([legacy.fatalLost, legacy.inFlightAtEnd, legacy.writesAfterEnd]).toEqual([0, 0, 0]);
+  }, 120_000);
+
+  it('replays every plan through the sequencer with no mis-pair of any kind, where the same lanes without it mis-pair', async () => {
+    const sequenced = await fuzz('sequenced');
+    expect({ ...sequenced, budgetRefusals: 0, inFlightAtEnd: 0 }).toEqual({
+      loud: 0,
+      silent: 0,
+      reruns: 0,
+      misdelivered: 0,
+      fatalLost: 0,
+      stuck: 0,
+      budgetRefusals: 0,
+      inFlightAtEnd: 0,
+      inFlightAtHealthyEnd: 0,
+      diverged: 0,
+      wrongLane: 0,
+      drifted: 0,
+      answeredNull: 0,
+      stepsInFlightAtEnd: 0,
+      writesAfterEnd: 0,
+      hanging: [],
+      badLogs: [],
+      anyBadLog: 0,
+      mispaired: [],
+      refused: [],
+      reasons: {},
+    });
+    expect(sequenced.budgetRefusals).toBeGreaterThan(0);
+
+    const unsequenced = await fuzz('unsequenced');
+    expect(unsequenced.loud).toBeGreaterThan(0);
+    expect(unsequenced.silent).toBeGreaterThan(0);
+    expect(unsequenced.reruns).toBeGreaterThan(0);
+    expect(unsequenced.misdelivered).toBeGreaterThan(0);
+    expect(unsequenced.drifted).toBeGreaterThan(0);
+  }, 240_000);
+
+  it('still breaks a sequenced replay on the shared in-memory sub-workflow budget that the charged one replaces', async () => {
+    const shared = await fuzz('sequenced-shared');
+    expect(shared.loud + shared.diverged + shared.drifted).toBeGreaterThan(0);
+  }, 120_000);
+
+  it("ends every sequenced run on a refused write that left no row, never branching on it, where today's engine goes past it", async () => {
+    const tally = async (engine: Engine): Promise<{ injected: number; absorbed: number }> => {
+      const counts = { injected: 0, absorbed: 0 };
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const fault = await faultDuring(randomDagPlan(seeded(seed)), seed, engine);
+        counts.injected += fault.injected ? 1 : 0;
+        counts.absorbed += fault.absorbed ? 1 : 0;
+      }
+      return counts;
+    };
+    const [sequenced, legacy] = [await tally('sequenced'), await tally('legacy')];
+    process.stdout.write(`refused writes: ${JSON.stringify({ sequenced, legacy })}\n`);
+    expect(sequenced.absorbed).toBe(0);
+    expect(sequenced.injected).toBeGreaterThan(SEEDS / 2);
+    expect(legacy.absorbed).toBeGreaterThan(0);
+  }, 240_000);
+
+  it('ends every sequenced run within one poll of a cancel, whatever it had in flight', async () => {
+    const latencies: number[] = [];
+    let cancelled = 0;
+    for (let seed = 1; seed <= SEEDS; seed++) {
+      const ended = await cancelDuring(randomDagPlan(seeded(seed)), seed);
+      if (!ended) continue;
+      latencies.push(ended.latencyMs);
+      if (ended.cancelled) cancelled += 1;
+    }
+    expect(latencies.filter((ms) => ms > CANCEL_BOUND_MS)).toEqual([]);
+    expect(cancelled).toBeGreaterThan(SEEDS / 2);
   }, 120_000);
 
   it('has the recovery guard refuse every run whose replay goes wrong, judged on what the crash left', async () => {
@@ -226,7 +323,7 @@ describe('crash-and-replay fuzz over SimDBOS', () => {
     const wrong: number[] = [];
     const missed: number[] = [];
     for (let seed = 1; seed <= 60; seed++) {
-      const verdict = await crashAndReplay(fuzz, seed);
+      const verdict = await crashAndReplay(fuzz, seed, 'legacy');
       if (!wentWrong(verdict)) continue;
       wrong.push(seed);
       const judged = judgedAtCrash(fuzz, verdict);
@@ -322,7 +419,7 @@ describe('crash-and-replay fuzz over SimDBOS', () => {
         top = new Set(fuzz.plan.nodes);
         for (const crashAt of CRASH_POINTS) {
           replayed.clear();
-          const replay = await crashAndReplay(fuzz, seed, crashAt);
+          const replay = await crashAndReplay(fuzz, seed, 'legacy', crashAt);
           const run = { plan: fuzz.plan, pins: fuzz.pins, initialScope: FUZZ_SCOPE };
           for (const [id, port] of replayRoutes(run, replay.atCrash.ops)) {
             if (!replayed.has(id)) continue;

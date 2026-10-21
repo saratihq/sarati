@@ -1,7 +1,17 @@
 import { DBOS, Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
 import type { RuntimeRunStatus } from '../database/entities/runtime-run.entity';
-import { DeterminismError, RunCancelledError, type DurableStep } from '../providers/durable-step';
+import {
+  DeterminismError,
+  PlainDurableStep,
+  RunCancelledError,
+  type DurableStep,
+  type EventWait,
+  type Lane,
+  type Outcome,
+  type ParkHooks,
+  type Pause,
+} from '../providers/durable-step';
 
 /** Whether a run's rejection is the cancel someone asked for, on either rail — not a failure. */
 export function isDurableCancellation(err: unknown): boolean {
@@ -21,31 +31,31 @@ export function isUnknownDurableRun(err: unknown): boolean {
  * `DurableStep` backed by DBOS: each step's result is checkpointed, so a resume returns the
  * memoized value rather than re-firing the side effect. Only meaningful inside a DBOS workflow.
  */
-export class DbosDurableStep implements DurableStep {
-  run<T>(name: string, fn: () => Promise<T>): Promise<T> {
+export class DbosDurableStep extends PlainDurableStep {
+  override run<T>(name: string, fn: () => Promise<T>): Promise<T> {
     return DBOS.runStep(fn, { name });
   }
 
-  sleep(_name: string, ms: number): Promise<void> {
+  override sleep(_name: string, ms: number): Promise<void> {
     return DBOS.sleepms(ms);
   }
 
   /** DBOS durable receive: resumed by `DBOS.send(runId, payload, topic)` (DbosRuntime.sendEvent). */
-  waitForEvent<T = unknown>(_name: string, topic: string, timeoutMs: number): Promise<T | null> {
+  override receive<T = unknown>(_name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return DBOS.recv<T>(topic, timeoutMs / 1000);
   }
 
   // A step's body may not call DBOS, and DBOS raises a cancel only at its next call.
-  waitInStep(ms: number): Promise<void> {
+  override waitInStep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  isCancellation(err: unknown): boolean {
+  override isCancellation(err: unknown): boolean {
     return err instanceof DbosErrors.DBOSWorkflowCancelledError;
   }
 
   // Only `instanceof` on the live throw: DBOS names a step mismatch plain `Error`, and replays a recorded error as one.
-  isFatal(err: unknown): boolean {
+  override isFatal(err: unknown): boolean {
     return (
       this.isCancellation(err) ||
       err instanceof DbosErrors.DBOSUnexpectedStepError ||
@@ -54,9 +64,9 @@ export class DbosDurableStep implements DurableStep {
   }
 
   // DBOS raises a cancel only at its next call.
-  throwIfCancelled(): void {}
+  override throwIfCancelled(): void {}
 
-  cancelSeenOnRow(): Error {
+  override cancelSeenOnRow(): Error {
     return new DbosErrors.DBOSWorkflowCancelledError(DBOS.workflowID ?? '');
   }
 }
@@ -93,14 +103,30 @@ export class RowGatedDurableStep implements DurableStep {
     return this.inner.run(name, fn);
   }
 
-  async sleep(name: string, ms: number): Promise<void> {
-    await this.gate();
-    return this.inner.sleep(name, ms);
+  root<T>(fn: () => Promise<T>): Promise<T> {
+    return this.inner.root(fn);
   }
 
-  async waitForEvent<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null> {
+  spawn(fn: () => Promise<unknown>): Lane {
+    return this.inner.spawn(fn);
+  }
+
+  joinAny(lanes: readonly Lane[]): Promise<{ lane: Lane; outcome: Outcome }> {
+    return this.inner.joinAny(lanes);
+  }
+
+  joinAll(lanes: readonly Lane[]): Promise<Outcome[]> {
+    return this.inner.joinAll(lanes);
+  }
+
+  async delay(pause: Pause, hooks: ParkHooks): Promise<Date | null> {
     await this.gate();
-    return this.inner.waitForEvent<T>(name, topic, timeoutMs);
+    return this.inner.delay(pause, hooks);
+  }
+
+  async waitForEvent<T = unknown>(wait: EventWait, hooks: ParkHooks): Promise<T | null> {
+    await this.gate();
+    return this.inner.waitForEvent<T>(wait, hooks);
   }
 
   waitInStep(ms: number): Promise<void> {

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
-import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
+import { PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
@@ -187,6 +187,77 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     });
     expect(service!.exitCode).toBeNull();
     expect((await fetch(url('/api/health'))).ok).toBe(true);
+  }, 120_000);
+
+  it('parks the two copies of a handler two failing steps share each on its own step’s topic, and keeps them apart across a crash', async () => {
+    const runKey = `${MOCK_USER_ID}:shared-handler`;
+    const node = (id: string, node_type: string, parameters: Record<string, unknown>) => ({
+      id,
+      name: id,
+      node_type,
+      type_version: 1,
+      parameters,
+      position: { x: 0, y: 0 },
+      metadata: {},
+    });
+    const failing = (id: string) =>
+      node(id, 'orchestr:code', { language: 'js', code: `throw new Error("${id} failed")` });
+    const toHandler = (source: string) => ({
+      id: `${source}->approve`,
+      source_node_id: source,
+      source_port: 0,
+      target_node_id: 'approve',
+      target_port: 0,
+      port_type: 'error',
+    });
+    const workflow_ir = {
+      version: '1.0',
+      name: 'shared handler',
+      description: '',
+      nodes: [
+        failing('a'),
+        failing('b'),
+        node('approve', 'orchestr:wait_for_event', { topic: 'approval', timeout_ms: WINDOW_MS }),
+      ],
+      edges: [toHandler('a'), toHandler('b')],
+      settings: { execution_order: 'v1', extra: {} },
+      metadata: {},
+    };
+    expect((await post('/api/runs/async', { run_id: 'shared-handler', workflow_ir })).status).toBe(201);
+    const routed = [
+      { step_key: 'a#error/approve', delivery_topic: 'orchestr:wait:a#error/approve' },
+      { step_key: 'b#error/approve', delivery_topic: 'orchestr:wait:b#error/approve' },
+    ];
+    const parked = async () =>
+      (
+        await db.query<{ step_key: string; delivery_topic: string }>(
+          `SELECT step_key, delivery_topic FROM runtime_run_steps
+            WHERE run_id = $1 AND waiting_topic = 'approval' AND finished_at IS NULL ORDER BY step_key`,
+          [runKey],
+        )
+      ).rows;
+    await eventually(parked, (rows) => rows.length === 2, 'both copies parked');
+    expect(await parked()).toEqual(routed);
+
+    await crash();
+    await boot();
+    await eventually(parked, (rows) => rows.length === 2, 'both copies parked again');
+    expect(await parked()).toEqual(routed);
+
+    for (const { step_key } of routed) {
+      const decided = await post('/api/runs/shared-handler/events', {
+        topic: 'approval',
+        step_key,
+        payload: { for: step_key },
+      });
+      expect(decided.status).toBe(200);
+    }
+    await eventually(parked, (rows) => rows.length === 0, 'both copies answered');
+    const answered = await db.query<{ step_key: string; output: unknown }>(
+      `SELECT step_key, output FROM runtime_run_steps WHERE run_id = $1 AND node_id = 'approve' ORDER BY step_key`,
+      [runKey],
+    );
+    expect(answered.rows).toEqual(routed.map(({ step_key }) => ({ step_key, output: { for: step_key } })));
   }, 120_000);
 
   it('keeps when a wait ended across a crash and its replay, so recovery never restarts the run’s time in flight', async () => {
@@ -386,29 +457,13 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     expect((await json('/api/runs/claimed')).decided_by).toMatchObject({ id: MOCK_USER_ID });
   }, 120_000);
 
-  const approval = (id: string) => ({ kind: 'waitForEvent', id, topic: 'approval', timeoutMs: WINDOW_MS });
-  const fork = { kind: 'parallel', id: 'fork', branches: [[approval('a1')], [approval('a2')]] };
-
-  /** A run from before waits were told apart, recovered before its fork: its two parallel waits share one receive. */
+  /** A run from before waits were told apart, as the legacy engine left it parked before its fork: once past it, its two waits share one receive. */
   async function sharedReceiveRun(runId: string): Promise<string> {
     const runKey = `${MOCK_USER_ID}:${runId}`;
-    const gate = { kind: 'waitForEvent', id: 'gate', topic: 'gate', timeoutMs: WINDOW_MS };
-    expect(
-      (await post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes: [gate, fork] } }))
-        .status,
-    ).toBe(201);
-    await eventually(
-      () => parkedIn(runId),
-      (p) => p.length === 1,
-      `${runId} parked at its gate`,
-    );
+    // Served once, the mock user has the org the restore moves the run into.
+    expect((await fetch(url('/api/runs/waiting'))).ok).toBe(true);
     await crash();
-    const rewritten = await dbos.query(
-      `UPDATE dbos.workflow_status SET inputs = replace(inputs, '"sharedTopicsByStep":true', '"sharedTopicsByStep":false')
-        WHERE workflow_uuid = $1 AND inputs LIKE '%"sharedTopicsByStep":true%'`,
-      [runKey],
-    );
-    expect(rewritten.rowCount).toBe(1);
+    await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/shared-receive-before-fan-out`, runId);
     await boot();
     expect((await post(`/api/runs/${runId}/events`, { topic: 'gate', payload: { d: 'go' } })).status).toBe(
       200,
@@ -537,38 +592,6 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     expect(kept.rows).toEqual([]);
   }, 120_000);
 
-  it('ends in error a run whose parallel waits were parked when it stopped, instead of parking them again', async () => {
-    const runKey = `${MOCK_USER_ID}:parked-fork`;
-    expect(
-      (
-        await post('/api/runs/async', {
-          run_id: 'parked-fork',
-          plan: { id: 'plan-parked-fork', nodes: [fork] },
-        })
-      ).status,
-    ).toBe(201);
-    await eventually(
-      () => parkedIn('parked-fork'),
-      (p) => p.length === 2,
-      'both parked-fork waits parked',
-    );
-    await crash();
-    await boot();
-    const ended = await eventually(
-      () =>
-        db.query<{ status: string; error: string | null }>(
-          `SELECT status, error FROM runtime_runs WHERE id = $1`,
-          [runKey],
-        ),
-      (res) => res.rows[0]?.status === 'error',
-      'parked-fork ended',
-    );
-    expect(ended.rows).toEqual([{ status: 'error', error: NOT_RESUMABLE['side-by-side'] }]);
-    expect(await parkedIn('parked-fork')).toEqual([]);
-    const listed = (await json('/api/runs/waiting')).runs as Array<Record<string, unknown>>;
-    expect(listed.filter((r) => r.run_id === 'parked-fork')).toEqual([]);
-  }, 120_000);
-
   it('never sends a decision again once its wait has given up, so the next wait on the topic is still a person’s', async () => {
     const runKey = `${MOCK_USER_ID}:late-claim`;
     const nodes = [
@@ -631,12 +654,16 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     expect((await completed('late-claim')).outputs).toMatchObject({ first: null, second: { d: 'second' } });
   }, 120_000);
 
-  it('ends in error a run recovered after an error lane finished beside another branch, running nothing again', async () => {
+  it('ends in error a run whose recovery finds another op beside an error lane that finished, running nothing after it', async () => {
     const hits = new Map<string, number>();
     const fixture = createHttpServer((req, res) => {
       hits.set(req.url ?? '', (hits.get(req.url ?? '') ?? 0) + 1);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"ok":true}');
+      const answer = (): void => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"ok":true}');
+      };
+      if (req.url === '/slow') setTimeout(answer, 500);
+      else answer();
     });
     await new Promise<void>((r) => fixture.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
@@ -647,6 +674,17 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       props: { method: 'GET', url: `${base}/${id}` },
     });
     const runKey = `${MOCK_USER_ID}:lane-beside`;
+    const ops = async (): Promise<Map<string, number>> =>
+      new Map(
+        (
+          await dbos.query<{ function_name: string; function_id: number }>(
+            `SELECT function_name, function_id FROM dbos.operation_outputs WHERE workflow_uuid = $1`,
+            [runKey],
+          )
+        ).rows.map((r) => [r.function_name, r.function_id]),
+      );
+    const handled = 'step|plan-lane-beside:fork|0/boom#error/handled';
+    const nap = 'deadline|fork|1/nap';
     try {
       const boom = {
         kind: 'code',
@@ -658,24 +696,28 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       const fork = {
         kind: 'parallel',
         id: 'fork',
-        branches: [[boom], [get('first'), { kind: 'delay', id: 'nap', ms: 20_000 }, get('after')]],
+        branches: [[boom], [get('slow'), { kind: 'delay', id: 'nap', ms: 20_000 }, get('after')]],
       };
       const nodes = [fork, get('tail')];
       expect(
         (await post('/api/runs/async', { run_id: 'lane-beside', plan: { id: 'plan-lane-beside', nodes } }))
           .status,
       ).toBe(201);
-      await eventually(
-        () =>
-          db.query(
-            `SELECT 1 FROM runtime_run_steps
-              WHERE run_id = $1 AND (step_key = 'fork|1/nap' OR (step_key = 'fork|0/handled' AND finished_at IS NOT NULL))`,
-            [runKey],
-          ),
-        (res) => res.rows.length === 2,
-        'the lane finished, its sibling napping',
+      const recorded = await eventually(
+        ops,
+        (now) => now.has(handled) && now.has(nap),
+        'the lane and the nap recorded',
       );
+      // A replay meets its ops in recorded order, so the sibling's next op comes after the lane's.
+      expect(recorded.get(nap)!).toBeGreaterThan(recorded.get(handled)!);
       await crash();
+      const moved = await dbos.query(
+        `UPDATE dbos.operation_outputs SET function_name = 'deadline|elsewhere'
+          WHERE workflow_uuid = $1 AND function_name = $2`,
+        [runKey, nap],
+      );
+      expect(moved.rowCount).toBe(1);
+
       await boot();
       const run = await eventually(
         () =>
@@ -686,7 +728,10 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
         (res) => res.rows[0]?.status !== 'running' && res.rows[0]?.status !== 'waiting',
         'the recovered run ended',
       );
-      expect(run.rows).toEqual([{ status: 'error', error: NOT_RESUMABLE['side-by-side'] }]);
+      expect(run.rows[0]!.status).toBe('error');
+      expect(run.rows[0]!.error).toMatch(
+        /deadline\|elsewhere was recorded when deadline\|fork\|1\/nap was expected/,
+      );
       const workflow = await eventually(
         () =>
           dbos.query<{ status: string }>(`SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
@@ -696,8 +741,82 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
         'the recovered workflow ended',
       );
       expect(workflow.rows[0]!.status).toBe('ERROR');
-      expect(Object.fromEntries(hits)).toEqual({ '/handled': 1, '/first': 1 });
+      expect(Object.fromEntries(hits)).toEqual({ '/handled': 1, '/slow': 1 });
     } finally {
+      await new Promise((r) => fixture.close(r));
+    }
+  }, 120_000);
+
+  it('resumes a run killed with a step in flight beside a parked wait, running no recorded step again and answering each wait its own decision', async () => {
+    const hits = new Map<string, number>();
+    let held = true;
+    const fixture = createHttpServer((req, res) => {
+      hits.set(req.url ?? '', (hits.get(req.url ?? '') ?? 0) + 1);
+      if (req.url === '/slow' && held) return;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ from: req.url }));
+    });
+    await new Promise<void>((r) => fixture.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
+    const get = (id: string) => ({
+      kind: 'action',
+      id,
+      actionId: 'http.send_request',
+      props: { method: 'GET', url: `${base}/${id}` },
+    });
+    const approval = (id: string) => ({ kind: 'waitForEvent', id, topic: 'approval', timeoutMs: WINDOW_MS });
+    const runKey = `${MOCK_USER_ID}:side-by-side`;
+    const parkedOn = async (): Promise<string[]> =>
+      (
+        await db.query<{ step_key: string }>(
+          `SELECT step_key FROM runtime_run_steps
+            WHERE run_id = $1 AND waiting_topic = 'approval' AND finished_at IS NULL ORDER BY step_key`,
+          [runKey],
+        )
+      ).rows.map((r) => r.step_key);
+    try {
+      const fork = {
+        kind: 'parallel',
+        id: 'fork',
+        branches: [[get('slow'), approval('a1')], [approval('a2'), get('fast')], [get('quick')]],
+      };
+      const nodes = [fork, get('last')];
+      expect(
+        (await post('/api/runs/async', { run_id: 'side-by-side', plan: { id: 'plan-side', nodes } })).status,
+      ).toBe(201);
+      await eventually(parkedOn, (keys) => keys.join() === 'fork|1/a2', 'a2 parked');
+      await eventually(
+        () =>
+          db.query(
+            `SELECT 1 FROM runtime_run_steps WHERE run_id = $1 AND step_key = 'fork|2/quick' AND finished_at IS NOT NULL`,
+            [runKey],
+          ),
+        (res) => res.rows.length === 1 && hits.get('/slow') === 1,
+        'quick done while slow is held',
+      );
+
+      await crash();
+      held = false;
+      await boot();
+      await eventually(parkedOn, (keys) => keys.join() === 'fork|0/a1,fork|1/a2', 'both waits parked');
+      for (const step_key of ['fork|1/a2', 'fork|0/a1']) {
+        expect(
+          (
+            await post('/api/runs/side-by-side/events', {
+              topic: 'approval',
+              step_key,
+              payload: { for: step_key },
+            })
+          ).status,
+        ).toBe(200);
+      }
+      expect((await completed('side-by-side')).outputs).toMatchObject({
+        a1: { for: 'fork|0/a1' },
+        a2: { for: 'fork|1/a2' },
+      });
+      expect(Object.fromEntries(hits)).toEqual({ '/slow': 2, '/quick': 1, '/fast': 1, '/last': 1 });
+    } finally {
+      fixture.closeAllConnections();
       await new Promise((r) => fixture.close(r));
     }
   }, 120_000);
@@ -735,10 +854,10 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
         'napping',
       );
       await crash();
-      // A name the plan issues, in another step's slot: the guard admits it, and DBOS refuses it at the lookup.
+      // Another op in the step's slot: what a replay that reaches its ops in a new order meets.
       const moved = await dbos.query(
-        `UPDATE dbos.operation_outputs SET function_name = 'plan-mismatched:after'
-          WHERE workflow_uuid = $1 AND function_name = 'plan-mismatched:first'`,
+        `UPDATE dbos.operation_outputs SET function_name = 'step|plan-mismatched:elsewhere'
+          WHERE workflow_uuid = $1 AND function_name = 'step|plan-mismatched:first'`,
         [runKey],
       );
       expect(moved.rowCount).toBe(1);
@@ -755,7 +874,7 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       );
       expect(run.rows[0]!.status).toBe('error');
       expect(run.rows[0]!.error).toMatch(
-        /plan-mismatched:after was recorded when plan-mismatched:first was expected/,
+        /step\|plan-mismatched:elsewhere was recorded when step\|plan-mismatched:first was expected/,
       );
       expect([hits.get('/first'), hits.get('/after')]).toEqual([1, undefined]);
     } finally {

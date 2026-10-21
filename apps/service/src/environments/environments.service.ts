@@ -11,6 +11,7 @@ import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { EventsService } from '../events/events.service';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
 import { validatedAppSlug } from '../providers/sdk-actions.registry';
 import { WEBHOOK_REGISTRATION_KEY } from '../providers/sdk-webhook.provider';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
@@ -83,6 +84,8 @@ export interface HeldWebhook {
 const DRAIN_CONCURRENCY = 5;
 
 const ENSURE_ATTEMPTS = 3;
+
+const DEFAULT_ENVS = [PROD_ENV, 'staging', UAT_ENV];
 
 const HAND_GIVEN_URLS = [
   { trigger: 'chat', nodeType: INCOMING_CHAT_PUBLIC, pathFor: chatPathFor },
@@ -173,6 +176,7 @@ export class EnvironmentsService {
   async create(orgId: string, rawName: string, actorUserId: string): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const rows = await rawQuery<{ id: string }>(
         em,
         `INSERT INTO environments (org_id, name, is_prod) VALUES ($1, $2, $3)
@@ -204,7 +208,8 @@ export class EnvironmentsService {
   ): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     const renamed = await this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId, true);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be renamed`, 409);
       if (env.name === UAT_ENV)
@@ -256,6 +261,7 @@ export class EnvironmentsService {
       this.triggerSignals.reconcileNow(workflowId),
     );
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       await lockDeletable(em, { environmentId: env.id }, `'${env.name}'`);
       await em.query(`DELETE FROM environments WHERE id = $1`, [env.id]);
       const receipt = { removed_pointers: removedPointers, unbound_triggers: holders.length };
@@ -278,7 +284,8 @@ export class EnvironmentsService {
     actorUserId: string,
   ): Promise<{ env: EnvironmentEntity; removedPointers: number; holders: string[] }> {
     return this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
       if (env.name === UAT_ENV)
@@ -322,11 +329,15 @@ export class EnvironmentsService {
     callerUserId: string,
   ): Promise<{ replaced_connection_id: string | null; also_in_environments: string[] }> {
     const result = await this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_key_share');
       // Visibility = ownership: a foreign or malformed-id connection is an indistinguishable 404.
       const notFound = new DomainError('Connection not found', 404);
       if (!isIdShape(connectionId)) throw notFound;
-      const conn = await em.findOne(ConnectionEntity, { where: { id: connectionId } });
+      const conn = await em.findOne(ConnectionEntity, {
+        where: { id: connectionId },
+        lock: { mode: 'for_key_share' },
+      });
       if (!conn || conn.userId !== callerUserId) throw notFound;
       if (!providersServing(app).includes(conn.provider)) {
         throw new DomainError(
@@ -369,16 +380,18 @@ export class EnvironmentsService {
 
   /** Empty a slot — "<env> runs will fail on <app> until reassigned" (honest skip). */
   async emptySlot(orgId: string, envId: string, app: string): Promise<void> {
-    const em = this.dataSource.manager;
-    const env = await this.byIdForOrg(em, orgId, envId);
-    const removed = await rawMutate(
-      em,
-      `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
-      [env.id, app],
-    );
-    if (removed === 0) {
-      throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
-    }
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId);
+      const removed = await rawMutate(
+        em,
+        `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
+        [env.id, app],
+      );
+      if (removed === 0) {
+        throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
+      }
+    });
     // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
   }
@@ -447,10 +460,8 @@ export class EnvironmentsService {
     );
   }
 
-  // Read from what serves the URL — the pointer's pinned version — and held still until the rename commits.
+  // Read from what serves the URL — the pointer's pinned version — held still by the env row lock every pointer write takes first (constitution row 11).
   private async urlChangesOf(em: EntityManager, env: EnvironmentEntity, name: string): Promise<UrlChange[]> {
-    // Locked on their own: a join that locks them re-checks a pointer moved meanwhile against the version it read first.
-    await rawQuery(em, `SELECT 1 FROM workflow_env_pointers WHERE environment_id = $1 FOR SHARE`, [env.id]);
     const pointers = await rawQuery<{
       workflow_id: string;
       workflow_name: string;
@@ -547,13 +558,13 @@ export class EnvironmentsService {
     em: EntityManager,
     orgId: string,
     envId: string,
-    lock = false,
+    lock?: 'for_no_key_update' | 'pessimistic_read' | 'for_key_share',
   ): Promise<EnvironmentEntity> {
     const notFound = new DomainError('Environment not found', 404);
     if (!isIdShape(envId)) throw notFound;
     const env = await em.findOne(EnvironmentEntity, {
       where: { id: envId, orgId },
-      ...(lock ? { lock: { mode: 'for_no_key_update' as const } } : {}),
+      ...(lock ? { lock: { mode: lock } } : {}),
     });
     if (!env) throw notFound;
     return env;
@@ -561,12 +572,21 @@ export class EnvironmentsService {
 
   /** Lazy defaults: prod (is_prod anchor) + staging + uat, once per org. */
   private async ensureDefaults(orgId: string): Promise<void> {
-    await this.dataSource.query(
-      `INSERT INTO environments (org_id, name, is_prod)
-       VALUES ($1, 'production', true), ($1, 'staging', false), ($1, 'uat', false)
-       ON CONFLICT (org_id, lower(name)) DO NOTHING`,
-      [orgId],
+    const [present] = await rawQuery<{ count: number }>(
+      this.dataSource.manager,
+      `SELECT count(*)::int AS count FROM environments WHERE org_id = $1 AND lower(name) = ANY($2)`,
+      [orgId, DEFAULT_ENVS],
     );
+    if (present?.count === DEFAULT_ENVS.length) return;
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      await em.query(
+        `INSERT INTO environments (org_id, name, is_prod)
+         SELECT $1, name, name = $3 FROM unnest($2::text[]) AS name
+         ON CONFLICT (org_id, lower(name)) DO NOTHING`,
+        [orgId, DEFAULT_ENVS, PROD_ENV],
+      );
+    });
   }
 
   private findByName(

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Client } from 'pg';
+
+import type { GoldenOutcome } from './golden-outcome';
 
 /** Where the recorded histories live, one `<build>/<shape>.json` each, `<build>` the recording commit's short sha. */
 export const GOLDEN_DIR = join(__dirname, '..', 'golden');
@@ -23,6 +25,32 @@ export interface GoldenHistory {
   app: Record<string, Row[]>;
   /** The run's rows in the DBOS system database, by table. */
   dbos: Record<string, Row[]>;
+  /** What the recording build made of the run when it recovered, for a run it resumes. */
+  outcome?: GoldenOutcome;
+}
+
+/** The build before this one — v0.2.24, the release that added the recovery guard — as the short sha its histories are kept under: record them again when it changes. */
+export const PREVIOUS_BUILD = 'bdf9cd7';
+
+/** The shapes recorded from `build`, each restored as `<build>/<shape>`. */
+export function goldenShapes(build = PREVIOUS_BUILD): string[] {
+  return readdirSync(join(GOLDEN_DIR, build))
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => file.slice(0, -'.json'.length));
+}
+
+/** The full sha of the build every history under `build` came from. */
+export function goldenBuild(build = PREVIOUS_BUILD): string {
+  const builds = new Set(
+    goldenShapes(build).map(
+      (shape) =>
+        (JSON.parse(readFileSync(join(GOLDEN_DIR, build, `${shape}.json`), 'utf8')) as GoldenHistory).build,
+    ),
+  );
+  const [sha] = builds;
+  if (builds.size !== 1 || !sha?.startsWith(build))
+    throw new Error(`the histories under ${build} come from ${[...builds].join(', ')}: record them again`);
+  return sha;
 }
 
 // Row ids the app keys rows by alone, so each restore of one history takes fresh ones.

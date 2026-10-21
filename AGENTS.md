@@ -66,9 +66,21 @@ These strings are written into saved data, issued tokens, live cookies or the da
   answer for a given plan moves in-flight receives, so it needs a new field.
 - The claim key `<scoped run id>|<step key>|<waiting_since ISO>` — in `dbos.notifications.message_uuid`
   of every claimed decision, and sent again until its run takes it; a different key lands a second copy.
-- The DBOS workflow name `orchestr.runPlan` and the default DBOS application version `orchestr-1` — in
-  `dbos.workflow_status` of every in-flight run; renaming either leaves those runs unrecoverable, and
-  the reaper ends any of them holding a decision.
+- The sub-workflow charge key `<scoped run id>|<step key>` — in `runtime_sub_workflow_charges.call_key` of every call an
+  agent's step charged; a different key charges a call its step makes again after a crash a second time.
+- The DBOS workflow names `orchestr.runPlan` and `orchestr.runPlan.v2`, and the default DBOS application
+  version `orchestr-1` — in `dbos.workflow_status` of every in-flight run; renaming any leaves those runs
+  unrecoverable, and the reaper ends any of them holding a decision.
+- The sequenced engine's op names and what it records under them — `step|<plan id>:<step key>` (an
+  agent's `#<round>:model` and `:tool:<call id>` suffixes included), `wait|<step key>` recording
+  `{ topic, deadline }`, `deadline|<step key>` recording `{ deadline, ms }`, `sched|<n>` recording
+  `{ inFlight, settled }`, and the `StepBodyError` name a failed step's recorded error carries, with a
+  refusal's `status` and `details` — in `dbos.operation_outputs` of every in-flight `orchestr.runPlan.v2`
+  run, whose replay checks each name
+  and reads each shape; a change needs a new workflow name.
+- An error lane's step path `<path><source id>#error/` — in `runtime_run_steps.step_key`, the
+  `orchestr:wait:` topic of a wait inside a lane, and every op name of an in-flight
+  `orchestr.runPlan.v2` run.
 
 The user-visible product name is Sarati and is free to change. None of the above is user-visible except
 the reserved topic prefixes `orchestr:timer:` and `orchestr:wait:`, which the docs name as reserved and

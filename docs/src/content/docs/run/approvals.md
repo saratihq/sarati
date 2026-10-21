@@ -64,14 +64,15 @@ decision before the first one takes it; otherwise it stays parked until it times
 decision for it is refused as already decided. That entry leaves the inbox, and a decision for it is
 refused, once either wait is within two seconds of timing out.
 
-A run that had already run steps side by side when the service stopped — a wait in a parallel branch,
-or any step beside another that runs at the same time — can't be resumed safely, even with a single
-approval waiting. After a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying
-so: its waits leave the inbox, and a decision made for one that it had not taken yet is recorded,
-with who made it, but not applied.
-Run it again. Going back to an earlier version is different: there such a run can end in an error or
-put a decision on the wrong wait, so let it finish first, as
-[Upgrades](/operate/upgrades/#going-back) says.
+A run this version starts with a wait in a parallel branch, or beside another step that runs at the
+same time, resumes after a restart or an upgrade where it was: no step that had finished runs again —
+except in a workflow it was calling, which runs again from its start if the call had not finished —
+and each decision reaches its own wait. A run an earlier version started that had already run steps
+side by side when the service stopped can't be resumed safely, even with a single approval waiting:
+after a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying so, its waits leave
+the inbox, and a decision made for one that it had not taken yet is recorded, with who made it, but
+not applied. Run it again. Going back to an earlier version is in
+[Upgrades](/operate/upgrades/#going-back).
 
 ## Deciding
 
@@ -90,7 +91,8 @@ curl -X POST http://localhost:8080/api/runs/<run-id>/events \
 
 In the request, `step_key` names the wait: the `step_key` of its entry in `GET /api/runs/waiting`,
 which is also the name the inbox shows on its row. A wait inside a loop or a branch runs under a
-longer key than its node, such as `loop#0/approval`. The reply's `step_key` names the wait the event
+longer key than its node, such as `loop#0/approval`, and one in an error lane under the step that
+failed into it, such as `charge#error/approval`. The reply's `step_key` names the wait the event
 answered, and is `null` for an entry with no `step_key`.
 
 Leave `step_key` out and the event answers the oldest wait on that topic that is still undecided and

@@ -2,12 +2,14 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { Client } from 'pg';
 
 import { unpackBuild, type EarlierBuild } from '../support/earlier-build';
-import { GOLDEN_DIR, type GoldenHistory } from '../support/golden-history';
+import { GOLDEN_DIR, restoreGoldenHistory, type GoldenHistory } from '../support/golden-history';
+import { DRIVES, deploy, driveGolden, recordedCallee, type GoldenOutcome } from '../support/golden-outcome';
+import { ECHO_CHILD, LANE_CHILD, ir, irEdge, irNode } from '../support/golden-docs';
 import { bootService } from '../support/service-process';
 import { ADMIN_URL, E2E_RUN_ID_ENV, createE2eDatabase, dropRunDatabases } from '../support/test-db';
 
@@ -59,34 +61,7 @@ const get = (id: string, url: string) => ({
   props: { method: 'GET', url },
 });
 
-const irNode = (id: string, node_type: string, parameters: Record<string, unknown>) => ({
-  id,
-  name: id,
-  node_type,
-  type_version: 1,
-  parameters,
-  position: { x: 0, y: 0 },
-  metadata: {},
-});
-const irEdge = (from: string, to: string, port_type = 'main') => ({
-  id: `${from}->${to}`,
-  source_node_id: from,
-  source_port: 0,
-  target_node_id: to,
-  target_port: 0,
-  port_type,
-});
 const irWait = irNode('approve', 'orchestr:wait_for_event', { topic: 'approval', timeout_ms: WINDOW_MS });
-const ir = (nodes: unknown[], edges: unknown[]) => ({
-  version: '1.0',
-  name: 'golden',
-  description: '',
-  nodes,
-  edges,
-  settings: { execution_order: 'v1', extra: {} },
-  metadata: {},
-});
-
 const plan =
   (...nodes: unknown[]): Shape['start'] =>
   (post, runId) =>
@@ -111,6 +86,30 @@ const parked =
 const waitFanOut: Pick<Shape, 'start' | 'ready'> = {
   start: plan(fork([wait('a1')], [wait('a2')])),
   ready: parked(2),
+};
+
+// A run from before waits on one topic were told apart: its args carry no routing, and its waits no delivery topic.
+const unrouted: NonNullable<Shape['afterCrash']> = async ({ db, dbos, runKey }) => {
+  const args = await dbos.query(
+    `UPDATE dbos.workflow_status SET inputs = replace(inputs, ',"sharedTopicsByStep":true', '')
+      WHERE workflow_uuid = $1 AND inputs LIKE '%,"sharedTopicsByStep":true%'`,
+    [runKey],
+  );
+  if (args.rowCount !== 1) throw new Error(`${runKey}: no routing flag to take out of its args`);
+  await db.query(`UPDATE runtime_run_steps SET delivery_topic = NULL WHERE run_id = $1`, [runKey]);
+};
+
+// Publish `child` so another workflow can call it, and answer its id.
+const callable = async (
+  post: (path: string, body: unknown) => Promise<Response>,
+  child: unknown,
+): Promise<string> => {
+  const deployed = await post('/api/deploy', { workflow_json: child });
+  const body = (await deployed.json()) as { workflow_id?: string; is_live?: boolean };
+  if (!deployed.ok || !body.workflow_id || body.is_live !== true) {
+    throw new Error(`the called workflow did not go live: ${deployed.status} ${JSON.stringify(body)}`);
+  }
+  return body.workflow_id;
 };
 
 /** The shapes of design §2.6, each recorded as its run stands at the crash. */
@@ -181,19 +180,64 @@ const SHAPES: Shape[] = [
       }),
     ready: parked(1),
   },
+  { name: 'shared-receive-wait-fan-out', ...waitFanOut, afterCrash: unrouted },
   {
-    // A run from before waits on one topic were told apart: its args carry no routing, and its waits no delivery topic.
-    name: 'shared-receive-wait-fan-out',
-    ...waitFanOut,
-    afterCrash: async ({ db, dbos, runKey }) => {
-      const args = await dbos.query(
-        `UPDATE dbos.workflow_status SET inputs = replace(inputs, ',"sharedTopicsByStep":true', '')
-          WHERE workflow_uuid = $1 AND inputs LIKE '%,"sharedTopicsByStep":true%'`,
-        [runKey],
-      );
-      if (args.rowCount !== 1) throw new Error(`${runKey}: no routing flag to take out of its args`);
-      await db.query(`UPDATE runtime_run_steps SET delivery_topic = NULL WHERE run_id = $1`, [runKey]);
-    },
+    name: 'shared-receive-before-fan-out',
+    start: plan(
+      { kind: 'waitForEvent', id: 'gate', topic: 'gate', timeoutMs: WINDOW_MS },
+      fork([wait('a1')], [wait('a2')]),
+    ),
+    ready: parked(1),
+    afterCrash: unrouted,
+  },
+  {
+    name: 'parked-in-error-lane',
+    start: plan({
+      kind: 'code',
+      id: 'boom',
+      language: 'js',
+      code: 'throw new Error("boom failed");',
+      onErrorBranch: [wait('approve')],
+    }),
+    ready: parked(1),
+  },
+  {
+    name: 'after-call-workflow',
+    start: async (post, runId) =>
+      post('/api/runs/from-ir', {
+        run_id: runId,
+        await_ms: 0,
+        workflow_ir: ir(
+          [
+            irNode('call', 'orchestr:call_workflow', {
+              workflow_id: await callable(post, ECHO_CHILD),
+              input: { q: 'hi' },
+            }),
+            irWait,
+          ],
+          [irEdge('call', 'approve')],
+        ),
+      }),
+    ready: parked(1),
+  },
+  {
+    name: 'parked-before-call-workflow',
+    start: async (post, runId) =>
+      post('/api/runs/from-ir', {
+        run_id: runId,
+        await_ms: 0,
+        workflow_ir: ir(
+          [
+            irWait,
+            irNode('call', 'orchestr:call_workflow', {
+              workflow_id: await callable(post, LANE_CHILD),
+              input: { q: 'hi' },
+            }),
+          ],
+          [irEdge('approve', 'call')],
+        ),
+      }),
+    ready: parked(1),
   },
 ];
 
@@ -275,6 +319,33 @@ async function record(
   }
 }
 
+// What the build that recorded `golden` (`<build>/<shape>`) makes of it when it recovers: restored on a fresh database, then driven.
+async function outcome(r0: EarlierBuild, golden: string, raw: string): Promise<GoldenOutcome> {
+  const shape = basename(golden);
+  const drive = DRIVES[shape]!;
+  const databaseUrl = await createE2eDatabase(ADMIN_URL, join(r0.service, 'db', 'schema.sql'));
+  const db = new Client({ connectionString: databaseUrl });
+  const sysUrl = new URL(databaseUrl);
+  sysUrl.pathname = `${sysUrl.pathname}_dbos`;
+  const dbos = new Client({ connectionString: sysUrl.toString() });
+  let service = await bootService({ service: r0.service, databaseUrl, earlier: true });
+  try {
+    await db.connect();
+    await dbos.connect();
+    // Served once, the mock user has the org a restore moves its run into.
+    await fetch(`${service.base}/api/runs/waiting`);
+    const callee = recordedCallee(raw);
+    const replace = drive.calls && callee ? { [callee]: await deploy(service.base, drive.calls) } : {};
+    await service.crash();
+    await restoreGoldenHistory(db, dbos, golden, shape, replace);
+    service = await bootService({ service: r0.service, databaseUrl, earlier: true });
+    return await driveGolden(service.base, db, dbos, shape, drive);
+  } finally {
+    await service.crash();
+    await Promise.allSettled([db.end(), dbos.end()]);
+  }
+}
+
 // Records every shape, or those named after the sha, on the build at that sha: the build before this one.
 async function main(): Promise<void> {
   const [build, ...only] = process.argv.slice(2);
@@ -290,7 +361,12 @@ async function main(): Promise<void> {
   try {
     for (const shape of SHAPES.filter((s) => only.length === 0 || only.includes(s.name))) {
       const history = await record(r0, build, shape, http, held);
-      writeFileSync(join(dir, `${shape.name}.json`), `${JSON.stringify(history, null, 2)}\n`);
+      const file = join(dir, `${shape.name}.json`);
+      writeFileSync(file, `${JSON.stringify(history, null, 2)}\n`);
+      if (DRIVES[shape.name]) {
+        const recovered = await outcome(r0, `${basename(dir)}/${shape.name}`, JSON.stringify(history));
+        writeFileSync(file, `${JSON.stringify({ ...history, outcome: recovered }, null, 2)}\n`);
+      }
       console.log(`recorded ${shape.name}`);
     }
   } finally {

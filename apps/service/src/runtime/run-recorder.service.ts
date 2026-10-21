@@ -26,6 +26,11 @@ export const CLEAR_WAIT = `${END_WAIT}, ${CLEAR_CLAIM}`;
 export const CLEAR_SLOT =
   'waiting_node_id = NULL, waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL';
 
+// The root's row is gone: a charge references it.
+function isForeignKeyViolation(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === '23503';
+}
+
 /** SQL test that `alias` (a runtime_run_steps row) holds an open wait — parked, and the step not finished. */
 export function parkedStep(alias: string): string {
   return `${alias}.waiting_topic IS NOT NULL AND ${alias}.finished_at IS NULL`;
@@ -130,6 +135,15 @@ export interface RunRecorder {
   isCancelled(scopedRunId: string): Promise<boolean>;
   /** The run row's status; null when there is none or it cannot be read, which never stops a run. */
   runStatus(scopedRunId: string): Promise<RuntimeRunStatus | null>;
+  /** Charge one sub-workflow call to its run tree, once per `callKey`: whether it is within `max`, answered alike each time; throws when it can't be charged. */
+  chargeSubWorkflowCall(
+    rootRunId: string,
+    callKey: string,
+    max: number,
+    lineage: readonly string[],
+  ): Promise<boolean>;
+  /** Drop every charge `runId` and the runs it called made in the tree, before it runs again in their place. */
+  forgetSubWorkflowCharges(rootRunId: string, runId: string): Promise<void>;
 }
 
 /**
@@ -365,6 +379,49 @@ export class RunRecorderService implements RunRecorder {
 
   async isCancelled(scopedRunId: string): Promise<boolean> {
     return (await this.runStatus(scopedRunId)) === 'cancelled';
+  }
+
+  async chargeSubWorkflowCall(
+    rootRunId: string,
+    callKey: string,
+    max: number,
+    lineage: readonly string[],
+  ): Promise<boolean> {
+    try {
+      return await this.dataSource.manager.transaction(async (em) => {
+        await lockRunRow(em, rootRunId);
+        const [charge] = await rawQuery<{ allowed: boolean }>(
+          em,
+          `WITH charged AS (
+             INSERT INTO runtime_sub_workflow_charges (root_run_id, call_key, allowed, lineage)
+             SELECT $1::varchar, $2::varchar, count(*) < $3::int, $4::varchar[]
+               FROM runtime_sub_workflow_charges WHERE root_run_id = $1::varchar AND allowed
+             ON CONFLICT (root_run_id, call_key) DO NOTHING
+             RETURNING allowed
+           )
+           SELECT allowed FROM charged
+           UNION ALL
+           SELECT allowed FROM runtime_sub_workflow_charges WHERE root_run_id = $1::varchar AND call_key = $2::varchar
+           LIMIT 1`,
+          [rootRunId, callKey, max, lineage],
+        );
+        return charge!.allowed;
+      });
+    } catch (err) {
+      if (isForeignKeyViolation(err))
+        throw new Error(`run ${rootRunId} has no row to charge a sub-workflow call to`);
+      throw err;
+    }
+  }
+
+  async forgetSubWorkflowCharges(rootRunId: string, runId: string): Promise<void> {
+    await this.dataSource.manager.transaction(async (em) => {
+      await lockRunRow(em, rootRunId);
+      await em.query(
+        `DELETE FROM runtime_sub_workflow_charges WHERE root_run_id = $1::varchar AND $2::varchar = ANY(lineage)`,
+        [rootRunId, runId],
+      );
+    });
   }
 
   async runStatus(scopedRunId: string): Promise<RuntimeRunStatus | null> {

@@ -1702,6 +1702,20 @@ CREATE TABLE public.trigger_retired_webhooks (
 
 CREATE INDEX ix_trigger_retired_webhooks_workflow ON public.trigger_retired_webhooks USING btree (workflow_id);
 
+--
+-- Name: runtime_sub_workflow_charges; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.runtime_sub_workflow_charges (
+    root_run_id character varying(200) NOT NULL,
+    call_key character varying(600) NOT NULL,
+    allowed boolean NOT NULL,
+    charged_at timestamp with time zone DEFAULT now() NOT NULL,
+    lineage character varying(200)[] DEFAULT '{}'::character varying[] NOT NULL,
+    CONSTRAINT runtime_sub_workflow_charges_pkey PRIMARY KEY (root_run_id, call_key),
+    CONSTRAINT runtime_sub_workflow_charges_root_run_id_fkey FOREIGN KEY (root_run_id) REFERENCES public.runtime_runs(id) ON DELETE CASCADE
+);
+
 
 --
 -- PostgreSQL database dump complete

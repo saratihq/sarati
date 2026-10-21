@@ -159,9 +159,9 @@ describe('runs endpoint on the general-DAG engine (e2e, isolated DB)', () => {
         {
           id: 'boom',
           name: 'boom',
-          node_type: 'nope.do',
+          node_type: 'orchestr:code',
           type_version: 1,
-          parameters: {},
+          parameters: { language: 'js', code: 'throw new Error("boom failed")' },
           position: { x: 0, y: 0 },
           metadata: {},
         },
@@ -208,9 +208,9 @@ describe('runs endpoint on the general-DAG engine (e2e, isolated DB)', () => {
         {
           id: 'boom',
           name: 'boom',
-          node_type: 'nope.do',
+          node_type: 'orchestr:code',
           type_version: 1,
-          parameters: { onError: 'continue' },
+          parameters: { language: 'js', code: 'throw new Error("boom failed")', onError: 'continue' },
           position: { x: 0, y: 0 },
           metadata: {},
         },
