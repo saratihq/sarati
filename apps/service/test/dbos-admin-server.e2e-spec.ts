@@ -8,27 +8,12 @@ import { bootService, THIS_SERVICE, type ServiceProcess } from './support/servic
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
-// Where DBOS 4.23.6 opens its admin API, on every interface, unless told not to.
-const DBOS_ADMIN_PORT = 3001;
 const WINDOW_MS = 10 * 60_000;
 const APPROVAL = { kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS };
 
 interface RunRow {
   status: string;
   error: string | null;
-}
-
-// Another process may hold the port, so what counts is whether whatever answers there serves this service's workflow.
-async function adminServes(runId: string): Promise<string[]> {
-  const workflowId = `${MOCK_USER_ID}:${runId}`;
-  const serving: string[] = [];
-  for (const host of ['127.0.0.1', '[::1]']) {
-    const res = await fetch(`http://${host}:${DBOS_ADMIN_PORT}/workflows/${workflowId}`, {
-      signal: AbortSignal.timeout(5_000),
-    }).catch(() => null);
-    if (res?.ok && (await res.text()).includes(workflowId)) serving.push(host);
-  }
-  return serving;
 }
 
 /** The service runs DBOS with no admin API of its own, and recovers runs without one (child processes, DBOS on, mock auth). */
@@ -78,6 +63,12 @@ describe('DBOS without its admin server (e2e)', () => {
       `${runId} parked`,
     );
 
+  // A bind that failed because another process holds DBOS's port still logs the attempt.
+  async function listensOnItsPortAlone(): Promise<void> {
+    expect(await service!.listeningPorts()).toEqual([Number(new URL(service!.base).port)]);
+    expect(service!.log()).not.toMatch(/admin server/i);
+  }
+
   async function startParked(runId: string): Promise<void> {
     const res = await post('/api/runs/async', {
       run_id: runId,
@@ -106,11 +97,9 @@ describe('DBOS without its admin server (e2e)', () => {
     await db?.end();
   }, 30_000);
 
-  it("serves nothing of a run in flight on DBOS's admin port, and starts no admin server", async () => {
-    const runId = `held-${randomUUID()}`;
-    await startParked(runId);
-    expect(await adminServes(runId)).toEqual([]);
-    expect(service!.log()).not.toMatch(/admin server/i);
+  it('listens on its PORT alone with a run in flight, and never tries to start an admin server', async () => {
+    await startParked(`held-${randomUUID()}`);
+    await listensOnItsPortAlone();
   });
 
   it('resumes after a crash a run this build started and one an earlier build started, and judges another from the steps it recorded', async () => {
@@ -148,7 +137,6 @@ describe('DBOS without its admin server (e2e)', () => {
         ),
       ).toEqual({ status: 'completed', error: null });
     }
-    expect(await adminServes(current)).toEqual([]);
-    expect(service.log()).not.toMatch(/admin server/i);
+    await listensOnItsPortAlone();
   }, 120_000);
 });

@@ -1,6 +1,10 @@
-import type { DBOSConfig } from '@dbos-inc/dbos-sdk';
+import { DBOS, type DBOSConfig } from '@dbos-inc/dbos-sdk';
 
-/** `config` with DBOS's admin server off: its HTTP API reads, cancels, resumes and forks any workflow with no authentication. */
-export function withoutAdminServer(config: DBOSConfig): DBOSConfig {
-  return { ...config, runAdminServer: false };
+/** Launch DBOS on `config` without its admin server, an unauthenticated API over every run; shuts DBOS down and throws if one starts anyway. */
+export async function launchDbos(config: DBOSConfig): Promise<void> {
+  DBOS.setConfig({ ...config, runAdminServer: false });
+  await DBOS.launch();
+  if (DBOS.adminServer === undefined) return;
+  await DBOS.shutdown();
+  throw new Error('DBOS started its admin server, which answers without signing in, so DBOS was shut down');
 }

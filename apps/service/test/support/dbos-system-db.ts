@@ -1,7 +1,7 @@
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { Client } from 'pg';
 
-import { withoutAdminServer } from '../../src/dbos/dbos-config';
+import { launchDbos } from '../../src/dbos/dbos-config';
 import { ADMIN_URL, e2eDatabaseName, withDatabase } from './test-db';
 
 /** DBOS launched on a system database of a suite's own, and how to stop it and drop that database. */
@@ -26,8 +26,7 @@ export async function launchThrowawayDbos(name: string): Promise<ThrowawayDbos> 
   const database = `${e2eDatabaseName()}_dbos`;
   await onAdmin([`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`, `CREATE DATABASE ${database}`]);
   const url = withDatabase(ADMIN_URL, database);
-  DBOS.setConfig(withoutAdminServer({ name, systemDatabaseUrl: url }));
-  await DBOS.launch();
+  await launchDbos({ name, systemDatabaseUrl: url });
   return {
     url,
     shutdown: async () => {
