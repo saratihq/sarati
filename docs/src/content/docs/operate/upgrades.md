@@ -222,6 +222,12 @@ another host stops the service at boot: every request to it carries the Composio
 to be `https://`, or `http://` to the same machine. A value that isn't an http(s) URL, or that
 carries a `?` or `#`, now stops it at boot too — neither ever sent a request to the right path.
 
+**Upgrading from v0.2.25 or earlier** with a username or password in `COMPOSIO_BASE_URL` or
+`CLERK_API_URL` stops the service at boot, and the message names only the address and path. Take
+them out of the URL: neither was ever sent. Requests to the Clerk API and to the Composio API
+dropped them, and with them in `COMPOSIO_BASE_URL` every managed step failed with an error that
+repeated them.
+
 ## Back up
 
 Your install is one container or five — `docker compose ps` in the `sarati` directory tells you
