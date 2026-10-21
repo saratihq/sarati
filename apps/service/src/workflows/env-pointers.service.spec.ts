@@ -1,5 +1,6 @@
 import type { DataSource, EntityManager } from 'typeorm';
 
+import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { OrganizationEntity } from '../database/entities/organization.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
@@ -87,7 +88,12 @@ const WF = 'wf-1';
 const V1 = '11111111-1111-1111-1111-111111111111';
 const V2 = '22222222-2222-2222-2222-222222222222';
 const MAIN = 'branch-main';
-const USER = 'user-1';
+const USER = {
+  kind: 'user',
+  user: { id: 'user-1' },
+  activeOrgId: null,
+  activeOrgRole: null,
+} as unknown as Principal;
 
 const wf = (over: Record<string, unknown> = {}): WorkflowEntity =>
   ({

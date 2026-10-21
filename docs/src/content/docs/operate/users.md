@@ -51,6 +51,7 @@ Three: `owner`, `admin`, `member`.
 | Create branches, commit, open reviews | ✅ | ✅ |
 | Approve a review | ✅ | ✅ |
 | **Publish, promote or un-promote — to any environment** | ❌ | ✅ |
+| [Test a branch](/version-control/reviews/#review-it) under an environment — on Default, anyone can | ❌ | ✅ |
 | Delete a workflow, protect or unprotect a branch | ❌ | ✅ |
 | Invite and remove people, org settings | ❌ | ✅ |
 | Change roles, transfer ownership, invite or remove an owner, delete the organization | ❌ | owner only |

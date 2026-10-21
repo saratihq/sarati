@@ -39,6 +39,10 @@ scope strings.
 <img class="shot shot-dark" src="/shots/api-keys-dark.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
 <img class="shot shot-light" src="/shots/api-keys-light.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
 
+Testing a branch under an environment takes `workflow:deploy` as well as `run:execute` — the same
+as promoting there, since it runs the branch on that environment's accounts. On Default,
+`run:execute` is enough.
+
 The list shows each key's **prefix only** — never the key itself — with its scopes and last use.
 
 `key:manage` is deliberately **not grantable** — a key cannot mint another key. Listing keys with a
