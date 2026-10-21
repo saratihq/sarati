@@ -129,7 +129,7 @@ export interface ManagedConnectionRef {
 /** Connections a transaction deleted, with what to run once it commits. */
 export interface ConnectionRemoval {
   deleted: number;
-  /** Revokes their Composio accounts, then reconciles every workflow listening as them; logs a failure, never throws. */
+  /** Revokes their Composio accounts, then reconciles every workflow listening as them, read once the delete commits; logs a failure, never throws. */
   afterCommit: () => Promise<void>;
 }
 
@@ -267,25 +267,35 @@ export class ConnectionsService implements RunAsAccounts {
       [id, status, status === 'active' ? null : reason, now()],
     );
     if (written && written.before !== status) {
-      await this.reconcileTriggers(await this.listenersOf(this.dataSource.manager, [id]));
+      const em = this.dataSource.manager;
+      await this.reconcileTriggers(await this.listenersOf(em, [id], await this.slotEnvironmentsOf(em, [id])));
     }
   }
 
-  // A trigger listens as its slot's account, and a webhook is deleted with it, only while it is active (#11): the workflows a change to these accounts can move.
-  private async listenersOf(em: EntityManager, connectionIds: readonly string[]): Promise<string[]> {
-    if (connectionIds.length === 0) return [];
+  private async slotEnvironmentsOf(em: EntityManager, connectionIds: readonly string[]): Promise<string[]> {
+    const rows = await rawQuery<{ environment_id: string }>(
+      em,
+      `SELECT DISTINCT environment_id FROM environment_connections WHERE connection_id = ANY($1::uuid[])`,
+      [connectionIds],
+    );
+    return rows.map((row) => row.environment_id);
+  }
+
+  // A trigger listens as its slot's account, and a webhook is deleted with it, only while it is active (#11): the workflows a change to these accounts, whose slots are in `environments`, can move.
+  private async listenersOf(
+    em: EntityManager,
+    connectionIds: readonly string[],
+    environments: readonly string[],
+  ): Promise<string[]> {
     const rows = await rawQuery<{ workflow_id: string }>(
       em,
-      `SELECT p.workflow_id
-         FROM environment_connections ec
-         JOIN workflow_env_pointers p ON p.environment_id = ec.environment_id
-        WHERE ec.connection_id = ANY($1::uuid[])
+      `SELECT workflow_id FROM workflow_env_pointers WHERE environment_id = ANY($2::uuid[])
        UNION
        SELECT workflow_id FROM runtime_trigger_activations WHERE connection_id = ANY($1::uuid[])
        UNION
        SELECT workflow_id FROM trigger_retired_webhooks
         WHERE webhook -> 'connection' ->> 'connectionId' = ANY($1::uuid[]::text[])`,
-      [connectionIds],
+      [connectionIds, environments],
     );
     return rows.map((row) => row.workflow_id);
   }
@@ -515,22 +525,33 @@ export class ConnectionsService implements RunAsAccounts {
     return this.deleteLocked(em, await lockConnectionsForDelete(em, found));
   }
 
-  /** Deletes connections `ids`, which the caller's transaction holds FOR UPDATE, and their slots, reading first the workflows listening as them; `afterCommit` revokes with the keys their scopes have now, since an org's delete takes the org's key with it. */
+  /** Deletes connections `ids`, which the caller's transaction holds FOR UPDATE, and their slots, reading first the environments those slots are in; `afterCommit` revokes with the keys their scopes have now, since an org's delete takes the org's key with it, then reconciles what listens as them. */
   async deleteLocked(em: EntityManager, ids: string[]): Promise<ConnectionRemoval> {
     if (ids.length === 0) return NOTHING_REMOVED;
     const revokes: Array<() => Promise<void>> = [];
     for (const row of await em.find(ConnectionEntity, { where: { id: In(ids) } })) {
       revokes.push(await this.revocation(em, row));
     }
-    const listeners = await this.listenersOf(em, ids);
+    const environments = await this.slotEnvironmentsOf(em, ids);
     const { affected } = await em.delete(ConnectionEntity, { id: In(ids) });
     return {
       deleted: affected ?? 0,
       afterCommit: async () => {
         for (const revoke of revokes) await revoke();
-        await this.reconcileTriggers(listeners);
+        await this.reconcileRemoved(ids, environments);
       },
     };
+  }
+
+  // Read once the delete commits, so a pointer moved into `environments` meanwhile is listed here or its own reconcile reads the slot empty; fail-open, since the delete has committed.
+  private async reconcileRemoved(ids: readonly string[], environments: readonly string[]): Promise<void> {
+    try {
+      await this.reconcileTriggers(await this.listenersOf(this.dataSource.manager, ids, environments));
+    } catch (err) {
+      this.logger.warn(
+        `Connections ${ids.join(', ')}: what listens as them could not be read, so their removal reconciled nothing: ${errorMessage(err)}`,
+      );
+    }
   }
 
   /** How many cluster connections in an org a given member owns (env steps run AS them). */

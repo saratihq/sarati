@@ -2,14 +2,15 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import type { INestApplication } from '@nestjs/common';
+import { type INestApplication, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 import { Client, type Pool } from 'pg';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+import { PostgresQueryRunner } from 'typeorm/driver/postgres/PostgresQueryRunner';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
@@ -31,6 +32,7 @@ import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconci
 import { TriggersService } from '../src/triggers/triggers.service';
 import { EnvPointersService } from '../src/workflows/env-pointers.service';
 import { listenOnLoopback } from './support/listen';
+import { deferred, lockProbes } from './support/lock-probes';
 import { setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -2672,6 +2674,193 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       expect(await activation(wf, production)).toMatchObject({
         held: false,
         composio_trigger_instance_id: null,
+      });
+    });
+
+    type Removal =
+      'its delete' | 'its cluster delete' | 'a cluster connect replacing it' | "its org's delete";
+
+    // Each way an account leaves its slots; a cluster account is `owner`'s.
+    const REMOVALS: Record<Removal, (account: string, owner: string) => request.Test> = {
+      'its delete': (account) => asA(http().delete(`/api/connections/${account}?force=true`)),
+      'its cluster delete': (account, owner) =>
+        asA(http().delete(`/api/orgs/${owner}/clusters/connections/${account}`).set('X-Org-Id', owner)),
+      'a cluster connect replacing it': (_account, owner) =>
+        asA(
+          http()
+            .post(`/api/orgs/${owner}/clusters/production/connect`)
+            .set('X-Org-Id', owner)
+            .send({ app: TRIGGERS.composio.app }),
+        ),
+      "its org's delete": (_account, owner) => asA(http().delete(`/api/orgs/${owner}`)),
+    };
+
+    // Holds `removal` of `account` once its transaction has deleted the account, before it commits, until `release`.
+    const removalHeld = async (
+      removal: Removal,
+      account: string,
+      owner: string,
+    ): Promise<{ release: () => Promise<number>; restore: () => void }> => {
+      const run = PostgresQueryRunner.prototype.query;
+      const arrived = deferred();
+      const released = deferred();
+      let held = false;
+      const spy = jest.spyOn(PostgresQueryRunner.prototype, 'query').mockImplementation(async function (
+        this: PostgresQueryRunner,
+        ...args
+      ) {
+        const result: unknown = await run.apply(this, args);
+        if (!held && args[0].startsWith('DELETE FROM "connections"')) {
+          held = true;
+          arrived.resolve();
+          await released.promise;
+        }
+        return result;
+      });
+      const removing = REMOVALS[removal](account, owner).then((res) => res.status);
+      await arrived.promise;
+      return {
+        release: () => {
+          released.resolve();
+          return removing;
+        },
+        restore: () => {
+          released.resolve();
+          spy.mockRestore();
+        },
+      };
+    };
+
+    const emptied = (wf: string, envId: string, env: string): Promise<void> =>
+      eventually(async () =>
+        expect(await activation(wf, envId)).toMatchObject({
+          connection_id: null,
+          held: false,
+          composio_trigger_instance_id: null,
+          last_error: LAST_ERROR.empty(env, TRIGGERS.composio.app, TRIGGERS.composio.name, ''),
+        }),
+      );
+
+    it.each(
+      (Object.keys(REMOVALS) as Removal[]).flatMap((removal) =>
+        ["a workflow's create", 'a promote'].map((write): [string, Removal] => [write, removal]),
+      ),
+    )(
+      '%s standing a trigger up as an account while %s is in flight leaves the trigger torn down once that commits, saying its slot is empty',
+      async (write, removal) => {
+        const { app: appSlug, nodeType, name, props } = TRIGGERS.composio;
+        const owner = await workspace(`removal in flight owner ${removal}`);
+        const { org, production, staging } = await workspace(`removal in flight ${write} ${removal}`);
+        const account =
+          removal === 'its delete' ? await oneClickConnection(appSlug) : await clusterAccount(owner.org);
+        const [envId, env] = write === 'a promote' ? [staging, 'staging'] : [production, 'production'];
+        await assignSlot(org, envId, appSlug, account);
+        const earlier = write === 'a promote' ? await deploy(org, triggerDoc(nodeType, name, props)) : null;
+
+        const held = await removalHeld(removal, account, owner.org);
+        try {
+          let wf: string;
+          if (earlier) {
+            wf = earlier.wf;
+            await asA(
+              http()
+                .post(`/api/workflows/${wf}/promote`)
+                .set('X-Org-Id', org)
+                .send({ environment: 'staging', version_id: earlier.v1 }),
+            ).expect(201);
+            await eventually(async () =>
+              expect(await activation(wf, staging)).toMatchObject({
+                connection_id: account,
+                last_error: null,
+              }),
+            );
+          } else {
+            const created = await deploy(org, triggerDoc(nodeType, name, props));
+            wf = created.wf;
+            expect(created.created).toMatchObject({ is_live: true, activated: true });
+            expect(await activation(wf, production)).toMatchObject({
+              connection_id: account,
+              last_error: null,
+            });
+          }
+
+          expect(await held.release()).toBe(removal === 'a cluster connect replacing it' ? 201 : 200);
+          expect((await db.query(`SELECT 1 FROM connections WHERE id = $1`, [account])).rows).toHaveLength(0);
+          await emptied(wf, envId, env);
+        } finally {
+          held.restore();
+        }
+      },
+    );
+
+    it("a promote standing a trigger up as the account its slot was given while the promote was in flight, while that account's delete is in flight too, leaves the trigger torn down once the delete commits", async () => {
+      const { app: appSlug, nodeType, name, props } = TRIGGERS.composio;
+      const { org, staging } = await workspace('slot moved under a promote');
+      const first = await oneClickConnection(appSlug);
+      const second = await oneClickConnection(appSlug);
+      await assignSlot(org, staging, appSlug, first);
+      const { wf, v1 } = await deploy(org, triggerDoc(nodeType, name, props));
+
+      const promotes = lockProbes(
+        () => app,
+        () => db,
+      ).gateEmits('workflow.promoted', 'before');
+      let held: Awaited<ReturnType<typeof removalHeld>> | null = null;
+      try {
+        const promoting = asA(
+          http()
+            .post(`/api/workflows/${wf}/promote`)
+            .set('X-Org-Id', org)
+            .send({ environment: 'staging', version_id: v1 }),
+        ).then((res) => res.status);
+        await promotes.arrived(0);
+        await assignSlot(org, staging, appSlug, second);
+        held = await removalHeld('its delete', second, org);
+
+        promotes.release(0);
+        expect(await promoting).toBe(201);
+        await eventually(async () =>
+          expect(await activation(wf, staging)).toMatchObject({ connection_id: second, last_error: null }),
+        );
+
+        expect(await held.release()).toBe(200);
+        await emptied(wf, staging, 'staging');
+      } finally {
+        promotes.restore();
+        held?.restore();
+      }
+    });
+
+    it('a delete that cannot read what listens as the account once it commits still answers that it deleted it, and logs that it reconciled nothing', async () => {
+      const { app: appSlug, name } = TRIGGERS.polling;
+      const { production, account, wf } = await liveTrigger('polling', 'listeners unread');
+      const query = EntityManager.prototype.query;
+      const unread = jest.spyOn(EntityManager.prototype, 'query').mockImplementation(function (
+        this: EntityManager,
+        text: string,
+        params?: Parameters<EntityManager['query']>[1],
+      ) {
+        return /UNION\s+SELECT workflow_id FROM trigger_retired_webhooks/.test(text)
+          ? Promise.reject(new Error('connection lost'))
+          : query.call(this, text, params);
+      });
+      const warned = jest.spyOn(Logger.prototype, 'warn');
+      try {
+        await asA(http().delete(`/api/connections/${account}?force=true`)).expect(200);
+        expect(warned).toHaveBeenCalledWith(
+          `Connections ${account}: what listens as them could not be read, so their removal reconciled nothing: connection lost`,
+        );
+      } finally {
+        unread.mockRestore();
+        warned.mockRestore();
+      }
+      expect((await db.query(`SELECT 1 FROM connections WHERE id = $1`, [account])).rows).toHaveLength(0);
+      expect(await activation(wf, production)).toMatchObject({ connection_id: account });
+
+      await reconcile(wf);
+      expect(await activation(wf, production)).toMatchObject({
+        connection_id: null,
+        last_error: LAST_ERROR.empty('production', appSlug, name, ''),
       });
     });
 
