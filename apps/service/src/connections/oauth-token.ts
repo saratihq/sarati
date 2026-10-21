@@ -3,6 +3,7 @@ import { ActionError, type FetchLikeResponse, guardedFetch, redactSecrets } from
 import { isRecord } from '../common/json-util';
 
 import type { OAuthProviderConfig } from './oauth-providers';
+import { redirectLocation } from './redirect-location';
 
 /** The token set a provider returns from an authorization_code (or refresh) grant. */
 export interface OAuthTokenSet {
@@ -36,21 +37,6 @@ function providerSaid(text: string, data: unknown): string {
   return said.length > 0
     ? said.join(': ')
     : `a reply with fields ${Object.keys(data).join(', ') || '(none)'}`;
-}
-
-// Origin and path only: a redirect's query can carry what the provider meant for someone else.
-function locationOf(res: FetchLikeResponse, tokenUrl: string): string | undefined {
-  let location = '';
-  res.headers.forEach((value, name) => {
-    if (name.toLowerCase() === 'location') location = value;
-  });
-  if (!location) return undefined;
-  try {
-    const url = new URL(location, tokenUrl);
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return undefined;
-  }
 }
 
 // A token endpoint that never answered, or broke off, did not refuse anything: never an OAuthExchangeError.
@@ -96,7 +82,7 @@ async function postToken(tokenUrl: string, params: Record<string, string>): Prom
     throw unanswered(origin, err, false);
   }
   if (res.status >= 300 && res.status < 400) {
-    const target = locationOf(res, tokenUrl);
+    const target = redirectLocation(res, tokenUrl);
     throw new ActionError({
       code: 'http_error',
       message: target

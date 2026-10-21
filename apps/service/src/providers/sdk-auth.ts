@@ -32,7 +32,7 @@ export interface SdkAuthContext {
   connections?: ConnectionsService;
   composioApiKey: string;
   composioBaseUrl: string;
-  /** Test-only fetch; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
+  /** Test-only fetch in place of the network hop: the SDK's SSRF-guarded one for a direct credential, `composioFetch`'s for a managed one. */
   fetchImpl?: FetchLike;
   /** The step the run-as rule decided this account for, and where it runs; absent where no step runs, e.g. an options picker. */
   decided?: { step: Pick<RunAsStep, 'name' | 'app' | 'label'>; where: RunAsWhere };

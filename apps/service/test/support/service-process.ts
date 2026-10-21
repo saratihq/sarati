@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 /** This build's `apps/service`. */
 export const THIS_SERVICE = join(__dirname, '..', '..');
@@ -12,6 +13,24 @@ export async function freePort(): Promise<number> {
   const { port } = probe.address() as AddressInfo;
   await new Promise((r) => probe.close(r));
   return port;
+}
+
+// lsof exits non-zero, failing the read, when the process listens on nothing.
+async function tcpPortsListenedOnBy(pid: number | undefined): Promise<number[]> {
+  const { stdout } = await promisify(execFile)('lsof', [
+    '-nP',
+    '-a',
+    '-p',
+    String(pid),
+    '-iTCP',
+    '-sTCP:LISTEN',
+    '-Fn',
+  ]);
+  const ports = stdout
+    .split('\n')
+    .filter((line) => line.startsWith('n'))
+    .map((line) => Number(line.slice(line.lastIndexOf(':') + 1)));
+  return [...new Set(ports)].sort((a, b) => a - b);
 }
 
 const answering = (base: string): Promise<boolean> =>
@@ -26,6 +45,8 @@ export interface ServiceProcess {
   base: string;
   /** Everything it has written so far. */
   log(): string;
+  /** Every TCP port the process listens on, on any interface. */
+  listeningPorts(): Promise<number[]>;
   /** Kill it with SIGKILL, as a crash would, and wait for it to be gone. */
   crash(): Promise<void>;
 }
@@ -80,6 +101,7 @@ export async function startService(
   const service: ServiceProcess = {
     base: `http://127.0.0.1:${port}`,
     log: () => log,
+    listeningPorts: () => tcpPortsListenedOnBy(child.pid),
     crash: async () => {
       if (child.exitCode === null) child.kill('SIGKILL');
       await exited;

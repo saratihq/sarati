@@ -102,6 +102,16 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
+### v0.2.26: the service opens no port but its own
+
+The service listens on its `PORT` alone. Earlier versions, with durable runs on (`DBOS_ENABLED`, the
+images' default), also opened port 3001 on every interface for the admin API of DBOS, the library
+that makes runs durable. That API answers without signing in: it lists runs with what each started
+with and every step's output, and cancels, resumes or forks any run. Neither stack file nor the
+one-container image publishes the port, but any container on the same Docker network could reach it,
+and so could anything that reaches the machine when the service runs outside Docker. Nothing in
+Sarati used it, so there is nothing to change: upgrade from any earlier version.
+
 ### v0.2.25: runs with parallel branches resume as they ran
 
 Runs this version starts resume after a crash, a restart or an upgrade where they were, parallel
@@ -221,6 +231,12 @@ that point at this install, and delete them there.
 another host stops the service at boot: every request to it carries the Composio API key, so it has
 to be `https://`, or `http://` to the same machine. A value that isn't an http(s) URL, or that
 carries a `?` or `#`, now stops it at boot too — neither ever sent a request to the right path.
+
+**Upgrading from v0.2.25 or earlier** with a username or password in `COMPOSIO_BASE_URL` or
+`CLERK_API_URL` stops the service at boot, and the message names only the address and path. Take
+them out of the URL: neither was ever sent. Requests to the Clerk API and to the Composio API
+dropped them, and with them in `COMPOSIO_BASE_URL` every managed step failed with an error that
+repeated them.
 
 ## Back up
 
