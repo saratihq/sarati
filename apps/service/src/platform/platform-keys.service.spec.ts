@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { ConfigService } from '@nestjs/config';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { EncryptionService } from '../common/crypto/encryption.service';
 import type { EnvConfig } from '../config/env.config';
@@ -12,11 +12,14 @@ const encryption = (fernetKey: string | null): EncryptionService =>
 
 const service = (fernetKey: string | null): { svc: PlatformKeysService; writes: unknown[][] } => {
   const writes: unknown[][] = [];
-  const ds = {
+  const em = {
     query: (sql: string, params: unknown[]) => {
       writes.push([sql, params]);
       return Promise.resolve([]);
     },
+  } as unknown as EntityManager;
+  const ds = {
+    transaction: (work: (tx: EntityManager) => Promise<unknown>) => work(em),
   } as unknown as DataSource;
   return { svc: new PlatformKeysService(ds, encryption(fernetKey)), writes };
 };
