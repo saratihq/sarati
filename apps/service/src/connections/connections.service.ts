@@ -261,7 +261,7 @@ export class ConnectionsService implements RunAsAccounts {
       this.dataSource.manager,
       `UPDATE connections c
           SET status = $2, status_reason = $3, last_checked_at = $4
-         FROM (SELECT id, status FROM connections WHERE id = $1 FOR UPDATE) old
+         FROM (SELECT id, status FROM connections WHERE id = $1 FOR NO KEY UPDATE) old
         WHERE c.id = old.id
        RETURNING old.status AS before`,
       [id, status, status === 'active' ? null : reason, now()],

@@ -2905,6 +2905,29 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       }
     });
 
+    it("a status change does not wait for a write holding the account's key, as a slot assign does", async () => {
+      const { account } = await liveTrigger('polling', 'key share');
+      const assign = new Client({ connectionString: process.env.DATABASE_URL });
+      await assign.connect();
+      try {
+        await assign.query('BEGIN');
+        await assign.query(`SELECT 1 FROM connections WHERE id = $1 FOR KEY SHARE`, [account]);
+        const written = app.get(ConnectionsService).setStatus(account, 'expired');
+        // Read while the key is still held: a status write that waited for it could not have landed yet.
+        await eventually(async () => {
+          const { rows } = await db.query<{ status: string }>(
+            `SELECT status FROM connections WHERE id = $1`,
+            [account],
+          );
+          expect(rows).toEqual([{ status: 'expired' }]);
+        });
+        await assign.query('ROLLBACK');
+        await written;
+      } finally {
+        await assign.end();
+      }
+    });
+
     it('an account that flaps while its trigger is reconciled queues one more reconcile of it, not one per change', async () => {
       const { production, account, wf, live } = await liveTrigger('polling', 'flaps');
       const parked = parkReconciles();
