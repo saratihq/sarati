@@ -113,9 +113,9 @@ bundled one, set the same two values on both:
   counting too many lets any visitor write the address their limits count against, so sign-in attempts
   become unlimited. The agent sends the address it reads on to the service with every call, so the two
   must agree.
-- **`LISTEN_HOST`:** the interface each listens on. A trusted hop is believed whoever connects, so bind
-  them where only your proxy can reach — `127.0.0.1` when it runs on the same machine. Unset, they listen
-  on every interface.
+- **`LISTEN_HOST`:** the interface each listens on, on its `PORT`, the only port either opens. A trusted
+  hop is believed whoever connects, so bind them where only your proxy can reach — `127.0.0.1` when it
+  runs on the same machine. Unset, they listen on every interface.
 
 The one-container image and `docker-compose.yaml` set `TRUST_PROXY_HOPS=1` for Sarati's own proxy, and
 the one-container image binds both to `127.0.0.1`.

@@ -5,6 +5,7 @@ import { DBOS } from '@dbos-inc/dbos-sdk';
 
 import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
+import { withoutAdminServer } from './dbos-config';
 import { RecoveryGuard } from './recovery-guard';
 import { systemDatabaseUrlOf } from './system-db-url';
 
@@ -32,12 +33,14 @@ export class DbosLifecycle implements OnApplicationBootstrap, OnApplicationShutd
     const systemDatabaseUrl = systemDatabaseUrlOf(env);
     // Pin recovery identity so a restart picks up the runs in flight across it.
     const applicationVersion = env.dbosAppVersion || DBOS_APP_VERSION_DEFAULT;
-    DBOS.setConfig({
-      name: 'orchestr',
-      systemDatabaseUrl,
-      applicationVersion,
-      ...(env.dbosExecutorId ? { executorID: env.dbosExecutorId } : {}),
-    });
+    DBOS.setConfig(
+      withoutAdminServer({
+        name: 'orchestr',
+        systemDatabaseUrl,
+        applicationVersion,
+        ...(env.dbosExecutorId ? { executorID: env.dbosExecutorId } : {}),
+      }),
+    );
     await this.logRunsInFlight();
     await DBOS.launch();
     this.launched = true;
