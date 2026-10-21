@@ -124,6 +124,21 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(offenders).toEqual([]);
   });
 
+  /** Constitution #21: who may change what an environment runs is one answer, and a branch test under one asks it too. */
+  it('every pointer move, and a branch test under an environment, asks the one promote decision', () => {
+    const asking = sources()
+      .filter((f) => /\.(?:assertMayPromote|promoteRightMissing)\s*\(/.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+    expect(asking).toEqual([
+      'reviews/review-test.service.ts',
+      'workflows/env-pointers.service.ts',
+      'workflows/versions-write.service.ts',
+      'workflows/workflow-lifecycle.service.ts',
+    ]);
+  });
+
   /** Constitution #19: a recorded history is replayed as it ran, never patched into another one. */
   it('no module patches a durable workflow', () => {
     const offenders = sources()

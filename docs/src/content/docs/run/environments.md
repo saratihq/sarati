@@ -39,6 +39,18 @@ curl -X POST http://localhost:8080/api/hooks/<id>/staging      # runs v1 → 7 s
 
 Same workflow. Same moment. Different versions, because the pointers differ.
 
+## Who can promote
+
+In an organization, only owners and admins promote, publish or un-promote — to any environment,
+`production` included; in your personal workspace, you do. An API key needs the `workflow:deploy`
+scope. A member is refused, naming the environment:
+
+> Only owners and admins can move the 'staging' pointer in an organization
+
+[Testing a branch](/version-control/reviews/#review-it) under an environment takes the same right,
+because it runs the branch on that environment's accounts before any review has passed it. On
+Default, it runs as your own accounts, and anyone who can run the branch can test it there.
+
 ## Where a branch can go
 
 `staging` and any environment you add accept a version from **any branch** — that is the point of a
