@@ -197,7 +197,9 @@ to a private address is refused, and every redirect is checked again.
 `COMPOSIO_BASE_URL` and `CLERK_API_URL` point the service at a proxy or a self-hosted API instead of
 the provider's own. Requests to them carry an API secret, so in production each has to be
 `https://`, or `http://` to the same machine (`localhost`, `127.0.0.1`, `::1`); anything else stops
-the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set.
+the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set. A redirect from
+`COMPOSIO_BASE_URL` is never followed: the request fails and names where it pointed, so the Composio
+API key only reaches the address you set.
 
 ## Container defaults differ from the source template
 

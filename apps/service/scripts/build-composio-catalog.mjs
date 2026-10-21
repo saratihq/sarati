@@ -124,14 +124,31 @@ function readApiKey() {
 
 const { key: API_KEY, base: BASE_URL } = readApiKey();
 
+/** Mirrors `composioFetch` in src/connections/composio-http.ts: the key only goes to BASE_URL's origin. */
+function redirectRefusal(res) {
+  return `Composio answered ${res.status}, a redirect${redirectTarget(res.headers.get('location'))}; the API key is only sent to ${new URL(BASE_URL).origin}, so it was not followed`;
+}
+
+function redirectTarget(location) {
+  if (!location) return '';
+  try {
+    const url = new URL(location, BASE_URL);
+    return ` to ${url.origin}${url.pathname}`;
+  } catch {
+    return '';
+  }
+}
+
 async function get(path) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
       headers: { 'x-api-key': API_KEY, accept: 'application/json' },
+      redirect: 'manual',
       signal: ctrl.signal,
     });
+    if (res.status >= 300 && res.status < 400) throw new Error(redirectRefusal(res));
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${path}: ${text.slice(0, 200)}`);
     return JSON.parse(text);
