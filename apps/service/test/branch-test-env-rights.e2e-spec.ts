@@ -13,6 +13,9 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const SECRET = 'branch-test-env-rights-secret';
 
+const SCOPE_REFUSAL =
+  'This API key is missing the "workflow:deploy" scope it takes to test a branch under \'production\', the same as promoting to it — test it on Default (your connections)';
+
 const codeDoc = (msg: string): Record<string, unknown> => ({
   version: '1',
   name: 'Env rights',
@@ -60,15 +63,21 @@ describe('a branch test under an environment takes the right to promote there (e
   let db: Client;
   const owner = randomUUID();
   const member = randomUUID();
+  const admin = randomUUID();
   const orgId = randomUUID();
+  const personalOrgId = randomUUID();
   const keys = {
     member: 'ork_e2e_envrights_member_deploy_aaaa',
     ownerNoDeploy: 'ork_e2e_envrights_owner_nodeploy_bbb',
     owner: 'ork_e2e_envrights_owner_deploy_cccccc',
+    admin: 'ork_e2e_envrights_admin_deploy_ddddd',
+    personalNoDeploy: 'ork_e2e_envrights_mine_nodeploy_eeee',
+    personal: 'ork_e2e_envrights_mine_deploy_ffffff',
   };
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
   let asOwner = '';
   let asMember = '';
+  let asAdmin = '';
   let wf = '';
   let review = '';
   let production = '';
@@ -81,11 +90,11 @@ describe('a branch test under an environment takes the right to promote there (e
     inOrg(http().post(`/api/workflows/${wf}/reviews/${review}/test`), bearer).send(
       environmentId ? { environment_id: environmentId } : {},
     );
-  const reviewRuns = async (): Promise<Array<{ environment_id: string | null }>> =>
+  const reviewRuns = async (id = review): Promise<Array<{ environment_id: string | null }>> =>
     (
       await db.query<{ environment_id: string | null }>(
         `SELECT environment_id FROM runtime_runs WHERE review_id = $1 AND source = 'review_test' ORDER BY started_at`,
-        [review],
+        [id],
       )
     ).rows;
 
@@ -98,27 +107,33 @@ describe('a branch test under an environment takes the right to promote there (e
     await db.query(
       `INSERT INTO users (id, email, name, created_at, updated_at)
        VALUES ($1, 'envrights-owner@e2e.local', 'Owner', now(), now()),
-              ($2, 'envrights-member@e2e.local', 'Member', now(), now())`,
-      [owner, member],
+              ($2, 'envrights-member@e2e.local', 'Member', now(), now()),
+              ($3, 'envrights-admin@e2e.local', 'Admin', now(), now())`,
+      [owner, member, admin],
     );
     await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Acme', false, now(), now())`,
-      [orgId],
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
+       VALUES ($1, 'Acme', false, now(), now()), ($2, 'Owner', true, now(), now())`,
+      [orgId, personalOrgId],
     );
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now())`,
-      [orgId, owner, member],
+       VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now()),
+              (gen_random_uuid(), $1, $4, 'admin', now()), (gen_random_uuid(), $5, $2, 'owner', now())`,
+      [orgId, owner, member, admin, personalOrgId],
     );
-    for (const [user, key, scopes] of [
-      [member, keys.member, ['run:execute', 'workflow:read', 'workflow:deploy']],
-      [owner, keys.ownerNoDeploy, ['run:execute', 'workflow:read']],
-      [owner, keys.owner, ['run:execute', 'workflow:read', 'workflow:deploy']],
+    for (const [user, org, key, scopes] of [
+      [member, orgId, keys.member, ['run:execute', 'workflow:read', 'workflow:deploy']],
+      [owner, orgId, keys.ownerNoDeploy, ['run:execute', 'workflow:read']],
+      [owner, orgId, keys.owner, ['run:execute', 'workflow:read', 'workflow:deploy']],
+      [admin, orgId, keys.admin, ['run:execute', 'workflow:read', 'workflow:deploy']],
+      [owner, personalOrgId, keys.personalNoDeploy, ['run:execute', 'workflow:read']],
+      [owner, personalOrgId, keys.personal, ['run:execute', 'workflow:read', 'workflow:deploy']],
     ] as const) {
       await db.query(
         `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
          VALUES (gen_random_uuid(), $1, $2, 'k', $3, $4, $5::json, now())`,
-        [user, orgId, hash(key), key.slice(0, 12), JSON.stringify(scopes)],
+        [user, org, hash(key), key.slice(0, 12), JSON.stringify(scopes)],
       );
     }
 
@@ -130,6 +145,7 @@ describe('a branch test under an environment takes the right to promote there (e
     process.env.SECRET_KEY = SECRET;
     asOwner = (await mintSession(owner, SECRET)).token;
     asMember = (await mintSession(member, SECRET)).token;
+    asAdmin = (await mintSession(admin, SECRET)).token;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
@@ -230,11 +246,7 @@ describe('a branch test under an environment takes the right to promote there (e
     const ran = (await reviewRuns()).length;
 
     const refused = await testBranch(keys.ownerNoDeploy, production).expect(403);
-    expect(refused.body).toMatchObject({
-      detail:
-        'This API key is missing the "workflow:deploy" scope it takes to test a branch under \'production\', the same as promoting to it — test it on Default (your connections)',
-      code: 'promote_not_permitted',
-    });
+    expect(refused.body).toMatchObject({ detail: SCOPE_REFUSAL, code: 'promote_not_permitted' });
     expect(await reviewRuns()).toHaveLength(ran);
 
     const res = await testBranch(keys.ownerNoDeploy).expect(201);
@@ -252,4 +264,80 @@ describe('a branch test under an environment takes the right to promote there (e
       { environment_id: production },
     ]);
   }, 30_000);
+
+  it.each([
+    ['session', (): string => asAdmin],
+    ['key holding "workflow:deploy"', (): string => keys.admin],
+  ])(
+    "an admin's %s, which may promote there, tests under production",
+    async (_, bearer) => {
+      const ran = (await reviewRuns()).length;
+
+      const res = await testBranch(bearer(), production).expect(201);
+
+      expect(res.body).toMatchObject({ verdict: 'green', environment_id: production });
+      expect((await reviewRuns()).slice(ran)).toEqual([
+        { environment_id: production },
+        { environment_id: production },
+      ]);
+    },
+    30_000,
+  );
+
+  describe('in a personal workspace', () => {
+    let mineWf = '';
+    let mineReview = '';
+    let mineProduction = '';
+    const mine = (r: request.Test, bearer = asOwner): request.Test =>
+      r.set('Authorization', `Bearer ${bearer}`).set('X-Org-Id', personalOrgId);
+    const testMine = (key: string, environmentId?: string): request.Test =>
+      mine(http().post(`/api/workflows/${mineWf}/reviews/${mineReview}/test`), key).send(
+        environmentId ? { environment_id: environmentId } : {},
+      );
+
+    beforeAll(async () => {
+      mineWf = (
+        await mine(http().post('/api/deploy'))
+          .send({ workflow_json: codeDoc('base') })
+          .expect(201)
+      ).body.workflow_id as string;
+      await mine(http().post(`/api/workflows/${mineWf}/branches`))
+        .send({ name: 'change' })
+        .expect(201);
+      await mine(http().post(`/api/workflows/${mineWf}/commit`))
+        .send({ workflow_json: codeDoc('changed'), branch: 'change' })
+        .expect(201);
+      mineReview = (
+        await mine(http().post(`/api/workflows/${mineWf}/reviews`))
+          .send({ source_branch: 'change', title: 'Change the output' })
+          .expect(201)
+      ).body.id as string;
+      const envs = (await mine(http().get('/api/environments')).expect(200)).body.environments as Array<{
+        id: string;
+        name: string;
+      }>;
+      mineProduction = envs.find((e) => e.name === 'production')!.id;
+    }, 30_000);
+
+    it('its owner\'s key without "workflow:deploy" is refused under its production naming the scope, and runs on Default', async () => {
+      const refused = await testMine(keys.personalNoDeploy, mineProduction).expect(403);
+      expect(refused.body).toMatchObject({ detail: SCOPE_REFUSAL, code: 'promote_not_permitted' });
+      expect(await reviewRuns(mineReview)).toEqual([]);
+
+      const res = await testMine(keys.personalNoDeploy).expect(201);
+      expect(res.body).toMatchObject({ verdict: 'green', environment_id: null });
+    }, 30_000);
+
+    it('its owner\'s key holding "workflow:deploy" tests under its production', async () => {
+      const ran = (await reviewRuns(mineReview)).length;
+
+      const res = await testMine(keys.personal, mineProduction).expect(201);
+
+      expect(res.body).toMatchObject({ verdict: 'green', environment_id: mineProduction });
+      expect((await reviewRuns(mineReview)).slice(ran)).toEqual([
+        { environment_id: mineProduction },
+        { environment_id: mineProduction },
+      ]);
+    }, 30_000);
+  });
 });
