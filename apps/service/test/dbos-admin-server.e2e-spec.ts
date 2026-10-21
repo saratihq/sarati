@@ -63,10 +63,18 @@ describe('DBOS without its admin server (e2e)', () => {
       `${runId} parked`,
     );
 
-  // A bind that failed because another process holds DBOS's port still logs the attempt.
+  // The boot log can reach this process after the service answers; the launch line comes after everything the launch wrote.
+  const bootLog = (): Promise<string> =>
+    eventually(
+      () => Promise.resolve(service!.log()),
+      (log) => log.includes('DBOS launched ('),
+      'the DBOS launch line',
+    );
+
+  // A bind lost to another process on DBOS's port leaves only a warning in the log.
   async function listensOnItsPortAlone(): Promise<void> {
     expect(await service!.listeningPorts()).toEqual([Number(new URL(service!.base).port)]);
-    expect(service!.log()).not.toMatch(/admin server/i);
+    expect(await bootLog()).not.toMatch(/admin server/i);
   }
 
   async function startParked(runId: string): Promise<void> {
@@ -111,7 +119,7 @@ describe('DBOS without its admin server (e2e)', () => {
     await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/parked-after-fan-out`, 'earlier-fanned');
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
 
-    expect(service.log()).toContain(
+    expect(await bootLog()).toContain(
       "Runs an earlier version started, in flight at boot: 1 can resume, 1 can't be resumed safely and will fail, 0 had already ended",
     );
     expect(
