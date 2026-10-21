@@ -7,11 +7,11 @@ import {
   type NormalizedRequest,
   type NormalizedResponse,
   type RequestBody,
-  resolveFetch,
   type Transport,
 } from '@sarati/actions-sdk';
 
 import { errorMessage } from '../common/error-message';
+import { composioFetch } from '../connections/composio-http';
 
 /** Headers that must not ride to the proxy — it issues its own request and attaches the real credential itself. */
 const STRIPPED_REQUEST_HEADERS = new Set([
@@ -57,7 +57,7 @@ export class ComposioProxyTransport implements Transport {
   private readonly connectedAccountId: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly fetchImpl: FetchLike;
+  private readonly fetchImpl: FetchLike | undefined;
 
   constructor(options: ComposioProxyTransportOptions) {
     if (!options.apiKey) {
@@ -78,7 +78,7 @@ export class ComposioProxyTransport implements Transport {
     this.connectedAccountId = options.connectedAccountId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.fetchImpl = resolveFetch(options.fetchImpl);
+    this.fetchImpl = options.fetchImpl;
   }
 
   async send(request: NormalizedRequest): Promise<NormalizedResponse> {
@@ -97,15 +97,21 @@ export class ComposioProxyTransport implements Transport {
     let status: number;
     let text: string;
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/api/v3/tools/execute/proxy`, {
-        method: 'POST',
-        headers: { 'x-api-key': this.apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      const res = await composioFetch(
+        this.apiKey,
+        `${this.baseUrl}/api/v3/tools/execute/proxy`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        },
+        this.fetchImpl,
+      );
       status = res.status;
       text = await res.text();
     } catch (err) {
+      if (err instanceof ActionError) throw err;
       // A failure reaching Composio is a gateway problem — retryable, and carries the real message.
       throw new ActionError({
         code: 'transport_unreachable',
