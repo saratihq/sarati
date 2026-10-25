@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { Client } from 'pg';
 
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
-import { RUN_PLAN_V2_WORKFLOW } from '../src/dbos/run-plan-workflow';
+import { RUN_PLAN_V2_WORKFLOW, RUN_PLAN_WORKFLOW } from '../src/dbos/run-plan-workflow';
 import { failedNodeIdOf, NOT_RESUMED_STEP_ERROR } from '../src/runs/run-failure';
 import { GOLDEN_DIR, PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { bootService, startService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
@@ -33,6 +33,9 @@ const recorded = (shapes: string[], latestOnly: string[] = []): string[] => [
 const RECORDED_EXPOSED = recorded(EXPOSED, ['shared-receive-wait-fan-out']);
 const RECORDED_RESUMABLE = recorded(RESUMABLE);
 const runIdOf = (golden: string): string => golden.replace('/', '-');
+const HISTORY_READ = 'SELECT step_key, kind, pinned FROM runtime_run_steps';
+const LOCK_RUN_STEPS = 'LOCK TABLE runtime_run_steps IN ACCESS EXCLUSIVE MODE';
+const seen = (log: string, line: string): number => log.split(line).length - 1;
 
 interface RunRow {
   status: string;
@@ -121,33 +124,41 @@ describe('the recovery guard (e2e)', () => {
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
   }
 
-  // Recover each shape as its run id under a held table lock, releasing it once the guard has tried and waited twice.
+  // Recover each shape as its run id, and no other legacy run, under a held table lock released once `held` settles.
   async function recoverUnderLock(
     runs: Record<string, string>,
-    held: { url: string; statement: string; retries: string },
+    lock: { url: string; statement: string },
+    held: (started: ServiceProcess) => Promise<unknown>,
   ): Promise<void> {
-    const { url, statement, retries } = held;
     await service?.crash();
     service = undefined;
+    await dbos.query(
+      `UPDATE dbos.workflow_status SET status = 'CANCELLED' WHERE name = $1 AND status = 'PENDING'`,
+      [RUN_PLAN_WORKFLOW],
+    );
     for (const [shape, runId] of Object.entries(runs)) await restoreGoldenHistory(db, dbos, shape, runId);
-    const holder = new Client({ connectionString: url });
+    const holder = new Client({ connectionString: lock.url });
     await holder.connect();
     try {
       await holder.query('BEGIN');
-      await holder.query(statement);
+      await holder.query(lock.statement);
       const started = await startService({ service: THIS_SERVICE, databaseUrl });
       service = started;
-      await eventually(
-        () => Promise.resolve(started.log().split(retries).length - 1),
-        (seen) => seen >= 2,
-        `the guard retrying: ${retries}`,
-      );
+      await held(started);
       await holder.query('ROLLBACK');
       await started.answered;
     } finally {
       await holder.end();
     }
   }
+  const retried =
+    (line: string) =>
+    (started: ServiceProcess): Promise<number> =>
+      eventually(
+        () => Promise.resolve(seen(started.log(), line)),
+        (count) => count >= 2,
+        `the guard retrying: ${line}`,
+      );
 
   beforeAll(async () => {
     databaseUrl = await createE2eDatabase(ADMIN_URL);
@@ -332,25 +343,29 @@ describe('the recovery guard (e2e)', () => {
   });
 
   it('stays up when the database ends the connection it reads histories on, leaving a parked run waiting', async () => {
-    await service?.crash();
-    service = undefined;
-    await restoreGoldenHistory(db, dbos, `${LATEST}/parked-before-fan-out`, 'dropped');
-    const started = await startService({ service: THIS_SERVICE, databaseUrl });
-    service = started;
-    // Ended while it sits idle in the pool, before the pool closes it.
-    await eventually(
-      async () =>
-        (
-          await db.query(
-            `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-              WHERE datname = $1 AND application_name = 'sarati-recovery-guard' AND state = 'idle'`,
-            [new URL(systemUrl).pathname.slice(1)],
-          )
-        ).rows.length,
-      (ended) => ended > 0,
-      "the guard's idle connection ended",
+    // Ended only while the guard waits on the lock for the run's rows: its DBOS read done, its connection sits idle in the pool.
+    await recoverUnderLock(
+      { [`${LATEST}/parked-before-fan-out`]: 'dropped' },
+      { url: databaseUrl, statement: LOCK_RUN_STEPS },
+      () =>
+        eventually(
+          async () =>
+            (
+              await db.query<{ ended: boolean }>(
+                `SELECT pg_terminate_backend(guard.pid) AS ended FROM pg_stat_activity guard
+                  WHERE guard.datname = $1 AND guard.application_name = 'sarati-recovery-guard'
+                    AND guard.state = 'idle'
+                    AND EXISTS (SELECT 1 FROM pg_stat_activity app
+                                 WHERE app.datname = current_database() AND app.wait_event_type = 'Lock'
+                                   AND starts_with(app.query, $2) AND app.query_start > guard.state_change)`,
+                [new URL(systemUrl).pathname.slice(1), HISTORY_READ],
+              )
+            ).rows.filter((row) => row.ended).length,
+          (ended) => ended > 0,
+          "the guard's idle connection ended",
+        ),
     );
-    await started.answered;
+    const started = service!;
     await eventually(
       () => Promise.resolve(started.log()),
       (log) => log.includes('The recovery guard lost a connection'),
@@ -372,11 +387,8 @@ describe('the recovery guard (e2e)', () => {
     // Held on DBOS's table, not the app's: the app's boot reads its own tables and would wait the lock out unlogged.
     await recoverUnderLock(
       { [`${LATEST}/linear-parked`]: 'held-read', [`${LATEST}/inside-wait-fan-out`]: 'held-read-exposed' },
-      {
-        url: systemUrl,
-        statement: 'LOCK TABLE dbos.operation_outputs IN ACCESS EXCLUSIVE MODE',
-        retries: `Couldn't read the history of run ${MOCK_USER_ID}:held-read-exposed`,
-      },
+      { url: systemUrl, statement: 'LOCK TABLE dbos.operation_outputs IN ACCESS EXCLUSIVE MODE' },
+      retried(`Couldn't read the history of run ${MOCK_USER_ID}:held-read-exposed`),
     );
     expect(
       await eventually(
@@ -400,41 +412,26 @@ describe('the recovery guard (e2e)', () => {
   }, 120_000);
 
   it('never refuses a run that ran nothing side by side for a lock on its history, and resumes it once it lifts', async () => {
-    await service?.crash();
-    service = undefined;
-    await restoreGoldenHistory(db, dbos, `${LATEST}/linear-parked`, 'held-app');
-    const holder = new Client({ connectionString: databaseUrl });
-    await holder.connect();
-    try {
-      await holder.query('BEGIN');
-      await holder.query('LOCK TABLE runtime_run_steps IN ACCESS EXCLUSIVE MODE');
-      const started = await startService({ service: THIS_SERVICE, databaseUrl });
-      service = started;
-      // Boot waits on this lock and logs nothing until it lifts: count the history reads queued on it, the boot count's first.
-      const reads = new Set<string>();
-      await eventually(
-        async () => {
-          const waiting = await db.query<{ pid: number; query_start: Date }>(
-            `SELECT pid, query_start FROM pg_stat_activity
-              WHERE datname = current_database() AND wait_event_type = 'Lock'
-                AND query LIKE 'SELECT step_key, kind, pinned FROM runtime_run_steps%'`,
-          );
-          for (const read of waiting.rows) reads.add(`${read.pid}@${read.query_start.toISOString()}`);
-          return reads.size;
-        },
-        (count) => count >= 4,
-        'the guard reading its history again',
-      );
-      await holder.query('ROLLBACK');
-      await started.answered;
-    } finally {
-      await holder.end();
-    }
-    const log = service.log();
-    expect(
-      log.split(`Couldn't read the history of run ${MOCK_USER_ID}:held-app`).length - 1,
-    ).toBeGreaterThanOrEqual(2);
-    expect(log).not.toContain(`Run ${MOCK_USER_ID}:held-app can't be resumed`);
+    // Boot waits on this lock and logs nothing until it lifts: count the history reads queued on it, all held-app's, the boot count's first.
+    const reads = new Set<string>();
+    await recoverUnderLock(
+      { [`${LATEST}/linear-parked`]: 'held-app' },
+      { url: databaseUrl, statement: LOCK_RUN_STEPS },
+      () =>
+        eventually(
+          async () => {
+            const waiting = await db.query<{ pid: number; query_start: Date }>(
+              `SELECT pid, query_start FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock' AND starts_with(query, $1)`,
+              [HISTORY_READ],
+            );
+            for (const read of waiting.rows) reads.add(`${read.pid}@${read.query_start.toISOString()}`);
+            return reads.size;
+          },
+          (count) => count >= 4,
+          'the guard reading its history again',
+        ),
+    );
     await eventually(
       () => parkedSteps('held-app'),
       (rows) => rows.length === 1,
@@ -448,16 +445,20 @@ describe('the recovery guard (e2e)', () => {
         'held-app done',
       ),
     ).toEqual({ status: 'completed', error: null });
+    // The lines the boot held back reach the log after it answers.
+    const log = await eventually(
+      () => Promise.resolve(service!.log()),
+      (lines) => seen(lines, `Couldn't read the history of run ${MOCK_USER_ID}:held-app`) >= 2,
+      "the guard's tries the lock refused",
+    );
+    expect(log).not.toContain(`Run ${MOCK_USER_ID}:held-app can't be resumed`);
   }, 120_000);
 
   it('retries the write that ends a run it refuses while the table is held, then ends it', async () => {
     await recoverUnderLock(
       { [`${LATEST}/inside-wait-fan-out`]: 'held-write' },
-      {
-        url: databaseUrl,
-        statement: 'LOCK TABLE runtime_runs IN EXCLUSIVE MODE',
-        retries: `Couldn't end run ${MOCK_USER_ID}:held-write`,
-      },
+      { url: databaseUrl, statement: 'LOCK TABLE runtime_runs IN EXCLUSIVE MODE' },
+      retried(`Couldn't end run ${MOCK_USER_ID}:held-write`),
     );
     expect(
       await eventually(
