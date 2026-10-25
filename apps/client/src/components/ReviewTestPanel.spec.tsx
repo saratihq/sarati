@@ -4,18 +4,24 @@ import * as api from "@/api/client";
 import type { BlockedStep, ReviewTestReadiness, ReviewTestSummary } from "@/api/client";
 import type { EnvironmentSummary } from "@/api/environments";
 import ReviewTestPanel from "@/components/ReviewTestPanel";
+import { useOrgs } from "@/store/useOrgs";
 
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof api>()),
   getReviewTestReadiness: vi.fn(),
+  testReviewBranch: vi.fn(),
 }));
+vi.mock("@/lib/toast", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 const getReviewTestReadiness = vi.mocked(api.getReviewTestReadiness);
+const testReviewBranch = vi.mocked(api.testReviewBranch);
 const clean: ReviewTestReadiness = { environment: null, blocked: [] };
 
 beforeEach(() => {
   getReviewTestReadiness.mockReset();
   getReviewTestReadiness.mockResolvedValue(clean);
+  testReviewBranch.mockReset();
+  useOrgs.setState({ orgs: [], activeOrgId: null });
 });
 
 const summary = (changed: ReviewTestSummary["regression"]["changed"]): ReviewTestSummary => ({
@@ -345,5 +351,56 @@ describe("ReviewTestPanel — what the test would refuse, before it runs", () =>
     renderRunnable();
     expect(await screen.findByText(/Couldn't check this branch's accounts before running \(network down\)/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Test this branch" })).toBeEnabled();
+  });
+});
+
+describe("ReviewTestPanel — an environment takes the right to promote there", () => {
+  const production = { id: "env-prod", name: "production", is_prod: true } as unknown as EnvironmentSummary;
+  const inTeamAs = (role: "member" | "admin") =>
+    useOrgs.setState({ orgs: [{ id: "o1", name: "Team", is_personal: false, role }], activeOrgId: "o1" });
+  const renderPanel = () =>
+    render(
+      <ReviewTestPanel
+        workflowId="wf"
+        reviewId="rev"
+        sourceBranch="add-email"
+        environments={[production]}
+        result={null}
+        onResult={vi.fn()}
+        canRun
+      />,
+    );
+  const runOn = async (value: string) => {
+    fireEvent.change(await screen.findByRole("combobox"), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Test this branch" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run test" }));
+    await waitFor(() => expect(testReviewBranch).toHaveBeenCalledTimes(1));
+  };
+
+  it("offers a member only Default, says why, and never sends an environment", async () => {
+    inTeamAs("member");
+    testReviewBranch.mockResolvedValue(summary([]));
+    renderPanel();
+
+    expect(await screen.findByRole("option", { name: "production" })).toBeDisabled();
+    expect(screen.getByRole("combobox")).toHaveAccessibleDescription(
+      "Only owners and admins can test a branch under an environment, the same as promoting to it — test it on Default (your connections).",
+    );
+    await runOn("env-prod");
+
+    expect(testReviewBranch).toHaveBeenCalledWith("wf", "rev", {});
+    expect(getReviewTestReadiness).not.toHaveBeenCalledWith("wf", "rev", "env-prod");
+  });
+
+  it("offers an admin every environment and runs under the one picked", async () => {
+    inTeamAs("admin");
+    testReviewBranch.mockResolvedValue({ ...summary([]), environment_id: "env-prod" });
+    renderPanel();
+
+    expect(await screen.findByRole("option", { name: "production" })).toBeEnabled();
+    expect(screen.queryByTestId("test-env-gate")).not.toBeInTheDocument();
+    await runOn("env-prod");
+
+    expect(testReviewBranch).toHaveBeenCalledWith("wf", "rev", { environment_id: "env-prod" });
   });
 });

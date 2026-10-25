@@ -227,7 +227,7 @@ export class ReviewsController {
     };
   }
 
-  /** Pre-merge "Test this branch": dual-run both heads on one payload. REALLY executes — live effects can fire. */
+  /** Pre-merge "Test this branch": dual-run both heads on one payload. REALLY executes — live effects can fire; under an environment it takes the right to promote there. */
   @Scope('run:execute')
   @Post(':reviewId/test')
   async test(
@@ -239,8 +239,7 @@ export class ReviewsController {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'write');
     const summary = await this.reviewTest.testBranch(workflowId, reviewId, {
-      userId: principal.user.id,
-      activeOrgId: principal.activeOrgId,
+      principal,
       environmentId: body.environment_id ?? null,
       triggerPayload: body.trigger_payload,
     });
@@ -262,8 +261,7 @@ export class ReviewsController {
     }
     await this.authorize(req, workflowId, 'read');
     const readiness = await this.reviewTest.readiness(workflowId, reviewId, {
-      userId: principal.user.id,
-      activeOrgId: principal.activeOrgId,
+      principal,
       environmentId: environmentId || null,
     });
     return { ...readiness };

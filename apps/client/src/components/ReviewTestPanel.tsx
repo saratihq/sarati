@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, FlaskConical, XCircle } from "lucide-react";
 import * as api from "@/api/client";
 import type { ReviewTestReadiness, ReviewTestRun, ReviewTestSummary } from "@/api/client";
@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { timeAgo } from "@/lib/format";
 import { REAL_RUN_CONSEQUENCE } from "@/lib/realRun";
 import { toast } from "@/lib/toast";
+import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 
 // Sentinel for the "Default (your connections)" option — an empty string can
 // never collide with a real env id.
@@ -332,7 +333,11 @@ export default function ReviewTestPanel({
   current = true,
   gate = null,
 }: ReviewTestPanelProps) {
-  const [envId, setEnvId] = useState<string>(DEFAULT_ENV);
+  const [pickedEnvId, setPickedEnvId] = useState<string>(DEFAULT_ENV);
+  // Testing under an environment takes the right to promote there, so without it only Default is offered.
+  const mayTestUnderEnvs = useOrgs(canMoveEnvPointers);
+  const envId = mayTestUnderEnvs ? pickedEnvId : DEFAULT_ENV;
+  const envGateId = useId();
   const [payloadSource, setPayloadSource] = useState<"latest" | "paste">("latest");
   const [payloadText, setPayloadText] = useState("");
   const [payloadError, setPayloadError] = useState<string | null>(null);
@@ -376,6 +381,7 @@ export default function ReviewTestPanel({
   const sortedEnvs = environments
     ? [...environments].sort((a, b) => Number(b.is_prod) - Number(a.is_prod))
     : [];
+  const envGated = !mayTestUnderEnvs && sortedEnvs.length > 0;
   const envLabel =
     envId === DEFAULT_ENV
       ? "Default (your connections)"
@@ -450,7 +456,8 @@ export default function ReviewTestPanel({
               </span>
               <select
                 value={envId}
-                onChange={(e) => setEnvId(e.target.value)}
+                onChange={(e) => setPickedEnvId(e.target.value)}
+                aria-describedby={envGated ? envGateId : undefined}
                 className="py-1.5 px-2.5 rounded text-[12px] outline-none cursor-pointer"
                 style={{
                   background: "var(--orchestr-accent-tint)",
@@ -460,7 +467,7 @@ export default function ReviewTestPanel({
               >
                 <option value={DEFAULT_ENV}>Default (your connections)</option>
                 {sortedEnvs.map((env) => (
-                  <option key={env.id} value={env.id}>
+                  <option key={env.id} value={env.id} disabled={!mayTestUnderEnvs}>
                     {env.name}
                   </option>
                 ))}
@@ -499,6 +506,17 @@ export default function ReviewTestPanel({
               </div>
             </div>
           </div>
+
+          {envGated && (
+            <p
+              id={envGateId}
+              data-testid="test-env-gate"
+              className="text-[11px] m-0"
+              style={{ color: "var(--orchestr-ink-subtle)" }}
+            >
+              {ENV_POINTER_GATE.test}
+            </p>
+          )}
 
           {payloadSource === "paste" && (
             <div>

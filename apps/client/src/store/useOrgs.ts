@@ -29,8 +29,8 @@ export function activeOrgOf(s: Pick<OrgState, "orgs" | "activeOrgId">): OrgSumma
 }
 
 /**
- * Env-pointer moves (publish/promote/restore) are owner/admin-only in a non-personal org.
- * Returns true while the org list loads — the service stays the backstop, so nobody is falsely locked out.
+ * Env-pointer moves (publish/promote/restore), and a branch test under an environment, are owner/admin-only in a
+ * non-personal org. Returns true while the org list loads — the service stays the backstop, so nobody is falsely locked out.
  */
 export function canMoveEnvPointers(s: Pick<OrgState, "orgs" | "activeOrgId">): boolean {
   const org = activeOrgOf(s);
@@ -38,10 +38,11 @@ export function canMoveEnvPointers(s: Pick<OrgState, "orgs" | "activeOrgId">): b
   return org.role === "owner" || org.role === "admin";
 }
 
-/** Tooltip copy for a pointer-move control disabled by the gate above. */
+/** Copy for a control the gate above disables: a pointer move, or a branch test under an environment. */
 export const ENV_POINTER_GATE = {
   publish: "Only owners and admins can publish to production",
   promote: "Only owners and admins can change what an environment runs",
+  test: "Only owners and admins can test a branch under an environment, the same as promoting to it — test it on Default (your connections).",
 } as const;
 
 export const useOrgs = create<OrgState>((set, get) => ({

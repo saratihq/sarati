@@ -450,9 +450,9 @@ export class VersionsWriteService {
   async publish(
     workflowId: string,
     versionNumber: number | null,
-    actorId: string | null,
+    actor: Principal,
   ): Promise<Record<string, unknown>> {
-    return this.movePublishPointer(workflowId, versionNumber, actorId, {
+    return this.movePublishPointer(workflowId, versionNumber, actor, {
       eventType: 'workflow.published',
       status: 'published',
       defaultToHead: true,
@@ -463,9 +463,9 @@ export class VersionsWriteService {
   async restore(
     workflowId: string,
     versionNumber: number,
-    actorId: string | null,
+    actor: Principal,
   ): Promise<Record<string, unknown>> {
-    return this.movePublishPointer(workflowId, versionNumber, actorId, {
+    return this.movePublishPointer(workflowId, versionNumber, actor, {
       eventType: 'workflow.restored',
       status: 'restored',
       defaultToHead: false,
@@ -476,7 +476,7 @@ export class VersionsWriteService {
   private async movePublishPointer(
     workflowId: string,
     versionNumber: number | null,
-    actorId: string | null,
+    actor: Principal,
     opts: { eventType: string; status: string; defaultToHead: boolean },
   ): Promise<Record<string, unknown>> {
     const result = await this.dataSource.transaction(async (em) => {
@@ -508,7 +508,7 @@ export class VersionsWriteService {
 
       // Moving an org workflow's PROD pointer is owner/admin-only — the SAME gate promote enforces.
       // Gate the OPERATION (before the idempotency check) so a member is denied consistently.
-      if (actorId) await this.envPointers.assertPointerMoveAllowed(em, wf, PROD_ENV, actorId);
+      await this.envPointers.assertMayPromote(em, wf.orgId, PROD_ENV, actor);
       // Publish IS promote-to-prod: it refuses an environment that cannot run the version too.
       await this.envPointers.assertEnvCanRun(em, wf, PROD_ENV, target);
 
@@ -518,7 +518,7 @@ export class VersionsWriteService {
         await this.envPointers.setPointer(em, wf.id, PROD_ENV, target.id);
         await this.events.emit(em, {
           orgId: wf.orgId,
-          actorUserId: actorId,
+          actorUserId: actor.user.id,
           type: opts.eventType,
           subjectType: 'workflow',
           subjectId: wf.id,

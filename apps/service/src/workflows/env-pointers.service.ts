@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
+import { principalScopes, type Principal } from '../auth/principal';
+import { scopeSatisfied } from '../auth/scopes';
 import { DomainError } from '../common/domain-error';
 import { ConnectionsService } from '../connections/connections.service';
 import { isIdShape } from '../database/ids';
@@ -27,6 +29,20 @@ export const ENV_SHAPE = ENV_NAME_SHAPE;
 
 /** Environments that may only be promoted from the default branch. */
 const MAIN_ONLY_ENVS = new Set([PROD_ENV, 'uat']);
+
+/** What a caller does under an environment that takes the right to promote to it: move its pointer, or test a branch on its accounts. */
+export type PromoteAct = 'move' | 'test';
+
+/** What the right to promote is missing: a key's scope, or in a shared org an owner's or admin's role. */
+export type PromoteRightMissing = 'scope' | 'role';
+
+const PROMOTE_ACTS: Record<PromoteAct, { doing: (env: string) => string; instead: string }> = {
+  move: { doing: (env) => `move the '${env}' pointer`, instead: '' },
+  test: {
+    doing: (env) => `test a branch under '${env}'`,
+    instead: ', the same as promoting to it — test it on Default (your connections)',
+  },
+};
 
 /** One pointer as the workflow-detail response carries it. */
 export interface EnvPointerView {
@@ -147,7 +163,7 @@ export class EnvPointersService {
   async removePointer(
     workflowId: string,
     environmentId: string,
-    actorUserId: string,
+    actor: Principal,
   ): Promise<{ removed: true; environment: string }> {
     const result = await this.dataSource.transaction(async (em) => {
       await lockWorkflowForPointerMove(em, workflowId);
@@ -155,7 +171,7 @@ export class EnvPointersService {
       if (!wf) throw new DomainError(`Workflow ${workflowId} not found`, 404);
       if (!wf.orgId) throw new DomainError('Environment not found', 404); // org-less: no env rows
       const env = await this.environments.byIdForOrg(em, wf.orgId, environmentId, 'pessimistic_read');
-      await this.assertPointerMoveAllowed(em, wf, env.name, actorUserId);
+      await this.assertMayPromote(em, wf.orgId, env.name, actor);
 
       const removed = await rawMutate(
         em,
@@ -175,7 +191,7 @@ export class EnvPointersService {
       }
       await this.events.emit(em, {
         orgId: wf.orgId,
-        actorUserId,
+        actorUserId: actor.user.id,
         type: 'workflow.unpromoted',
         subjectType: 'workflow',
         subjectId: wf.id,
@@ -227,7 +243,7 @@ export class EnvPointersService {
     workflowId: string,
     environmentRaw: string,
     versionId: string,
-    actorUserId: string,
+    actor: Principal,
   ): Promise<Record<string, unknown>> {
     if (!ENV_SHAPE.test(environmentRaw)) throw new DomainError('Invalid environment name', 400);
     const environment = normalizeEnv(environmentRaw);
@@ -253,7 +269,7 @@ export class EnvPointersService {
 
       // Taken first and held until commit: a rename of this env waits, and one that committed is not followed.
       const envRow = wf.orgId ? await this.environments.ensureEnvironment(em, wf.orgId, environment) : null;
-      await this.assertPointerMoveAllowed(em, wf, environment, actorUserId);
+      await this.assertMayPromote(em, wf.orgId, environment, actor);
       await this.assertEnvCanRun(em, wf, environment, version);
 
       const currentVersionId = envRow
@@ -267,7 +283,7 @@ export class EnvPointersService {
         await this.setPointer(em, wf.id, environment, version.id);
         await this.events.emit(em, {
           orgId: wf.orgId,
-          actorUserId,
+          actorUserId: actor.user.id,
           type: 'workflow.promoted',
           subjectType: 'workflow',
           subjectId: wf.id,
@@ -306,31 +322,38 @@ export class EnvPointersService {
     );
   }
 
-  /**
-   * The ONE gate every pointer move funnels through (publish/restore, promote, un-promote): moving an
-   * org workflow's pointer needs an owner/admin for EVERY environment, prod included. Org-less passes.
-   */
-  async assertPointerMoveAllowed(
+  /** The ONE gate on what an environment runs: every pointer move, and a branch test under it, which runs unreviewed content on its accounts. */
+  async assertMayPromote(
     em: EntityManager,
-    wf: WorkflowEntity,
+    orgId: string | null,
     environment: string,
-    actorUserId: string,
+    actor: Principal,
+    act: PromoteAct = 'move',
   ): Promise<void> {
-    if (!(await this.mayMovePointers(em, wf.orgId, actorUserId))) {
-      throw new DomainError(
-        `Only owners and admins can move the '${environment}' pointer in an organization`,
-        403,
-      );
-    }
+    const missing = await this.promoteRightMissing(em, orgId, actor);
+    if (!missing) return;
+    const { doing, instead } = PROMOTE_ACTS[act];
+    throw new DomainError(
+      missing === 'scope'
+        ? `This API key is missing the "workflow:deploy" scope it takes to ${doing(environment)}${instead}`
+        : `Only owners and admins can ${doing(environment)} in an organization${instead}`,
+      403,
+      { code: 'promote_not_permitted' },
+    );
   }
 
-  /** Whether this user may change what runs in this org: anyone outside a shared org, an owner or admin inside one. */
-  async mayMovePointers(em: EntityManager, orgId: string | null, actorUserId: string): Promise<boolean> {
-    if (!orgId) return true;
+  /** What this caller lacks to change what runs in this org: a key needs `workflow:deploy`, and in a shared org the person an owner or admin. */
+  async promoteRightMissing(
+    em: EntityManager,
+    orgId: string | null,
+    actor: Principal,
+  ): Promise<PromoteRightMissing | null> {
+    if (!scopeSatisfied(principalScopes(actor), 'workflow:deploy')) return 'scope';
+    if (!orgId) return null;
     const org = await em.findOne(OrganizationEntity, { where: { id: orgId } });
-    if (!org || org.isPersonal) return true;
-    const role = await this.orgs.roleOf(em, actorUserId, orgId);
-    return role === 'owner' || role === 'admin';
+    if (!org || org.isPersonal) return null;
+    const role = await this.orgs.roleOf(em, actor.user.id, orgId);
+    return role === 'owner' || role === 'admin' ? null : 'role';
   }
 }
 

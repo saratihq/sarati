@@ -121,7 +121,7 @@ export class WorkflowLifecycleService {
     const orgId = principal.activeOrgId;
     const author = principal.user.name;
 
-    if (!(await this.envPointers.mayMovePointers(this.dataSource.manager, orgId, userId))) {
+    if (await this.envPointers.promoteRightMissing(this.dataSource.manager, orgId, principal)) {
       const draft = await this.createDraft({ principal, name, irDoc, commitMessage: 'Initial version' });
       return {
         workflow_id: draft.workflow.id,
