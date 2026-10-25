@@ -279,7 +279,9 @@ describe('SDK polling-trigger activation (e2e, stubbed fetch)', () => {
     expect(rows.rows[0].kind).toBe('polling');
     expect(rows.rows[0].trigger_type).toBe('slack.new_channel');
     expect(rows.rows[0].connection_id).toBeNull();
-    expect(rows.rows[0].last_error).toMatch(/connection/i);
+    expect(rows.rows[0].last_error).toBe(
+      'production has no slack account assigned, so "When a channel is created" can\'t run there — an owner assigns one under Integrations → Environments',
+    );
 
     // A poll cycle must not fire a run for a connection trigger with no slot.
     await app.get(TriggersService).runActivationPollCycle();

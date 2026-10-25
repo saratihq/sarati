@@ -56,6 +56,11 @@ describe('DbosLifecycle (B9 — pinned recovery identity)', () => {
     );
   });
 
+  it('launches DBOS without its admin server', async () => {
+    await new DbosLifecycle(configWith(enabled())).onApplicationBootstrap();
+    expect(setConfig).toHaveBeenCalledWith(expect.objectContaining({ runAdminServer: false }));
+  });
+
   it('does not shut down DBOS when it was never launched', async () => {
     const lc = new DbosLifecycle(configWith({ dbosEnabled: false }));
     await lc.onApplicationBootstrap();

@@ -15,7 +15,7 @@ import { PlatformKeysService } from '../platform/platform-keys.service';
 import { resolveSdkAuthHandle, type SdkAuthContext } from './sdk-auth';
 import type { RunActionInput, RunActionResult } from './managed-integration-provider';
 
-/** Test-only fetch for the SDK transports; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
+/** Test-only fetch in place of the network hop: the SDK's SSRF-guarded one for a direct credential, `composioFetch`'s for a managed one. */
 export const SDK_ACTIONS_FETCH = Symbol('SDK_ACTIONS_FETCH');
 
 /**

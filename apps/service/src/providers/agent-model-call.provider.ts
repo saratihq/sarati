@@ -16,7 +16,7 @@ import type { EnvConfig } from '../config/env.config';
 import type { AgentModelAuth, AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/agent';
 import { resolveSdkAuthHandle } from './sdk-auth';
 
-/** Test-only fetch for the agent model call; unset in production → the SDK's SSRF-guarded hop, which any value here skips. */
+/** Test-only fetch in place of the agent model call's network hop: the SDK's SSRF-guarded one for a direct credential, `composioFetch`'s for a managed one. */
 export const AGENT_MODEL_FETCH = Symbol('AGENT_MODEL_FETCH');
 
 /**

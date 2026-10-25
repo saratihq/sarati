@@ -4,7 +4,7 @@ import type PgBoss from 'pg-boss';
 import { errorMessage } from '../common/error-message';
 import { PG_BOSS } from '../jobs/jobs.module';
 
-/** pg-boss queue that reconciles ONE workflow's trigger activations (payload: `{ workflowId }`). */
+/** pg-boss queue that reconciles ONE workflow's trigger activations (payload: `{ workflowId }`), at most one job per workflow waiting. */
 export const RECONCILE_QUEUE = 'trigger-reconcile';
 /** pg-boss queue that reconciles ALL workflows — the periodic safety-net full sweep. */
 export const RECONCILE_SWEEP_QUEUE = 'trigger-reconcile-sweep';
@@ -26,7 +26,7 @@ export class TriggerSignalsService {
   private readonly logger = new Logger(TriggerSignalsService.name);
   private inline: InlineReconcile | null = null;
   private readonly waiting: string[] = [];
-  private running = 0;
+  private readonly running = new Set<string>();
 
   constructor(@Inject(PG_BOSS) private readonly boss: PgBoss | null) {}
 
@@ -57,7 +57,8 @@ export class TriggerSignalsService {
   async enqueue(workflowId: string): Promise<void> {
     try {
       if (this.boss) {
-        await this.boss.send(RECONCILE_QUEUE, { workflowId });
+        // A reconcile reads the state when it starts, so one waiting job per workflow covers every change before it.
+        await this.boss.send(RECONCILE_QUEUE, { workflowId }, { singletonKey: workflowId });
         return;
       }
       // Fire-and-forget: the caller must not block on provider registration.
@@ -70,17 +71,23 @@ export class TriggerSignalsService {
 
   private drain(): void {
     const inline = this.inline;
-    while (inline && this.running < INLINE_CONCURRENCY && this.waiting.length > 0) {
-      const workflowId = this.waiting.shift()!;
-      this.running += 1;
+    for (let next = this.nextWaiting(); inline && next >= 0; next = this.nextWaiting()) {
+      const [workflowId] = this.waiting.splice(next, 1) as [string];
+      this.running.add(workflowId);
       void inline(workflowId)
         .catch((err: unknown) =>
           this.logger.warn(`inline reconcile of ${workflowId} failed: ${errorMessage(err)}`),
         )
         .finally(() => {
-          this.running -= 1;
+          this.running.delete(workflowId);
           this.drain();
         });
     }
+  }
+
+  // A workflow being reconciled keeps its one waiting entry until that reconcile ends, as the queue keeps one job.
+  private nextWaiting(): number {
+    if (this.running.size >= INLINE_CONCURRENCY) return -1;
+    return this.waiting.findIndex((workflowId) => !this.running.has(workflowId));
   }
 }

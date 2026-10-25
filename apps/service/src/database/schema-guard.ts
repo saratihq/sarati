@@ -177,6 +177,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_sub_workflow_charges' AND column_name='lineage'",
   },
+  {
+    migration: '041_activation_held.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'",
+  },
 ];
 
 /**

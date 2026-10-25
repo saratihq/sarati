@@ -4,7 +4,6 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
-import { request } from 'undici';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
@@ -13,6 +12,7 @@ import type { EnvConfig } from '../config/env.config';
 import { ComposioAuthConfigEntity } from '../database/entities/composio-auth-config.entity';
 import { now } from '../database/ids';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
+import { composioFetch } from './composio-http';
 
 /** Cache partition per owning scope — never share one scope's Composio project data with another. */
 function scopeKey(scope: PlatformKeyScope): string {
@@ -566,19 +566,17 @@ export class ComposioProvider {
     let statusCode: number;
     let text: string;
     try {
-      const res = await request(`${this.baseUrl}${path}`, {
+      const res = await composioFetch(apiKey, `${this.baseUrl}${path}`, {
         method,
         headers: {
-          'x-api-key': apiKey,
           accept: 'application/json',
-          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        headersTimeout: REQUEST_TIMEOUT_MS,
-        bodyTimeout: REQUEST_TIMEOUT_MS,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      statusCode = res.statusCode;
-      text = await res.body.text();
+      statusCode = res.status;
+      text = await res.text();
     } catch (err) {
       const message = errorMessage(err);
       this.logger.warn(`Composio ${method} ${path} failed: ${message}`);

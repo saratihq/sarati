@@ -37,6 +37,12 @@ export interface RunAsStep {
   managedOnly?: boolean;
 }
 
+/** A step or trigger as the slot rule sees it. */
+export interface SlotStep extends RunAsStep {
+  /** It runs only on an account that uses its own credentials: a trigger on the SDK's direct rail. */
+  ownCredentialsOnly?: boolean;
+}
+
 /** A pool connection and the user who owns it — the step runs AS that user. */
 export interface OwnedConnection {
   id: string;
@@ -76,6 +82,7 @@ export type RunAsRefusalReason =
   | 'empty_slot'
   | 'wrong_app_slot'
   | 'needs_managed_slot'
+  | 'needs_own_credentials_slot'
   | 'inactive_slot'
   | 'inactive'
   | 'needs_managed'
@@ -87,7 +94,7 @@ export type RunAsRefusalReason =
 /** The refusals of an environment run — its slot, never the runner, decides. */
 export type SlotRefusalReason = Extract<
   RunAsRefusalReason,
-  'empty_slot' | 'wrong_app_slot' | 'needs_managed_slot' | 'inactive_slot'
+  'empty_slot' | 'wrong_app_slot' | 'needs_managed_slot' | 'needs_own_credentials_slot' | 'inactive_slot'
 >;
 
 /** The account a step runs as, or why it can't run. */
@@ -132,11 +139,11 @@ export async function decideRunAs(
 ): Promise<RunAsDecision> {
   const nameOf = async () => (await environmentNamed(scope, accounts)) ?? '';
   if (scope.environmentId) {
-    return bySlot(step, await accounts.resolveSlotConnection(scope.environmentId, step.app), nameOf);
+    return decideBySlot(step, await accounts.resolveSlotConnection(scope.environmentId, step.app), nameOf);
   }
   if (scope.environment && scope.orgId) {
     const slot = await accounts.resolveClusterConnection(scope.orgId, scope.environment, step.app);
-    return bySlot(step, slot, nameOf);
+    return decideBySlot(step, slot, nameOf);
   }
   return forRunner(step, scope.externalUserId, accounts);
 }
@@ -219,9 +226,32 @@ function emptySlotMessage(environment: string, step: NamedStep): string {
   return `${environment} has no ${label} account assigned, so "${step.name}" can't run there — an owner assigns one under Integrations → Environments`;
 }
 
+/** What brings a slot's inactive account back, after "its owner": Reconnect connects a new account, which a slot holds only once assigned. */
+export const REVIVES_SLOT =
+  'tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments';
+
 function inactiveSlotMessage(environment: string, step: NamedStep): string {
   const label = step.label ?? step.app;
-  return `${environment}'s ${label} account isn't active, so "${step.name}" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments`;
+  return `${environment}'s ${label} account isn't active, so "${step.name}" can't run there — its owner ${REVIVES_SLOT}`;
+}
+
+/** What a held trigger does until its account is active again: fires what its app sends, resumes as a poll from where it stopped, fires what still reaches the service at its old URL while its move to a new public URL waits, or, while a change to it waits, starts no run and then starts afresh. */
+export type WhileHeld = 'fires' | 'resumes' | 'moves' | 'waits';
+
+const MEANWHILE: Record<WhileHeld, (label: string) => string> = {
+  fires: (label) =>
+    `what ${label} sends still starts runs, and nothing is changed at ${label} until the account is active again`,
+  resumes: () => "it isn't polled, and picks up from where it stopped once the account is active again",
+  moves: (label) =>
+    `its move to the service's new public URL waits until the account is active again, and meanwhile what ${label} sends to the old one still starts runs while that URL still reaches the service`,
+  waits: (label) =>
+    `a change to it waits, so it starts no run until the account is active again, and then starts afresh, without what happened at ${label} meanwhile`,
+};
+
+/** What a trigger held while its slot's account isn't active says: what it does meanwhile, and what releases it (#11). */
+export function heldTriggerMessage(environment: string, trigger: NamedStep, meanwhile: WhileHeld): string {
+  const label = trigger.label ?? trigger.app;
+  return `${environment}'s ${label} account isn't active, so "${trigger.name}" is held: ${MEANWHILE[meanwhile](label)} — the account's owner ${REVIVES_SLOT}`;
 }
 
 /** What a connected credential lacks for its step's sign-in, and how it is fixed. */
@@ -254,19 +284,27 @@ export async function lostAccountMessage(
   return lost === 'removed' ? emptySlotMessage(environment, step) : inactiveSlotMessage(environment, step);
 }
 
-async function bySlot(
-  step: RunAsStep,
+/** The slot half of {@link decideRunAs}: whether an environment's account for the step's app, already read, serves it — the rule an app trigger listens by too (#11). */
+export async function decideBySlot(
+  step: SlotStep,
   slot: SlotAccount | null,
   nameOf: () => Promise<string>,
 ): Promise<RunAsDecision> {
-  const unfit = slot ? (unfitFor(step, slot) ?? (slot.status === 'active' ? null : 'inactive')) : null;
+  const unfit = slot ? slotUnfitFor(step, slot) : null;
   if (slot && unfit === null) {
     return { kind: 'account', connectionId: slot.id, ownerUserId: slot.ownerUserId, via: 'slot' };
   }
   return refuseSlot(await nameOf(), step, slot, unfit);
 }
 
-type Unfit = 'wrong_app' | 'needs_managed' | 'inactive';
+type Unfit = 'wrong_app' | 'needs_managed' | 'needs_own_credentials' | 'inactive';
+
+function slotUnfitFor(step: SlotStep, slot: SlotAccount): Unfit | null {
+  const unfit = unfitFor(step, slot);
+  if (unfit !== null) return unfit;
+  if (step.ownCredentialsOnly && slot.managed) return 'needs_own_credentials';
+  return slot.status === 'active' ? null : 'inactive';
+}
 
 function refuseSlot(
   environment: string,
@@ -288,6 +326,12 @@ function refuseSlot(
       `${environment}'s ${label} account uses its own credentials, and "${step.name}" runs only on a one-click (managed) one, so it can't run there — an owner assigns a one-click ${label} account under Integrations → Environments`,
     );
   }
+  if (unfit === 'needs_own_credentials') {
+    return slotRefused(
+      'needs_own_credentials_slot',
+      `${environment}'s ${label} account is one-click (managed), and "${step.name}" runs only on one that uses its own credentials, so it can't run there — an owner assigns ${anAccount(label)} that uses its own credentials under Integrations → Environments`,
+    );
+  }
   return slotRefused('inactive_slot', inactiveSlotMessage(environment, step));
 }
 
@@ -298,7 +342,7 @@ function anAccount(label: string): string {
 function unfitFor(
   step: Pick<RunAsStep, 'app' | 'managedOnly'>,
   account: Pick<OwnAccount, 'provider' | 'managed'>,
-): Exclude<Unfit, 'inactive'> | null {
+): Extract<Unfit, 'wrong_app' | 'needs_managed'> | null {
   if (!providersServing(step.app).includes(account.provider)) return 'wrong_app';
   return step.managedOnly && !account.managed ? 'needs_managed' : null;
 }

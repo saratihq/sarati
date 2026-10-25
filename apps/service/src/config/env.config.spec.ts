@@ -124,6 +124,20 @@ describe('env config', () => {
     );
   });
 
+  it('refuses a base URL carrying a username or password, naming only its origin and path', () => {
+    for (const name of ['COMPOSIO_BASE_URL', 'CLERK_API_URL']) {
+      for (const bad of [
+        'https://proxyuser:SEKRET@proxy.example.com/c',
+        'https://proxyuser@proxy.example.com/c',
+      ]) {
+        expect(() => validateEnv({ [name]: bad })).toThrow(
+          `${name} (https://proxy.example.com/c) must not carry a username or password`,
+        );
+        expect(() => validateEnv({ [name]: bad })).not.toThrow(/proxyuser|SEKRET/);
+      }
+    }
+  });
+
   it('production keeps an API secret off plaintext: http only to this machine, and Clerk only once it holds a secret', () => {
     for (const local of ['http://localhost:15001', 'http://127.0.0.1:15001', 'http://[::1]:15001']) {
       expect(() => validateEnv({ ...PROD, COMPOSIO_BASE_URL: local })).not.toThrow();

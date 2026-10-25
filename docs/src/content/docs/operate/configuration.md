@@ -113,9 +113,9 @@ bundled one, set the same two values on both:
   counting too many lets any visitor write the address their limits count against, so sign-in attempts
   become unlimited. The agent sends the address it reads on to the service with every call, so the two
   must agree.
-- **`LISTEN_HOST`:** the interface each listens on. A trusted hop is believed whoever connects, so bind
-  them where only your proxy can reach — `127.0.0.1` when it runs on the same machine. Unset, they listen
-  on every interface.
+- **`LISTEN_HOST`:** the interface each listens on, on its `PORT`, the only port either opens. A trusted
+  hop is believed whoever connects, so bind them where only your proxy can reach — `127.0.0.1` when it
+  runs on the same machine. Unset, they listen on every interface.
 
 The one-container image and `docker-compose.yaml` set `TRUST_PROXY_HOPS=1` for Sarati's own proxy, and
 the one-container image binds both to `127.0.0.1`.
@@ -197,7 +197,11 @@ to a private address is refused, and every redirect is checked again.
 `COMPOSIO_BASE_URL` and `CLERK_API_URL` point the service at a proxy or a self-hosted API instead of
 the provider's own. Requests to them carry an API secret, so in production each has to be
 `https://`, or `http://` to the same machine (`localhost`, `127.0.0.1`, `::1`); anything else stops
-the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set.
+the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set. Neither may carry a
+username, a password, a query string or a fragment, in any environment: the service stops at boot
+and names only the address and path. A redirect from `COMPOSIO_BASE_URL` is followed only while it
+stays on the same origin; one to any other origin fails the request and names where it pointed, so
+the Composio API key only reaches the address you set.
 
 ## Container defaults differ from the source template
 

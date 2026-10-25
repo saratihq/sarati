@@ -26,6 +26,19 @@ export default tseslint.config(
     },
   },
   {
+    files: ['src/**/*.ts', 'test/**/*.ts'],
+    ignores: ['src/dbos/dbos-config.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.object.name='DBOS'][callee.property.name=/^(setConfig|launch)$/]",
+          message: 'Launch DBOS with launchDbos (src/dbos/dbos-config.ts), which keeps its admin server off.',
+        },
+      ],
+    },
+  },
+  {
     // Tests assert on runtime shapes (supertest bodies are `any`) — the
     // unsafe-* family is noise there; correctness comes from the assertions.
     files: ['test/**/*.ts', 'src/**/*.spec.ts'],

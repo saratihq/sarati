@@ -530,7 +530,7 @@ describe('the run-as rule, dry, answers what the run does — for every state', 
       .send({ environment_id: environment })
       .expect(428);
     expect(refused.body.detail).toBe(
-      `parity's gmail account isn't active, so "${STEP}" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments, or test on Default (your connections)`,
+      `parity's gmail account isn't active, so "${STEP}" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments, or test on Default (your connections)`,
     );
     expect(refused.body.code).toBe('environment_slots_inactive');
     const after = await db.query<{ n: number }>(
@@ -667,7 +667,7 @@ describe('the run-as rule, dry, answers what the run does — for every state', 
       'under an environment, not active',
       'environment',
       'inactive',
-      `parity's gmail account isn't active, so "${STEP}" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments`,
+      `parity's gmail account isn't active, so "${STEP}" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments`,
     ],
     [
       'under an environment, removed',

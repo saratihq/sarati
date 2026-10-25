@@ -4,7 +4,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { accountLabel, storedAccount } from '../connections/account-identity';
-import { providersServing } from '../connections/run-as-account';
+import { providersServing, REVIVES_SLOT } from '../connections/run-as-account';
 import { isIdShape } from '../database/ids';
 import { isUniqueViolation } from '../database/pg-errors';
 import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
@@ -12,6 +12,8 @@ import { ConnectionEntity } from '../database/entities/connection.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { EventsService } from '../events/events.service';
 import { lockOrgForWrite } from '../orgs/org-row-lock';
+import { validatedAppSlug } from '../providers/sdk-actions.registry';
+import { WEBHOOK_REGISTRATION_KEY } from '../providers/sdk-webhook.provider';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { runBounded } from '../common/bounded';
@@ -62,6 +64,22 @@ export interface UrlChange {
 
 /** A trigger whose `url_changes` entry the caller saw and confirmed moving. */
 export type ConfirmedUrlChange = Pick<UrlChange, 'workflow_id' | 'trigger' | 'from' | 'to'>;
+
+/** A webhook registered with an app for this environment that a rename can't move: the account it was registered with isn't active. */
+export interface HeldWebhook {
+  workflow_id: string;
+  workflow_name: string;
+  /** The trigger node's id, as a preflight's `triggers` entry names it. */
+  node_id: string;
+  /** The trigger node's name, as a preflight's `triggers` entry names it. */
+  node_name: string;
+  /** The app the webhook is registered with. */
+  app: string;
+  /** The account it was registered with. */
+  connection_id: string;
+  /** That account's display identity, as its slot shows it. */
+  account_label: string;
+}
 
 const DRAIN_CONCURRENCY = 5;
 
@@ -145,7 +163,7 @@ export class EnvironmentsService {
         .map((s) => ({
           app: s.app,
           connection_id: s.connection_id,
-          account_label: s.display_name ?? slotAccountLabel(s.account) ?? s.provider,
+          account_label: labelOf(s),
           owner_user_id: s.owner_user_id,
           owner_label: s.owner_email ?? s.owner_user_id,
           status: s.status,
@@ -180,7 +198,7 @@ export class EnvironmentsService {
     });
   }
 
-  /** Rename; registered webhooks move to the new URL, and each hand-given URL it moves must be in `confirmed` (409 lists them). 409 on is_prod. */
+  /** Rename; registered webhooks move to the new URL, 409 while one's account isn't active (`held_webhooks`), and each hand-given URL it moves must be in `confirmed` (409 lists them). 409 on is_prod. */
   async rename(
     orgId: string,
     envId: string,
@@ -201,6 +219,7 @@ export class EnvironmentsService {
       if (taken && taken.id !== env.id) {
         throw new DomainError(`An environment named '${name}' already exists`, 409);
       }
+      await this.assertWebhooksCanMove(em, env);
       await this.assertUrlChangesConfirmed(em, env, name, confirmed);
       await em
         .query(`UPDATE environments SET name = $2 WHERE id = $1`, [env.id, name])
@@ -375,6 +394,44 @@ export class EnvironmentsService {
     });
     // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
+  }
+
+  // A registered webhook moves only by its delete and a new registration, both made with the account it was registered with (#11).
+  private async assertWebhooksCanMove(em: EntityManager, env: EnvironmentEntity): Promise<void> {
+    const rows = await rawQuery<{
+      workflow_id: string;
+      workflow_name: string;
+      trigger_node_id: string;
+      trigger_type: string;
+      workflow_ir: WorkflowIR | null;
+      connection_id: string;
+      display_name: string | null;
+      account: unknown;
+      provider: string;
+    }>(
+      em,
+      `SELECT a.workflow_id, w.name AS workflow_name, a.trigger_node_id, a.trigger_type, v.workflow_ir,
+              c.id AS connection_id, c.display_name, c.account, c.provider
+         FROM runtime_trigger_activations a
+         JOIN runtime_activation_store s ON s.activation_id = a.id AND s.key = $2
+         JOIN connections c ON c.id::text = COALESCE(s.value -> 'connection' ->> 'connectionId', a.connection_id::text)
+         JOIN workflows w ON w.id = a.workflow_id
+         LEFT JOIN workflow_versions v ON v.id = a.version_id
+        WHERE a.environment_id = $1 AND c.status <> 'active'
+        ORDER BY w.name, a.workflow_id, a.trigger_node_id`,
+      [env.id, WEBHOOK_REGISTRATION_KEY],
+    );
+    if (rows.length === 0) return;
+    const held: HeldWebhook[] = rows.map((r) => ({
+      workflow_id: r.workflow_id,
+      workflow_name: r.workflow_name,
+      node_id: r.trigger_node_id,
+      node_name: r.workflow_ir?.nodes.find((n) => n.id === r.trigger_node_id)?.name || r.trigger_node_id,
+      app: validatedAppSlug(r.trigger_type) ?? r.provider,
+      connection_id: r.connection_id,
+      account_label: labelOf(r),
+    }));
+    throw new DomainError(heldWebhooksMessage(env.name, held), 409, { held_webhooks: held });
   }
 
   private async assertUrlChangesConfirmed(
@@ -555,7 +612,23 @@ export class EnvironmentsService {
   }
 }
 
-function slotAccountLabel(raw: unknown): string | null {
-  const account = storedAccount(raw);
-  return account ? accountLabel(account) : null;
+function labelOf(connection: { display_name: string | null; account: unknown; provider: string }): string {
+  const account = storedAccount(connection.account);
+  return connection.display_name ?? (account ? accountLabel(account) : connection.provider);
+}
+
+function heldWebhooksMessage(environment: string, held: HeldWebhook[]): string {
+  const [only] = held;
+  if (held.length === 1 && only) {
+    return `Renaming '${environment}' would leave "${only.node_name}" in "${only.workflow_name}" registered at its old URL, which serves nothing, because the ${only.app} account it was registered with (${only.account_label}) isn't active — before renaming, its owner ${REVIVES_SLOT}`;
+  }
+  const leaves = `Renaming '${environment}' would leave ${held.length} webhooks registered at their old URLs, which serve nothing`;
+  if (only && held.every((w) => w.connection_id === only.connection_id)) {
+    const named = held.map((w) => `"${w.node_name}" in "${w.workflow_name}"`);
+    return `${leaves}, because the ${only.app} account they were registered with (${only.account_label}) isn't active: ${named.join(', ')} — before renaming, its owner ${REVIVES_SLOT}`;
+  }
+  const named = held.map(
+    (w) => `"${w.node_name}" in "${w.workflow_name}" (${w.app} account ${w.account_label})`,
+  );
+  return `${leaves}, because the accounts they were registered with aren't active: ${named.join(', ')} — before renaming, each account's owner ${REVIVES_SLOT}`;
 }
