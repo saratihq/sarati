@@ -230,7 +230,7 @@ export class RecoveryGuard implements OnModuleDestroy {
         application_name: 'sarati-recovery-guard',
         options: `-c lock_timeout=${LOCK_TIMEOUT_MS}`,
       });
-      // An idle connection the database ends is dropped from the pool; unheard, it would end the process.
+      // An idle connection the database ends is dropped from the pool; heard here, it never ends the process.
       pool.on('error', (err) =>
         this.logger.warn(`The recovery guard lost a connection: ${errorMessage(err)}`),
       );
