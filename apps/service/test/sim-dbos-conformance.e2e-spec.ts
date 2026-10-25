@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { dirname, join } from 'node:path';
 
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { Client } from 'pg';
@@ -89,6 +90,10 @@ interface Run {
   recordedAll(...ids: number[]): Promise<void>;
   /** Until `count` ops have settled — readable after a cancel, when the workflow has no result to give. */
   settled(count: number): Promise<Settled[]>;
+  /** Until the run's recvs have begun `count` waits between their polls; how long each one asked to wait, in order. */
+  waits(count?: number): Promise<number[]>;
+  /** Whether a message on `topic` is still there, unconsumed. */
+  unread(topic: string): Promise<boolean>;
   send(topic: string, message: unknown): Promise<void>;
   recorded(): Promise<number[]>;
   result(): Promise<OpResult[]>;
@@ -96,6 +101,8 @@ interface Run {
   cancel(): Promise<void>;
   /** Opens the parked step `gate` and cancels the run once the sleep `id` after it has begun and before it can end. */
   cancelInSleep(gate: string, id: number): Promise<void>;
+  /** Opens the parked step `gate` and cancels the run once the recv after it has checked for a cancel and before it waits. */
+  cancelInPoll(gate: string): Promise<void>;
 }
 
 interface Backend {
@@ -175,14 +182,33 @@ const realInvocations = new Map<string, number>();
 const scripts = new Map<string, Script>();
 const realProgress = new Map<string, Settled[]>();
 const realGates = new Map<string, Gates>();
+const realWaits = new Map<string, number[]>();
 
-function gatesOf(id: string): Gates {
-  let gates = realGates.get(id);
-  if (!gates) {
-    gates = new Gates();
-    realGates.set(id, gates);
+function entryOf<T>(map: Map<string, T>, id: string, make: () => T): T {
+  let entry = map.get(id);
+  if (entry === undefined) {
+    entry = make();
+    map.set(id, entry);
   }
-  return gates;
+  return entry;
+}
+
+const gatesOf = (id: string): Gates => entryOf(realGates, id, () => new Gates());
+const waitsOf = (id: string): number[] => entryOf(realWaits, id, () => []);
+
+type PollSleep = (ms: number) => { promise: Promise<void>; cancel: () => void };
+
+// DBOS's own sleep between a recv's polls, watched and called through: how long each recv waits before it checks again.
+function watchRecvWaits(): jest.SpiedFunction<PollSleep> {
+  const utils = jest.requireActual<{ cancellableSleep: PollSleep }>(
+    join(dirname(require.resolve('@dbos-inc/dbos-sdk')), 'utils.js'),
+  );
+  const sleep = utils.cancellableSleep;
+  return jest.spyOn(utils, 'cancellableSleep').mockImplementation((ms) => {
+    const id = DBOS.workflowID;
+    if (id !== undefined) waitsOf(id).push(ms);
+    return sleep(ms);
+  });
 }
 
 const scriptWorkflow = DBOS.registerWorkflow(
@@ -234,25 +260,27 @@ function realBackend(db: Client, url: string): Backend {
       )
     ).rows.map((r) => r.function_id);
 
-  // The sleep's record waits on an uncommitted row at its id: past its own cancel check, its deadline taken, not yet asleep.
-  const cancelInSleep = async (id: string, gates: Gates, gate: string, sleepId: number): Promise<void> => {
-    const holder = new Client({ connectionString: url });
+  // Opens `gate` with `hold` taken, and cancels once the run's next statement on `table` waits behind it.
+  const cancelBehind = async (
+    id: string,
+    gate: string,
+    table: string,
+    hold: string,
+    params: unknown[] = [],
+  ): Promise<void> => {
+    const holder = new Client({ connectionString: url, idle_in_transaction_session_timeout: 30_000 });
     await holder.connect();
     try {
       const { pid } = (await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)).rows[0]!;
       await holder.query('BEGIN');
-      await holder.query(
-        `INSERT INTO dbos.operation_outputs (workflow_uuid, function_id, function_name, started_at_epoch_ms, completed_at_epoch_ms)
-         VALUES ($1, $2, 'held', 0, 0)`,
-        [id, sleepId],
-      );
-      gates.open(gate);
+      await holder.query(hold, params);
+      gatesOf(id).open(gate);
       await until(
         async () =>
           (
             await db.query(
-              `SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%operation_outputs%'`,
-              [pid],
+              `SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2`,
+              [pid, `%${table}%`],
             )
           ).rows.length > 0,
       );
@@ -280,8 +308,31 @@ function realBackend(db: Client, url: string): Backend {
         await until(() => progress.length >= count);
         return progress;
       },
+      waits: async (count = 0) => {
+        await until(() => waitsOf(id).length >= count);
+        return [...waitsOf(id)];
+      },
+      unread: async (topic) =>
+        (
+          await db.query(
+            `SELECT 1 FROM dbos.notifications WHERE destination_uuid = $1 AND topic = $2 AND NOT consumed`,
+            [id, topic],
+          )
+        ).rows.length > 0,
       cancel: () => DBOS.cancelWorkflow(id),
-      cancelInSleep: (gate, sleepId) => cancelInSleep(id, gates, gate, sleepId),
+      // The sleep's record waits on an uncommitted row at its id: past its own cancel check, its deadline taken, not yet asleep.
+      cancelInSleep: (gate, sleepId) =>
+        cancelBehind(
+          id,
+          gate,
+          'operation_outputs',
+          `INSERT INTO dbos.operation_outputs (workflow_uuid, function_id, function_name, started_at_epoch_ms, completed_at_epoch_ms)
+           VALUES ($1, $2, 'held', 0, 0)`,
+          [id, sleepId],
+        ),
+      // The recv's read of its notifications waits on the table's lock: past its cancel check, not yet waiting.
+      cancelInPoll: (gate) =>
+        cancelBehind(id, gate, 'notifications', 'LOCK TABLE dbos.notifications IN ACCESS EXCLUSIVE MODE'),
       send: (topic, message) => DBOS.send(id, message, topic),
       recorded: () => recorded(id),
       result: async () => (await handle).getResult(),
@@ -339,6 +390,13 @@ function simBackend(): Backend {
     const execution = new SimExecution(wf, () => 1, refusedHere);
     const gates = new Gates();
     const progress: Settled[] = [];
+    const waits: number[] = [];
+    // The model's wait between a recv's polls, watched as the real backend watches DBOS's own.
+    const arrival = wf.arrival.bind(wf);
+    wf.arrival = (topic, finish) => {
+      waits.push(finish - clock.now());
+      return arrival(topic, finish);
+    };
     let settled: OpResult[] | undefined;
     void runScript(
       script,
@@ -372,10 +430,20 @@ function simBackend(): Backend {
         await reach(() => progress.length >= count, `${count} ops settled`);
         return progress;
       },
+      waits: async (count = 0) => {
+        await reach(() => waits.length >= count, `${count} recv waits began`);
+        return [...waits];
+      },
+      unread: (topic) => Promise.resolve(wf.hasWaiting(topic)),
       cancel,
       cancelInSleep: async (gate, sleepId) => {
         gates.open(gate);
         await reach(() => wf.rows.has(sleepId), `sleep ${sleepId} began`);
+        await cancel();
+      },
+      cancelInPoll: async (gate) => {
+        gates.open(gate);
+        await reach(() => waits.length > 0, 'the recv began to wait');
         await cancel();
       },
       send: (topic, message) => {
@@ -426,8 +494,10 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
   let dbos: ThrowawayDbos;
   let db: Client;
   let real: Backend;
+  let recvWaits: jest.SpiedFunction<PollSleep>;
 
   beforeAll(async () => {
+    recvWaits = watchRecvWaits();
     dbos = await launchThrowawayDbos('conformance');
     db = new Client({ connectionString: dbos.url });
     await db.connect();
@@ -451,11 +521,13 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
   }, 60_000);
 
   afterAll(async () => {
+    recvWaits.mockRestore();
     await db.end();
     await dbos.shutdown();
   }, 60_000);
 
   const id = (): string => `conf-${randomBytes(4).toString('hex')}`;
+  const cancelled = { error: { name: 'Error', message: expect.stringMatching(/has been cancelled$/) } };
   const both = async <T>(scenario: (backend: Backend, id: string) => Promise<T>): Promise<T> => {
     const name = id();
     const [onReal, onSim] = [await scenario(real, name), await scenario(simBackend(), name)];
@@ -677,32 +749,54 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     });
   }, 30_000);
 
-  it('stops a parked recv at a poll once cancelled, long before its deadline, and refuses every op after it', async () => {
+  it('stops a parked recv at its first poll after a cancel, one poll interval on, and refuses every op after it', async () => {
     const seen = await both(async (backend, name) => {
       const run = backend.start(name, [
+        { op: 'step', name: 'gate', parked: true },
         { op: 'recv', topic: 'never', timeout: LONG_S, poll: 200 },
         { op: 'step', name: `${name}-after` },
       ]);
-      await run.recordedAll(1);
-      await run.cancel();
+      await run.entered('gate');
+      await run.cancelInPoll('gate');
+      const settled = await run.settled(3);
       return {
-        settled: (await run.settled(2)).map(({ index, result, at }) => ({
-          index,
-          result,
-          beforeDeadline: at < LONG_MS,
-        })),
+        results: [...settled].sort((a, b) => a.index - b.index).map(({ result }) => result),
+        waits: await run.waits(),
         ran: backend.invocations.get(`${name}-after`) ?? 0,
         rows: await run.rows(),
       };
     });
-    expect(
-      seen.settled.map((s) => [s.index, s.beforeDeadline, 'error' in s.result && s.result.error.message]),
-    ).toEqual([
-      [0, true, expect.stringMatching(/has been cancelled$/)],
-      [1, true, expect.stringMatching(/has been cancelled$/)],
-    ]);
-    expect(seen.ran).toBe(0);
-    expect(seen.rows).toEqual([{ id: 1, name: 'DBOS.sleep' }]);
+    expect(seen).toEqual({
+      results: [{ value: { from: 'gate' } }, cancelled, cancelled],
+      waits: [200],
+      ran: 0,
+      rows: [
+        { id: 0, name: 'gate', value: { from: 'gate' } },
+        { id: 2, name: 'DBOS.sleep' },
+      ],
+    });
+  }, 30_000);
+
+  it('checks for a cancel before it consumes, so a cancelled recv woken by a message throws and leaves it unread', async () => {
+    const seen = await both(async (backend, name) => {
+      const run = backend.start(name, [{ op: 'recv', topic: 'answer', timeout: LONG_S, poll: LONG_MS }]);
+      await run.waits(1);
+      await run.cancel();
+      await run.send('answer', { late: true });
+      const [recv] = await run.settled(1);
+      return {
+        result: recv!.result,
+        waits: (await run.waits()).length,
+        unread: await run.unread('answer'),
+        rows: await run.rows(),
+      };
+    });
+    expect(seen).toEqual({
+      result: cancelled,
+      waits: 1,
+      unread: true,
+      rows: [{ id: 1, name: 'DBOS.sleep' }],
+    });
   }, 30_000);
 
   it('lets a sleep run to its end once cancelled, then throws', async () => {
@@ -723,7 +817,7 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     });
     expect(seen).toEqual({
       gate: { value: { from: 'gate' } },
-      sleep: { error: { name: 'Error', message: expect.stringMatching(/has been cancelled$/) } },
+      sleep: cancelled,
       ranItsLength: true,
       rows: [
         { id: 0, name: 'gate', value: { from: 'gate' } },
