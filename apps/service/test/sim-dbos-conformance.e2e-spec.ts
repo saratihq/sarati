@@ -26,6 +26,14 @@ type OpResult =
   | { value: unknown; early?: boolean }
   | { error: { name: string; message: string; status?: unknown; details?: unknown } };
 
+/** A wait a recv armed between its polls. */
+interface Wait {
+  /** How long it asked to wait. */
+  ms: number;
+  /** Whether it waited all of that, rather than being woken. */
+  ranOut: boolean;
+}
+
 /** An op's result the moment it settled: its place in the script, and when it was issued and settled after the start. */
 interface Settled {
   index: number;
@@ -38,6 +46,7 @@ interface Settled {
 class Gates {
   private readonly started = new Set<string>();
   private readonly gates = new Map<string, { open: () => void; opened: Promise<void> }>();
+  private allOpen = false;
 
   enter(name: string): Promise<void> {
     this.started.add(name);
@@ -52,6 +61,11 @@ class Gates {
     this.gate(name).open();
   }
 
+  openAll(): void {
+    this.allOpen = true;
+    for (const gate of this.gates.values()) gate.open();
+  }
+
   private gate(name: string): { open: () => void; opened: Promise<void> } {
     let gate = this.gates.get(name);
     if (!gate) {
@@ -59,6 +73,7 @@ class Gates {
       const opened = new Promise<void>((resolve) => (open = resolve));
       gate = { open, opened };
       this.gates.set(name, gate);
+      if (this.allOpen) open();
     }
     return gate;
   }
@@ -90,8 +105,8 @@ interface Run {
   recordedAll(...ids: number[]): Promise<void>;
   /** Until `count` ops have settled — readable after a cancel, when the workflow has no result to give. */
   settled(count: number): Promise<Settled[]>;
-  /** Until the run's recvs have begun `count` waits between their polls; how long each one asked to wait, in order. */
-  waits(count?: number): Promise<number[]>;
+  /** Until the run's recvs have armed `count` waits between their polls; each one, in order. */
+  waits(count?: number): Promise<Wait[]>;
   /** Whether a message on `topic` is still there, unconsumed. */
   unread(topic: string): Promise<boolean>;
   send(topic: string, message: unknown): Promise<void>;
@@ -174,15 +189,40 @@ function runScript(
   })();
 }
 
-async function until(done: () => boolean | Promise<boolean>): Promise<void> {
-  while (!(await done())) await new Promise((resolve) => setTimeout(resolve, 5));
+// A failure bound only: a state a scenario waits for arrives in milliseconds or never.
+const STATE_MS = 10_000;
+
+const neverReached = (what: string): Error => new Error(`real DBOS never reached ${what}`);
+
+async function until(what: string, done: () => boolean | Promise<boolean>): Promise<void> {
+  const giveUp = Date.now() + STATE_MS;
+  while (!(await done())) {
+    if (Date.now() >= giveUp) throw neverReached(what);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function within<T>(what: string, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const gaveUp = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(neverReached(what)), STATE_MS);
+  });
+  try {
+    return await Promise.race([pending, gaveUp]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const realInvocations = new Map<string, number>();
 const scripts = new Map<string, Script>();
 const realProgress = new Map<string, Settled[]>();
 const realGates = new Map<string, Gates>();
-const realWaits = new Map<string, number[]>();
+const realWaits = new Map<string, Wait[]>();
+const startedReal = new Set<string>();
+const liveReal = new Set<string>();
+const drainedReal = new Set<string>();
+const sleepEnders = new Map<string, Set<() => void>>();
 
 function entryOf<T>(map: Map<string, T>, id: string, make: () => T): T {
   let entry = map.get(id);
@@ -194,44 +234,103 @@ function entryOf<T>(map: Map<string, T>, id: string, make: () => T): T {
 }
 
 const gatesOf = (id: string): Gates => entryOf(realGates, id, () => new Gates());
-const waitsOf = (id: string): number[] => entryOf(realWaits, id, () => []);
+const waitsOf = (id: string): Wait[] => entryOf(realWaits, id, () => []);
 
-type PollSleep = (ms: number) => { promise: Promise<void>; cancel: () => void };
+type Sleep = { promise: Promise<void>; cancel: () => void };
+type PollSleep = (ms: number) => Sleep;
 
-// DBOS's own sleep between a recv's polls, watched and called through: how long each recv waits before it checks again.
-function watchRecvWaits(): jest.SpiedFunction<PollSleep> {
-  const utils = jest.requireActual<{ cancellableSleep: PollSleep }>(
+// A workflow's DBOS sleep, as one a drain of the workflow can end by rejecting it.
+function endable(id: string, sleep: Sleep): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const end = (): void => {
+      reject(new Error(`${id} was drained`));
+      sleep.cancel();
+    };
+    if (drainedReal.has(id)) {
+      end();
+      return;
+    }
+    const enders = entryOf(sleepEnders, id, () => new Set<() => void>());
+    enders.add(end);
+    void sleep.promise.then(() => {
+      enders.delete(end);
+      resolve();
+    });
+  });
+}
+
+// DBOS's own sleeps, called through: each wait a recv arms between its polls is watched, and every sleep in a workflow can be ended.
+function watchDbosSleeps(): () => void {
+  const utils = jest.requireActual<{ cancellableSleep: PollSleep; sleepms: (ms: number) => Promise<void> }>(
     join(dirname(require.resolve('@dbos-inc/dbos-sdk')), 'utils.js'),
   );
-  const sleep = utils.cancellableSleep;
-  return jest.spyOn(utils, 'cancellableSleep').mockImplementation((ms) => {
+  const { cancellableSleep, sleepms } = utils;
+  const polls = jest.spyOn(utils, 'cancellableSleep').mockImplementation((ms) => {
     const id = DBOS.workflowID;
-    if (id !== undefined) waitsOf(id).push(ms);
-    return sleep(ms);
+    const slept = cancellableSleep(ms);
+    if (id === undefined) return slept;
+    const wait: Wait = { ms, ranOut: false };
+    waitsOf(id).push(wait);
+    let woken = false;
+    void slept.promise.then(() => {
+      wait.ranOut = !woken;
+    });
+    const cancel = (): void => {
+      woken = true;
+      slept.cancel();
+    };
+    return { promise: endable(id, { promise: slept.promise, cancel }), cancel };
   });
+  const sleeps = jest.spyOn(utils, 'sleepms').mockImplementation((ms) => {
+    const id = DBOS.workflowID;
+    return id === undefined ? sleepms(ms) : endable(id, cancellableSleep(ms));
+  });
+  return () => {
+    polls.mockRestore();
+    sleeps.mockRestore();
+  };
+}
+
+// Ends the runs a failed scenario left waiting: a cancel alone opens no parked step, and a recv or a sleep sees it only once its wait is over.
+async function drainReal(): Promise<void> {
+  const ids = [...startedReal];
+  startedReal.clear();
+  for (const id of ids) {
+    drainedReal.add(id);
+    gatesOf(id).openAll();
+    for (const end of sleepEnders.get(id) ?? []) end();
+    sleepEnders.delete(id);
+  }
+  await Promise.all(ids.map((id) => DBOS.cancelWorkflow(id)));
+  await until(`the end of ${ids.join(', ')} once drained`, () => ids.every((id) => !liveReal.has(id)));
 }
 
 const scriptWorkflow = DBOS.registerWorkflow(
   async (): Promise<OpResult[]> => {
     const id = DBOS.workflowID ?? '';
-    return runScript(
-      scripts.get(id) ?? [],
-      {
-        step: (name, fn) => DBOS.runStep(fn, { name }),
-        sleep: (ms) => DBOS.sleepms(ms),
-        recv: (topic, timeout, poll) =>
-          DBOS.recv(
-            topic,
-            timeout === 'due'
-              ? { deadlineEpochMS: Date.now() - 1 }
-              : { timeoutSeconds: timeout, pollingIntervalMs: poll },
-          ),
-        now: () => Date.now(),
-      },
-      gatesOf(id),
-      realInvocations,
-      realProgress.get(id) ?? [],
-    );
+    liveReal.add(id);
+    try {
+      return await runScript(
+        scripts.get(id) ?? [],
+        {
+          step: (name, fn) => DBOS.runStep(fn, { name }),
+          sleep: (ms) => DBOS.sleepms(ms),
+          recv: (topic, timeout, poll) =>
+            DBOS.recv(
+              topic,
+              timeout === 'due'
+                ? { deadlineEpochMS: Date.now() - 1 }
+                : { timeoutSeconds: timeout, pollingIntervalMs: poll },
+            ),
+          now: () => Date.now(),
+        },
+        gatesOf(id),
+        realInvocations,
+        realProgress.get(id) ?? [],
+      );
+    } finally {
+      liveReal.delete(id);
+    }
   },
   { name: 'conformance.script' },
 );
@@ -268,7 +367,7 @@ function realBackend(db: Client, url: string): Backend {
     hold: string,
     params: unknown[] = [],
   ): Promise<void> => {
-    const holder = new Client({ connectionString: url, idle_in_transaction_session_timeout: 30_000 });
+    const holder = new Client({ connectionString: url, idle_in_transaction_session_timeout: 2 * STATE_MS });
     await holder.connect();
     try {
       const { pid } = (await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)).rows[0]!;
@@ -276,6 +375,7 @@ function realBackend(db: Client, url: string): Backend {
       await holder.query(hold, params);
       gatesOf(id).open(gate);
       await until(
+        `a statement on ${table} waiting behind the hold`,
         async () =>
           (
             await db.query(
@@ -286,7 +386,6 @@ function realBackend(db: Client, url: string): Backend {
       );
       await DBOS.cancelWorkflow(id);
     } finally {
-      await holder.query('ROLLBACK');
       await holder.end();
     }
   };
@@ -294,22 +393,23 @@ function realBackend(db: Client, url: string): Backend {
   const run = (id: string, start: () => Promise<{ getResult: () => Promise<OpResult[]> }>): Run => {
     const progress: Settled[] = [];
     realProgress.set(id, progress);
+    startedReal.add(id);
     const gates = gatesOf(id);
     const handle = start();
     return {
-      entered: (name) => until(() => gates.entered(name)),
+      entered: (name) => until(`${name} started`, () => gates.entered(name)),
       open: (name) => gates.open(name),
       recordedAll: (...ids) =>
-        until(async () => {
+        until(`rows ${ids.join(', ')}`, async () => {
           const rows = await recorded(id);
           return ids.every((i) => rows.includes(i));
         }),
       settled: async (count) => {
-        await until(() => progress.length >= count);
+        await until(`${count} ops settled`, () => progress.length >= count);
         return progress;
       },
       waits: async (count = 0) => {
-        await until(() => waitsOf(id).length >= count);
+        await until(`${count} recv waits armed`, () => waitsOf(id).length >= count);
         return [...waitsOf(id)];
       },
       unread: async (topic) =>
@@ -335,7 +435,11 @@ function realBackend(db: Client, url: string): Backend {
         cancelBehind(id, gate, 'notifications', 'LOCK TABLE dbos.notifications IN ACCESS EXCLUSIVE MODE'),
       send: (topic, message) => DBOS.send(id, message, topic),
       recorded: () => recorded(id),
-      result: async () => (await handle).getResult(),
+      result: () =>
+        within(
+          'the script ended',
+          handle.then((started) => started.getResult()),
+        ),
       rows: async () =>
         (
           await db.query<{
@@ -390,12 +494,15 @@ function simBackend(): Backend {
     const execution = new SimExecution(wf, () => 1, refusedHere);
     const gates = new Gates();
     const progress: Settled[] = [];
-    const waits: number[] = [];
+    const waits: Wait[] = [];
     // The model's wait between a recv's polls, watched as the real backend watches DBOS's own.
     const arrival = wf.arrival.bind(wf);
     wf.arrival = (topic, finish) => {
-      waits.push(finish - clock.now());
-      return arrival(topic, finish);
+      const wait: Wait = { ms: finish - clock.now(), ranOut: false };
+      waits.push(wait);
+      return arrival(topic, finish).then(() => {
+        wait.ranOut = clock.now() >= finish;
+      });
     };
     let settled: OpResult[] | undefined;
     void runScript(
@@ -431,7 +538,7 @@ function simBackend(): Backend {
         return progress;
       },
       waits: async (count = 0) => {
-        await reach(() => waits.length >= count, `${count} recv waits began`);
+        await reach(() => waits.length >= count, `${count} recv waits armed`);
         return [...waits];
       },
       unread: (topic) => Promise.resolve(wf.hasWaiting(topic)),
@@ -494,10 +601,10 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
   let dbos: ThrowawayDbos;
   let db: Client;
   let real: Backend;
-  let recvWaits: jest.SpiedFunction<PollSleep>;
+  let restoreSleeps: () => void;
 
   beforeAll(async () => {
-    recvWaits = watchRecvWaits();
+    restoreSleeps = watchDbosSleeps();
     dbos = await launchThrowawayDbos('conformance');
     db = new Client({ connectionString: dbos.url });
     await db.connect();
@@ -520,8 +627,10 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     );
   }, 60_000);
 
+  afterEach(drainReal);
+
   afterAll(async () => {
-    recvWaits.mockRestore();
+    restoreSleeps();
     await db.end();
     await dbos.shutdown();
   }, 60_000);
@@ -768,7 +877,7 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     });
     expect(seen).toEqual({
       results: [{ value: { from: 'gate' } }, cancelled, cancelled],
-      waits: [200],
+      waits: [{ ms: 200, ranOut: true }],
       ran: 0,
       rows: [
         { id: 0, name: 'gate', value: { from: 'gate' } },
