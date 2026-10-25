@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { Client } from 'pg';
 
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
-import { RUN_PLAN_V2_WORKFLOW } from '../src/dbos/run-plan-workflow';
+import { RUN_PLAN_V2_WORKFLOW, RUN_PLAN_WORKFLOW } from '../src/dbos/run-plan-workflow';
 import { failedNodeIdOf, NOT_RESUMED_STEP_ERROR } from '../src/runs/run-failure';
 import { GOLDEN_DIR, PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { bootService, startService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
@@ -124,7 +124,7 @@ describe('the recovery guard (e2e)', () => {
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
   }
 
-  // Recover each shape as its run id under a held table lock, releasing it once `held` settles.
+  // Recover each shape as its run id, and no other legacy run, under a held table lock released once `held` settles.
   async function recoverUnderLock(
     runs: Record<string, string>,
     lock: { url: string; statement: string },
@@ -132,6 +132,10 @@ describe('the recovery guard (e2e)', () => {
   ): Promise<void> {
     await service?.crash();
     service = undefined;
+    await dbos.query(
+      `UPDATE dbos.workflow_status SET status = 'CANCELLED' WHERE name = $1 AND status = 'PENDING'`,
+      [RUN_PLAN_WORKFLOW],
+    );
     for (const [shape, runId] of Object.entries(runs)) await restoreGoldenHistory(db, dbos, shape, runId);
     const holder = new Client({ connectionString: lock.url });
     await holder.connect();
@@ -408,7 +412,7 @@ describe('the recovery guard (e2e)', () => {
   }, 120_000);
 
   it('never refuses a run that ran nothing side by side for a lock on its history, and resumes it once it lifts', async () => {
-    // Boot waits on this lock and logs nothing until it lifts: count the history reads queued on it, the boot count's first.
+    // Boot waits on this lock and logs nothing until it lifts: count the history reads queued on it, all held-app's, the boot count's first.
     const reads = new Set<string>();
     await recoverUnderLock(
       { [`${LATEST}/linear-parked`]: 'held-app' },
