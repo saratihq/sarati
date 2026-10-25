@@ -4,6 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
+import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { ConnectionsService } from '../connections/connections.service';
@@ -17,6 +18,7 @@ import { type NamedEnvironment, slotRefusalError, stepsRefusedIn } from '../envi
 import type { WorkflowIR } from '../ir/models';
 import { isRunCancelled, RunsService } from '../runs/runs.service';
 import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
+import { EnvPointersService } from '../workflows/env-pointers.service';
 import { lockWorkflowRow } from '../workflows/workflow-row-lock';
 import { ReviewsService } from './reviews.service';
 import { diffRunOutputs } from './run-output-diff';
@@ -30,8 +32,7 @@ import type {
 
 /** Who is testing, and under which environment. */
 export interface TestScope {
-  userId: string;
-  activeOrgId: string | null;
+  principal: Principal;
   /** Named environment to run under (its slots supply every account); null = Default (the tester's own). */
   environmentId?: string | null;
 }
@@ -67,6 +68,7 @@ export class ReviewTestService {
     private readonly runs: RunsService,
     private readonly reviews: ReviewsService,
     private readonly connections: ConnectionsService,
+    private readonly envPointers: EnvPointersService,
   ) {}
 
   /** The branch head's steps a test would refuse for want of an account — the run-as rule, dry, for this tester and environment. */
@@ -78,7 +80,7 @@ export class ReviewTestService {
     const plan = await planRunAs(
       headIr,
       {
-        externalUserId: scope.userId,
+        externalUserId: scope.principal.user.id,
         environmentId: environment?.id ?? null,
         environment: environment?.name ?? null,
       },
@@ -111,6 +113,15 @@ export class ReviewTestService {
     }
     const environment = await this.environmentOf(opts);
     const em = this.dataSource.manager;
+    if (environment) {
+      await this.envPointers.assertMayPromote(
+        em,
+        opts.principal.activeOrgId,
+        environment.name,
+        opts.principal,
+        'test',
+      );
+    }
     const { source, target } = await this.headsOf(em, review);
 
     const headIr = await this.headIr(em, source); // source branch head — the change under review
@@ -191,7 +202,7 @@ export class ReviewTestService {
     if (!isIdShape(scope.environmentId)) throw new DomainError('Environment not found', 404);
     const rows: NamedEnvironment[] = await this.dataSource.query(
       `SELECT id, name FROM environments WHERE id = $1 AND org_id = $2`,
-      [scope.environmentId, scope.activeOrgId ?? null],
+      [scope.environmentId, scope.principal.activeOrgId],
     );
     const [environment] = rows;
     if (!environment) throw new DomainError('Environment not found', 404);
@@ -227,15 +238,15 @@ export class ReviewTestService {
     const runId = randomUUID();
     try {
       const result = await this.runs.runFromIr(ir, {
-        externalUserId: opts.userId,
-        activeOrgId: opts.activeOrgId,
+        externalUserId: opts.principal.user.id,
+        activeOrgId: opts.principal.activeOrgId,
         runId,
         workflowId,
         source: 'review_test',
         reviewId,
         environment: environment?.name ?? null,
         environmentId: environment?.id ?? null,
-        orgId: opts.activeOrgId,
+        orgId: opts.principal.activeOrgId,
         initialScope: payload !== undefined ? { trigger: payload } : undefined,
       });
       return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
@@ -252,7 +263,7 @@ export class ReviewTestService {
 
   /** Default payload: the workflow's latest completed run's trigger, else `{}`. */
   private async defaultPayload(opts: TestBranchOptions, workflowId: string): Promise<unknown> {
-    const latest = await this.runs.latestRunOutputs(opts.userId, workflowId);
+    const latest = await this.runs.latestRunOutputs(opts.principal.user.id, workflowId);
     const outputs = latest && typeof latest === 'object' ? (latest as { outputs?: unknown }).outputs : null;
     if (outputs && typeof outputs === 'object' && 'trigger' in outputs) {
       return (outputs as { trigger?: unknown }).trigger ?? {};

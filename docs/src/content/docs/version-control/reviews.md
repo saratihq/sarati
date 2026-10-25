@@ -30,6 +30,15 @@ Pick the environment to run against, and whether the trigger payload comes from 
 or JSON you paste. On **Default (your connections)** each step runs as the account picked on it, or
 your only active one for its app; under an environment, as that environment's.
 
+Under an environment, your branch — content no review has passed yet — runs on that environment's
+accounts, so testing there takes the same right as [promoting](/run/environments/#who-can-promote)
+there: in an organization, an owner or admin, and through an API key the `workflow:deploy` scope as
+well as `run:execute`. Default stays open to anyone who can run the branch. Without that right the
+panel offers only Default and says why; asked anyway, the test is refused before anything runs:
+
+> Only owners and admins can test a branch under 'production' in an organization, the same as
+> promoting to it — test it on Default (your connections)
+
 Before you run it, the panel names every step on your branch that a run would refuse for want of
 an account, in the words the run would use, and links to where it is fixed. It checks again when
 the branch moves on and when you come back to the tab, so a fix made elsewhere frees the run. It

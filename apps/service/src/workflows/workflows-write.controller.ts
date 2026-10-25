@@ -196,7 +196,7 @@ export class WorkflowsWriteController {
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'deploy');
-    return this.versionsWrite.publish(workflowId, body.version_number ?? null, principal.user.id);
+    return this.versionsWrite.publish(workflowId, body.version_number ?? null, principal);
   }
 
   /** Promote: point an ENVIRONMENT at a version (publish ≡ promote-to-prod). Org workflows also need an owner/admin, enforced in the service. */
@@ -210,7 +210,7 @@ export class WorkflowsWriteController {
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'deploy');
-    return this.envPointers.promote(workflowId, body.environment, body.version_id, principal.user.id);
+    return this.envPointers.promote(workflowId, body.environment, body.version_id, principal);
   }
 
   /** Layout patch: node moves are presentation, not history — the branch head is updated in place, no new version. */
@@ -237,7 +237,7 @@ export class WorkflowsWriteController {
   ): Promise<{ removed: true; environment: string }> {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'deploy');
-    return this.envPointers.removePointer(workflowId, environmentId, principal.user.id);
+    return this.envPointers.removePointer(workflowId, environmentId, principal);
   }
 
   /** Restore: instant live-pointer move to an older version — distinct from rollback, which appends a new one. */
@@ -251,7 +251,7 @@ export class WorkflowsWriteController {
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'deploy');
-    return this.versionsWrite.restore(workflowId, body.version_number, principal.user.id);
+    return this.versionsWrite.restore(workflowId, body.version_number, principal);
   }
 
   private authorize(req: Request, workflowId: string, action: PolicyAction): Promise<WorkflowEntity> {
