@@ -15,7 +15,7 @@ import { launchThrowawayDbos, type ThrowawayDbos } from './support/dbos-system-d
 
 /** One scripted op; a group of them is issued together, in order, before any of them is awaited. */
 type Op =
-  | { op: 'step'; name: string; ms?: number; fails?: true | 'marked' | 'refused' }
+  | { op: 'step'; name: string; parked?: true; fails?: true | 'marked' | 'refused' }
   | { op: 'sleep'; ms: number }
   | { op: 'recv'; topic: string; timeout: number | 'due'; poll?: number };
 type Script = Array<Op | Op[]>;
@@ -25,19 +25,49 @@ type OpResult =
   | { value: unknown; early?: boolean }
   | { error: { name: string; message: string; status?: unknown; details?: unknown } };
 
-/** An op's result the moment it settled: its place in the script, and how long after the start. */
+/** An op's result the moment it settled: its place in the script, and when it was issued and settled after the start. */
 interface Settled {
   index: number;
   result: OpResult;
+  began: number;
   at: number;
 }
 
-/** What a backend gives a script to call, and how it lets time pass inside a step. */
+// Parked step bodies: each says it has started, then waits until the scenario opens it.
+class Gates {
+  private readonly started = new Set<string>();
+  private readonly gates = new Map<string, { open: () => void; opened: Promise<void> }>();
+
+  enter(name: string): Promise<void> {
+    this.started.add(name);
+    return this.gate(name).opened;
+  }
+
+  entered(name: string): boolean {
+    return this.started.has(name);
+  }
+
+  open(name: string): void {
+    this.gate(name).open();
+  }
+
+  private gate(name: string): { open: () => void; opened: Promise<void> } {
+    let gate = this.gates.get(name);
+    if (!gate) {
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      gate = { open, opened };
+      this.gates.set(name, gate);
+    }
+    return gate;
+  }
+}
+
+/** What a backend gives a script to call. */
 interface OpPort {
   step(name: string, fn: () => Promise<unknown>): Promise<unknown>;
   sleep(ms: number): Promise<void>;
   recv(topic: string, timeout: number | 'due', poll?: number): Promise<unknown>;
-  pause(ms: number): Promise<void>;
   now(): number;
 }
 
@@ -49,17 +79,23 @@ interface Row {
   error?: string;
 }
 
-/** One started workflow, driven the same way on either backend. */
+/** One started workflow, driven the same way on either backend: every wait is for a state, never for a time. */
 interface Run {
-  /** Lets time pass until `ms` after the run started. */
-  until(ms: number): Promise<void>;
+  /** Until the parked step `name` has started. */
+  entered(name: string): Promise<void>;
+  /** Lets the parked step `name` finish. */
+  open(name: string): void;
+  /** Until each of `ids` has a row. */
+  recordedAll(...ids: number[]): Promise<void>;
+  /** Until `count` ops have settled — readable after a cancel, when the workflow has no result to give. */
+  settled(count: number): Promise<Settled[]>;
   send(topic: string, message: unknown): Promise<void>;
   recorded(): Promise<number[]>;
   result(): Promise<OpResult[]>;
   rows(): Promise<Row[]>;
   cancel(): Promise<void>;
-  /** Every op settled so far — readable after a cancel, when the workflow has no result to give. */
-  progress(): Settled[];
+  /** Opens the parked step `gate` and cancels the run once the sleep `id` after it has begun and before it can end. */
+  cancelInSleep(gate: string, id: number): Promise<void>;
 }
 
 interface Backend {
@@ -70,9 +106,14 @@ interface Backend {
   invocations: Map<string, number>;
 }
 
+// A recv timeout, in seconds, and a replayed sleep's length, that no scenario here waits out.
+const LONG_S = 600;
+const LONG_MS = LONG_S * 1000;
+
 function runScript(
   script: Script,
   port: OpPort,
+  gates: Gates,
   invocations: Map<string, number>,
   settled: Settled[],
 ): Promise<OpResult[]> {
@@ -80,8 +121,9 @@ function runScript(
   let issued = 0;
   const issue = (op: Op): Promise<OpResult> => {
     const index = issued++;
+    const began = port.now() - begun;
     return outcome(op).then((result) => {
-      settled.push({ index, result, at: port.now() - begun });
+      settled.push({ index, result, began, at: port.now() - begun });
       return result;
     });
   };
@@ -90,7 +132,7 @@ function runScript(
     if (op.op === 'step') {
       call = port.step(op.name, async () => {
         invocations.set(op.name, (invocations.get(op.name) ?? 0) + 1);
-        await port.pause(op.ms ?? 0);
+        if (op.parked) await gates.enter(op.name);
         if (op.fails === 'marked') throw new StepBodyError(`boom in ${op.name}`);
         if (op.fails === 'refused')
           throw new StepBodyError(`refused in ${op.name}`, 428, { code: 'no_account' });
@@ -125,15 +167,29 @@ function runScript(
   })();
 }
 
+async function until(done: () => boolean | Promise<boolean>): Promise<void> {
+  while (!(await done())) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
 const realInvocations = new Map<string, number>();
 const scripts = new Map<string, Script>();
 const realProgress = new Map<string, Settled[]>();
+const realGates = new Map<string, Gates>();
+
+function gatesOf(id: string): Gates {
+  let gates = realGates.get(id);
+  if (!gates) {
+    gates = new Gates();
+    realGates.set(id, gates);
+  }
+  return gates;
+}
 
 const scriptWorkflow = DBOS.registerWorkflow(
   async (): Promise<OpResult[]> => {
-    const script = scripts.get(DBOS.workflowID ?? '') ?? [];
+    const id = DBOS.workflowID ?? '';
     return runScript(
-      script,
+      scripts.get(id) ?? [],
       {
         step: (name, fn) => DBOS.runStep(fn, { name }),
         sleep: (ms) => DBOS.sleepms(ms),
@@ -144,11 +200,11 @@ const scriptWorkflow = DBOS.registerWorkflow(
               ? { deadlineEpochMS: Date.now() - 1 }
               : { timeoutSeconds: timeout, pollingIntervalMs: poll },
           ),
-        pause: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
       },
+      gatesOf(id),
       realInvocations,
-      realProgress.get(DBOS.workflowID ?? '') ?? [],
+      realProgress.get(id) ?? [],
     );
   },
   { name: 'conformance.script' },
@@ -169,27 +225,65 @@ function normalise(row: { id: number; name: string; output?: unknown; error?: st
   };
 }
 
-function realBackend(db: Client): Backend {
-  const begun = new Map<string, number>();
+function realBackend(db: Client, url: string): Backend {
+  const recorded = async (id: string): Promise<number[]> =>
+    (
+      await db.query<{ function_id: number }>(
+        `SELECT function_id FROM dbos.operation_outputs WHERE workflow_uuid = $1 ORDER BY function_id`,
+        [id],
+      )
+    ).rows.map((r) => r.function_id);
+
+  // The sleep's record waits on an uncommitted row at its id: past its own cancel check, its deadline taken, not yet asleep.
+  const cancelInSleep = async (id: string, gates: Gates, gate: string, sleepId: number): Promise<void> => {
+    const holder = new Client({ connectionString: url });
+    await holder.connect();
+    try {
+      const { pid } = (await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)).rows[0]!;
+      await holder.query('BEGIN');
+      await holder.query(
+        `INSERT INTO dbos.operation_outputs (workflow_uuid, function_id, function_name, started_at_epoch_ms, completed_at_epoch_ms)
+         VALUES ($1, $2, 'held', 0, 0)`,
+        [id, sleepId],
+      );
+      gates.open(gate);
+      await until(
+        async () =>
+          (
+            await db.query(
+              `SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%operation_outputs%'`,
+              [pid],
+            )
+          ).rows.length > 0,
+      );
+      await DBOS.cancelWorkflow(id);
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+  };
+
   const run = (id: string, start: () => Promise<{ getResult: () => Promise<OpResult[]> }>): Run => {
-    begun.set(id, Date.now());
-    realProgress.set(id, []);
+    const progress: Settled[] = [];
+    realProgress.set(id, progress);
+    const gates = gatesOf(id);
     const handle = start();
     return {
-      cancel: () => DBOS.cancelWorkflow(id),
-      progress: () => realProgress.get(id)!,
-      until: async (ms) => {
-        const wait = begun.get(id)! + ms - Date.now();
-        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      entered: (name) => until(() => gates.entered(name)),
+      open: (name) => gates.open(name),
+      recordedAll: (...ids) =>
+        until(async () => {
+          const rows = await recorded(id);
+          return ids.every((i) => rows.includes(i));
+        }),
+      settled: async (count) => {
+        await until(() => progress.length >= count);
+        return progress;
       },
+      cancel: () => DBOS.cancelWorkflow(id),
+      cancelInSleep: (gate, sleepId) => cancelInSleep(id, gates, gate, sleepId),
       send: (topic, message) => DBOS.send(id, message, topic),
-      recorded: async () =>
-        (
-          await db.query<{ function_id: number }>(
-            `SELECT function_id FROM dbos.operation_outputs WHERE workflow_uuid = $1 ORDER BY function_id`,
-            [id],
-          )
-        ).rows.map((r) => r.function_id),
+      recorded: () => recorded(id),
       result: async () => (await handle).getResult(),
       rows: async () =>
         (
@@ -236,9 +330,14 @@ function simBackend(): Backend {
   const clock = new VirtualClock();
   const workflows = new Map<string, SimWorkflow>();
   const invocations = new Map<string, number>();
+  // Fires the model's timers only until `done` holds, so virtual time never runs past the state a scenario waits for.
+  const reach = async (done: () => boolean, what: string): Promise<void> => {
+    await clock.drive(done);
+    if (!done()) throw new Error(`SimDBOS ran out of timers before ${what}`);
+  };
   const run = (wf: SimWorkflow, script: Script): Run => {
-    const begun = clock.now();
     const execution = new SimExecution(wf, () => 1, refusedHere);
+    const gates = new Gates();
     const progress: Settled[] = [];
     let settled: OpResult[] | undefined;
     void runScript(
@@ -253,26 +352,31 @@ function simBackend(): Backend {
               ? { deadlineEpochMS: clock.now() - 1 }
               : { timeoutSeconds: timeout, pollingIntervalMs: poll },
           ),
-        pause: (ms) => clock.sleep(ms),
         now: () => clock.now(),
       },
+      gates,
       invocations,
       progress,
     ).then((results) => {
       settled = results;
     });
+    const cancel = (): Promise<void> => {
+      wf.cancelled = true;
+      return Promise.resolve();
+    };
     return {
-      cancel: () => {
-        wf.cancelled = true;
-        return Promise.resolve();
+      entered: (name) => reach(() => gates.entered(name), `${name} started`),
+      open: (name) => gates.open(name),
+      recordedAll: (...ids) => reach(() => ids.every((i) => wf.rows.has(i)), `rows ${ids.join(', ')}`),
+      settled: async (count) => {
+        await reach(() => progress.length >= count, `${count} ops settled`);
+        return progress;
       },
-      progress: () => progress,
-      until: async (ms) => {
-        let reached = false;
-        clock.at(begun + ms, () => {
-          reached = true;
-        });
-        await clock.drive(() => reached);
+      cancel,
+      cancelInSleep: async (gate, sleepId) => {
+        gates.open(gate);
+        await reach(() => wf.rows.has(sleepId), `sleep ${sleepId} began`);
+        await cancel();
       },
       send: (topic, message) => {
         wf.send(message, topic);
@@ -280,7 +384,7 @@ function simBackend(): Backend {
       },
       recorded: () => Promise.resolve([...wf.rows.keys()].sort((a, b) => a - b)),
       result: async () => {
-        await clock.drive(() => settled !== undefined);
+        await reach(() => settled !== undefined, 'the script ended');
         return settled!;
       },
       rows: () =>
@@ -327,7 +431,7 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     dbos = await launchThrowawayDbos('conformance');
     db = new Client({ connectionString: dbos.url });
     await db.connect();
-    real = realBackend(db);
+    real = realBackend(db, dbos.url);
     await db.query(`CREATE FUNCTION dbos.refuse_consume() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.topic = '${REFUSED_TOPIC}' THEN RAISE EXCEPTION 'lock not available' USING ERRCODE = '55P03'; END IF;
@@ -363,17 +467,17 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     const seen = await both(async (backend, name) => {
       const run = backend.start(name, [
         [
-          { op: 'step', name: 'slow', ms: 300 },
-          { op: 'step', name: 'fast', ms: 20 },
-          { op: 'recv', topic: 'answer', timeout: 1.5 },
+          { op: 'step', name: 'slow', parked: true },
+          { op: 'step', name: 'fast' },
+          { op: 'recv', topic: 'answer', timeout: LONG_S },
           { op: 'sleep', ms: 600 },
         ],
       ]);
-      await run.until(150);
+      await run.recordedAll(1, 3, 4);
       const early = await run.recorded();
-      await run.until(450);
+      run.open('slow');
+      await run.recordedAll(0);
       const later = await run.recorded();
-      await run.until(800);
       await run.send('answer', { decided: 'yes' });
       return { early, later, result: await run.result(), rows: await run.rows() };
     });
@@ -401,13 +505,14 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
       const run = backend.start(name, [
         { op: 'sleep', ms: 0 },
         { op: 'sleep', ms: -5 },
-        { op: 'step', name: 'gate', ms: 250 },
+        { op: 'step', name: 'gate', parked: true },
         { op: 'recv', topic: 'waiting', timeout: 'due' },
         { op: 'recv', topic: 'empty', timeout: 'due' },
         { op: 'step', name: 'end' },
       ]);
-      await run.until(100);
+      await run.entered('gate');
       await run.send('waiting', { early: true });
+      run.open('gate');
       return { result: await run.result(), rows: await run.rows() };
     });
     expect(seen.rows).toEqual([
@@ -494,16 +599,16 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
   it('lets a replay take a recv on another topic and a sleep of another length without a word', async () => {
     const seen = await both(async (backend, name) => {
       const run = backend.start(name, [
-        { op: 'recv', topic: 'first', timeout: 1 },
+        { op: 'recv', topic: 'first', timeout: LONG_S },
         { op: 'sleep', ms: 150 },
       ]);
-      await run.until(100);
+      await run.recordedAll(1);
       await run.send('first', { meant: 'first' });
       await run.result();
       return backend
         .fork(name, 3, [
-          { op: 'recv', topic: 'second', timeout: 1 },
-          { op: 'sleep', ms: 5_000 },
+          { op: 'recv', topic: 'second', timeout: LONG_S },
+          { op: 'sleep', ms: LONG_MS },
         ])
         .result();
     });
@@ -521,7 +626,7 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
       const slipped = await backend
         .fork(name, 3, [
           { op: 'sleep', ms: 0 },
-          { op: 'sleep', ms: 5_000 },
+          { op: 'sleep', ms: LONG_MS },
           { op: 'step', name: 'b' },
         ])
         .result();
@@ -546,11 +651,11 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
   it('rejects a recv whose consume the database refuses and a step whose record it refuses, recording neither', async () => {
     const seen = await both(async (backend, name) => {
       const run = backend.start(name, [
-        { op: 'recv', topic: REFUSED_TOPIC, timeout: 3 },
+        { op: 'recv', topic: REFUSED_TOPIC, timeout: LONG_S },
         { op: 'step', name: REFUSED_STEP },
         { op: 'step', name: `${name}-after` },
       ]);
-      await run.until(100);
+      await run.recordedAll(1);
       await run.send(REFUSED_TOPIC, { d: 'kept' });
       const results = await run.result();
       return {
@@ -572,40 +677,59 @@ describe('SimDBOS conforms to DBOS 4.23.6 (e2e, real DBOS, throwaway system DB)'
     });
   }, 30_000);
 
-  it('stops a parked recv within its poll interval once cancelled, and refuses every op after it', async () => {
+  it('stops a parked recv at a poll once cancelled, long before its deadline, and refuses every op after it', async () => {
     const seen = await both(async (backend, name) => {
       const run = backend.start(name, [
-        { op: 'recv', topic: 'never', timeout: 5, poll: 200 },
+        { op: 'recv', topic: 'never', timeout: LONG_S, poll: 200 },
         { op: 'step', name: `${name}-after` },
       ]);
-      await run.until(100);
+      await run.recordedAll(1);
       await run.cancel();
-      await run.until(700);
       return {
-        settled: run
-          .progress()
-          .map(({ index, result, at }) => ({ index, result, withinPoll: at < 100 + 200 + 150 })),
+        settled: (await run.settled(2)).map(({ index, result, at }) => ({
+          index,
+          result,
+          beforeDeadline: at < LONG_MS,
+        })),
         ran: backend.invocations.get(`${name}-after`) ?? 0,
+        rows: await run.rows(),
       };
     });
     expect(
-      seen.settled.map((s) => [s.index, s.withinPoll, 'error' in s.result && s.result.error.message]),
+      seen.settled.map((s) => [s.index, s.beforeDeadline, 'error' in s.result && s.result.error.message]),
     ).toEqual([
       [0, true, expect.stringMatching(/has been cancelled$/)],
       [1, true, expect.stringMatching(/has been cancelled$/)],
     ]);
     expect(seen.ran).toBe(0);
+    expect(seen.rows).toEqual([{ id: 1, name: 'DBOS.sleep' }]);
   }, 30_000);
 
   it('lets a sleep run to its end once cancelled, then throws', async () => {
     const seen = await both(async (backend, name) => {
-      const run = backend.start(name, [{ op: 'sleep', ms: 700 }]);
-      await run.until(100);
-      await run.cancel();
-      await run.until(1_000);
-      return run.progress().map(({ result, at }) => ({ result, atItsEnd: at >= 650 }));
+      const run = backend.start(name, [
+        { op: 'step', name: 'gate', parked: true },
+        { op: 'sleep', ms: 700 },
+      ]);
+      await run.entered('gate');
+      await run.cancelInSleep('gate', 1);
+      const [gate, sleep] = [...(await run.settled(2))].sort((a, b) => a.index - b.index);
+      return {
+        gate: gate!.result,
+        sleep: sleep!.result,
+        ranItsLength: sleep!.at - sleep!.began >= 700,
+        rows: await run.rows(),
+      };
     });
-    expect(seen).toEqual([{ result: { error: expect.objectContaining({ name: 'Error' }) }, atItsEnd: true }]);
+    expect(seen).toEqual({
+      gate: { value: { from: 'gate' } },
+      sleep: { error: { name: 'Error', message: expect.stringMatching(/has been cancelled$/) } },
+      ranItsLength: true,
+      rows: [
+        { id: 0, name: 'gate', value: { from: 'gate' } },
+        { id: 1, name: 'DBOS.sleep' },
+      ],
+    });
   }, 30_000);
 
   it('runs a step again on replay when its slot was never recorded', async () => {
