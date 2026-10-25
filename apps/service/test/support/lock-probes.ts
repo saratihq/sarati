@@ -25,6 +25,25 @@ export interface Hold {
   restore: () => void;
 }
 
+/** Resolves once `arrived` does; rejects, naming `what`, if five seconds pass first. */
+export function reached(arrived: Promise<void>, what: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} never reached its hold`)), 5_000);
+    void arrived.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/** `hold`, its arrival bounded as `reached` bounds it, timed from when it is awaited. */
+export const bounded = (hold: Hold, what: string): Hold => ({
+  ...hold,
+  get arrived() {
+    return reached(hold.arrived, what);
+  },
+});
+
 /** Holds on a suite's requests and reads of its database's locks, each read from the app and client when it runs. */
 export interface LockProbes {
   /** Holds each transaction that emits `type`, just before or just after that emit, the nth until `release(n)` or `restore()`. */

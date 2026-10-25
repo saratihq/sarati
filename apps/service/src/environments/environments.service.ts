@@ -290,11 +290,6 @@ export class EnvironmentsService {
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
       if (env.name === UAT_ENV)
         throw new DomainError(`'uat' is a predefined environment — it cannot be deleted`, 409);
-      const activations = await rawQuery<{ workflow_id: string }>(
-        em,
-        `SELECT workflow_id FROM runtime_trigger_activations WHERE environment_id = $1`,
-        [env.id],
-      );
       // Also match legacy name-only rows, or the delete leaves a same-named ghost binding behind.
       const removed = await rawMutateReturning<{ workflow_id: string }>(
         em,
@@ -305,6 +300,12 @@ export class EnvironmentsService {
                 OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))
         RETURNING p.workflow_id`,
         [env.id, env.name, orgId],
+      );
+      // Read once the pointers are gone, so an activation insert that held one has committed and is listed (constitution row 11).
+      const activations = await rawQuery<{ workflow_id: string }>(
+        em,
+        `SELECT workflow_id FROM runtime_trigger_activations WHERE environment_id = $1`,
+        [env.id],
       );
       for (const { workflow_id } of removed) {
         await this.events.emit(em, {
