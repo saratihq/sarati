@@ -117,7 +117,8 @@ a polled trigger carries on from where it was.
 
 Renaming the environment replaces a webhook the same way, because the address the app calls carries
 the environment's name: the webhook at the old address is deleted and one is registered at the new
-one.
+one. While the account the webhook was registered with isn't active, neither can be done, so the
+rename is refused; see [Rename and delete](/run/environments/#rename-and-delete).
 
 If the app can't delete the old webhook, or doesn't answer within ten seconds, the new trigger goes
 live anyway, and the delete is tried again every fifteen minutes — even after you remove the trigger,
@@ -133,10 +134,10 @@ Linear is the exception: the Linear trigger does not report a failed delete, so 
 not delete stays in Linear and nothing retries it. The service log names every Linear webhook it
 deletes, with its address (at warn level), so one still in Linear can be found and deleted there.
 
-A registration that failed to start shows its error on the workflow overview and is retried every
-fifteen minutes, and when the service starts. Until it has started, the trigger fires nothing: a
-polled trigger whose feed could not be read when it started is not checked, so it never fires the
-items that were already in its feed.
+A registration that failed to start shows its error on the workflow overview, which reads **Not
+listening**, and is retried every fifteen minutes, and when the service starts. Until it has
+started, the trigger fires nothing: a polled trigger whose feed could not be read when it started is
+not checked, so it never fires the items that were already in its feed.
 
 ## Localhost and inbound triggers
 
@@ -146,7 +147,7 @@ For local development, expose your instance with a tunnel and set `PUBLIC_BASE_U
 URL so generated webhook URLs are the ones a sender can actually reach.
 
 If the tunnel's address changes, update `PUBLIC_BASE_URL` and restart. Webhooks registered with apps
-move to the new address when the service starts. A URL you gave a sender yourself has to be updated
-there.
+move to the new address when the service starts, except one whose account isn't active: it moves once
+the account is active again. A URL you gave a sender yourself has to be updated there.
 
 Your own `curl` on the same machine works without any of this.

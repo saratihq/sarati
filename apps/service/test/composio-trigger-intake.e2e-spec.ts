@@ -14,20 +14,20 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const WEBHOOK_SECRET = 'whsec_e2e_composio_secret';
 
-/** The fire TARGET; the activation is seeded directly, so the workflow needs no trigger node. */
-const workflowDoc = (): Record<string, unknown> => ({
+/** The fire TARGET: its Composio trigger's activation, held back for want of a github slot, is bound to an instance directly. */
+const workflowDoc = (triggerId: string): Record<string, unknown> => ({
   version: '1.0',
-  name: 'composio intake target',
+  name: `composio intake target ${triggerId}`,
   description: '',
   nodes: [
     {
-      id: 'trigger',
-      name: 'Manual',
-      node_type: 'orchestr:trigger',
+      id: triggerId,
+      name: 'On a commit',
+      node_type: 'github.github_commit_event',
       type_version: 1,
       parameters: {},
       position: { x: 0, y: 0 },
-      metadata: {},
+      metadata: { trigger: true },
     },
     {
       id: 'say',
@@ -42,7 +42,7 @@ const workflowDoc = (): Record<string, unknown> => ({
   edges: [
     {
       id: 'e-trigger-say',
-      source_node_id: 'trigger',
+      source_node_id: triggerId,
       source_port: 0,
       target_node_id: 'say',
       target_port: 0,
@@ -82,6 +82,29 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
       .set('webhook-timestamp', ts)
       .set('webhook-signature', sig.startsWith('v1,') ? sig : sign(id, ts, raw))
       .send(raw);
+  };
+
+  // Deploy a workflow and bind its trigger's activation to a Composio instance, as a stand-up would.
+  const deployBound = async (
+    triggerId: string,
+    instance: string,
+    connectionId: string | null,
+  ): Promise<string> => {
+    const deployed = await asA(
+      http()
+        .post('/api/deploy')
+        .set('X-Org-Id', orgId)
+        .send({ workflow_json: workflowDoc(triggerId) }),
+    ).expect(201);
+    const workflowId = deployed.body.workflow_id as string;
+    const bound = await db.query(
+      `UPDATE runtime_trigger_activations
+          SET composio_trigger_instance_id = $2, connection_id = $3, connection_owner_user_id = $4
+        WHERE workflow_id = $1 AND trigger_node_id = $5 AND kind = 'composio_subscription'`,
+      [workflowId, instance, connectionId, userId, triggerId],
+    );
+    expect(bound.rowCount).toBe(1);
+    return workflowId;
   };
 
   beforeAll(async () => {
@@ -125,30 +148,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     // The signing secret is the same Composio project's credential, so it is scoped too.
     await seedPlatformKeyEverywhere(app, 'composio_webhook_secret', WEBHOOK_SECRET);
 
-    const deployed = await asA(
-      http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: workflowDoc() }),
-    ).expect(201);
-    wfId = deployed.body.workflow_id as string;
-
-    // The production env pointer materialized by deploy — the activation's target.
-    const pointer = await db.query<{ environment_id: string; version_id: string }>(
-      `SELECT environment_id, version_id FROM workflow_env_pointers
-        WHERE workflow_id = $1 AND environment_id IS NOT NULL LIMIT 1`,
-      [wfId],
-    );
-    const target = pointer.rows[0];
-    if (!target) throw new Error('deploy did not materialize a production env pointer');
-    const { environment_id, version_id } = target;
-
-    // Seed a live composio_subscription activation bound to a Composio instance id.
-    await db.query(
-      `INSERT INTO runtime_trigger_activations
-         (id, workflow_id, environment_id, trigger_node_id, kind, trigger_type, version_id,
-          props, composio_trigger_instance_id, connection_owner_user_id, paused, created_at, updated_at)
-       VALUES ($1, $2, $3, 'ext-node', 'composio_subscription', 'github.github_commit_event', $4,
-               '{}'::json, $5, $6, false, now(), now())`,
-      [randomUUID(), wfId, environment_id, version_id, INSTANCE, userId],
-    );
+    wfId = await deployBound('ext-node', INSTANCE, null);
   }, 30_000);
 
   afterAll(async () => {
@@ -157,19 +157,19 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     process.env.DATABASE_URL = ADMIN_URL;
   });
 
-  const runCount = async (): Promise<number> => {
+  const runCount = async (workflowId = wfId): Promise<number> => {
     const res = await db.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM runtime_runs WHERE workflow_id = $1`,
-      [wfId],
+      [workflowId],
     );
     return Number(res.rows[0]?.n ?? '0');
   };
 
   /** A delivery's run starts after the 202 (fast ack), so its record is waited for, never read once. */
-  const runsCreatedSince = async (before: number): Promise<number> => {
+  const runsCreatedSince = async (before: number, workflowId = wfId): Promise<number> => {
     let created = 0;
     for (let i = 0; i < 40 && created === 0; i++) {
-      created = (await runCount()) - before;
+      created = (await runCount(workflowId)) - before;
       if (created === 0) await new Promise((r) => setTimeout(r, 100));
     }
     return created;
@@ -307,22 +307,12 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
   describe('connected-account cross-check (F7)', () => {
     const F7_INSTANCE = 'ti_f7_instance';
     const connId = randomUUID();
+    let f7Wf = '';
     let refSpy: jest.SpyInstance;
 
     beforeAll(async () => {
-      // A second live activation on the same workflow/env, bound to a connection spied to `ca_expected`.
-      await db.query(
-        `INSERT INTO runtime_trigger_activations
-           (id, workflow_id, environment_id, trigger_node_id, kind, trigger_type, version_id,
-            props, composio_trigger_instance_id, connection_id, connection_owner_user_id,
-            paused, created_at, updated_at)
-         SELECT $1, $2, environment_id, 'f7-node', 'composio_subscription', 'github.github_commit_event',
-                version_id, '{}'::json, $3, $4, $5, false, now(), now()
-           FROM workflow_env_pointers
-          WHERE workflow_id = $2 AND environment_id IS NOT NULL
-          LIMIT 1`,
-        [randomUUID(), wfId, F7_INSTANCE, connId, userId],
-      );
+      // A second live activation, bound to a connection spied to `ca_expected`.
+      f7Wf = await deployBound('f7-node', F7_INSTANCE, connId);
       refSpy = jest.spyOn(app.get(ConnectionsService), 'managedRef').mockResolvedValue({
         id: connId,
         authType: 'managed',
@@ -334,25 +324,25 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     afterAll(() => refSpy.mockRestore());
 
     it('SKIPS an activation whose account ≠ the delivery account (fired: 0)', async () => {
-      const before = await runCount();
+      const before = await runCount(f7Wf);
       const raw = JSON.stringify({
         metadata: { trigger_id: F7_INSTANCE, connected_account_id: 'ca_wrong' },
         data: { action: 'push' },
       });
       const res = await deliver(raw, 'auto').expect(202);
       expect(res.body).toMatchObject({ status: 'accepted', fired: 0 });
-      expect(await runCount()).toBe(before);
+      expect(await runCount(f7Wf)).toBe(before);
     });
 
     it('FIRES when the delivery account matches the activation account (fired: 1)', async () => {
-      const before = await runCount();
+      const before = await runCount(f7Wf);
       const raw = JSON.stringify({
         metadata: { trigger_id: F7_INSTANCE, connected_account_id: 'ca_expected' },
         data: { action: 'push' },
       });
       const res = await deliver(raw, 'auto').expect(202);
       expect(res.body).toMatchObject({ status: 'accepted', fired: 1 });
-      expect(await runsCreatedSince(before)).toBe(1);
+      expect(await runsCreatedSince(before, f7Wf)).toBe(1);
     });
   });
 });

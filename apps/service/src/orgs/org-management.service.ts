@@ -121,7 +121,7 @@ export class OrgManagementService {
       await em.delete(OrganizationEntity, { id: org.id });
       return removal;
     });
-    await clusters.revoke();
+    await clusters.afterCommit();
   }
 
   private async refuseWhileWorkflows(em: EntityManager, orgId: string): Promise<void> {

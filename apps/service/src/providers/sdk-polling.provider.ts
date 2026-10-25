@@ -32,6 +32,69 @@ interface SdkPollingContext {
   store: ProviderStore;
 }
 
+/** PUBLIC type → SDK polling trigger. Every polling trigger the SDK ships (`pollingTriggers`). */
+const POLLING_TRIGGERS = new Map<string, PollingTrigger<never, unknown>>([
+  [actions.rss.RSS_NEW_ITEM_TYPE, actions.rss.newItem as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.hackernews.NEW_STORY_TYPE,
+    actions.hackernews.newStory as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.http.HTTP_NEW_ITEM_TYPE, actions.http.newItem as unknown as PollingTrigger<never, unknown>],
+  [actions.slack.NEW_CHANNEL_TYPE, actions.slack.newChannel as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.mailchimp.NEW_SUBSCRIBER_TYPE,
+    actions.mailchimp.newSubscriber as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.jira.NEW_ISSUE_TYPE, actions.jira.newIssue as unknown as PollingTrigger<never, unknown>],
+  [actions.asana.NEW_TASK_TYPE, actions.asana.newTask as unknown as PollingTrigger<never, unknown>],
+  [actions.todoist.NEW_TASK_TYPE, actions.todoist.newTask as unknown as PollingTrigger<never, unknown>],
+  [actions.hubspot.NEW_CONTACT_TYPE, actions.hubspot.newContact as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.intercom.NEW_CONVERSATION_TYPE,
+    actions.intercom.newConversation as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.zendesk.NEW_TICKET_TYPE, actions.zendesk.newTicket as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.salesforce.NEW_RECORD_TYPE,
+    actions.salesforce.newRecord as unknown as PollingTrigger<never, unknown>,
+  ],
+  [
+    actions.airtable.AIRTABLE_NEW_RECORD_TYPE,
+    actions.airtable.newRecord as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.notion.NOTION_NEW_PAGE_TYPE, actions.notion.newPage as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.dropbox.DROPBOX_NEW_FILE_TYPE,
+    actions.dropbox.newFile as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.drive.DRIVE_NEW_FILE_TYPE, actions.drive.newFile as unknown as PollingTrigger<never, unknown>],
+  [actions.sheets.SHEETS_NEW_ROW_TYPE, actions.sheets.newRow as unknown as PollingTrigger<never, unknown>],
+  [
+    actions.zoom.ZOOM_NEW_RECORDING_TYPE,
+    actions.zoom.newRecording as unknown as PollingTrigger<never, unknown>,
+  ],
+  [
+    actions.calendar.CALENDAR_NEW_EVENT_TYPE,
+    actions.calendar.newEvent as unknown as PollingTrigger<never, unknown>,
+  ],
+  [
+    actions.outlook.OUTLOOK_NEW_EMAIL_TYPE,
+    actions.outlook.newEmail as unknown as PollingTrigger<never, unknown>,
+  ],
+  [actions.gmail.GMAIL_NEW_EMAIL_TYPE, actions.gmail.newEmail as unknown as PollingTrigger<never, unknown>],
+]);
+
+/** Whether `type` is an SDK polling trigger. */
+export function isSdkPollingTrigger(type: string): boolean {
+  return POLLING_TRIGGERS.has(type);
+}
+
+/** Whether an SDK polling trigger signs in to its app (a non-`none` scheme); one that doesn't listens as no account. */
+export function sdkPollingTriggerSignsIn(type: string): boolean {
+  const trigger = POLLING_TRIGGERS.get(type);
+  return trigger ? trigger.auth.type !== 'none' : false;
+}
+
 /**
  * Runs the SDK's POLLING triggers (`runPoll` — the identity-deduped poll rail) IN-PROCESS, the counterpart of
  * {@link import('./sdk-webhook.provider').SdkWebhookProvider}. Always available (no COMPOSIO_API_KEY needed);
@@ -39,63 +102,7 @@ interface SdkPollingContext {
  */
 @Injectable()
 export class SdkPollingProvider {
-  /** PUBLIC type → SDK polling trigger. Every polling trigger the SDK ships (`pollingTriggers`). */
-  private readonly registry = new Map<string, PollingTrigger<never, unknown>>([
-    [actions.rss.RSS_NEW_ITEM_TYPE, actions.rss.newItem as unknown as PollingTrigger<never, unknown>],
-    [
-      actions.hackernews.NEW_STORY_TYPE,
-      actions.hackernews.newStory as unknown as PollingTrigger<never, unknown>,
-    ],
-    [actions.http.HTTP_NEW_ITEM_TYPE, actions.http.newItem as unknown as PollingTrigger<never, unknown>],
-    [actions.slack.NEW_CHANNEL_TYPE, actions.slack.newChannel as unknown as PollingTrigger<never, unknown>],
-    [
-      actions.mailchimp.NEW_SUBSCRIBER_TYPE,
-      actions.mailchimp.newSubscriber as unknown as PollingTrigger<never, unknown>,
-    ],
-    [actions.jira.NEW_ISSUE_TYPE, actions.jira.newIssue as unknown as PollingTrigger<never, unknown>],
-    [actions.asana.NEW_TASK_TYPE, actions.asana.newTask as unknown as PollingTrigger<never, unknown>],
-    [actions.todoist.NEW_TASK_TYPE, actions.todoist.newTask as unknown as PollingTrigger<never, unknown>],
-    [
-      actions.hubspot.NEW_CONTACT_TYPE,
-      actions.hubspot.newContact as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.intercom.NEW_CONVERSATION_TYPE,
-      actions.intercom.newConversation as unknown as PollingTrigger<never, unknown>,
-    ],
-    [actions.zendesk.NEW_TICKET_TYPE, actions.zendesk.newTicket as unknown as PollingTrigger<never, unknown>],
-    [
-      actions.salesforce.NEW_RECORD_TYPE,
-      actions.salesforce.newRecord as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.airtable.AIRTABLE_NEW_RECORD_TYPE,
-      actions.airtable.newRecord as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.notion.NOTION_NEW_PAGE_TYPE,
-      actions.notion.newPage as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.dropbox.DROPBOX_NEW_FILE_TYPE,
-      actions.dropbox.newFile as unknown as PollingTrigger<never, unknown>,
-    ],
-    [actions.drive.DRIVE_NEW_FILE_TYPE, actions.drive.newFile as unknown as PollingTrigger<never, unknown>],
-    [actions.sheets.SHEETS_NEW_ROW_TYPE, actions.sheets.newRow as unknown as PollingTrigger<never, unknown>],
-    [
-      actions.zoom.ZOOM_NEW_RECORDING_TYPE,
-      actions.zoom.newRecording as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.calendar.CALENDAR_NEW_EVENT_TYPE,
-      actions.calendar.newEvent as unknown as PollingTrigger<never, unknown>,
-    ],
-    [
-      actions.outlook.OUTLOOK_NEW_EMAIL_TYPE,
-      actions.outlook.newEmail as unknown as PollingTrigger<never, unknown>,
-    ],
-    [actions.gmail.GMAIL_NEW_EMAIL_TYPE, actions.gmail.newEmail as unknown as PollingTrigger<never, unknown>],
-  ]);
+  private readonly registry = POLLING_TRIGGERS;
 
   constructor(
     @Optional() private readonly connections?: ConnectionsService,
@@ -104,13 +111,7 @@ export class SdkPollingProvider {
 
   /** Whether `type` is an SDK polling trigger (drives the triggers-service + reconciler branch). */
   isPollingTrigger(type: string): boolean {
-    return this.registry.has(type);
-  }
-
-  /** Whether the trigger needs a connection (non-`none` scheme) — the reconciler's gate, so a no-auth trigger isn't held back. */
-  needsConnection(type: string): boolean {
-    const trigger = this.registry.get(type);
-    return trigger ? trigger.auth.type !== 'none' : false;
+    return isSdkPollingTrigger(type);
   }
 
   /** Catalog entries for the trigger picker — same wire shape the other trigger entries use, plus `sample`. */

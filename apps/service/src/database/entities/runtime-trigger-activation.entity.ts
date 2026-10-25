@@ -77,6 +77,10 @@ export class RuntimeTriggerActivationEntity {
   /** What the reconciler last stood up — the columns above are what is DESIRED; `null` = not known. */
   @Column({ type: 'jsonb', nullable: true })
   materialized!: MaterializedActivation | null;
+
+  /** Kept as stood up but neither polled nor changed at its app, while the slot account it listens as isn't active. */
+  @Column({ type: 'boolean', default: false })
+  held!: boolean;
 }
 
 /** Per-activation persistent KV (cursors, webhook secret/handle); rows cascade with the activation. */

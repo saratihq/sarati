@@ -2,7 +2,7 @@ import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 
 import type { RegisteredWebhook } from '../../triggers/registered-webhook';
 
-/** An app webhook whose delete failed, retried by later reconciles until it succeeds or can never succeed. */
+/** An app webhook whose delete failed or waits for its account to be active, retried by later reconciles until it succeeds or can never succeed. */
 @Entity('trigger_retired_webhooks')
 @Index('ix_trigger_retired_webhooks_workflow', ['workflowId'])
 export class TriggerRetiredWebhookEntity {
