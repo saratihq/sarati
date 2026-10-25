@@ -16,7 +16,12 @@ const SECRET = 'branch-test-env-rights-secret';
 const SCOPE_REFUSAL =
   'This API key is missing the "workflow:deploy" scope it takes to test a branch under \'production\', the same as promoting to it — test it on Default (your connections)';
 
-const codeDoc = (msg: string): Record<string, unknown> => ({
+const docWith = (step: {
+  id: string;
+  name: string;
+  node_type: string;
+  parameters: Record<string, unknown>;
+}): Record<string, unknown> => ({
   version: '1',
   name: 'Env rights',
   description: '',
@@ -30,22 +35,14 @@ const codeDoc = (msg: string): Record<string, unknown> => ({
       position: { x: 0, y: 0 },
       metadata: {},
     },
-    {
-      id: 'code',
-      name: 'Compute',
-      node_type: 'orchestr:code',
-      type_version: 1,
-      parameters: { language: 'js', code: `return { msg: '${msg}' };` },
-      position: { x: 300, y: 0 },
-      metadata: {},
-    },
+    { ...step, type_version: 1, position: { x: 300, y: 0 }, metadata: {} },
   ],
   edges: [
     {
       id: 'e1',
       source_node_id: 'trigger',
       source_port: 0,
-      target_node_id: 'code',
+      target_node_id: step.id,
       target_port: 0,
       port_type: 'main',
     },
@@ -54,8 +51,23 @@ const codeDoc = (msg: string): Record<string, unknown> => ({
   metadata: { engine: 'orchestr' },
 });
 
+const codeDoc = (msg: string): Record<string, unknown> =>
+  docWith({
+    id: 'code',
+    name: 'Compute',
+    node_type: 'orchestr:code',
+    parameters: { language: 'js', code: `return { msg: '${msg}' };` },
+  });
+
+/** A Gmail step with no account chosen, so under an environment it needs a Gmail slot, which no environment here has. */
+const gmailDoc = (name: string): Record<string, unknown> =>
+  docWith({ id: 'profile', name, node_type: 'gmail.get_profile', parameters: {} });
+
 const ROLE_REFUSAL = (env: string): string =>
   `Only owners and admins can test a branch under '${env}' in an organization, the same as promoting to it — test it on Default (your connections)`;
+
+const MOVE_REFUSAL = (env: string): string =>
+  `Only owners and admins can move the '${env}' pointer in an organization`;
 
 /** "Test this branch" runs unreviewed content on an environment's accounts, so under one it takes the right to promote there. */
 describe('a branch test under an environment takes the right to promote there (e2e, sessions + API keys)', () => {
@@ -283,6 +295,108 @@ describe('a branch test under an environment takes the right to promote there (e
     },
     30_000,
   );
+
+  describe("where the environment's slots would refuse the content too", () => {
+    let slotWf = '';
+    let slotReview = '';
+    let v1 = '';
+    const door = {
+      promote: (bearer: string, environment: string): request.Test =>
+        inOrg(http().post(`/api/workflows/${slotWf}/promote`), bearer).send({ environment, version_id: v1 }),
+      publish: (bearer: string): request.Test =>
+        inOrg(http().post(`/api/workflows/${slotWf}/publish`), bearer).send({}),
+      restore: (bearer: string): request.Test =>
+        inOrg(http().post(`/api/workflows/${slotWf}/restore`), bearer).send({ version_number: 1 }),
+      test: (bearer: string, environmentId: string): request.Test =>
+        inOrg(http().post(`/api/workflows/${slotWf}/reviews/${slotReview}/test`), bearer).send({
+          environment_id: environmentId,
+        }),
+    };
+    const pointers = async (): Promise<Array<{ environment: string; version_id: string }>> =>
+      (
+        await db.query<{ environment: string; version_id: string }>(
+          `SELECT environment, version_id FROM workflow_env_pointers WHERE workflow_id = $1 ORDER BY environment`,
+          [slotWf],
+        )
+      ).rows;
+
+    beforeAll(async () => {
+      slotWf = (
+        await inOrg(http().post('/api/deploy'), asOwner)
+          .send({ workflow_json: gmailDoc('Profile') })
+          .expect(201)
+      ).body.workflow_id as string;
+      v1 = (await inOrg(http().get(`/api/workflows/${slotWf}/branches/main/head`), asOwner).expect(200)).body
+        .head.version_id as string;
+      await inOrg(http().post(`/api/workflows/${slotWf}/branches`), asMember)
+        .send({ name: 'change' })
+        .expect(201);
+      await inOrg(http().post(`/api/workflows/${slotWf}/commit`), asMember)
+        .send({ workflow_json: gmailDoc('Profile, renamed'), branch: 'change' })
+        .expect(201);
+      slotReview = (
+        await inOrg(http().post(`/api/workflows/${slotWf}/reviews`), asMember)
+          .send({ source_branch: 'change', title: 'Rename the step' })
+          .expect(201)
+      ).body.id as string;
+    }, 30_000);
+
+    it('an owner, who holds the right, is refused by the slots on every door, so the slot check is in play', async () => {
+      const slotRefusal = (environment: string): Record<string, unknown> => ({
+        code: 'environment_slots_empty',
+        environment,
+        apps: ['gmail'],
+      });
+
+      expect((await door.promote(asOwner, 'staging').expect(428)).body).toMatchObject(slotRefusal('staging'));
+      expect((await door.publish(asOwner).expect(428)).body).toMatchObject(slotRefusal('production'));
+      expect((await door.restore(asOwner).expect(428)).body).toMatchObject(slotRefusal('production'));
+      expect((await door.test(asOwner, staging).expect(428)).body).toMatchObject(slotRefusal('staging'));
+    }, 30_000);
+
+    it.each([
+      ['session', (): string => asMember],
+      ['key holding "workflow:deploy"', (): string => keys.member],
+    ])(
+      "a member's %s is refused 403 before any slot refusal on every door — nothing moves or runs",
+      async (_, bearer) => {
+        const live = await pointers();
+
+        for (const env of ['production', 'staging']) {
+          expect((await door.promote(bearer(), env).expect(403)).body).toMatchObject({
+            detail: MOVE_REFUSAL(env),
+            code: 'promote_not_permitted',
+          });
+        }
+        for (const move of [door.publish, door.restore]) {
+          expect((await move(bearer()).expect(403)).body).toMatchObject({
+            detail: MOVE_REFUSAL('production'),
+            code: 'promote_not_permitted',
+          });
+        }
+        for (const [id, name] of [
+          [production, 'production'],
+          [staging, 'staging'],
+        ] as const) {
+          expect((await door.test(bearer(), id).expect(403)).body).toMatchObject({
+            detail: ROLE_REFUSAL(name),
+            code: 'promote_not_permitted',
+          });
+        }
+
+        expect(await pointers()).toEqual(live);
+        expect(await reviewRuns(slotReview)).toEqual([]);
+      },
+      30_000,
+    );
+
+    it('an owner\'s key without "workflow:deploy" is refused a branch test under production naming the scope, before any slot refusal', async () => {
+      const refused = await door.test(keys.ownerNoDeploy, production).expect(403);
+
+      expect(refused.body).toMatchObject({ detail: SCOPE_REFUSAL, code: 'promote_not_permitted' });
+      expect(await reviewRuns(slotReview)).toEqual([]);
+    }, 30_000);
+  });
 
   describe('in a personal workspace', () => {
     let mineWf = '';
