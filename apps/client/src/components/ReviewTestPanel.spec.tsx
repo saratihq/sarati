@@ -246,7 +246,7 @@ describe("ReviewTestPanel — what the test would refuse, before it runs", () =>
         blocked({
           reason: "inactive_slot",
           message:
-            'production\'s gmail account isn\'t active, so "Email me the report" can\'t run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments',
+            'production\'s gmail account isn\'t active, so "Email me the report" can\'t run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments',
         }),
       ],
     });

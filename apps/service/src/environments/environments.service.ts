@@ -4,13 +4,16 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { accountLabel, storedAccount } from '../connections/account-identity';
-import { providersServing } from '../connections/run-as-account';
+import { providersServing, REVIVES_SLOT } from '../connections/run-as-account';
 import { isIdShape } from '../database/ids';
 import { isUniqueViolation } from '../database/pg-errors';
 import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
 import { ConnectionEntity } from '../database/entities/connection.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
 import { EventsService } from '../events/events.service';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
+import { validatedAppSlug } from '../providers/sdk-actions.registry';
+import { WEBHOOK_REGISTRATION_KEY } from '../providers/sdk-webhook.provider';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { runBounded } from '../common/bounded';
@@ -62,9 +65,27 @@ export interface UrlChange {
 /** A trigger whose `url_changes` entry the caller saw and confirmed moving. */
 export type ConfirmedUrlChange = Pick<UrlChange, 'workflow_id' | 'trigger' | 'from' | 'to'>;
 
+/** A webhook registered with an app for this environment that a rename can't move: the account it was registered with isn't active. */
+export interface HeldWebhook {
+  workflow_id: string;
+  workflow_name: string;
+  /** The trigger node's id, as a preflight's `triggers` entry names it. */
+  node_id: string;
+  /** The trigger node's name, as a preflight's `triggers` entry names it. */
+  node_name: string;
+  /** The app the webhook is registered with. */
+  app: string;
+  /** The account it was registered with. */
+  connection_id: string;
+  /** That account's display identity, as its slot shows it. */
+  account_label: string;
+}
+
 const DRAIN_CONCURRENCY = 5;
 
 const ENSURE_ATTEMPTS = 3;
+
+const DEFAULT_ENVS = [PROD_ENV, 'staging', UAT_ENV];
 
 const HAND_GIVEN_URLS = [
   { trigger: 'chat', nodeType: INCOMING_CHAT_PUBLIC, pathFor: chatPathFor },
@@ -142,7 +163,7 @@ export class EnvironmentsService {
         .map((s) => ({
           app: s.app,
           connection_id: s.connection_id,
-          account_label: s.display_name ?? slotAccountLabel(s.account) ?? s.provider,
+          account_label: labelOf(s),
           owner_user_id: s.owner_user_id,
           owner_label: s.owner_email ?? s.owner_user_id,
           status: s.status,
@@ -155,6 +176,7 @@ export class EnvironmentsService {
   async create(orgId: string, rawName: string, actorUserId: string): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       const rows = await rawQuery<{ id: string }>(
         em,
         `INSERT INTO environments (org_id, name, is_prod) VALUES ($1, $2, $3)
@@ -176,7 +198,7 @@ export class EnvironmentsService {
     });
   }
 
-  /** Rename; registered webhooks move to the new URL, and each hand-given URL it moves must be in `confirmed` (409 lists them). 409 on is_prod. */
+  /** Rename; registered webhooks move to the new URL, 409 while one's account isn't active (`held_webhooks`), and each hand-given URL it moves must be in `confirmed` (409 lists them). 409 on is_prod. */
   async rename(
     orgId: string,
     envId: string,
@@ -186,7 +208,8 @@ export class EnvironmentsService {
   ): Promise<{ id: string; name: string }> {
     const name = this.validName(rawName);
     const renamed = await this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId, true);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be renamed`, 409);
       if (env.name === UAT_ENV)
@@ -196,6 +219,7 @@ export class EnvironmentsService {
       if (taken && taken.id !== env.id) {
         throw new DomainError(`An environment named '${name}' already exists`, 409);
       }
+      await this.assertWebhooksCanMove(em, env);
       await this.assertUrlChangesConfirmed(em, env, name, confirmed);
       await em
         .query(`UPDATE environments SET name = $2 WHERE id = $1`, [env.id, name])
@@ -237,6 +261,7 @@ export class EnvironmentsService {
       this.triggerSignals.reconcileNow(workflowId),
     );
     return this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
       await lockDeletable(em, { environmentId: env.id }, `'${env.name}'`);
       await em.query(`DELETE FROM environments WHERE id = $1`, [env.id]);
       const receipt = { removed_pointers: removedPointers, unbound_triggers: holders.length };
@@ -259,7 +284,8 @@ export class EnvironmentsService {
     actorUserId: string,
   ): Promise<{ env: EnvironmentEntity; removedPointers: number; holders: string[] }> {
     return this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_no_key_update');
       if (env.isProd)
         throw new DomainError(`'${env.name}' is the production anchor — it cannot be deleted`, 409);
       if (env.name === UAT_ENV)
@@ -303,11 +329,15 @@ export class EnvironmentsService {
     callerUserId: string,
   ): Promise<{ replaced_connection_id: string | null; also_in_environments: string[] }> {
     const result = await this.dataSource.transaction(async (em) => {
-      const env = await this.byIdForOrg(em, orgId, envId);
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId, 'for_key_share');
       // Visibility = ownership: a foreign or malformed-id connection is an indistinguishable 404.
       const notFound = new DomainError('Connection not found', 404);
       if (!isIdShape(connectionId)) throw notFound;
-      const conn = await em.findOne(ConnectionEntity, { where: { id: connectionId } });
+      const conn = await em.findOne(ConnectionEntity, {
+        where: { id: connectionId },
+        lock: { mode: 'for_key_share' },
+      });
       if (!conn || conn.userId !== callerUserId) throw notFound;
       if (!providersServing(app).includes(conn.provider)) {
         throw new DomainError(
@@ -350,18 +380,58 @@ export class EnvironmentsService {
 
   /** Empty a slot — "<env> runs will fail on <app> until reassigned" (honest skip). */
   async emptySlot(orgId: string, envId: string, app: string): Promise<void> {
-    const em = this.dataSource.manager;
-    const env = await this.byIdForOrg(em, orgId, envId);
-    const removed = await rawMutate(
-      em,
-      `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
-      [env.id, app],
-    );
-    if (removed === 0) {
-      throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
-    }
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      const env = await this.byIdForOrg(em, orgId, envId);
+      const removed = await rawMutate(
+        em,
+        `DELETE FROM environment_connections WHERE environment_id = $1 AND app = $2`,
+        [env.id, app],
+      );
+      if (removed === 0) {
+        throw new DomainError(`No '${app}' slot assignment in the ${env.name} environment`, 404);
+      }
+    });
     // Emptying a slot can strand a connection-needing activation — reconcile.
     await this.enqueueEnvWorkflows(envId);
+  }
+
+  // A registered webhook moves only by its delete and a new registration, both made with the account it was registered with (#11).
+  private async assertWebhooksCanMove(em: EntityManager, env: EnvironmentEntity): Promise<void> {
+    const rows = await rawQuery<{
+      workflow_id: string;
+      workflow_name: string;
+      trigger_node_id: string;
+      trigger_type: string;
+      workflow_ir: WorkflowIR | null;
+      connection_id: string;
+      display_name: string | null;
+      account: unknown;
+      provider: string;
+    }>(
+      em,
+      `SELECT a.workflow_id, w.name AS workflow_name, a.trigger_node_id, a.trigger_type, v.workflow_ir,
+              c.id AS connection_id, c.display_name, c.account, c.provider
+         FROM runtime_trigger_activations a
+         JOIN runtime_activation_store s ON s.activation_id = a.id AND s.key = $2
+         JOIN connections c ON c.id::text = COALESCE(s.value -> 'connection' ->> 'connectionId', a.connection_id::text)
+         JOIN workflows w ON w.id = a.workflow_id
+         LEFT JOIN workflow_versions v ON v.id = a.version_id
+        WHERE a.environment_id = $1 AND c.status <> 'active'
+        ORDER BY w.name, a.workflow_id, a.trigger_node_id`,
+      [env.id, WEBHOOK_REGISTRATION_KEY],
+    );
+    if (rows.length === 0) return;
+    const held: HeldWebhook[] = rows.map((r) => ({
+      workflow_id: r.workflow_id,
+      workflow_name: r.workflow_name,
+      node_id: r.trigger_node_id,
+      node_name: r.workflow_ir?.nodes.find((n) => n.id === r.trigger_node_id)?.name || r.trigger_node_id,
+      app: validatedAppSlug(r.trigger_type) ?? r.provider,
+      connection_id: r.connection_id,
+      account_label: labelOf(r),
+    }));
+    throw new DomainError(heldWebhooksMessage(env.name, held), 409, { held_webhooks: held });
   }
 
   private async assertUrlChangesConfirmed(
@@ -390,10 +460,8 @@ export class EnvironmentsService {
     );
   }
 
-  // Read from what serves the URL — the pointer's pinned version — and held still until the rename commits.
+  // Read from what serves the URL — the pointer's pinned version — held still by the env row lock every pointer write takes first (constitution row 11).
   private async urlChangesOf(em: EntityManager, env: EnvironmentEntity, name: string): Promise<UrlChange[]> {
-    // Locked on their own: a join that locks them re-checks a pointer moved meanwhile against the version it read first.
-    await rawQuery(em, `SELECT 1 FROM workflow_env_pointers WHERE environment_id = $1 FOR SHARE`, [env.id]);
     const pointers = await rawQuery<{
       workflow_id: string;
       workflow_name: string;
@@ -490,13 +558,13 @@ export class EnvironmentsService {
     em: EntityManager,
     orgId: string,
     envId: string,
-    lock = false,
+    lock?: 'for_no_key_update' | 'pessimistic_read' | 'for_key_share',
   ): Promise<EnvironmentEntity> {
     const notFound = new DomainError('Environment not found', 404);
     if (!isIdShape(envId)) throw notFound;
     const env = await em.findOne(EnvironmentEntity, {
       where: { id: envId, orgId },
-      ...(lock ? { lock: { mode: 'for_no_key_update' as const } } : {}),
+      ...(lock ? { lock: { mode: lock } } : {}),
     });
     if (!env) throw notFound;
     return env;
@@ -504,12 +572,21 @@ export class EnvironmentsService {
 
   /** Lazy defaults: prod (is_prod anchor) + staging + uat, once per org. */
   private async ensureDefaults(orgId: string): Promise<void> {
-    await this.dataSource.query(
-      `INSERT INTO environments (org_id, name, is_prod)
-       VALUES ($1, 'production', true), ($1, 'staging', false), ($1, 'uat', false)
-       ON CONFLICT (org_id, lower(name)) DO NOTHING`,
-      [orgId],
+    const [present] = await rawQuery<{ count: number }>(
+      this.dataSource.manager,
+      `SELECT count(*)::int AS count FROM environments WHERE org_id = $1 AND lower(name) = ANY($2)`,
+      [orgId, DEFAULT_ENVS],
     );
+    if (present?.count === DEFAULT_ENVS.length) return;
+    await this.dataSource.transaction(async (em) => {
+      await lockOrgForWrite(em, orgId);
+      await em.query(
+        `INSERT INTO environments (org_id, name, is_prod)
+         SELECT $1, name, name = $3 FROM unnest($2::text[]) AS name
+         ON CONFLICT (org_id, lower(name)) DO NOTHING`,
+        [orgId, DEFAULT_ENVS, PROD_ENV],
+      );
+    });
   }
 
   private findByName(
@@ -535,7 +612,23 @@ export class EnvironmentsService {
   }
 }
 
-function slotAccountLabel(raw: unknown): string | null {
-  const account = storedAccount(raw);
-  return account ? accountLabel(account) : null;
+function labelOf(connection: { display_name: string | null; account: unknown; provider: string }): string {
+  const account = storedAccount(connection.account);
+  return connection.display_name ?? (account ? accountLabel(account) : connection.provider);
+}
+
+function heldWebhooksMessage(environment: string, held: HeldWebhook[]): string {
+  const [only] = held;
+  if (held.length === 1 && only) {
+    return `Renaming '${environment}' would leave "${only.node_name}" in "${only.workflow_name}" registered at its old URL, which serves nothing, because the ${only.app} account it was registered with (${only.account_label}) isn't active — before renaming, its owner ${REVIVES_SLOT}`;
+  }
+  const leaves = `Renaming '${environment}' would leave ${held.length} webhooks registered at their old URLs, which serve nothing`;
+  if (only && held.every((w) => w.connection_id === only.connection_id)) {
+    const named = held.map((w) => `"${w.node_name}" in "${w.workflow_name}"`);
+    return `${leaves}, because the ${only.app} account they were registered with (${only.account_label}) isn't active: ${named.join(', ')} — before renaming, its owner ${REVIVES_SLOT}`;
+  }
+  const named = held.map(
+    (w) => `"${w.node_name}" in "${w.workflow_name}" (${w.app} account ${w.account_label})`,
+  );
+  return `${leaves}, because the accounts they were registered with aren't active: ${named.join(', ')} — before renaming, each account's owner ${REVIVES_SLOT}`;
 }

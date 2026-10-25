@@ -3,8 +3,7 @@ import { createHash } from 'node:crypto';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource } from 'typeorm';
-import { request } from 'undici';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
@@ -13,6 +12,7 @@ import type { EnvConfig } from '../config/env.config';
 import { ComposioAuthConfigEntity } from '../database/entities/composio-auth-config.entity';
 import { now } from '../database/ids';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
+import { composioFetch } from './composio-http';
 
 /** Cache partition per owning scope — never share one scope's Composio project data with another. */
 function scopeKey(scope: PlatformKeyScope): string {
@@ -154,6 +154,13 @@ function normalizeExecuteError(error: unknown): string | null {
 
 export type ManagedAccountStatus = 'pending' | 'active' | 'expired' | 'failed';
 
+export interface ComposioLink {
+  redirectUrl: string;
+  connectedAccountId: string;
+  /** Deletes the account the link created with the key that minted it, which a deleted org no longer has; logs, never throws. */
+  discard: () => Promise<void>;
+}
+
 /** Composio itself failed (network, 5xx, unexpected shape) — a gateway problem, not the caller's. */
 export class ComposioUpstreamError extends DomainError {
   constructor(message: string) {
@@ -271,12 +278,9 @@ export class ComposioProvider {
   }
 
   /** Mint a hosted Connect Link for the user (managed configs REQUIRE this flow). */
-  async createLink(
-    scope: PlatformKeyScope,
-    userId: string,
-    authConfigId: string,
-  ): Promise<{ redirectUrl: string; connectedAccountId: string }> {
-    const body = await this.request(scope, 'POST', '/api/v3/connected_accounts/link', {
+  async createLink(scope: PlatformKeyScope, userId: string, authConfigId: string): Promise<ComposioLink> {
+    const apiKey = await this.requireApiKey(scope);
+    const body = await this.send(apiKey, 'POST', '/api/v3/connected_accounts/link', {
       auth_config_id: authConfigId,
       user_id: userId,
     });
@@ -287,7 +291,15 @@ export class ComposioProvider {
     ) {
       throw new ComposioUpstreamError('Composio connect-link response was missing redirect_url');
     }
-    return { redirectUrl: body.redirect_url, connectedAccountId: body.connected_account_id };
+    const connectedAccountId = body.connected_account_id;
+    const discard = async (): Promise<void> => {
+      try {
+        await this.deleteAccountWith(apiKey, connectedAccountId);
+      } catch (err) {
+        this.logger.warn(`Composio account ${connectedAccountId} could not be deleted: ${errorMessage(err)}`);
+      }
+    };
+    return { redirectUrl: body.redirect_url, connectedAccountId, discard };
   }
 
   /** Poll a connected account: INITIALIZING/INITIATED/PENDING → pending, ACTIVE → active, EXPIRED → expired, else failed. */
@@ -304,13 +316,17 @@ export class ComposioProvider {
     return 'failed';
   }
 
-  /** Delete the Composio connected account (revokes their custody of the grant). */
-  async deleteAccount(scope: PlatformKeyScope, connectedAccountId: string): Promise<void> {
-    await this.request(
-      scope,
-      'DELETE',
-      `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`,
-    );
+  /** Deletes connected accounts with the key `scope` has now, which an org's delete takes with it; null when it has none. */
+  async accountDeleter(
+    scope: PlatformKeyScope,
+    em?: EntityManager,
+  ): Promise<((connectedAccountId: string) => Promise<void>) | null> {
+    const apiKey = (await this.platformKeys?.composioApiKey(scope, em)) ?? '';
+    return apiKey ? (connectedAccountId) => this.deleteAccountWith(apiKey, connectedAccountId) : null;
+  }
+
+  private async deleteAccountWith(apiKey: string, connectedAccountId: string): Promise<void> {
+    await this.send(apiKey, 'DELETE', `/api/v3/connected_accounts/${encodeURIComponent(connectedAccountId)}`);
   }
 
   /** The connected account's non-secret metadata for `auth.data.*`, cached per account; raw tokens are never surfaced. */
@@ -538,23 +554,29 @@ export class ComposioProvider {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
-    const apiKey = await this.requireApiKey(scope);
+    return this.send(await this.requireApiKey(scope), method, path, body);
+  }
+
+  private async send(
+    apiKey: string,
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
     let statusCode: number;
     let text: string;
     try {
-      const res = await request(`${this.baseUrl}${path}`, {
+      const res = await composioFetch(apiKey, `${this.baseUrl}${path}`, {
         method,
         headers: {
-          'x-api-key': apiKey,
           accept: 'application/json',
-          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        headersTimeout: REQUEST_TIMEOUT_MS,
-        bodyTimeout: REQUEST_TIMEOUT_MS,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      statusCode = res.statusCode;
-      text = await res.body.text();
+      statusCode = res.status;
+      text = await res.text();
     } catch (err) {
       const message = errorMessage(err);
       this.logger.warn(`Composio ${method} ${path} failed: ${message}`);

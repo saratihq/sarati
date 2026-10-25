@@ -10,7 +10,6 @@ import { EntityManager } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { NOT_RESUMABLE, RecoveryGuard } from '../src/dbos/recovery-guard';
-import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
@@ -22,6 +21,7 @@ import { BranchService } from '../src/workflows/branch.service';
 import { VersionsWriteService } from '../src/workflows/versions-write.service';
 import { WorkflowLifecycleService } from '../src/workflows/workflow-lifecycle.service';
 import { listenOnLoopback } from './support/listen';
+import { deferred, lockProbes, pause } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ROUNDS = 30;
@@ -67,19 +67,6 @@ function webhookDoc(name: string, echo = 'title', separator = ''): Record<string
   };
 }
 
-interface Deferred {
-  promise: Promise<void>;
-  resolve: () => void;
-}
-
-function deferred(): Deferred {
-  let resolve = (): void => undefined;
-  const promise = new Promise<void>((done) => (resolve = done));
-  return { promise, resolve };
-}
-
-const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 // Counts each request's answers by status, so a failing race reports every unexpected one at once.
 class Tally {
   private readonly counts = new Map<string, number>();
@@ -113,11 +100,14 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
   const user = randomUUID();
   const personal = randomUUID();
   const key = 'ork_e2e_lockord_aaaaaaaaaaaaaaaaaaaaaaaa';
+  const orgless = randomUUID();
+  const orglessKey = 'ork_e2e_orgless_cccccccccccccccccccccccc';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const as = (r: request.Test, org: string): request.Test =>
     r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', org);
+  const asOrgless = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${orglessKey}`);
 
   const workspace = async (name: string): Promise<string> => {
     const created = await http()
@@ -133,10 +123,8 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     return res.body.id as string;
   };
 
-  const deploy = async (org: string, name: string): Promise<string> => {
-    const res = await as(http().post('/api/deploy'), org)
-      .send({ workflow_json: webhookDoc(name) })
-      .expect(201);
+  const deploy = async (org: string, name: string, doc = webhookDoc(name)): Promise<string> => {
+    const res = await as(http().post('/api/deploy'), org).send({ workflow_json: doc }).expect(201);
     return res.body.workflow_id as string;
   };
 
@@ -162,20 +150,17 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
   const remove = (org: string, wfId: string): request.Test =>
     as(http().delete(`/api/workflows/${wfId}`), org);
 
+  const removeEnv = (org: string, env: string): request.Test =>
+    as(http().delete(`/api/environments/${env}`), org);
+
+  const suffix = (): string => randomUUID().slice(0, 8);
+
   const statusOf = (r: request.Test): Promise<number> => r.then((res) => res.status);
 
-  const deadlocks = async (): Promise<number> => {
-    const { rows } = await db.query<{ deadlocks: string }>(
-      `SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`,
-    );
-    return Number(rows[0]!.deadlocks);
-  };
-
-  // A backend reports its counters once idle, at most a second later.
-  const deadlocksSince = async (before: number): Promise<number> => {
-    await pause(1_500);
-    return (await deadlocks()) - before;
-  };
+  const { gateEmits, holdQuery, lockWaiters, deadlocks, deadlocksSince } = lockProbes(
+    () => app,
+    () => db,
+  );
 
   const runRecordedWithin = async (runId: string, ms: number): Promise<boolean> => {
     for (const deadline = Date.now() + ms; Date.now() < deadline; await pause(25)) {
@@ -183,17 +168,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       if (rows.length > 0) return true;
     }
     return false;
-  };
-
-  const lockWaiters = async (count: number): Promise<void> => {
-    for (let i = 0; i < 200; i++) {
-      const { rows } = await db.query(
-        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-      );
-      if (rows.length >= count) return;
-      await pause(25);
-    }
-    throw new Error(`never saw ${count} lock waiter(s)`);
   };
 
   const workflowState = async (
@@ -218,34 +192,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     return rows[0]!;
   };
 
-  // Holds each transaction that emits `type` at that emit, the nth until `release(n)` or `restore()`.
-  const gateEmits = (
-    type: string,
-  ): { arrived: (n: number) => Promise<void>; release: (n: number) => void; restore: () => void } => {
-    const events = app.get(EventsService);
-    const emit = events.emit.bind(events);
-    const gates: Array<{ arrived: Deferred; released: Deferred }> = [];
-    const nth = (n: number): { arrived: Deferred; released: Deferred } =>
-      (gates[n] ??= { arrived: deferred(), released: deferred() });
-    let seen = 0;
-    const spy = jest.spyOn(events, 'emit').mockImplementation(async (em, event: DomainEventInput) => {
-      if (event.type === type) {
-        const gate = nth(seen++);
-        gate.arrived.resolve();
-        await gate.released.promise;
-      }
-      return emit(em, event);
-    });
-    return {
-      arrived: (n) => nth(n).arrived.promise,
-      release: (n) => nth(n).released.resolve(),
-      restore: () => {
-        for (const gate of gates) gate.released.resolve();
-        spy.mockRestore();
-      },
-    };
-  };
-
   // Holds each call of `method` at its entry until `release()` or `restore()`, then runs it.
   const holdCalls = <T extends object>(
     target: T,
@@ -259,34 +205,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       await released.promise;
       return original(...args);
     }) as never);
-    return {
-      arrived: arrived.promise,
-      release: released.resolve,
-      restore: () => {
-        released.resolve();
-        spy.mockRestore();
-      },
-    };
-  };
-
-  // Holds the first query whose SQL matches `sql` before it runs, until `release()` or `restore()`.
-  const holdQuery = (sql: RegExp): { arrived: Promise<void>; release: () => void; restore: () => void } => {
-    const query = EntityManager.prototype.query;
-    const arrived = deferred();
-    const released = deferred();
-    let held = false;
-    const spy = jest.spyOn(EntityManager.prototype, 'query').mockImplementation(async function (
-      this: EntityManager,
-      text: string,
-      params?: Parameters<EntityManager['query']>[1],
-    ) {
-      if (!held && sql.test(text)) {
-        held = true;
-        arrived.resolve();
-        await released.promise;
-      }
-      return query.call(this, text, params);
-    });
     return {
       arrived: arrived.promise,
       release: released.resolve,
@@ -325,6 +243,14 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
       [user, hash(key), key.slice(0, 12)],
+    );
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'org-less@e2e.local', 'No Org', now(), now())`,
+      [orgless],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
+      [orgless, hash(orglessKey), orglessKey.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;
@@ -542,35 +468,72 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     expect(rows[0]!.id).not.toBe(env);
   });
 
-  it('a rename held mid-way does not hold up the run a webhook fire in that environment starts', async () => {
-    const org = await workspace('Fire during rename');
-    const env = await createEnv(org, 'fire-a');
-    const wfId = await deploy(org, 'fired during rename');
-    const [v1] = await versions(org, wfId);
-    await promote(org, wfId, 'fire-a', v1!.id).expect(201);
-    const asked = await as(http().patch(`/api/environments/${env}`), org)
-      .send({ name: 'fire-b' })
-      .expect(409);
-    const renamed = gateEmits('environment.renamed');
-    try {
-      const renaming = statusOf(
-        as(http().patch(`/api/environments/${env}`), org).send({
-          name: 'fire-b',
-          confirm_url_changes: asked.body.url_changes,
-        }),
-      );
-      await renamed.arrived(0);
-      const fired = await http()
-        .post(`/api/hooks/${wfId}/fire-a`)
-        .send({ title: 'during rename' })
-        .expect(202);
-      expect(await runRecordedWithin(fired.body.run_id as string, 3_000)).toBe(true);
-      renamed.release(0);
-      expect(await renaming).toBe(200);
-    } finally {
-      renamed.restore();
-    }
-  });
+  interface FireBeside {
+    org: string;
+    env: string;
+    /** A second workflow promoted to the environment, the one the write un-promotes. */
+    other: string;
+  }
+
+  it.each([
+    [
+      'a rename',
+      'environment.renamed',
+      async ({ org, env }: FireBeside): Promise<number> => {
+        const asked = await as(http().patch(`/api/environments/${env}`), org)
+          .send({ name: 'fire-b' })
+          .expect(409);
+        return statusOf(
+          as(http().patch(`/api/environments/${env}`), org).send({
+            name: 'fire-b',
+            confirm_url_changes: asked.body.url_changes,
+          }),
+        );
+      },
+    ],
+    [
+      "an environment delete's un-promote",
+      'workflow.unpromoted',
+      ({ org, env }: FireBeside): Promise<number> => statusOf(removeEnv(org, env)),
+    ],
+    [
+      'an un-promote',
+      'workflow.unpromoted',
+      ({ org, env, other }: FireBeside): Promise<number> =>
+        statusOf(as(http().delete(`/api/workflows/${other}/pointers/${env}`), org)),
+    ],
+    [
+      "a workflow delete's un-promote",
+      'workflow.unpromoted',
+      ({ org, other }: FireBeside): Promise<number> => statusOf(remove(org, other)),
+    ],
+  ])(
+    '%s held mid-way does not hold up the run a webhook fire in that environment starts',
+    async (_, event, write) => {
+      const org = await workspace('Fire beside a write');
+      const env = await createEnv(org, 'fire-a');
+      const [fired, other] = [await deploy(org, 'fired'), await deploy(org, 'un-promoted')];
+      for (const wfId of [fired, other]) {
+        const [v1] = await versions(org, wfId);
+        await promote(org, wfId, 'fire-a', v1!.id).expect(201);
+      }
+      const held = gateEmits(event);
+      const before = await deadlocks();
+      const writing = write({ org, env, other });
+      try {
+        await held.arrived(0);
+        await expect(
+          db.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE NOWAIT`, [env]),
+        ).rejects.toMatchObject({ code: '55P03' });
+        const run = await http().post(`/api/hooks/${fired}/fire-a`).send({ title: 'beside' }).expect(202);
+        expect(await runRecordedWithin(run.body.run_id as string, 3_000)).toBe(true);
+      } finally {
+        held.restore();
+      }
+      expect(await writing).toBe(200);
+      expect(await deadlocksSince(before)).toBe(0);
+    },
+  );
 
   it('a second pointer on one environment is refused by the database', async () => {
     const org = await workspace('One pointer per env');
@@ -1154,9 +1117,6 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
           payload: { d: 1 },
         }),
       );
-    const removeEnv = (org: string, env: string): request.Test =>
-      as(http().delete(`/api/environments/${env}`), org);
-    const suffix = (): string => randomUUID().slice(0, 8);
 
     let deliver: jest.SpyInstance;
     beforeEach(() => {
@@ -1669,5 +1629,603 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       );
       expect(rows[0]!.allowed).toBe(MAX_SUB_WORKFLOW_INVOCATIONS);
     });
+  });
+
+  describe('a workflow delete and an environment delete over a run they share', () => {
+    const shared = async (
+      name: string,
+    ): Promise<{
+      org: string;
+      wfId: string;
+      env: string;
+      envName: string;
+      versionId: string;
+      runId: string;
+    }> => {
+      const org = await workspace(name);
+      const wfId = await deploy(org, name);
+      const envName = `shared-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const [v1] = await versions(org, wfId);
+      const runId = `${user}:shared-${suffix()}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, finished_at,
+                                   workflow_id, workflow_version_id, environment, environment_id, org_id)
+         VALUES ($1, $1, $2, 'plan-shared', 'completed', now(), now(), $3, $4, $5, $6, $7)`,
+        [runId, user, wfId, v1!.id, envName, env, org],
+      );
+      await as(http().put(`/api/workflows/${wfId}/webhook-secret`), org)
+        .send({ node_id: 'trigger', secret: 's', environment: envName })
+        .expect(200);
+      return { org, wfId, env, envName, versionId: v1!.id, runId };
+    };
+
+    const leftBehind = async (wfId: string, env: string, runId: string): Promise<Record<string, unknown>> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM workflows WHERE id = $1) AS workflow,
+                  EXISTS (SELECT 1 FROM environments WHERE id = $2) AS environment,
+                  (SELECT count(*)::int FROM webhook_trigger_secrets
+                    WHERE workflow_id = $1 OR environment_id = $2) AS secrets,
+                  (SELECT json_build_object('workflow_id', workflow_id, 'workflow_version_id', workflow_version_id,
+                                            'environment_id', environment_id, 'status', status)
+                     FROM runtime_runs WHERE id = $3) AS run`,
+          [wfId, env, runId],
+        )
+      ).rows[0] as Record<string, unknown>;
+
+    const LOCK_NOT_AVAILABLE = '55P03';
+    const lockedNow = (table: 'environments' | 'runtime_runs', id: string): Promise<unknown> =>
+      db.query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE NOWAIT`, [id]);
+
+    const unlinked = {
+      workflow_id: null,
+      workflow_version_id: null,
+      environment_id: null,
+      status: 'completed',
+    };
+    const cleared = { workflow: false, environment: false, secrets: 0, run: unlinked };
+
+    it('an environment delete holding its row when the workflow delete starts finishes first, and both delete', async () => {
+      const { org, wfId, env, runId } = await shared('Env delete then workflow delete');
+      const held = holdQuery(/DELETE FROM environments WHERE id/);
+      const wfEmit = gateEmits('workflow.deleted');
+      const before = await deadlocks();
+      try {
+        const envDeleting = statusOf(removeEnv(org, env));
+        await held.arrived;
+        await expect(lockedNow('environments', env)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const wfDeleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        held.release();
+        expect(await envDeleting).toBe(200);
+        await Promise.race([wfEmit.arrived(0), wfDeleting]);
+        expect(await leftBehind(wfId, env, runId)).toMatchObject({ workflow: true, environment: false });
+        wfEmit.release(0);
+        expect(await wfDeleting).toBe(200);
+      } finally {
+        held.restore();
+        wfEmit.restore();
+      }
+      expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a workflow delete held mid-cascade, past the run, when the environment delete starts finishes first, and both delete', async () => {
+      const { org, wfId, env, versionId, runId } = await shared('Workflow delete then env delete');
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const envEmit = gateEmits('environment.deleted');
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM workflow_versions WHERE id = $1 FOR KEY SHARE`, [versionId]);
+        const wfDeleting = statusOf(remove(org, wfId));
+        await lockWaiters(1);
+        await expect(lockedNow('runtime_runs', runId)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const envDeleting = statusOf(removeEnv(org, env));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect(await wfDeleting).toBe(200);
+        await Promise.race([envEmit.arrived(0), envDeleting]);
+        expect(await leftBehind(wfId, env, runId)).toMatchObject({ workflow: false, environment: true });
+        envEmit.release(0);
+        expect(await envDeleting).toBe(200);
+      } finally {
+        envEmit.restore();
+        await holder.end();
+      }
+      expect(await leftBehind(wfId, env, runId)).toEqual(cleared);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a workflow delete holding the environments its runs ran in lets a run, a promote and a rename in one go ahead', async () => {
+      const { org, wfId, env, envName } = await shared('Writes beside a delete');
+      const fired = await deploy(org, 'fired beside a delete');
+      const [firedV1] = await versions(org, fired);
+      await promote(org, fired, envName, firedV1!.id).expect(201);
+      const promoted = await deploy(org, 'promoted beside a delete');
+      const [promotedV1] = await versions(org, promoted);
+      const renamed = `beside-${suffix()}`;
+      const rename = (confirm: unknown = null): request.Test =>
+        as(http().patch(`/api/environments/${env}`), org).send({
+          name: renamed,
+          ...(confirm ? { confirm_url_changes: confirm } : {}),
+        });
+      const within = <T>(work: PromiseLike<T>): Promise<T | 'blocked'> =>
+        Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
+      const held = holdQuery(/SET active_version_id = NULL, default_branch_id = NULL/);
+      try {
+        const deleting = statusOf(remove(org, wfId));
+        await held.arrived;
+        await expect(lockedNow('environments', env)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const run = await within(
+          http()
+            .post(`/api/hooks/${fired}/${envName}`)
+            .send({ title: 'beside a delete' })
+            .then((res) => String(res.body.run_id)),
+        );
+        const recorded = await runRecordedWithin(run, 3_000);
+        const promoting = await within(statusOf(promote(org, promoted, envName, promotedV1!.id)));
+        const asked = await within(rename().then((res) => res.body.url_changes as unknown));
+        const renaming = asked === 'blocked' ? asked : await within(statusOf(rename(asked)));
+        expect({ recorded, promoting, renaming }).toEqual({ recorded: true, promoting: 201, renaming: 200 });
+        held.release();
+        expect(await deleting).toBe(200);
+      } finally {
+        held.restore();
+      }
+    });
+
+    const orglessCallee = async (name: string): Promise<{ calledId: string; versionId: string }> => {
+      const called = await asOrgless(http().post('/api/deploy'))
+        .send({ workflow_json: webhookDoc(name) })
+        .expect(201);
+      const calledId = called.body.workflow_id as string;
+      const callee = await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [calledId]);
+      expect(callee.rows).toEqual([{ org_id: null }]);
+      const listed = await asOrgless(http().get(`/api/workflows/${calledId}/versions`)).expect(200);
+      const [v1] = listed.body.versions as Array<{ id: string }>;
+      return { calledId, versionId: v1!.id };
+    };
+
+    const subWorkflowRun = async (
+      callee: { calledId: string; versionId: string },
+      org: string,
+      env: { id: string; name: string },
+    ): Promise<string> => {
+      const runId = `${orgless}:called-${suffix()}`;
+      await db.query(
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, status, started_at, finished_at, source,
+                                   workflow_id, workflow_version_id, environment, environment_id, org_id)
+         VALUES ($1, $1, $2, 'plan-called', 'completed', now(), now(), 'sub_workflow', $3, $4, $5, $6, $7)`,
+        [runId, orgless, callee.calledId, callee.versionId, env.name, env.id, org],
+      );
+      return runId;
+    };
+
+    it("an org delete and the delete of an org-less workflow whose sub-workflow run ran in the org's environment both delete", async () => {
+      const org = await workspace('Org delete beside a sub-workflow run');
+      const envName = `called-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const callee = await orglessCallee('org-less callee');
+      const { calledId, versionId } = callee;
+      const runId = await subWorkflowRun(callee, org, { id: env, name: envName });
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM workflow_versions WHERE id = $1 FOR KEY SHARE`, [versionId]);
+        const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${calledId}`)));
+        await lockWaiters(1);
+        await expect(lockedNow('runtime_runs', runId)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
+        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect(await wfDeleting).toBe(200);
+        expect(await orgDeleting).toBe(200);
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(calledId, env, runId)).toMatchObject({
+        workflow: false,
+        environment: false,
+        run: unlinked,
+      });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    interface ScanOrders {
+      created: string[];
+      byId: string[];
+      byHeap: string[];
+      byName: string[];
+      byLookup: string[];
+    }
+
+    interface RunsInFour {
+      org: string;
+      envs: Array<{ id: string; name: string }>;
+      callee: { calledId: string; versionId: string };
+      runIds: string[];
+    }
+
+    // An org with four custom environments and an org-less callee with a sub-workflow run in each, retried with a fresh org until `fits` the orders each scan takes them in.
+    const runsInFour = async (fits: (orders: ScanOrders) => boolean): Promise<RunsInFour> => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const org = await workspace('Org delete beside sub-workflow runs in four environments');
+        const envs: Array<{ id: string; name: string }> = [];
+        for (let i = 0; i < 4; i++) {
+          const name = `e${i}-${suffix()}`;
+          envs.push({ id: await createEnv(org, name), name });
+        }
+        const callee = await orglessCallee('org-less callee in four environments');
+        const runIds: string[] = [];
+        for (const env of envs) runIds.push(await subWorkflowRun(callee, org, env));
+        const created = envs.map((env) => env.id);
+        const scans = await db.query<{ by_id: string[]; by_heap: string[]; by_name: string[] }>(
+          `SELECT array_agg(id::text ORDER BY id) AS by_id, array_agg(id::text ORDER BY ctid) AS by_heap,
+                  array_agg(id::text ORDER BY lower(name)) AS by_name
+             FROM environments WHERE id = ANY($1::uuid[])`,
+          [created],
+        );
+        const lookup = await db.query<{ id: string }>(
+          `SELECT e.id FROM environments e
+            WHERE e.id IN (SELECT r.environment_id FROM runtime_runs r WHERE r.workflow_id = $1)
+              FOR KEY SHARE OF e`,
+          [callee.calledId],
+        );
+        const { by_id: byId, by_heap: byHeap, by_name: byName } = scans.rows[0]!;
+        const byLookup = lookup.rows.map((row) => row.id);
+        if (fits({ created, byId, byHeap, byName, byLookup })) return { org, envs, callee, runIds };
+      }
+      throw new Error('no four environments in the scan orders this test needs');
+    };
+
+    const allUnlinked = async ({ callee, envs, runIds }: RunsInFour): Promise<unknown> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM workflows WHERE id = $1) AS workflow,
+                  (SELECT count(*)::int FROM environments WHERE id = ANY($2::uuid[])) AS environments,
+                  (SELECT count(*)::int FROM runtime_runs
+                    WHERE id = ANY($3::text[]) AND status = 'completed' AND workflow_id IS NULL
+                      AND workflow_version_id IS NULL AND environment_id IS NULL) AS unlinked`,
+          [callee.calledId, envs.map((env) => env.id), runIds],
+        )
+      ).rows[0];
+
+    it("an org delete and the delete of an org-less workflow whose sub-workflow runs ran in four of the org's environments both delete, with the environment that delete locks first held", async () => {
+      // No scan order but id order starts at the lowest id, so only id order on both sides keeps the deletes apart.
+      const four = await runsInFour(
+        ({ byId, byHeap, byName, byLookup }) => ![byHeap[0], byName[0], byLookup[0]].includes(byId[0]),
+      );
+      const { org, envs, callee } = four;
+      const holders = await Promise.all(
+        envs.map(async (env) => {
+          const client = new Client({ connectionString: dbUrl });
+          await client.connect();
+          await client.query('BEGIN');
+          await client.query(`SELECT 1 FROM environments WHERE id = $1 FOR UPDATE`, [env.id]);
+          const { rows } = await client.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`);
+          return { client, pid: rows[0]!.pid };
+        }),
+      );
+      const before = await deadlocks();
+      try {
+        const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${callee.calledId}`)));
+        await lockWaiters(1);
+        const waiting = await db.query<{ blockers: number[] }>(
+          `SELECT pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        expect(waiting.rows).toHaveLength(1);
+        const first = holders.filter((h) => waiting.rows[0]!.blockers.includes(h.pid));
+        expect(first).toHaveLength(1);
+        for (const h of holders) if (h !== first[0]) await h.client.query('ROLLBACK');
+        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        await lockWaiters(2);
+        await first[0]!.client.query('COMMIT');
+        expect({ workflow: await wfDeleting, org: await orgDeleting }).toEqual({ workflow: 200, org: 200 });
+      } finally {
+        await Promise.all(holders.map((h) => h.client.end()));
+      }
+      expect(await allUnlinked(four)).toEqual({
+        workflow: false,
+        environments: 0,
+        unlinked: four.runIds.length,
+      });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it("an org delete and the delete of an org-less workflow whose sub-workflow runs ran in four of the org's environments both delete, with the org delete held on the second environment its cascade reaches, ahead of the lowest id", async () => {
+      // The cascade reaches e0 then e1, by heap and by name, and the lowest id comes later, so the org delete is part-way through its environments when the workflow delete starts.
+      const four = await runsInFour(
+        ({ created, byId, byHeap, byName }) =>
+          byHeap.join() === created.join() &&
+          byName.join() === created.join() &&
+          !created.slice(0, 2).includes(byId[0]!),
+      );
+      const { org, envs, callee } = four;
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      const before = await deadlocks();
+      try {
+        await holder.query('BEGIN');
+        await holder.query(`SELECT 1 FROM environments WHERE id = $1 FOR KEY SHARE`, [envs[1]!.id]);
+        const { rows } = await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`);
+        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        await lockWaiters(1);
+        const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${callee.calledId}`)));
+        await lockWaiters(2);
+        const waiting = await db.query<{ pid: number; blockers: number[] }>(
+          `SELECT pid, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        const orgWait = waiting.rows.find((w) => w.blockers.includes(rows[0]!.pid));
+        expect(waiting.rows.filter((w) => w !== orgWait).map((w) => w.blockers)).toEqual([[orgWait?.pid]]);
+        await holder.query('COMMIT');
+        expect({ workflow: await wfDeleting, org: await orgDeleting }).toEqual({ workflow: 200, org: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await allUnlinked(four)).toEqual({
+        workflow: false,
+        environments: 0,
+        unlinked: four.runIds.length,
+      });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+  });
+
+  describe("an environment's row is locked before its pointers", () => {
+    const manualDoc = (name: string): Record<string, unknown> => {
+      const doc = webhookDoc(name);
+      const [trigger] = doc.nodes as Array<Record<string, unknown>>;
+      trigger!.node_type = 'orchestr:trigger';
+      return doc;
+    };
+
+    interface Crossed {
+      org: string;
+      env: string;
+      /** Its workflows in the order a rename updates their pointers; an un-promote of the environment deletes them in reverse. */
+      order: string[];
+    }
+
+    const rolledBack = async (sql: string, params: unknown[]): Promise<string[]> => {
+      await db.query('BEGIN');
+      try {
+        return (await db.query<{ workflow_id: string }>(sql, params)).rows.map((row) => row.workflow_id);
+      } finally {
+        await db.query('ROLLBACK');
+      }
+    };
+
+    const renameOrder = (env: string, envName: string): Promise<string[]> =>
+      rolledBack(
+        `UPDATE workflow_env_pointers SET environment = $2 WHERE environment_id = $1 RETURNING workflow_id`,
+        [env, envName],
+      );
+
+    const UNPROMOTE = `DELETE FROM workflow_env_pointers p USING workflows w
+          WHERE w.id = p.workflow_id
+            AND (p.environment_id = $1 OR (p.environment_id IS NULL AND lower(p.environment) = $2 AND w.org_id = $3))`;
+
+    const unpromoteOrder = (org: string, env: string, envName: string): Promise<string[]> =>
+      rolledBack(`${UNPROMOTE} RETURNING p.workflow_id`, [env, envName, org]);
+
+    // The planner scans the workflows first only once it sees enough of them beside the pointers, so add workflows with no pointer until it does.
+    const unpromoteScansWorkflows = async (org: string, env: string, envName: string): Promise<void> => {
+      for (let round = 0; round < 20; round++) {
+        await db.query('ANALYZE workflows, workflow_env_pointers');
+        const plan = await db.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${UNPROMOTE}`, [env, envName, org]);
+        const scans = plan.rows.map((row) => /Scan (?:using \S+ )?on (\w+)/.exec(row['QUERY PLAN'])?.[1]);
+        if (scans.find(Boolean) === 'workflows') return;
+        await db.query(
+          `INSERT INTO workflows (id, name) SELECT gen_random_uuid(), 'no pointer' FROM generate_series(1, 50)`,
+        );
+      }
+      throw new Error("the un-promote's plan never scans the workflows first");
+    };
+
+    // Three of `renamed` that `unpromoted` holds in the reverse order, if any.
+    const reversedThree = (renamed: string[], unpromoted: string[]): string[] | undefined => {
+      const at = (id: string): number => unpromoted.indexOf(id);
+      const threes = renamed.flatMap((a, i) =>
+        renamed.slice(i + 1).flatMap((b, j) => renamed.slice(i + j + 2).map((c) => [a, b, c])),
+      );
+      return threes.find(([a, b, c]) => at(a!) > at(b!) && at(b!) > at(c!));
+    };
+
+    // An environment left with three workflows' pointers that its delete's un-promote, scanning the workflows, deletes in the reverse of a rename's order: six promoted in the reverse of their creation, three kept, retried with a fresh org if no three are reversed.
+    const crossed = async (name: string): Promise<Crossed> => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const org = await workspace(name);
+        const envName = `crossed-${suffix()}`;
+        const env = await createEnv(org, envName);
+        const created: string[] = [];
+        for (let i = 0; i < 6; i++)
+          created.push(await deploy(org, `${name} ${i}`, manualDoc(`${name} ${i}`)));
+        for (const wfId of [...created].reverse()) {
+          const [v1] = await versions(org, wfId);
+          await promote(org, wfId, envName, v1!.id).expect(201);
+        }
+        await unpromoteScansWorkflows(org, env, envName);
+        const renamed = await renameOrder(env, envName);
+        const three = reversedThree(renamed, await unpromoteOrder(org, env, envName));
+        if (!three) continue;
+        for (const wfId of renamed.filter((id) => !three.includes(id))) {
+          await as(http().delete(`/api/workflows/${wfId}/pointers/${env}`), org).expect(200);
+        }
+        const order = await renameOrder(env, envName);
+        const unpromoted = await unpromoteOrder(org, env, envName);
+        if (order.join() === three.join() && unpromoted.join() === [...three].reverse().join()) {
+          return { org, env, order };
+        }
+      }
+      throw new Error(
+        "no environment whose delete un-promotes three workflows in the reverse of a rename's order",
+      );
+    };
+
+    // A client holding the pointer a rename and an un-promote of the environment both reach second.
+    const holdMiddle = async ({ env, order }: Crossed): Promise<Client> => {
+      const holder = new Client({ connectionString: dbUrl });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query(
+        `SELECT 1 FROM workflow_env_pointers WHERE workflow_id = $1 AND environment_id = $2 FOR NO KEY UPDATE`,
+        [order[1], env],
+      );
+      return holder;
+    };
+
+    const rowWaits = async (): Promise<string[]> =>
+      (
+        await db.query<{ relation: string }>(
+          `SELECT l.relation::regclass::text AS relation
+             FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND l.locktype = 'tuple'
+            ORDER BY 1`,
+        )
+      ).rows.map((row) => row.relation);
+
+    const renameEnv = (org: string, env: string): Promise<number> =>
+      statusOf(as(http().patch(`/api/environments/${env}`), org).send({ name: `renamed-${suffix()}` }));
+
+    const pointersOn = async (env: string): Promise<number> =>
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM workflow_env_pointers WHERE environment_id = $1`,
+          [env],
+        )
+      ).rows[0]!.n;
+
+    const leftBehind = async ({ env, order }: Crossed): Promise<unknown> =>
+      (
+        await db.query(
+          `SELECT EXISTS (SELECT 1 FROM environments WHERE id = $1) AS environment,
+                  (SELECT count(*)::int FROM workflow_env_pointers
+                    WHERE workflow_id = ANY($2::uuid[]) AND environment <> 'production') AS pointers,
+                  (SELECT json_object_agg(type, n) FROM (
+                     SELECT type, count(*)::int AS n FROM domain_events
+                      WHERE subject_id = ANY($3::text[])
+                        AND type IN ('environment.renamed', 'environment.deleted', 'workflow.unpromoted')
+                      GROUP BY type) e) AS events`,
+          [env, order, [env, ...order]],
+        )
+      ).rows[0];
+
+    const bothLanded = {
+      environment: false,
+      pointers: 0,
+      events: { 'environment.renamed': 1, 'environment.deleted': 1, 'workflow.unpromoted': 3 },
+    };
+
+    it('a rename holding the environment when its delete starts lands first, and the delete, waiting at the environment row, then un-promotes what it renamed', async () => {
+      const crossing = await crossed('Rename then environment delete');
+      const holder = await holdMiddle(crossing);
+      const before = await deadlocks();
+      try {
+        const renaming = renameEnv(crossing.org, crossing.env);
+        await lockWaiters(1);
+        const deleting = statusOf(removeEnv(crossing.org, crossing.env));
+        await lockWaiters(2);
+        expect(await rowWaits()).toEqual(['environments', 'workflow_env_pointers']);
+        await holder.query('COMMIT');
+        expect({ rename: await renaming, delete: await deleting }).toEqual({ rename: 200, delete: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(crossing)).toEqual(bothLanded);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an environment delete un-promoting when a rename of it starts goes first, and the rename, waiting at the environment row, then lands before the delete removes it', async () => {
+      const crossing = await crossed('Environment delete then rename');
+      const holder = await holdMiddle(crossing);
+      const before = await deadlocks();
+      try {
+        const deleting = statusOf(removeEnv(crossing.org, crossing.env));
+        await lockWaiters(1);
+        const renaming = renameEnv(crossing.org, crossing.env);
+        await lockWaiters(2);
+        expect(await rowWaits()).toEqual(['environments', 'workflow_env_pointers']);
+        await holder.query('COMMIT');
+        expect({ delete: await deleting, rename: await renaming }).toEqual({ delete: 200, rename: 200 });
+      } finally {
+        await holder.end();
+      }
+      expect(await leftBehind(crossing)).toEqual(bothLanded);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a promote holding the environment when its delete starts lands first, and the delete un-promotes it with the rest', async () => {
+      const org = await workspace('Promote then environment delete');
+      const envName = `promoted-${suffix()}`;
+      const env = await createEnv(org, envName);
+      const deployed = await as(http().post('/api/deploy'), org)
+        .send({ workflow_json: manualDoc('promoted while deleted') })
+        .expect(201);
+      const wfId = deployed.body.workflow_id as string;
+      const [v1] = await versions(org, wfId);
+      const promoted = gateEmits('workflow.promoted');
+      const before = await deadlocks();
+      try {
+        const promoting = statusOf(promote(org, wfId, envName, v1!.id));
+        await promoted.arrived(0);
+        const deleting = statusOf(removeEnv(org, env));
+        await lockWaiters(1);
+        promoted.release(0);
+        expect({ promote: await promoting, delete: await deleting }).toEqual({ promote: 201, delete: 200 });
+      } finally {
+        promoted.restore();
+      }
+      const unpromotedThere = await db.query(
+        `SELECT 1 FROM domain_events WHERE type = 'workflow.unpromoted' AND subject_id = $1 AND payload->>'environment' = $2`,
+        [wfId, envName],
+      );
+      expect(unpromotedThere.rows).toHaveLength(1);
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it.each([
+      [
+        'an un-promote',
+        (org: string, wfId: string, env: string): request.Test =>
+          as(http().delete(`/api/workflows/${wfId}/pointers/${env}`), org),
+      ],
+      ["a workflow delete's un-promote", (org: string, wfId: string): request.Test => remove(org, wfId)],
+    ])(
+      '%s holding the environment when a rename of it starts lands first, and the rename lists no URL for it',
+      async (_, unpromote) => {
+        const org = await workspace('Un-promote then rename');
+        const envName = `unpromoted-${suffix()}`;
+        const env = await createEnv(org, envName);
+        const wfId = await deploy(org, 'un-promoted while renamed');
+        const [v1] = await versions(org, wfId);
+        await promote(org, wfId, envName, v1!.id).expect(201);
+        const unpromoted = gateEmits('workflow.unpromoted');
+        const before = await deadlocks();
+        try {
+          const unpromoting = statusOf(unpromote(org, wfId, env));
+          await unpromoted.arrived(0);
+          const renaming = renameEnv(org, env);
+          await lockWaiters(1);
+          expect(await rowWaits()).toEqual(['environments']);
+          unpromoted.release(0);
+          unpromoted.release(1);
+          expect({ unpromote: await unpromoting, rename: await renaming }).toEqual({
+            unpromote: 200,
+            rename: 200,
+          });
+        } finally {
+          unpromoted.restore();
+        }
+        expect(await pointersOn(env)).toBe(0);
+        expect(await deadlocksSince(before)).toBe(0);
+      },
+    );
   });
 });

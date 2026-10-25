@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import type { DataSource } from 'typeorm';
-import { request } from 'undici';
+import { fetch } from 'undici';
 
 import type { EnvConfig } from '../config/env.config';
 import { ComposioProvider } from './composio.provider';
@@ -9,21 +9,24 @@ import { PlatformKeysService } from '../platform/platform-keys.service';
 /** Any scope will do here — the tests are about behaviour, not about whose key it is. */
 const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
-jest.mock('undici', () => ({ request: jest.fn() }));
+jest.mock('undici', () => ({ fetch: jest.fn() }));
 
-/** The Composio v3 client's TRIGGER-INSTANCE leg — asserts the exact endpoints + bodies, `undici` mocked. */
-const mockRequest = request as unknown as jest.Mock;
+/** The Composio v3 client's TRIGGER-INSTANCE leg — asserts the exact endpoints + bodies, `undici`'s fetch mocked. */
+const mockFetch = fetch as unknown as jest.Mock;
 
-function jsonResponse(body: unknown): { statusCode: number; body: { text: () => Promise<string> } } {
-  return { statusCode: 200, body: { text: () => Promise.resolve(JSON.stringify(body)) } };
+interface FakeResponse {
+  status: number;
+  headers: { forEach: () => void };
+  text: () => Promise<string>;
 }
 
-function response(
-  statusCode: number,
-  body: unknown,
-): { statusCode: number; body: { text: () => Promise<string> } } {
+function response(status: number, body: unknown): FakeResponse {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
-  return { statusCode, body: { text: () => Promise.resolve(text) } };
+  return { status, headers: { forEach: () => undefined }, text: () => Promise.resolve(text) };
+}
+
+function jsonResponse(body: unknown): FakeResponse {
+  return response(200, body);
 }
 
 function makeProvider(): ComposioProvider {
@@ -34,11 +37,11 @@ function makeProvider(): ComposioProvider {
   return new ComposioProvider({} as DataSource, config, keys);
 }
 
-describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
-  beforeEach(() => mockRequest.mockReset());
+describe('ComposioProvider — trigger instances (v3, fetch mocked)', () => {
+  beforeEach(() => mockFetch.mockReset());
 
   it('listTriggerTypes GETs /api/v3/triggers_types and paginates by next_cursor', async () => {
-    mockRequest
+    mockFetch
       .mockResolvedValueOnce(
         jsonResponse({
           items: [
@@ -74,7 +77,7 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
     expect(types.map((t) => t.slug)).toEqual(['GMAIL_NEW_GMAIL_MESSAGE', 'GITHUB_COMMIT_EVENT']);
     expect(types[0]).toMatchObject({ toolkitSlug: 'gmail', type: 'poll' });
     // page 1
-    const [url1, opts1] = mockRequest.mock.calls[0] as [
+    const [url1, opts1] = mockFetch.mock.calls[0] as [
       string,
       { method: string; headers: Record<string, string> },
     ];
@@ -82,12 +85,12 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
     expect(opts1.method).toBe('GET');
     expect(opts1.headers['x-api-key']).toBe('test-key');
     // page 2 threads the cursor
-    const [url2] = mockRequest.mock.calls[1] as [string];
+    const [url2] = mockFetch.mock.calls[1] as [string];
     expect(url2).toBe('https://backend.composio.dev/api/v3/triggers_types?limit=100&cursor=CURSOR2');
   });
 
   it('createTriggerInstance POSTs {slug}/upsert with the confirmed body and returns trigger_id', async () => {
-    mockRequest.mockResolvedValueOnce(jsonResponse({ trigger_id: 'ti_Q58v' }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ trigger_id: 'ti_Q58v' }));
 
     const id = await makeProvider().createTriggerInstance(SCOPE, {
       slug: 'GMAIL_NEW_GMAIL_MESSAGE',
@@ -97,7 +100,7 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
     });
 
     expect(id).toBe('ti_Q58v');
-    const [url, opts] = mockRequest.mock.calls[0] as [string, { method: string; body: string }];
+    const [url, opts] = mockFetch.mock.calls[0] as [string, { method: string; body: string }];
     expect(url).toBe('https://backend.composio.dev/api/v3/trigger_instances/GMAIL_NEW_GMAIL_MESSAGE/upsert');
     expect(opts.method).toBe('POST');
     expect(JSON.parse(opts.body)).toEqual({
@@ -108,7 +111,7 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
   });
 
   it('throws an upstream error when upsert returns no trigger_id', async () => {
-    mockRequest.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
     await expect(
       makeProvider().createTriggerInstance(SCOPE, {
         slug: 'X_Y',
@@ -120,9 +123,9 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
   });
 
   it('deleteTriggerInstance DELETEs /manage/{triggerId}', async () => {
-    mockRequest.mockResolvedValueOnce(jsonResponse({ trigger_id: 'ti_x' }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ trigger_id: 'ti_x' }));
     await makeProvider().deleteTriggerInstance(SCOPE, 'ti_x');
-    const [url, opts] = mockRequest.mock.calls[0] as [string, { method: string }];
+    const [url, opts] = mockFetch.mock.calls[0] as [string, { method: string }];
     expect(url).toBe('https://backend.composio.dev/api/v3/trigger_instances/manage/ti_x');
     expect(opts.method).toBe('DELETE');
   });
@@ -130,23 +133,23 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
   // An already-gone instance must not wedge teardown — a refcounted delete can legitimately
   // race a sibling that already removed the shared instance, and Composio answers 404/410.
   it('deleteTriggerInstance treats an already-gone 404 as success (no throw)', async () => {
-    mockRequest.mockResolvedValueOnce(response(404, { error: 'trigger instance not found' }));
+    mockFetch.mockResolvedValueOnce(response(404, { error: 'trigger instance not found' }));
     await expect(makeProvider().deleteTriggerInstance(SCOPE, 'ti_gone')).resolves.toBeUndefined();
   });
 
   it('deleteTriggerInstance treats a 410 gone as success (no throw)', async () => {
-    mockRequest.mockResolvedValueOnce(response(410, ''));
+    mockFetch.mockResolvedValueOnce(response(410, ''));
     await expect(makeProvider().deleteTriggerInstance(SCOPE, 'ti_gone')).resolves.toBeUndefined();
   });
 
   it('deleteTriggerInstance PROPAGATES a non-gone 4xx (e.g. 403)', async () => {
-    mockRequest.mockResolvedValueOnce(response(403, { error: 'forbidden' }));
+    mockFetch.mockResolvedValueOnce(response(403, { error: 'forbidden' }));
     await expect(makeProvider().deleteTriggerInstance(SCOPE, 'ti_x')).rejects.toThrow(/403/);
   });
 
   // The orphan reaper lists live instances via GET /trigger_instances/active.
   it("listActiveTriggerInstances GETs /trigger_instances/active, paginates, and names each one's account", async () => {
-    mockRequest
+    mockFetch
       .mockResolvedValueOnce(
         jsonResponse({ items: [{ id: 'ti_aaa', connected_account_id: 'ca_1' }], next_cursor: 'C2' }),
       )
@@ -160,14 +163,14 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
       { id: 'ti_aaa', connectedAccountId: 'ca_1' },
       { id: 'ti_bbb', connectedAccountId: 'ca_2' },
     ]);
-    const [url1] = mockRequest.mock.calls[0] as [string, { method: string }];
+    const [url1] = mockFetch.mock.calls[0] as [string, { method: string }];
     expect(url1).toBe('https://backend.composio.dev/api/v3/trigger_instances/active?limit=100');
-    const [url2] = mockRequest.mock.calls[1] as [string];
+    const [url2] = mockFetch.mock.calls[1] as [string];
     expect(url2).toBe('https://backend.composio.dev/api/v3/trigger_instances/active?limit=100&cursor=C2');
   });
 
   it('listActiveTriggerInstances reads the id under alternate keys but REQUIRES the ti_ prefix', async () => {
-    mockRequest.mockResolvedValueOnce(
+    mockFetch.mockResolvedValueOnce(
       jsonResponse({
         items: [
           { trigger_id: 'ti_from_trigger_id' }, // alternate key
@@ -186,7 +189,7 @@ describe('ComposioProvider — trigger instances (v3, undici mocked)', () => {
   });
 
   it('listActiveTriggerInstances throws on an unexpected shape (no items array)', async () => {
-    mockRequest.mockResolvedValueOnce(jsonResponse({ oops: true }));
+    mockFetch.mockResolvedValueOnce(jsonResponse({ oops: true }));
     await expect(makeProvider().listActiveTriggerInstances(SCOPE)).rejects.toThrow(/unexpected shape/);
   });
 });

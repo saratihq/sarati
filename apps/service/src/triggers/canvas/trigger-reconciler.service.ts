@@ -10,23 +10,21 @@ import type { DataSource } from 'typeorm';
 import { runBounded } from '../../common/bounded';
 import { withDeadline } from '../../common/deadline';
 import { errorMessage } from '../../common/error-message';
-import { isTriggerNode } from '../../compiler/compile-ir';
 import { ConnectionsService } from '../../connections/connections.service';
+import { heldTriggerMessage, type WhileHeld } from '../../connections/run-as-account';
 import type { EnvConfig } from '../../config/env.config';
 import { newId, now } from '../../database/ids';
 import { rawMutate, rawQuery } from '../../database/raw-query';
 import { RuntimeTriggerActivationEntity } from '../../database/entities/runtime-trigger-activation.entity';
 import { TriggerRetiredWebhookEntity } from '../../database/entities/trigger-retired-webhook.entity';
 import { PG_POOL } from '../../database/tokens';
-import type { IRNode, WorkflowIR } from '../../ir/models';
-import { composioTriggerSpec } from '../../providers/composio-trigger.registry';
+import type { WorkflowIR } from '../../ir/models';
 import { ComposioTriggerProvider } from '../../providers/composio-trigger.provider';
 import {
   MANAGED_INTEGRATION_PROVIDER,
   type ManagedIntegrationProvider,
 } from '../../providers/managed-integration-provider';
 import { InMemoryStore, type ProviderStore } from '../../providers/provider-store';
-import { validatedAppSlug } from '../../providers/sdk-actions.registry';
 import { SdkPollingProvider } from '../../providers/sdk-polling.provider';
 import {
   SdkWebhookProvider,
@@ -45,21 +43,21 @@ import {
   sameRegistration,
   webhookRegistrationOf,
 } from '../registered-webhook';
-import {
-  AGENT_TOOL_PUBLIC,
-  INCOMING_CHAT_PUBLIC,
-  INCOMING_WEBHOOK_PUBLIC,
-  MANUAL_TRIGGER,
-} from '../trigger-catalog.service';
-import { ORCHESTR_SCHEDULE, SCHEDULE_CURSOR_KEY } from '../schedule';
+import { SCHEDULE_CURSOR_KEY } from '../schedule';
 import { TriggerSignalsService } from '../trigger-signals.service';
 import { WebhookDeleteFence } from './webhook-delete-fence';
-import { webhookUrlFor } from './webhook-url';
-import { activationKeyOf, actualOf } from './activation-row';
+import { servedWebhookUrl } from './webhook-url';
+import { activationKeyOf, actualOf, holdsTrigger } from './activation-row';
+import {
+  activationKindOf,
+  decideTriggerSlots,
+  firesWhileHeld,
+  heldBackBySlot,
+  type TriggerSlotDecision,
+} from './trigger-kind';
 import {
   type ActivationKey,
   activationKeyString,
-  type ActivationKind,
   applyFinished,
   type ConnectionRef,
   type DesiredActivation,
@@ -174,39 +172,45 @@ export class TriggerReconcilerService {
       if (ir) pointerInputs.push({ environmentId: p.environment_id, versionId: p.version_id, ir });
     }
 
+    const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
+    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
+    const actual = actualRows.map((r) => actualOf(r));
+
     // The pure derive is synchronous, so slots must be resolved up front.
-    const connByEnvApp = await this.resolveConnections(pointerInputs);
+    const slots = await this.resolveSlots(pointerInputs, envNameById);
     const desired = deriveDesiredActivations({
       workflowId,
       pointers: pointerInputs,
-      kindOf: (node) => this.kindOf(node),
-      connectionOf: (envId, node) => connByEnvApp.get(slotKey(envId, node)) ?? null,
+      kindOf: (node) => activationKindOf(node.node_type),
+      connectionOf: (envId, node) =>
+        listensAs(
+          slots.get(triggerKey(envId, node.id)),
+          rowByKey.get(activationKeyString({ workflowId, environmentId: envId, triggerNodeId: node.id })),
+        ),
       webhookUrlOf: (envId, kind) =>
         kind === 'registered_webhook'
           ? this.webhookUrl({ workflowId, environmentId: envId }, envNameById)
           : null,
     });
 
-    const actualRows = await em.find(RuntimeTriggerActivationEntity, { where: { workflowId } });
-    const rowByKey = new Map(actualRows.map((r) => [activationKeyString(activationKeyOf(r)), r]));
-    const actual = actualRows.map((r) => actualOf(r));
-
     const plan = reconcileActivations(desired, actual);
     // Each op is isolated: a failure lands on the row's `last_error` and never aborts the
     // rest of the sweep — the next reconcile re-converges.
     for (const d of plan.toCreate) {
-      await this.applyCreate(d).catch((err) => this.logApplyError('create', d.key, err));
+      await this.applyCreate(d, slots).catch((err) => this.logApplyError('create', d.key, err));
     }
-    for (const u of plan.toUpdate) {
+    for (const u of [...plan.toUpdate, ...restatements(plan, desired, rowByKey, slots)]) {
       const row = rowByKey.get(activationKeyString(u.actual.key));
       if (row)
-        await this.applyUpdate(row, u, envNameById).catch((err) => this.applyFailed('update', row, err));
+        await this.applyUpdate(row, u, envNameById, slots).catch((err) =>
+          this.applyFailed('update', row, err),
+        );
     }
     for (const d of plan.toDelete) {
       const row = rowByKey.get(activationKeyString(d.key));
       if (row) await this.applyDelete(row, envNameById).catch((err) => this.applyFailed('delete', row, err));
     }
-    if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan);
+    if (opts.selfHeal) await this.selfHealComposioSubscriptions(desired, rowByKey, plan, slots);
     return pendingDeletes;
   }
 
@@ -219,6 +223,7 @@ export class TriggerReconcilerService {
     desired: DesiredActivation[],
     rowByKey: Map<string, RuntimeTriggerActivationEntity>,
     plan: ReconcilePlan,
+    slots: SlotReads,
   ): Promise<void> {
     // Rows the plan already stood up this sweep — don't pay a second upsert for them.
     const materialized = new Set<string>();
@@ -229,7 +234,7 @@ export class TriggerReconcilerService {
     const targets: Array<{ id: string; desired: DesiredActivation }> = [];
     for (const d of desired) {
       if (d.kind !== 'composio_subscription' || d.paused) continue;
-      if (this.needsConnection(d) && d.connection === null) continue; // unfilled slot → last_error, not a subscribe
+      if (heldBackBySlot({ ...d, held: isHeld(d, slots) })) continue;
       const keyStr = activationKeyString(d.key);
       if (materialized.has(keyStr)) continue;
       const row = rowByKey.get(keyStr);
@@ -299,11 +304,11 @@ export class TriggerReconcilerService {
 
   // ─── apply ───
 
-  private async applyCreate(desired: DesiredActivation): Promise<void> {
+  private async applyCreate(desired: DesiredActivation, slots: SlotReads): Promise<void> {
     const id = newId();
     const ts = now();
-    const missingSlot = this.needsConnection(desired) && desired.connection === null;
-    const standsUp = !missingSlot && !desired.paused;
+    const heldBack = heldBackBySlot(desired);
+    const standsUp = !heldBack && !desired.paused;
     const row = this.dataSource.manager.create(RuntimeTriggerActivationEntity, {
       id,
       workflowId: desired.key.workflowId,
@@ -317,11 +322,12 @@ export class TriggerReconcilerService {
       connectionOwnerUserId: desired.connection?.ownerUserId ?? null,
       paused: desired.paused,
       webhookUrl: desired.webhookUrl,
+      held: false,
       lastPolledAt: null,
-      lastError: missingSlot ? this.slotError(desired) : null,
+      lastError: heldBack ? slotReason(desired, slots, null) : null,
       createdAt: ts,
       updatedAt: ts,
-      // Paused or unslotted stands nothing up, so that much is already in effect.
+      // Paused or held back stands nothing up, so that much is already in effect.
       materialized: standsUp ? null : materializedOf(desired),
     });
     await withActivationLock(this.pool, id, async () => {
@@ -337,26 +343,19 @@ export class TriggerReconcilerService {
     row: RuntimeTriggerActivationEntity,
     update: ActivationUpdate,
     envName: Map<string, string>,
+    slots: SlotReads,
   ): Promise<void> {
     const { desired } = update;
     const live = liveOf(row);
-    const missingSlot = this.needsConnection(desired) && desired.connection === null;
-    row.kind = desired.kind;
-    row.triggerType = desired.triggerType;
-    row.versionId = desired.versionId;
-    row.props = desired.props;
-    row.connectionId = desired.connection?.connectionId ?? null;
-    row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
-    row.paused = desired.paused;
-    row.webhookUrl = desired.webhookUrl;
-    row.lastError = missingSlot ? this.slotError(desired) : null;
-    row.updatedAt = now();
+    const held = isHeld(desired, slots);
+    const heldBack = heldBackBySlot({ ...desired, held });
+    describeRow(row, update, held, heldBack ? slotReason(desired, slots, held ? row : null) : null);
     await withActivationLock(this.pool, row.id, async () => {
       await this.dataSource.manager.save(RuntimeTriggerActivationEntity, row);
-      // A 'keep' leaves the cursor/subscription untouched; a 'reset' tears down what is live and starts from now.
-      if (update.cursorAction === 'keep') return;
+      // A 'keep' leaves the cursor/subscription untouched, and a held row asks nothing of its app; a 'reset' tears down what is live and starts from now.
+      if (update.cursorAction === 'keep' || held) return;
       await this.teardown(row, live, envName);
-      if (desired.paused || missingSlot) {
+      if (desired.paused || heldBack) {
         await this.recordMaterialized(row.id, desired);
         return;
       }
@@ -467,14 +466,33 @@ export class TriggerReconcilerService {
     const webhook =
       registeredWebhookOf(stored) ?? (await this.legacyWebhook(row, live, stored, store, envName));
     if (!webhook || (await this.registrationHeld(webhook, row.id))) return;
+    if (await this.waitsForAccount(webhook)) {
+      this.logger.warn(
+        `activation ${row.id}: ${webhookLabel(webhook)} is deleted once the account it was registered with is active again`,
+      );
+      await this.retire(row, webhook, "the account it was registered with isn't active");
+      return;
+    }
     await this.boundedDelete(webhook).then(
       () => this.noteUnreportedDelete(webhook, row.workflowId),
-      (err: unknown) => this.retire(row, webhook, err),
+      (err: unknown) => this.deleteFailed(row, webhook, err),
     );
   }
 
+  // A webhook is never deleted with an account that isn't active (#11); one whose account is gone is given up by its retry.
+  private async waitsForAccount(webhook: RegisteredWebhook): Promise<boolean> {
+    if (!webhook.connection) return false;
+    const status = await this.statusOf(webhook.connection);
+    return status !== undefined && status !== 'active';
+  }
+
+  private async statusOf(account: ConnectionRef): Promise<string | undefined> {
+    const own = await this.connections.ownConnections(account.ownerUserId, [account.connectionId]);
+    return own.get(account.connectionId)?.status;
+  }
+
   // A delete still running past the wait stays in the fence, so a stand-up handed its handle waits for it to land.
-  private boundedDelete(webhook: RegisteredWebhook): Promise<void> {
+  private boundedDelete(webhook: RegisteredWebhook): Promise<boolean> {
     const attempt = this.deleteFence.deleting(webhook, () =>
       this.disableWebhook(webhook, new InMemoryStore()),
     );
@@ -521,7 +539,7 @@ export class TriggerReconcilerService {
     };
   }
 
-  private disableWebhook(webhook: RegisteredWebhook, store: ProviderStore): Promise<void> {
+  private disableWebhook(webhook: RegisteredWebhook, store: ProviderStore): Promise<boolean> {
     return this.sdkWebhooks.disable({
       externalUserId: webhook.connection?.ownerUserId ?? '',
       type: webhook.triggerType,
@@ -534,8 +552,7 @@ export class TriggerReconcilerService {
     });
   }
 
-  // The activation carries on as if the delete had succeeded; only a retry after its stand-up, which may take the webhook over, gives it up.
-  private async retire(
+  private async deleteFailed(
     row: RuntimeTriggerActivationEntity,
     webhook: RegisteredWebhook,
     err: unknown,
@@ -545,6 +562,15 @@ export class TriggerReconcilerService {
         `activation ${row.id}: ${webhookLabel(webhook)} delete failed, retried by later reconciles: ${errorMessage(err)}`,
       );
     }
+    await this.retire(row, webhook, errorMessage(err));
+  }
+
+  // The activation carries on as if the delete had succeeded; only a retry after its stand-up, which may take the webhook over, gives it up.
+  private async retire(
+    row: RuntimeTriggerActivationEntity,
+    webhook: RegisteredWebhook,
+    lastError: string,
+  ): Promise<void> {
     const em = this.dataSource.manager;
     const ts = now();
     const entry = em.create(TriggerRetiredWebhookEntity, {
@@ -553,7 +579,7 @@ export class TriggerReconcilerService {
       environmentId: row.environmentId,
       triggerNodeId: row.triggerNodeId,
       webhook,
-      lastError: errorMessage(err),
+      lastError,
       createdAt: ts,
       updatedAt: ts,
     });
@@ -577,18 +603,25 @@ export class TriggerReconcilerService {
     }
   }
 
-  private async retryRetiredWebhook(entry: TriggerRetiredWebhookEntity): Promise<void> {
+  private async retryRetiredWebhook(
+    entry: TriggerRetiredWebhookEntity,
+    standUp: ConnectionRef | null = null,
+  ): Promise<void> {
     const em = this.dataSource.manager;
     if ((await em.count(TriggerRetiredWebhookEntity, { where: { id: entry.id } })) === 0) return;
     const done = await this.deleteFence.deleting(
       entry.webhook,
-      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry)),
+      async () => (await this.registrationHeld(entry.webhook)) || (await this.retriedDelete(entry, standUp)),
     );
     if (done) await em.delete(TriggerRetiredWebhookEntity, { id: entry.id });
   }
 
   // Whether the entry is done with: deleted, or never deletable. The activation's store now belongs to its successor.
-  private async retriedDelete(entry: TriggerRetiredWebhookEntity): Promise<boolean> {
+  private async retriedDelete(
+    entry: TriggerRetiredWebhookEntity,
+    standUp: ConnectionRef | null,
+  ): Promise<boolean> {
+    if (await this.waitsForAccount(entry.webhook)) return this.deletedAs(entry, standUp);
     try {
       await this.disableWebhook(entry.webhook, new InMemoryStore());
       this.noteUnreportedDelete(entry.webhook, entry.workflowId);
@@ -604,6 +637,26 @@ export class TriggerReconcilerService {
         { id: entry.id },
         { lastError: errorMessage(err), updatedAt: now() },
       );
+      return false;
+    }
+  }
+
+  // A stand-up its app refuses at the address of a webhook whose own account isn't active deletes that webhook with its own active account, for the same app, only where the app answers that it deleted it (#11).
+  private async deletedAs(
+    entry: TriggerRetiredWebhookEntity,
+    account: ConnectionRef | null,
+  ): Promise<boolean> {
+    if (account === null || (await this.statusOf(account)) !== 'active') return false;
+    const waits = `${webhookLabel(entry.webhook)} was not deleted with the account standing a trigger up at its address, so it waits for its own`;
+    try {
+      const deleted = await this.disableWebhook(
+        { ...entry.webhook, connection: account },
+        new InMemoryStore(),
+      );
+      if (!deleted) this.logger.warn(`${waits}: the app did not answer that it deleted it`);
+      return deleted;
+    } catch (err) {
+      this.logger.warn(`${waits}: ${errorMessage(err)}`);
       return false;
     }
   }
@@ -658,7 +711,7 @@ export class TriggerReconcilerService {
     }
   }
 
-  // Whether a pending delete of a webhook at the desired address was there and landed within the wait; other retries are never waited on.
+  // Whether a pending delete of a webhook at the desired address was there and landed within the wait, made with the stand-up's account where its own isn't active; other retries are never waited on.
   private async landPendingDeletesAt(desired: DesiredActivation): Promise<boolean> {
     const { webhookUrl } = desired;
     if (!webhookUrl) return false;
@@ -673,7 +726,7 @@ export class TriggerReconcilerService {
     // One already being deleted lands through the fence; the rest are deleted now, so their queued copies find them gone.
     const landing = (async (): Promise<void> => {
       await this.deleteFence.landed((webhook) => sameAddress(webhook, target));
-      for (const entry of await atAddress()) await this.retryRetiredWebhook(entry);
+      for (const entry of await atAddress()) await this.retryRetiredWebhook(entry, desired.connection);
     })();
     const inTime = await withDeadline(
       landing,
@@ -730,7 +783,11 @@ export class TriggerReconcilerService {
       );
     }
     const conn = desired.connection;
-    if (!conn) throw new Error('No connection resolved for this Composio trigger'); // guarded by missingSlot
+    if (!conn) {
+      throw new Error(
+        `The trigger type "${desired.triggerType}" names no app, so no environment's account can serve it`,
+      );
+    }
     const ref = await this.connections.managedRef(conn.ownerUserId, conn.connectionId);
     if (!ref) throw new Error(`Connection ${conn.connectionId} not found`);
     if (ref.authType !== 'managed' || !ref.connectedAccountId) {
@@ -841,76 +898,22 @@ export class TriggerReconcilerService {
 
   // ─── resolution helpers ───
 
-  /**
-   * Classify an IR trigger node into an activation kind, or `null` when it has NO runtime
-   * activation — the manual trigger must never become a pollable one.
-   */
-  private kindOf(node: IRNode): ActivationKind | null {
-    // Neither fires on its own: the manual trigger waits for a Run, the tool trigger for a caller
-    // . Without this a tool trigger falls through to the Composio rail and asks for a
-    // connection slot it can never have.
-    if (node.node_type === MANUAL_TRIGGER || node.node_type === AGENT_TOOL_PUBLIC) return null;
-    if (node.node_type === INCOMING_WEBHOOK_PUBLIC) {
-      return 'webhook';
-    }
-    if (node.node_type === INCOMING_CHAT_PUBLIC) return 'chat';
-    if (node.node_type === ORCHESTR_SCHEDULE) return 'schedule';
-    if (this.sdkWebhooks.isRegisteredWebhook(node.node_type)) return 'registered_webhook';
-    if (this.sdkPolling.isPollingTrigger(node.node_type)) return 'polling';
-    // The hand-polled Composio-poll exceptions keep OUR poll cycle; everything else
-    // `<app>.<trigger>` rides the Composio native-subscription rail.
-    if (composioTriggerSpec(node.node_type)) return 'polling';
-    return 'composio_subscription';
-  }
-
-  /** Pre-resolve every env slot the desired activations reference, once per (env, app). */
-  private async resolveConnections(pointers: EnvPointerInput[]): Promise<Map<string, ConnectionRef | null>> {
-    const map = new Map<string, ConnectionRef | null>();
+  /** Each trigger node's slot under each env pointer, judged by the run-as slot rule (#18). */
+  private async resolveSlots(
+    pointers: EnvPointerInput[],
+    envNameById: Map<string, string>,
+  ): Promise<SlotReads> {
+    const decisions: SlotReads = new Map();
     for (const pointer of pointers) {
-      for (const node of pointer.ir.nodes) {
-        if (!isTriggerNode(node)) continue;
-        const app = validatedAppSlug(node.node_type);
-        if (this.isNativeKind(node) || !app) continue;
-        // A `none`-scheme SDK polling trigger resolves no connection — skip the slot lookup.
-        if (
-          this.sdkPolling.isPollingTrigger(node.node_type) &&
-          !this.sdkPolling.needsConnection(node.node_type)
-        )
-          continue;
-        const key = slotKey(pointer.environmentId, node);
-        if (map.has(key)) continue;
-        const slot = await this.connections.resolveSlotConnection(pointer.environmentId, app);
-        map.set(key, slot ? { connectionId: slot.id, ownerUserId: slot.ownerUserId } : null);
+      const environment = envNameById.get(pointer.environmentId) ?? 'This environment';
+      const decided = await decideTriggerSlots(pointer.ir.nodes, environment, (app) =>
+        this.connections.resolveSlotConnection(pointer.environmentId, app),
+      );
+      for (const read of decided) {
+        decisions.set(triggerKey(pointer.environmentId, read.nodeId), { ...read, environment });
       }
     }
-    return map;
-  }
-
-  private isNativeKind(node: IRNode): boolean {
-    return (
-      node.node_type === INCOMING_WEBHOOK_PUBLIC ||
-      node.node_type === INCOMING_CHAT_PUBLIC ||
-      node.node_type === ORCHESTR_SCHEDULE
-    );
-  }
-
-  /**
-   * Whether this activation resolves a provider connection. The SDK polling rail is
-   * per-trigger, so consult the trigger's own auth scheme rather than assuming by kind.
-   */
-  private needsConnection(desired: DesiredActivation): boolean {
-    if (desired.kind === 'polling' && this.sdkPolling.isPollingTrigger(desired.triggerType)) {
-      return this.sdkPolling.needsConnection(desired.triggerType);
-    }
-    return (
-      desired.kind === 'registered_webhook' ||
-      desired.kind === 'polling' ||
-      desired.kind === 'composio_subscription'
-    );
-  }
-
-  private slotError(desired: DesiredActivation): string {
-    return `No connection in this environment's slot for trigger node ${desired.key.triggerNodeId} — assign one first`;
+    return decisions;
   }
 
   private webhookUrl(
@@ -918,7 +921,7 @@ export class TriggerReconcilerService {
     envName: Map<string, string>,
   ): string {
     const name = envName.get(key.environmentId) ?? key.environmentId;
-    return webhookUrlFor(this.publicBaseUrl(), key.workflowId, name);
+    return servedWebhookUrl(this.config.get('env', { infer: true }), key.workflowId, name);
   }
 
   private async loadIrs(versionIds: string[]): Promise<Map<string, WorkflowIR>> {
@@ -942,11 +945,6 @@ export class TriggerReconcilerService {
       { id: activationId },
       { lastError: activationError(err) },
     );
-  }
-
-  private publicBaseUrl(): string {
-    const env = this.config.get('env', { infer: true });
-    return (env.publicBaseUrl || `http://localhost:${env.port}`).replace(/\/+$/, '');
   }
 }
 
@@ -979,6 +977,114 @@ function webhookLabel(webhook: RegisteredWebhook): string {
   return where.length > 0 ? `${label} (${where.join(', ')})` : label;
 }
 
-function slotKey(environmentId: string, node: IRNode): string {
-  return `${environmentId}::${validatedAppSlug(node.node_type) ?? ''}`;
+// A trigger's slot as one reconcile reads it, under the environment's current name.
+interface SlotRead extends TriggerSlotDecision {
+  environment: string;
+}
+
+type SlotReads = Map<string, SlotRead>;
+
+function triggerKey(environmentId: string, triggerNodeId: string): string {
+  return `${environmentId}::${triggerNodeId}`;
+}
+
+// A trigger listens as its slot's account while the slot serves it; a live one whose own account only stops being active keeps it, held.
+function listensAs(
+  read: SlotRead | undefined,
+  row: RuntimeTriggerActivationEntity | undefined,
+): ConnectionRef | null {
+  if (!read) return null;
+  const { decision, account } = read;
+  if (decision.kind === 'account') {
+    return { connectionId: decision.connectionId, ownerUserId: decision.ownerUserId };
+  }
+  const live = row ? liveConnection(row) : null;
+  const same = live !== null && live.connectionId === account?.id && live.ownerUserId === account.ownerUserId;
+  return decision.reason === 'inactive_slot' && same ? live : null;
+}
+
+// Only a row whose last apply finished has a trigger live; one whose stand-up never finished holds nothing at its app.
+function liveConnection(row: RuntimeTriggerActivationEntity): ConnectionRef | null {
+  const actual = actualOf(row);
+  return applyFinished(actual) ? actual.materialized.connection : null;
+}
+
+function refusedBy(desired: DesiredActivation, slots: SlotReads): SlotRead | null {
+  const read = slots.get(triggerKey(desired.key.environmentId, desired.key.triggerNodeId));
+  return read?.decision.kind === 'refused' ? read : null;
+}
+
+// Refused, yet listening as an account: listensAs kept the one it was stood up with.
+function isHeld(desired: DesiredActivation, slots: SlotReads): boolean {
+  return desired.connection !== null && refusedBy(desired, slots) !== null;
+}
+
+// The reason a trigger its slot holds back gives: for one held as `held` is live, what it does meanwhile; else the rule's refusal.
+function slotReason(
+  desired: DesiredActivation,
+  slots: SlotReads,
+  held: RuntimeTriggerActivationEntity | null,
+): string {
+  const read = refusedBy(desired, slots);
+  // resolveSlots judges every trigger heldBackBySlot names, so a held-back one always has the rule's refusal.
+  if (read?.decision.kind !== 'refused') {
+    throw new Error(`No slot decision for trigger node ${desired.key.triggerNodeId}`);
+  }
+  if (held === null) return read.decision.message;
+  return heldTriggerMessage(
+    read.environment,
+    { name: read.name, app: read.slot.app },
+    whileHeld(held, desired),
+  );
+}
+
+// A held trigger fires or resumes only while the version its pointer names holds it as it is live, a webhook at the intake served for it.
+function whileHeld(row: RuntimeTriggerActivationEntity, desired: DesiredActivation): WhileHeld {
+  if (!holdsTrigger(row, desired)) return 'waits';
+  if (!firesWhileHeld(liveOf(row).kind)) return 'resumes';
+  return row.webhookUrl === desired.webhookUrl ? 'fires' : 'moves';
+}
+
+// A held row keeps what it was stood up as, and records only the version a 'keep' moves it to.
+function describeRow(
+  row: RuntimeTriggerActivationEntity,
+  { desired, cursorAction }: ActivationUpdate,
+  held: boolean,
+  refusal: string | null,
+): void {
+  if (!held || cursorAction === 'keep') row.versionId = desired.versionId;
+  if (!held) {
+    row.kind = desired.kind;
+    row.triggerType = desired.triggerType;
+    row.props = desired.props;
+    row.connectionId = desired.connection?.connectionId ?? null;
+    row.connectionOwnerUserId = desired.connection?.ownerUserId ?? null;
+    row.paused = desired.paused;
+    row.webhookUrl = desired.webhookUrl;
+  }
+  row.held = held;
+  row.lastError = refusal;
+  row.updatedAt = now();
+}
+
+// A row the plan leaves alone is rewritten in place when its slot's answer changes: held, released, or refused in other words.
+function restatements(
+  plan: ReconcilePlan,
+  desired: DesiredActivation[],
+  rowByKey: Map<string, RuntimeTriggerActivationEntity>,
+  slots: SlotReads,
+): ActivationUpdate[] {
+  const planned = new Set([
+    ...plan.toCreate.map((d) => activationKeyString(d.key)),
+    ...plan.toUpdate.map((u) => activationKeyString(u.actual.key)),
+  ]);
+  return desired.flatMap((d): ActivationUpdate[] => {
+    const keyStr = activationKeyString(d.key);
+    const row = rowByKey.get(keyStr);
+    if (!row || planned.has(keyStr)) return [];
+    const held = isHeld(d, slots);
+    const refusal = heldBackBySlot({ ...d, held }) ? slotReason(d, slots, held ? row : null) : null;
+    const restated = refusal !== null && row.lastError !== refusal;
+    return restated || row.held !== held ? [{ desired: d, actual: actualOf(row), cursorAction: 'keep' }] : [];
+  });
 }

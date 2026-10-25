@@ -195,7 +195,7 @@ describe('AgentModelCallProvider', () => {
     [
       'under an environment, by its current name',
       { environmentId: 'env-1', environment: 'staging-before-rename' },
-      "staging's Claude account isn't active, so \"Think it over\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments",
+      "staging's Claude account isn't active, so \"Think it over\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments",
     ],
   ])(
     'an account lost after the decision is worded as the decision would (%s)',

@@ -1,5 +1,6 @@
 import { DomainError } from '../common/domain-error';
 import {
+  decideBySlot,
   decideRunAs,
   isInlineCredential,
   planForRunner,
@@ -278,7 +279,7 @@ describe('which account a step runs as', () => {
         reason: 'inactive_slot',
         status: 428,
         message:
-          "production's gmail account isn't active, so \"Email me the report\" can't run there — its owner reconnects it under Integrations, or an owner reassigns the slot under Integrations → Environments",
+          "production's gmail account isn't active, so \"Email me the report\" can't run there — its owner tests it under Integrations once it works again, or an owner reassigns the slot under Integrations → Environments",
       });
     },
   );
@@ -396,6 +397,37 @@ describe('which account a step runs as', () => {
       expect(plan).toEqual([
         expect.objectContaining({ node_id: 'r', managed_only: true, offered: ['one-click'] }),
       ]);
+    });
+  });
+
+  describe('a trigger signing in on the SDK rail, which only an account with its own credentials serves', () => {
+    const signsUp = {
+      name: 'When a customer signs up',
+      app: 'stripe',
+      connectionId: null,
+      ownCredentialsOnly: true,
+    };
+    const slot = (managed: boolean, status = 'active') => ({
+      id: 'slot-1',
+      ownerUserId: OWNER,
+      provider: 'stripe',
+      status,
+      managed,
+    });
+    const production = (): Promise<string> => Promise.resolve('production');
+
+    it('is refused a one-click slot account before its status, and served by one with its own credentials', async () => {
+      expect(await decideBySlot(signsUp, slot(true, 'expired'), production)).toEqual({
+        kind: 'refused',
+        reason: 'needs_own_credentials_slot',
+        status: 428,
+        message:
+          'production\'s stripe account is one-click (managed), and "When a customer signs up" runs only on one that uses its own credentials, so it can\'t run there — an owner assigns a stripe account that uses its own credentials under Integrations → Environments',
+      });
+      expect(await decideBySlot(signsUp, slot(false), production)).toMatchObject({
+        kind: 'account',
+        connectionId: 'slot-1',
+      });
     });
   });
 

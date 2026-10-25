@@ -18,7 +18,12 @@ import { EnvPointersService, PROD_ENV } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
-import { lockWorkflowForPointerMove } from './workflow-row-lock';
+import { lockOrgForWrite } from '../orgs/org-row-lock';
+import {
+  lockPointerEnvironments,
+  lockRunEnvironments,
+  lockWorkflowForPointerMove,
+} from './workflow-row-lock';
 
 /** What a caller must say to create a workflow; `irDoc` is the v1 document. */
 export interface DraftCreateInput {
@@ -61,6 +66,7 @@ export class WorkflowLifecycleService {
     assertAuthoredIrValid(input.irDoc, this.catalog.facts());
 
     const { wf, branchName } = await this.dataSource.transaction(async (em) => {
+      if (orgId) await lockOrgForWrite(em, orgId);
       const created = em.create(WorkflowEntity, {
         id: newId(),
         name: input.name,
@@ -130,6 +136,7 @@ export class WorkflowLifecycleService {
     }
 
     const workflowId = await this.dataSource.transaction(async (em) => {
+      if (orgId) await lockOrgForWrite(em, orgId);
       const wf = em.create(WorkflowEntity, {
         id: newId(),
         name,
@@ -226,6 +233,7 @@ export class WorkflowLifecycleService {
 
     await this.dataSource.transaction(async (tx) => {
       await lockDeletable(tx, { workflowId: wf.id }, `'${wf.name}'`);
+      await lockRunEnvironments(tx, wf.id);
       // The circular FKs must be broken before the cascade delete.
       await tx.query(
         `UPDATE workflows SET active_version_id = NULL, default_branch_id = NULL WHERE id = $1`,
@@ -249,6 +257,7 @@ export class WorkflowLifecycleService {
   private unpromoteEverywhere(wf: WorkflowEntity, actorId: string | null): Promise<void> {
     return this.dataSource.transaction(async (tx) => {
       await lockWorkflowForPointerMove(tx, wf.id);
+      await lockPointerEnvironments(tx, wf.id);
       const removed = await rawMutateReturning<{ environment: string }>(
         tx,
         `DELETE FROM workflow_env_pointers WHERE workflow_id = $1 RETURNING environment`,

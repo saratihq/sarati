@@ -60,7 +60,7 @@ export function parseCorsOrigins(raw: string): string[] {
   return origins;
 }
 
-/** Parse a provider API base URL: http(s), a hostname, no query or fragment; trailing slashes dropped, else throws at startup. */
+/** Parse a provider API base URL: http(s), a hostname, no username, password, query or fragment; trailing slashes dropped, else throws at startup. */
 export function parseApiBaseUrl(name: string, raw: string): string {
   const value = raw.trim();
   const parsed = httpUrl(value);
@@ -68,6 +68,10 @@ export function parseApiBaseUrl(name: string, raw: string): string {
     throw new Error(
       `Invalid ${name} ${JSON.stringify(raw)} — it must be an http(s) URL with a hostname, like https://api.example.com`,
     );
+  }
+  // A username or password here is never sent, and fetch's refusal of one repeats the URL, so neither is echoed.
+  if (parsed.username || parsed.password) {
+    throw new Error(`${name} (${parsed.origin}${parsed.pathname}) must not carry a username or password`);
   }
   // Requests append their path, so even a bare `?` or `#` swallows it; the value may hold a key, so it is not echoed.
   if (/[?#]/.test(value)) {

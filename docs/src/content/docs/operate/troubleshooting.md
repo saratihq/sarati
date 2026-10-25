@@ -62,6 +62,51 @@ curl "http://localhost:8080/api/workflows/<id>/webhook-secret?node_id=trigger&en
 
 `{"secret_present":false}` means verification is on with nothing to verify against.
 
+## A promote or publish says a trigger or step "can't run there"
+
+```
+staging's gmail account isn't active, so "New email" can't run there — its owner tests it under
+Integrations once it works again, or an owner reassigns the slot under Integrations → Environments
+before promoting here
+```
+
+The environment's account for that app can't serve what the message names: there is none, it is for
+another app, it isn't active, or it is of the wrong kind — one that uses its own credentials where
+only a one-click account runs the trigger or step, or a one-click one for a trigger that signs in
+with its own. A trigger listens as the environment's account even when it names one of its own, so
+picking an account on the trigger does not help. Fix the slot under
+**Integrations → Environments** and promote again. **Reconnect** under Integrations connects a new
+account, which the slot holds only once an owner assigns it there.
+
+The same reason on the workflow overview, under **Not listening**, means a trigger is held back by
+the environment's account, and starts once the slot is fixed. A trigger whose own account stopped
+being active is **held** as it was, and the overview's reason says what it still does: a polled feed
+is not listening and picks up from where it stopped once a **Test** under Integrations finds that
+account working, while a webhook or subscription still starts a run for each delivery, which the
+service checks without the account. One whose new version's change, or move to a renamed
+environment's URL, waits for the account is not listening either, and starts afresh once the account
+works again. One whose move to a new public URL for the service waits still starts a run for each
+delivery that reaches the service at its old address, and moves once the account works again. A
+trigger whose stand-up failed is not listening until one succeeds, and the overview gives the app's
+error. See
+[Environments](/run/environments/#triggers-listen-as-the-environments-account).
+
+## Renaming an environment says a webhook would be left at its old URL
+
+```
+Renaming 'staging' would leave "New customer" in "Billing" registered at its old URL, which serves
+nothing, because the stripe account it was registered with (Billing Stripe) isn't active — before
+renaming, its owner tests it under Integrations once it works again, or an owner reassigns the slot
+under Integrations → Environments
+```
+
+A webhook trigger in that environment is held: the account it was registered with at the app isn't
+active, and without it the webhook can be neither deleted nor registered again at the new URL. Once
+the account works again, a **Test** under Integrations brings it back; or assign the slot another
+account under **Integrations → Environments**, which registers the trigger anew as that account,
+deleting the old webhook with it first where the app keeps one per address, as GitHub does, if that
+account can reach it. Then rename. See [Rename and delete](/run/environments/#rename-and-delete).
+
 ## A run ends in `error`
 
 The run and the failing step both carry the reason, for example
@@ -243,8 +288,9 @@ Under an environment the message names it instead —
 `production has no gmail account assigned, so "Email me the report" can't run there`,
 `production's gmail account is for slack`, `production's slack account uses its own credentials`, or
 `production's gmail account isn't active` — and an owner assigns or reassigns one under
-**Integrations → Environments**. An account that isn't active is also mended by its owner
-reconnecting it under **Integrations**.
+**Integrations → Environments**. An account that isn't active is also mended once its owner's
+**Test** under **Integrations** finds it working; **Reconnect** connects a new account, which the
+slot holds only once an owner assigns it there.
 
 ## An AI Agent step says it has no Claude account
 

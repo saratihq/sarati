@@ -28,6 +28,8 @@ export class TriggerReconcilerJob implements OnModuleInit {
     try {
       const on = await this.jobs.register(async (boss) => {
         await boss.createQueue(RECONCILE_QUEUE);
+        // `short` keeps one waiting job per singleton key; createQueue leaves an existing queue's policy as it was.
+        await boss.updateQueue(RECONCILE_QUEUE, { name: RECONCILE_QUEUE, policy: 'short' });
         await boss.work<{ workflowId: string }>(RECONCILE_QUEUE, async ([job]) => {
           if (job?.data?.workflowId) await this.reconciler.reconcile(job.data.workflowId);
         });
