@@ -3,6 +3,7 @@ import { join, relative } from 'node:path';
 
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 
+import { loggedUrl } from '../common/request-log-redaction';
 import { AuthGuard } from './auth.guard';
 import { SCOPE_METADATA } from './scope.decorator';
 
@@ -23,6 +24,21 @@ const PUBLIC_CONTROLLERS = [
   'triggers/chat.controller.ts',
   'triggers/hooks.controller.ts',
 ];
+
+/** Routes whose path parameters are a credential, each marked `@CapabilityPath()` at its handler so the request log replaces them. */
+const CAPABILITY_ROUTES = [
+  '/api/catch/:catchId',
+  '/api/chat/:workflowId/:env',
+  '/api/chat/:workflowId/:env/events',
+  '/api/hooks/:workflowId/:env',
+  '/api/hooks/catch/:catchId',
+  '/api/orgs/invites/:token',
+  '/api/orgs/invites/:token/accept',
+];
+
+const PLACEHOLDER = 'path-credential';
+
+const loggedRoute = (route: string): string => loggedUrl(route.replace(/:\w+/g, PLACEHOLDER));
 
 type Ctor = new (...args: never[]) => object;
 
@@ -57,6 +73,14 @@ function guardedByAuth(controller: Ctor, handler: object): boolean {
   return guards.includes(AuthGuard);
 }
 
+function routePath(controller: Ctor, handler: object): string {
+  const parts = [Reflect.getMetadata(PATH_METADATA, controller), Reflect.getMetadata(PATH_METADATA, handler)];
+  return `/${parts
+    .map((part) => String(part).replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean)
+    .join('/')}`;
+}
+
 function declaredScope(controller: Ctor, handler: object): unknown {
   return Reflect.getMetadata(SCOPE_METADATA, handler) ?? Reflect.getMetadata(SCOPE_METADATA, controller);
 }
@@ -67,6 +91,8 @@ describe('API-key scope coverage', () => {
   const authenticated: string[] = [];
   const unannotated: string[] = [];
   const publicControllers: string[] = [];
+  const routes: string[] = [];
+  const publicRoutes: string[] = [];
 
   beforeAll(() => {
     for (const file of files) {
@@ -76,6 +102,10 @@ describe('API-key scope coverage', () => {
       for (const controller of exportedControllers(module)) {
         const handlers = routeHandlers(controller);
         if (handlers.length === 0) continue;
+        for (const { handler } of handlers) {
+          routes.push(routePath(controller, handler));
+          if (!guardedByAuth(controller, handler)) publicRoutes.push(routePath(controller, handler));
+        }
         if (!handlers.some((h) => guardedByAuth(controller, h.handler))) {
           publicControllers.push(relativePath);
           continue;
@@ -100,5 +130,17 @@ describe('API-key scope coverage', () => {
 
   it('the controllers open to unauthenticated callers are exactly the reviewed set', () => {
     expect([...new Set(publicControllers)].sort()).toEqual(PUBLIC_CONTROLLERS);
+  });
+
+  it('no path parameter of a route open to unauthenticated callers reaches the request log', () => {
+    const parameterised = publicRoutes.filter((route) => route.includes('/:'));
+    expect(parameterised.length).toBeGreaterThan(3);
+    expect(parameterised.filter((route) => loggedRoute(route).includes(PLACEHOLDER))).toEqual([]);
+  });
+
+  it('the routes whose path parameters the request log replaces are exactly the reviewed set, each in full', () => {
+    const replaced = [...new Set(routes.filter((route) => loggedRoute(route).includes('[REDACTED]')))];
+    expect(replaced.sort()).toEqual(CAPABILITY_ROUTES);
+    expect(CAPABILITY_ROUTES.filter((route) => loggedRoute(route).includes(PLACEHOLDER))).toEqual([]);
   });
 });

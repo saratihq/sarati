@@ -10,7 +10,7 @@ import { LocalAuthModule } from './auth/local/local-auth.module';
 import { OidcSignInModule } from './auth/oidc/oidc-sign-in.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { genRequestId } from './common/request-id';
-import { REQUEST_LOG_REDACTION } from './common/request-log-redaction';
+import { REQUEST_LOG_SERIALIZERS } from './common/request-log-redaction';
 import { validateEnv, warnRetiredEnv, type EnvConfig } from './config/env.config';
 import { CoreModule } from './core.module';
 import { DatabaseModule } from './database/database.module';
@@ -56,7 +56,7 @@ import { rateLimitKey } from './common/rate-limit-key';
           return typeof existing === 'string' ? existing : genRequestId(req, res);
         },
         autoLogging: true,
-        redact: REQUEST_LOG_REDACTION,
+        serializers: REQUEST_LOG_SERIALIZERS,
         level: process.env.LOG_LEVEL ?? 'info',
       },
     }),
