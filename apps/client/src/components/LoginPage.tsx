@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import { useSignIn } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { clerkErrorMessage } from "@/lib/clerkErrors";
+import { safeReturnTo } from "@/lib/returnTo";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
-import { useRedirectIfSignedIn, safeReturnTo } from "@/lib/useRedirectIfSignedIn";
+import { useRedirectIfSignedIn } from "@/lib/useRedirectIfSignedIn";
 import { SaratiSquircle } from "@/components/SaratiLogo";
 
 type OAuthStrategy = "oauth_google" | "oauth_github";
