@@ -6,9 +6,9 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { DomainError } from '../../common/domain-error';
 import type { EnvConfig } from '../../config/env.config';
 import { newId, now } from '../../database/ids';
-import { OrgInviteEntity } from '../../database/entities/org-invite.entity';
 import { UserEntity } from '../../database/entities/user.entity';
-import { OrgManagementService } from '../../orgs/org-management.service';
+import { rawQuery } from '../../database/raw-query';
+import { OrgManagementService, type ClaimedInvite } from '../../orgs/org-management.service';
 import { OrgsService } from '../../orgs/orgs.service';
 import { MIN_PASSWORD_LENGTH, hashPassword, verifyPassword } from './password';
 import { mintSession } from './local-session';
@@ -16,6 +16,14 @@ import { mintSession } from './local-session';
 /** A password never verified against a real hash still costs time, so login cannot be an account oracle. */
 const DUMMY_HASH =
   'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+// A two-key advisory lock space of its own: the trigger activation lock's is 7301.
+const REGISTRATION_LOCK_SPACE = 7302;
+
+const signupClosed = (): DomainError =>
+  new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
+    code: 'signup_closed',
+  });
 
 export interface SessionGrant {
   token: string;
@@ -55,9 +63,12 @@ export class LocalAuthService {
     this.assertEnabled();
     const email = normalizeEmail(input.email);
     this.assertPasswordUsable(input.password);
+    const hashedPassword = await hashPassword(input.password);
 
-    const grant = await this.dataSource.transaction(async (em) => {
-      await this.assertAdmissible(em, email, input.inviteToken);
+    return this.dataSource.transaction(async (em) => {
+      // Registrations take turns, so each counts accounts and looks up its email after the last one committed.
+      await rawQuery(em, 'SELECT pg_advisory_xact_lock($1, 0)', [REGISTRATION_LOCK_SPACE]);
+      const invite = await this.admit(em, email, input.inviteToken?.trim());
       if (await em.findOne(UserEntity, { where: { email } })) {
         throw new DomainError('An account with that email already exists — sign in instead.', 409, {
           code: 'email_taken',
@@ -68,20 +79,16 @@ export class LocalAuthService {
         id: newId(),
         email,
         name: input.name?.trim() || email.split('@')[0] || 'Owner',
-        hashedPassword: await hashPassword(input.password),
+        hashedPassword,
         createdAt: now(),
         updatedAt: now(),
       });
       await em.save(UserEntity, user);
       await this.orgs.ensurePersonalOrg(em, user);
+      if (invite) await this.orgManagement.redeemInvite(em, user.id, invite);
       this.logger.log(`local account created for ${email}`);
-      return { session: await this.grant(user), userId: user.id };
+      return this.grant(user);
     });
-
-    // Membership runs through the ONE acceptance path, so the join event fires exactly as it does
-    // for a browser accept. It owns its own transaction, hence after the commit above.
-    if (input.inviteToken) await this.orgManagement.acceptInvite(grant.userId, input.inviteToken.trim());
-    return grant.session;
   }
 
   async login(email: string, password: string): Promise<SessionGrant> {
@@ -109,23 +116,21 @@ export class LocalAuthService {
     };
   }
 
-  /**
-   * Registration is never open: the FIRST account on an empty instance, or one matching a live
-   * invite. Returns the invite to accept, or null for the bootstrap case.
-   */
-  private async assertAdmissible(em: EntityManager, email: string, token: string | undefined): Promise<void> {
-    if ((await em.count(UserEntity)) === 0) return;
-
-    const invite = token ? await em.findOne(OrgInviteEntity, { where: { token: token.trim() } }) : null;
-    const live =
-      invite !== null &&
-      normalizeEmail(invite.email ?? '') === email &&
-      (await this.orgManagement.isRedeemable(em, invite));
-    if (!live) {
-      throw new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
-        code: 'signup_closed',
-      });
+  private async admit(
+    em: EntityManager,
+    email: string,
+    token: string | undefined,
+  ): Promise<ClaimedInvite | null> {
+    if (!token) {
+      if ((await em.count(UserEntity)) > 0) throw signupClosed();
+      return null;
     }
+    const claimed = await this.orgManagement.claimInvite(em, token, signupClosed());
+    const admits =
+      normalizeEmail(claimed.invite.email ?? '') === email &&
+      (await this.orgManagement.isRedeemable(em, claimed.invite));
+    if (!admits) throw signupClosed();
+    return claimed;
   }
 
   private assertEnabled(): void {

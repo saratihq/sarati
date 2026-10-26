@@ -22,6 +22,12 @@ import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
 
 const INVITE_TTL_DAYS = 14;
 
+/** An invite held under its locks, with its org. */
+export interface ClaimedInvite {
+  invite: OrgInviteEntity;
+  org: OrganizationEntity;
+}
+
 export interface OrgSummary {
   id: string;
   name: string;
@@ -377,35 +383,14 @@ export class OrgManagementService {
     try {
       return await this.dataSource.transaction(async (em) => {
         const spent = new DomainError('Invite not found or expired', 404);
-        const sought = await em.findOne(OrgInviteEntity, { where: { token } });
-        if (!sought) throw spent;
-        await lockOrgForWrite(em, sought.orgId, spent);
-        const invite = await lockInvite(em, { id: sought.id });
-        if (!invite) throw spent;
-        const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
+        const claimed = await this.claimInvite(em, token, spent);
+        const { org } = claimed;
 
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
         if (existing) return { org_id: org.id, name: org.name };
 
-        if (!(await this.isRedeemable(em, invite))) throw spent;
-
-        await em.insert(OrgMemberEntity, {
-          id: newId(),
-          orgId: org.id,
-          userId,
-          role: invite.role,
-          createdAt: now(),
-        });
-        await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
-        await this.events.emit(em, {
-          orgId: org.id,
-          actorUserId: userId,
-          type: 'org.member_joined',
-          subjectType: 'org_member',
-          subjectId: userId,
-          payload: { role: invite.role, invite_id: invite.id },
-        });
-        return { org_id: org.id, name: org.name };
+        if (!(await this.isRedeemable(em, claimed.invite))) throw spent;
+        return this.redeemInvite(em, userId, claimed);
       });
     } catch (err) {
       // Double-submit race: the membership unique constraint makes the loser idempotent.
@@ -418,6 +403,42 @@ export class OrgManagementService {
       }
       throw err;
     }
+  }
+
+  /** Holds the invite `token` names for an accept or a registration against it: its org row FOR KEY SHARE, then the invite FOR UPDATE (constitution row 20); throws `refused` once either is gone. */
+  async claimInvite(em: EntityManager, token: string, refused: DomainError): Promise<ClaimedInvite> {
+    const sought = await em.findOne(OrgInviteEntity, { where: { token } });
+    if (!sought) throw refused;
+    await lockOrgForWrite(em, sought.orgId, refused);
+    const invite = await lockInvite(em, { id: sought.id });
+    if (!invite) throw refused;
+    const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
+    return { invite, org };
+  }
+
+  /** Spends a claimed invite on `userId`, who joins its org with its role: the one write every accept of an invite makes. */
+  async redeemInvite(
+    em: EntityManager,
+    userId: string,
+    { invite, org }: ClaimedInvite,
+  ): Promise<{ org_id: string; name: string }> {
+    await em.insert(OrgMemberEntity, {
+      id: newId(),
+      orgId: org.id,
+      userId,
+      role: invite.role,
+      createdAt: now(),
+    });
+    await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
+    await this.events.emit(em, {
+      orgId: org.id,
+      actorUserId: userId,
+      type: 'org.member_joined',
+      subjectType: 'org_member',
+      subjectId: userId,
+      payload: { role: invite.role, invite_id: invite.id },
+    });
+    return { org_id: org.id, name: org.name };
   }
 
   async orgById(orgId: string): Promise<OrganizationEntity> {
