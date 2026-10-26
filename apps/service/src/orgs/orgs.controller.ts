@@ -19,6 +19,7 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { KEY_SCOPED_TO_OTHER_ORG, reachesOrg, requirePrincipal, type Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
+import { CapabilityPath } from '../common/request-log-redaction';
 import type { EnvConfig } from '../config/env.config';
 import {
   ASSIGNABLE_ORG_ROLES,
@@ -91,6 +92,7 @@ export class OrgsController {
   /** Accept is token-bound (not email-bound) — any logged-in account holding the link joins. */
   @HttpCode(200)
   @Scope('org:manage')
+  @CapabilityPath()
   @Post('invites/:token/accept')
   async accept(
     @Req() req: Request,

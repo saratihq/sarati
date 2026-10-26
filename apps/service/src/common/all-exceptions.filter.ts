@@ -5,6 +5,7 @@ import { ThrottlerException } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 
 import { DomainError } from './domain-error';
+import { loggedUrl } from './request-log-redaction';
 
 /** The response a KNOWN exception shapes into, or null when only the 500 path can answer (it mints an error id). */
 export function shapeKnownError(
@@ -63,7 +64,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const errorId = randomBytes(4).toString('hex');
     const err = exception instanceof Error ? exception : new Error(String(exception));
     this.logger.error(
-      `Unhandled error ${errorId} on ${req.method} ${req.originalUrl}: ${err.message}`,
+      `Unhandled error ${errorId} on ${req.method} ${loggedUrl(req.originalUrl)}: ${err.message}`,
       err.stack,
     );
     res.status(500).json({ detail: `Internal server error (ref ${errorId})`, error_id: errorId });
