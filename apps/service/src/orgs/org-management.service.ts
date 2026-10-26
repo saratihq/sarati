@@ -22,11 +22,17 @@ import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
 
 const INVITE_TTL_DAYS = 14;
 
-/** An invite held under its locks, with its org. */
-export interface ClaimedInvite {
-  invite: OrgInviteEntity;
-  org: OrganizationEntity;
-}
+declare const held: unique symbol;
+
+/** An invite held under its locks, with its org and whether it can be redeemed, judged on the held row: only `claimInvite` makes one. */
+export type ClaimedInvite = {
+  readonly invite: OrgInviteEntity;
+  readonly org: OrganizationEntity;
+  readonly [held]: true;
+} & ({ readonly redeemable: true } | { readonly redeemable: false });
+
+/** A claimed invite judged redeemable: the only kind `redeemInvite` spends. */
+export type RedeemableInvite = Extract<ClaimedInvite, { redeemable: true }>;
 
 export interface OrgSummary {
   id: string;
@@ -357,7 +363,7 @@ export class OrgManagementService {
   }
 
   /** Whether an invite can still be redeemed: unused, unexpired, and an owner invite only while its creator is an owner. */
-  async isRedeemable(em: EntityManager, invite: OrgInviteEntity): Promise<boolean> {
+  private async isRedeemable(em: EntityManager, invite: OrgInviteEntity): Promise<boolean> {
     if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) return false;
     if (invite.role !== 'owner') return true;
     const creator = invite.createdBy
@@ -389,7 +395,7 @@ export class OrgManagementService {
         const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
         if (existing) return { org_id: org.id, name: org.name };
 
-        if (!(await this.isRedeemable(em, claimed.invite))) throw spent;
+        if (!claimed.redeemable) throw spent;
         return this.redeemInvite(em, userId, claimed);
       });
     } catch (err) {
@@ -413,14 +419,14 @@ export class OrgManagementService {
     const invite = await lockInvite(em, { id: sought.id });
     if (!invite) throw refused;
     const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
-    return { invite, org };
+    return { invite, org, redeemable: await this.isRedeemable(em, invite) } as ClaimedInvite;
   }
 
-  /** Spends a claimed invite on `userId`, who joins its org with its role: the one write every accept of an invite makes. */
+  /** Spends a claimed, redeemable invite on `userId`, who joins its org with its role: the one write every accept of an invite makes. */
   async redeemInvite(
     em: EntityManager,
     userId: string,
-    { invite, org }: ClaimedInvite,
+    { invite, org }: RedeemableInvite,
   ): Promise<{ org_id: string; name: string }> {
     await em.insert(OrgMemberEntity, {
       id: newId(),

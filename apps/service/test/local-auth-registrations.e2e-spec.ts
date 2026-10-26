@@ -21,8 +21,8 @@ interface Answer {
   code: unknown;
 }
 
-/** Local registrations take turns: an empty instance admits one first account, and an email one account. */
-describe('local registrations side by side (e2e, isolated DB)', () => {
+/** Who a local registration admits: one first account on an empty instance, one account per email, and against an invite only its invitee. */
+describe('local registration admission (e2e, isolated DB)', () => {
   let app: INestApplication;
   let db: Client;
   let dbUrl = '';
@@ -38,6 +38,25 @@ describe('local registrations side by side (e2e, isolated DB)', () => {
       .post('/api/auth/local/register')
       .send({ email, password: PASSWORD, ...(inviteToken ? { invite_token: inviteToken } : {}) })
       .then((res) => ({ status: res.status, code: res.body.code }));
+
+  const signUpOwner = async (): Promise<string> => {
+    const owner = await http()
+      .post('/api/auth/local/register')
+      .send({ email: 'owner@example.com', password: PASSWORD })
+      .expect(201);
+    return `Bearer ${owner.body.token as string}`;
+  };
+
+  const inviteToNewOrg = async (session: string, name: string, email: string): Promise<string> => {
+    const org = await http().post('/api/orgs').set('Authorization', session).send({ name }).expect(201);
+    const invite = await http()
+      .post(`/api/orgs/${org.body.id as string}/invites`)
+      .set('Authorization', session)
+      .set('X-Org-Id', org.body.id as string)
+      .send({ email, role: 'member' })
+      .expect(201);
+    return invite.body.token as string;
+  };
 
   const accounts = async (): Promise<string[]> =>
     (await db.query<{ email: string }>(`SELECT email FROM users ORDER BY email`)).rows.map((r) => r.email);
@@ -122,22 +141,11 @@ describe('local registrations side by side (e2e, isolated DB)', () => {
   });
 
   it('two registrations of one email against two invites at once admit one account, and the other answers email_taken', async () => {
-    const owner = await http()
-      .post('/api/auth/local/register')
-      .send({ email: 'owner@example.com', password: PASSWORD })
-      .expect(201);
-    const session = `Bearer ${owner.body.token as string}`;
-    const tokens: string[] = [];
-    for (const name of ['North', 'South']) {
-      const org = await http().post('/api/orgs').set('Authorization', session).send({ name }).expect(201);
-      const invite = await http()
-        .post(`/api/orgs/${org.body.id as string}/invites`)
-        .set('Authorization', session)
-        .set('X-Org-Id', org.body.id as string)
-        .send({ email: 'both@example.com', role: 'member' })
-        .expect(201);
-      tokens.push(invite.body.token as string);
-    }
+    const session = await signUpOwner();
+    const tokens = [
+      await inviteToNewOrg(session, 'North', 'both@example.com'),
+      await inviteToNewOrg(session, 'South', 'both@example.com'),
+    ];
 
     const answers = await sideBySide(
       () => register('both@example.com', tokens[0]),
@@ -151,5 +159,26 @@ describe('local registrations side by side (e2e, isolated DB)', () => {
               (SELECT count(*)::int FROM org_invites WHERE accepted_at IS NOT NULL) AS spent`,
     );
     expect(rows[0]).toEqual({ joined: 1, spent: 1 });
+  });
+
+  it('a registration against an invite sent to another email is refused as signup_closed, making no account and leaving the invite to its invitee', async () => {
+    const token = await inviteToNewOrg(await signUpOwner(), 'Addressed', 'invitee@example.com');
+
+    expect(await register('holder@example.com', token)).toEqual(CLOSED);
+    expect(await accounts()).toEqual(['owner@example.com']);
+    const pending = await db.query(`SELECT 1 FROM org_invites WHERE token = $1 AND accepted_at IS NULL`, [
+      token,
+    ]);
+    expect(pending.rowCount).toBe(1);
+
+    expect(await register('Invitee@Example.com', token)).toEqual(ADMITTED);
+    const { rows } = await db.query<{ joined: number }>(
+      `SELECT count(*)::int AS joined FROM org_members m
+         JOIN org_invites i ON i.org_id = m.org_id AND i.accepted_by = m.user_id
+         JOIN users u ON u.id = m.user_id
+        WHERE i.token = $1 AND u.email = 'invitee@example.com'`,
+      [token],
+    );
+    expect(rows[0]?.joined).toBe(1);
   });
 });

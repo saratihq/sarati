@@ -5,10 +5,11 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../../common/domain-error';
 import type { EnvConfig } from '../../config/env.config';
+import { REGISTRATION_LOCK_SPACE } from '../../database/advisory-lock-spaces';
 import { newId, now } from '../../database/ids';
 import { UserEntity } from '../../database/entities/user.entity';
 import { rawQuery } from '../../database/raw-query';
-import { OrgManagementService, type ClaimedInvite } from '../../orgs/org-management.service';
+import { OrgManagementService, type RedeemableInvite } from '../../orgs/org-management.service';
 import { OrgsService } from '../../orgs/orgs.service';
 import { MIN_PASSWORD_LENGTH, hashPassword, verifyPassword } from './password';
 import { mintSession } from './local-session';
@@ -16,9 +17,6 @@ import { mintSession } from './local-session';
 /** A password never verified against a real hash still costs time, so login cannot be an account oracle. */
 const DUMMY_HASH =
   'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-
-// A two-key advisory lock space of its own: the trigger activation lock's is 7301.
-const REGISTRATION_LOCK_SPACE = 7302;
 
 const signupClosed = (): DomainError =>
   new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
@@ -120,16 +118,13 @@ export class LocalAuthService {
     em: EntityManager,
     email: string,
     token: string | undefined,
-  ): Promise<ClaimedInvite | null> {
+  ): Promise<RedeemableInvite | null> {
     if (!token) {
       if ((await em.count(UserEntity)) > 0) throw signupClosed();
       return null;
     }
     const claimed = await this.orgManagement.claimInvite(em, token, signupClosed());
-    const admits =
-      normalizeEmail(claimed.invite.email ?? '') === email &&
-      (await this.orgManagement.isRedeemable(em, claimed.invite));
-    if (!admits) throw signupClosed();
+    if (!claimed.redeemable || normalizeEmail(claimed.invite.email ?? '') !== email) throw signupClosed();
     return claimed;
   }
 
