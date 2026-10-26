@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 
 import { DomainError } from '../common/domain-error';
+import { CapabilityPath } from '../common/request-log-redaction';
 import { isIdShape } from '../database/ids';
 import { CatchStore } from './catch-store';
 import { TriggersService } from './triggers.service';
@@ -20,6 +21,7 @@ export class HooksController {
 
   /** Test-event intake: the payload becomes an editor sample — nothing runs. */
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @CapabilityPath()
   @Post('catch/:catchId')
   catchEvent(@Param('catchId') catchId: string, @Body() body: unknown): Record<string, unknown> {
     if (!isIdShape(catchId)) throw new DomainError('Catch not found or expired', 404);
@@ -50,6 +52,7 @@ export class HooksController {
    */
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
   @HttpCode(202)
+  @CapabilityPath()
   @Post(':workflowId/:env')
   async fireEnv(
     @Param('workflowId') workflowId: string,
