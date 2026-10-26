@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Client } from 'pg';
 
+import { ADMISSION_LOCK_SPACE } from '../auth/local/admission-lock';
 import { errorMessage } from '../common/error-message';
 
 // `pnpm auth:link-sso <email> <sub>`: shell access to the box is the proof that this account is that subject at OIDC_ISSUER.
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
   await db.connect();
   try {
     await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock($1, 0)', [ADMISSION_LOCK_SPACE]);
     const found = await db.query<{ id: string }>('SELECT id FROM users WHERE lower(email) = $1 FOR UPDATE', [
       email,
     ]);

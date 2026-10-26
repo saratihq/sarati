@@ -1,6 +1,9 @@
 -- 042 — single sign-on: the identities a person signs in with at an OpenID Connect provider, keyed by (issuer, subject),
--- and the single-use state a browser sign-in holds between its start and its completion.
+-- the single-use state a browser sign-in holds between its start and its completion, and whether an account's email
+-- is one an invite may be matched to (false only when single sign-on made it from an address the provider did not confirm).
 -- Idempotent: db:migrate re-runs every file.
+
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS email_verified boolean DEFAULT true NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.user_identities (
     id uuid NOT NULL,

@@ -10,11 +10,14 @@ const M042 = readFileSync(join(__dirname, '..', 'db', 'migrations', '042_sso_sig
 
 const TABLES = ['user_identities', 'oidc_login_states'];
 
-/** Columns, constraints and indexes of the two tables, so a migrated database can be compared with a fresh one. */
+/** Columns, constraints and indexes of what 042 adds, so a migrated database can be compared with a fresh one. */
 async function shapeOf(db: Client): Promise<unknown> {
   const columns = await db.query(
     `SELECT table_name, column_name, data_type, character_maximum_length, is_nullable, column_default
-       FROM information_schema.columns WHERE table_name = ANY($1) ORDER BY table_name, column_name`,
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND (table_name = ANY($1) OR (table_name = 'users' AND column_name = 'email_verified'))
+      ORDER BY table_name, column_name`,
     [TABLES],
   );
   const constraints = await db.query(
@@ -29,7 +32,7 @@ async function shapeOf(db: Client): Promise<unknown> {
   return { columns: columns.rows, constraints: constraints.rows, indexes: indexes.rows };
 }
 
-describe('migration 042: single sign-on identities and sign-in state (scratch DBs)', () => {
+describe('migration 042: single sign-on identities, sign-in state and email trust (scratch DBs)', () => {
   let migrated: Client;
   let fresh: Client;
 
@@ -38,14 +41,22 @@ describe('migration 042: single sign-on identities and sign-in state (scratch DB
     fresh = new Client({ connectionString: await createE2eDatabase(ADMIN_URL) });
     await Promise.all([migrated.connect(), fresh.connect()]);
     await migrated.query('DROP TABLE user_identities, oidc_login_states');
+    await migrated.query('ALTER TABLE users DROP COLUMN email_verified');
   }, 30_000);
 
   afterAll(async () => {
     await Promise.all([migrated.end(), fresh.end()]);
   });
 
-  it('creates both tables once, a re-run keeps their rows, and the result matches a fresh schema.sql', async () => {
+  it('creates both tables and the column once, keeps an existing account matchable, a re-run keeps their rows, and the result matches a fresh schema.sql', async () => {
+    const existing = randomUUID();
+    await migrated.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'e@example.com', 'E', now(), now())`,
+      [existing],
+    );
     await migrated.query(M042);
+    const trusted = await migrated.query(`SELECT email_verified FROM users WHERE id = $1`, [existing]);
+    expect(trusted.rows).toEqual([{ email_verified: true }]);
     const user = randomUUID();
     await migrated.query(
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'm@example.com', 'M', now(), now())`,

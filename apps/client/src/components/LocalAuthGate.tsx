@@ -34,7 +34,7 @@ export function AuthHeading({ title, subtitle, focus = false }: { title: string;
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (focus) heading.current?.focus();
-  }, [focus]);
+  }, [focus, title]);
   return (
     <div className="mb-8 text-center">
       <div className="flex items-center justify-center mb-4">

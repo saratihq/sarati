@@ -43,6 +43,8 @@ export default function JoinPage() {
   const [error, setError] = useState<string | null>(() =>
     token ? null : "This invite link is missing its token.",
   );
+  // An invite for another address is not spent: the message says what to do instead of asking for a fresh link.
+  const [notYours, setNotYours] = useState(false);
   const [joining, setJoining] = useState(false);
   // StrictMode double-mounts in dev; the GET is idempotent, so this only avoids a duplicate request.
   const previewed = useRef(false);
@@ -79,6 +81,7 @@ export default function JoinPage() {
       toast.success(`Joined ${name}`, "You're now working in this organization.");
       router.replace("/");
     } catch (e) {
+      setNotYours(e instanceof api.ApiError && (e.code?.startsWith("invite_email_") ?? false));
       setError(e instanceof Error ? e.message : "This invite link is invalid or has expired.");
       setJoining(false);
     }
@@ -106,12 +109,14 @@ export default function JoinPage() {
             <AlertTriangle size={18} />
           </div>
           <h1 className="text-[16px] font-semibold m-0 mb-1.5">This invite can&apos;t be used</h1>
-          <p className="text-[13px] m-0 mb-2 leading-relaxed" style={{ color: "var(--orchestr-ink-muted)" }}>
+          <p className={`text-[13px] m-0 leading-relaxed ${notYours ? "mb-6" : "mb-2"}`} style={{ color: "var(--orchestr-ink-muted)" }}>
             {error}
           </p>
-          <p className="text-[13px] m-0 mb-6 leading-relaxed" style={{ color: "var(--orchestr-ink-subtle)" }}>
-            Ask whoever invited you for a fresh link — invites expire and can only be used once.
-          </p>
+          {!notYours && (
+            <p className="text-[13px] m-0 mb-6 leading-relaxed" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              Ask whoever invited you for a fresh link — invites expire and can only be used once.
+            </p>
+          )}
           <Button variant="secondary" onClick={() => router.push("/")}>
             Go to dashboard
           </Button>
@@ -138,12 +143,12 @@ export default function JoinPage() {
                   .{" "}
                   {showPassword
                     ? "Create your account using the email address the invite was sent to."
-                    : "Continue with single sign-on to join."}
+                    : "Continue with single sign-on as the email address the invite was sent to."}
                 </>
               ) : showPassword ? (
                 "Create your account to join the team. Use the email address the invite was sent to."
               ) : (
-                "Continue with single sign-on to join the team."
+                "Continue with single sign-on as the email address the invite was sent to."
               )}
             </p>
           </div>

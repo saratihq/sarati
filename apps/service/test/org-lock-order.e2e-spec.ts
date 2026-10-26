@@ -125,7 +125,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
   const deleteOrg = (org: string): request.Test => asOwner(http().delete(`/api/orgs/${org}`));
 
-  // An org with a second member, a custom environment and a pending invite: one row of each kind its delete cascades into.
+  // An org with a second member, a custom environment and a pending invite for the joiner: one row of each kind its delete cascades into.
   const team = async (name: string): Promise<Team> => {
     const created = await asOwner(http().post('/api/orgs')).send({ name }).expect(201);
     const org = created.body.id as string;
@@ -136,7 +136,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     const envName = `env-${suffix()}`;
     const env = await asOwner(http().post('/api/environments'), org).send({ name: envName }).expect(201);
     const pending = await asOwner(http().post(`/api/orgs/${org}/invites`))
-      .send({ email: `pending-${suffix()}@e2e.local` })
+      .send({ email: 'joiner-lock@e2e.local' })
       .expect(201);
     return {
       org,

@@ -12,7 +12,7 @@ curl -fsSL https://get.sarati.io | sh
 That checks Docker is running, refuses a port that is already taken, writes a `sarati` directory to
 configure and upgrade from, starts the product, and waits until it answers. Open
 <http://localhost:8080> and create the owner account — the first account is yours, everyone after
-joins by invite.
+joins by invite ([single sign-on](/operate/users/#single-sign-on) admits people differently).
 
 Prefer to read it first? It only fetches
 [`install.sh`](https://github.com/saratihq/sarati/blob/main/install.sh) and

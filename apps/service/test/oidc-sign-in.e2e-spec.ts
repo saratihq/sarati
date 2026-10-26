@@ -39,6 +39,8 @@ const ACCOUNTS: Record<string, IdpAccount> = {
   'sub-unverified': { email: 'unverified@example.com', email_verified: false },
   'sub-outsider': { email: 'out@elsewhere.net', email_verified: true },
   'sub-member': { email: 'member@example.com', email_verified: true },
+  'sub-stranger': { email: 'stranger@example.com', email_verified: true },
+  'sub-quiet': { email: 'quiet@other.org', email_verified: false },
 };
 
 interface Started {
@@ -324,6 +326,52 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       ).toBe(0);
     });
 
+    it('admits only the account at the address the invite was sent to — never one holding a forwarded link', async () => {
+      const { orgId, token } = await invite('someone.else@example.com');
+      const before = await rowsCreated();
+      const stranger = await signIn('sub-stranger', { invite: token });
+      expect({ status: stranger.status, code: stranger.body.code }).toEqual({
+        status: 403,
+        code: 'invite_email_mismatch',
+      });
+      expect(await rowsCreated()).toEqual(before);
+      const returning = await signIn('sub-bob', { invite: token });
+      expect({ status: returning.status, code: returning.body.code }).toEqual({
+        status: 403,
+        code: 'invite_email_mismatch',
+      });
+      expect(await count(`SELECT 1 FROM org_members WHERE org_id = $1`, [orgId])).toBe(1);
+      const pending = await db.query(`SELECT accepted_by FROM org_invites WHERE token = $1`, [token]);
+      expect(pending.rows).toEqual([{ accepted_by: null }]);
+    });
+
+    it('matches no invite to an address the provider did not confirm, until it confirms it', async () => {
+      const quiet = await invite('quiet@other.org');
+      const before = await rowsCreated();
+      const unconfirmed = await signIn('sub-quiet', { invite: quiet.token });
+      expect({ status: unconfirmed.status, code: unconfirmed.body.code }).toEqual({
+        status: 403,
+        code: 'invite_email_unverified',
+      });
+      expect(unconfirmed.body.detail).toContain('email_verified');
+      expect(await rowsCreated()).toEqual(before);
+
+      const { orgId, token } = await invite('jit@other.org');
+      const returning = await signIn('sub-jit', { invite: token });
+      expect({ status: returning.status, code: returning.body.code }).toEqual({
+        status: 403,
+        code: 'invite_email_unverified',
+      });
+      idp.setAccounts({ ...ACCOUNTS, 'sub-jit': { ...ACCOUNTS['sub-jit'], email_verified: true } });
+      try {
+        const confirmed = await signIn('sub-jit', { invite: token });
+        expect(confirmed.status).toBe(200);
+        expect(confirmed.body.joined_org_id).toBe(orgId);
+      } finally {
+        idp.setAccounts(ACCOUNTS);
+      }
+    });
+
     it('makes no account at all when joining the org fails', async () => {
       const { orgId, token } = await invite('fail@example.com');
       await db.query(`CREATE OR REPLACE FUNCTION e2e_refuse_join() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -446,6 +494,11 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
         .delete('/api/auth/oidc/link')
         .set('Authorization', `Bearer ${carolSession}`)
         .expect(204);
+      const twice = await from(app)
+        .delete('/api/auth/oidc/link')
+        .set('Authorization', `Bearer ${carolSession}`)
+        .expect(404);
+      expect(twice.body.code).toBe('oidc_not_linked');
       const me = await from(app)
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${carolSession}`)
@@ -459,6 +512,26 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       expect(ssoOnly.body.code).toBe('oidc_last_sign_in_method');
       expect(await count(`SELECT 1 FROM user_identities WHERE user_id = $1`, [ownerId])).toBe(1);
     });
+
+    it('keeps single sign-on connected while password sign-in is off, though the account has a password', async () => {
+      await db.query(
+        `INSERT INTO user_identities (id, user_id, issuer, subject, email_at_link) VALUES ($1, $2, $3, 'sub-carol', NULL)`,
+        [randomUUID(), carol, idp.issuer],
+      );
+      await reboot(ssoEnv());
+      try {
+        const ssoSession = (await mintSession(carol, SSO_SECRET_KEY, { method: 'oidc', idp: idp.issuer }))
+          .token;
+        const refusedUnlink = await from(app)
+          .delete('/api/auth/oidc/link')
+          .set('Authorization', `Bearer ${ssoSession}`)
+          .expect(409);
+        expect(refusedUnlink.body.code).toBe('oidc_last_sign_in_method');
+        expect(await count(`SELECT 1 FROM user_identities WHERE user_id = $1`, [carol])).toBe(1);
+      } finally {
+        await reboot(ssoEnv({ LOCAL_AUTH_ENABLED: 'true' }));
+      }
+    }, 60_000);
   });
 
   describe('which sessions each configuration accepts', () => {
@@ -716,6 +789,10 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       expect(await run(['dup@example.com', 'sub-ada'])).toEqual({
         code: 1,
         out: expect.stringContaining('already signs in to another account'),
+      });
+      expect(await run(['legacy@example.com', 'sub-legacy-elsewhere'])).toEqual({
+        code: 1,
+        out: expect.stringContaining('already connected to a different subject'),
       });
       expect(await run(['dup@example.com', 'sub-x'], '')).toEqual({
         code: 1,

@@ -10,8 +10,9 @@ curl -fsSL https://get.sarati.io | sh
 ```
 
 Open <http://localhost:8080> and create your account — the first one is the owner, everyone after
-joins by invite. Docker is the only requirement, and re-running that command upgrades in place. It
-only fetches [`install.sh`](install.sh) and
+joins by invite ([single sign-on](https://docs.sarati.io/operate/users/#single-sign-on) admits
+people differently). Docker is the only requirement, and re-running that command upgrades in place.
+It only fetches [`install.sh`](install.sh) and
 [`docker-compose.single.yaml`](docker-compose.single.yaml), so read them first if you like.
 
 Rather not pipe a script? The same product, one container:

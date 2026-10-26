@@ -192,7 +192,7 @@ export class EnvConfig {
   @IsString()
   oidcClientSecret = '';
 
-  /** Comma-separated email domains single sign-on admits new accounts from; empty admits any. */
+  /** Comma-separated email domains every single sign-on must come from, returning accounts included; empty admits any. */
   @IsString()
   oidcAllowedDomains = '';
 

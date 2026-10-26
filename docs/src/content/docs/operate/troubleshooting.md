@@ -388,16 +388,21 @@ Or **Can't reach your identity provider** after signing in there. The service lo
 line starting `Single sign-on unavailable:`:
 
 ```
-Single sign-on unavailable: http://idp.example.com/.well-known/openid-configuration could not be reached: connect ECONNREFUSED 10.0.0.5:443
+Single sign-on unavailable: https://idp.example.com/.well-known/openid-configuration could not be reached: connect ECONNREFUSED 10.0.0.5:443
+```
+
+```
+Single sign-on unavailable: https://idp.example.com/.well-known/openid-configuration could not be reached: unable to verify the first certificate
 ```
 
 ```
 Single sign-on unavailable: the discovery document names issuer "https://login.example.com/", not OIDC_ISSUER "https://login.example.com" — they must match exactly, trailing slash included
 ```
 
-For the second, copy the `issuer` from the provider's discovery document into `OIDC_ISSUER` as it
-is. A provider behind a private certificate authority needs `NODE_EXTRA_CA_CERTS`, as
-[Single sign-on](/operate/configuration/#single-sign-on) says.
+The second is a provider behind a private certificate authority:
+[trust it](/operate/configuration/#a-provider-behind-a-private-certificate-authority) with
+`NODE_EXTRA_CA_CERTS`. For the third, copy the `issuer` from the provider's discovery document into
+`OIDC_ISSUER` as it is.
 
 ## Single sign-on: "Sign-in couldn't be verified"
 

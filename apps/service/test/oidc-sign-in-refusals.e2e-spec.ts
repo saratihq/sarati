@@ -7,8 +7,16 @@ import { Client } from 'pg';
 import { mintSession } from '../src/auth/local/local-session';
 import { OidcRelyingParty } from '../src/auth/oidc/oidc-relying-party';
 import { HostileIdp } from './support/hostile-idp';
-import { freePort } from './support/service-process';
-import { SSO_SECRET_KEY, bootSsoApp, clientAddress, from, newBinding, snapshotEnv } from './support/sso-app';
+import { bootService, freePort, THIS_SERVICE } from './support/service-process';
+import {
+  FRONTEND_URL,
+  SSO_SECRET_KEY,
+  bootSsoApp,
+  clientAddress,
+  from,
+  newBinding,
+  snapshotEnv,
+} from './support/sso-app';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 interface Flow {
@@ -20,6 +28,8 @@ interface Flow {
 }
 
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
+
+const DISCOVERY_PATH = '/tenant/.well-known/openid-configuration';
 
 /** Every refusal the relying party owes, against a provider whose answers each test sets: status and code, nothing created, and the operator's log line. */
 describe('single sign-on refusals against a hostile provider (e2e, isolated DB)', () => {
@@ -463,6 +473,35 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
       idp.userinfo = () => ({ status: 500, body: 'down' });
       await refused(flow, 502, 'oidc_unavailable');
     });
+
+    it('reads UserInfo refusing the access token as a rejection', async () => {
+      const flow = await begin();
+      idp.answerWith(claimsFor(flow, { email: undefined }));
+      idp.userinfo = () => ({ status: 401, body: '' });
+      await refused(flow, 401, 'oidc_token_rejected');
+      expect(warned().at(-1)).toMatch(/UserInfo endpoint refused the access token \(401\)/);
+    });
+  });
+
+  describe("the provider's keys", () => {
+    it('reads a key set it cannot fetch as the provider being unavailable, and reads discovery afresh after', async () => {
+      idp.jwks = () => ({ status: 500, body: 'down' });
+      const flow = await begin();
+      idp.answerWith(claimsFor(flow));
+      await refused(flow, 502, 'oidc_unavailable');
+      expect(warned().at(-1)).toMatch(/keys \(jwks_uri\) could not be read/);
+      const fetched = idp.sent(DISCOVERY_PATH).length;
+      await begin();
+      expect(idp.sent(DISCOVERY_PATH)).toHaveLength(fetched + 1);
+    });
+
+    it('reads a key set behind a closed port as the provider being unavailable', async () => {
+      idp.discovery.jwks_uri = `http://127.0.0.1:${await freePort()}/jwks`;
+      const flow = await begin();
+      idp.answerWith(claimsFor(flow));
+      await refused(flow, 502, 'oidc_unavailable');
+      expect(warned().at(-1)).toMatch(/keys \(jwks_uri\) could not be read/);
+    });
   });
 
   describe('discovery', () => {
@@ -513,6 +552,11 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
       flow = await begin();
       idp.answerWith(claimsFor(flow, { email: 'not an email' }));
       await refused(flow, 403, 'oidc_email_missing');
+      for (const email of ['a\u0000b@example.com', 'a\u001b[31mb@example.com', 'a\u202eb@example.com']) {
+        flow = await begin();
+        idp.answerWith(claimsFor(flow, { email }));
+        await refused(flow, 403, 'oidc_email_missing');
+      }
     });
 
     describe('with OIDC_ALLOWED_DOMAINS', () => {
@@ -537,7 +581,57 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
           await refused(flow, 403, 'oidc_domain_not_allowed');
         }
       });
+
+      it('holds a link to the same rule, connecting nothing', async () => {
+        const ann = await bareUser();
+        const cases: Array<[Record<string, unknown>, string]> = [
+          [{ email: 'a@example.org' }, 'oidc_domain_not_allowed'],
+          [{ email_verified: false }, 'oidc_email_unverified'],
+        ];
+        for (const [over, code] of cases) {
+          const link = await begin('/api/auth/oidc/link/start', ann.session);
+          idp.answerWith(claimsFor(link, over));
+          const res = await finish(link, {}, '/api/auth/oidc/link/complete', ann.session);
+          expect({ status: res.status, code: res.body.code }).toEqual({ status: 403, code });
+        }
+        const identities = await db.query(`SELECT 1 FROM user_identities WHERE user_id = $1`, [ann.id]);
+        expect(identities.rows).toEqual([]);
+      });
     });
+  });
+
+  describe('in production', () => {
+    it('refuses a discovery document naming a plain-http endpoint off this machine, and never calls it', async () => {
+      idp.discovery.token_endpoint = 'http://idp.invalid/token';
+      const service = await bootService({
+        service: THIS_SERVICE,
+        databaseUrl: await createE2eDatabase(ADMIN_URL),
+        env: {
+          ...ssoEnv({ OIDC_ALLOWED_DOMAINS: '' }),
+          ENVIRONMENT: 'production',
+          MOCK_AUTH: 'false',
+          SECRET_KEY: SSO_SECRET_KEY,
+          FERNET_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+          DBOS_APP_VERSION: 'e2e-production',
+          FRONTEND_URL,
+        },
+      });
+      try {
+        const res = await fetch(`${service.base}/api/auth/oidc/start`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ binding_hash: newBinding().bindingHash }),
+        });
+        expect({ status: res.status, code: ((await res.json()) as { code?: string }).code }).toEqual({
+          status: 502,
+          code: 'oidc_unavailable',
+        });
+        expect(service.log()).toMatch(/token_endpoint is plain http, which production refuses/);
+        expect(idp.sent(DISCOVERY_PATH)).toHaveLength(1);
+      } finally {
+        await service.crash();
+      }
+    }, 120_000);
   });
 
   it('never writes a secret, a token, a code or a binding to the log', () => {

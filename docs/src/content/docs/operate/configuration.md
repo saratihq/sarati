@@ -150,20 +150,27 @@ one redirect URI:
 <SARATI_URL>/auth/oidc/callback
 ```
 
-Then put the three values it gives you in `.env` and run `docker compose up -d`:
+On an instance that already has password accounts, add `LOCAL_AUTH_ENABLED=true` as well and
+follow [Moving an instance over](/operate/users/#single-sign-on) — otherwise passwords turn off
+before anyone has connected. Then put the three values the provider gives you in `.env` and run
+`docker compose up -d`:
 
 ```bash
 # The issuer exactly as the provider's tokens carry it — trailing slash included, or not.
 OIDC_ISSUER=https://login.example.com
 OIDC_CLIENT_ID=sarati
 OIDC_CLIENT_SECRET=
-# Optional: the email domains an account may come from, comma-separated. Empty admits any.
+# The email domains people may sign in from, comma-separated. Empty admits any.
 OIDC_ALLOWED_DOMAINS=example.com
 ```
 
 The sign-in screen then leads with **Continue with single sign-on**. Who that admits, and how
 people already on the instance move over, is in [Users](/operate/users/#single-sign-on).
 
+- **A provider anyone can join needs `OIDC_ALLOWED_DOMAINS`:** with `accounts.google.com`, Apple,
+  GitLab.com or personal Microsoft accounts, anyone with an account there can otherwise make one
+  here. In production the boot log warns while it is unset. Set it, too, for a provider that lets
+  people set an address it has not verified — [Users](/operate/users/#single-sign-on) says why.
 - **The three go together:** setting `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` without the other two
   stops the service at boot and names what is missing. `OIDC_ISSUER` alone does nothing, and the
   boot log says so.
@@ -177,8 +184,8 @@ people already on the instance move over, is in [Users](/operate/users/#single-s
 - **`SARATI_URL` is the address people use:** the redirect URI is built from it, and a sign-in
   started at any other address cannot finish. In production, `SARATI_URL` and `OIDC_ISSUER` must be
   `https://`, or `http://` to this machine; anything else stops the service at boot.
-- **A provider behind a private certificate authority:** point Node's `NODE_EXTRA_CA_CERTS` at the
-  authority's certificate, at a path inside the container.
+- **A provider behind a private certificate authority:** mount the authority's certificate into the
+  container and point `NODE_EXTRA_CA_CERTS` at it — see below.
 - **Clerk or your own provider, not both:** `CLERK_ISSUER` with `OIDC_CLIENT_ID` stops the service
   at boot.
 - **Email and password turns off:** once the three are set, `LOCAL_AUTH_ENABLED` defaults to off,
@@ -187,6 +194,23 @@ people already on the instance move over, is in [Users](/operate/users/#single-s
   In production the boot log then warns that passwords skip the provider's MFA and offboarding.
 - **The composer:** the AI composer accepts single sign-on sessions once it sees `OIDC_ISSUER` and
   `OIDC_CLIENT_ID` too. Both stacks hand it the same `.env`, so there is nothing to do.
+
+#### A provider behind a private certificate authority
+
+Save the authority's certificate as `ca.pem` in the install directory, beside
+`docker-compose.yaml`, and add a `docker-compose.override.yaml` there. Compose reads it with the
+main file, and an upgrade leaves it alone:
+
+```yaml
+services:
+  sarati:
+    volumes:
+      - ./ca.pem:/etc/sarati/ca.pem:ro
+```
+
+On a five-container install the service is `service` instead of `sarati`. Then add
+`NODE_EXTRA_CA_CERTS=/etc/sarati/ca.pem` to `.env` and run `docker compose up -d`. Until then, the
+service log says `unable to verify the first certificate`.
 
 ### Private addresses
 

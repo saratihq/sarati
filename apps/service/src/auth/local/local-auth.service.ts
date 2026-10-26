@@ -84,6 +84,7 @@ export class LocalAuthService {
         email,
         name: input.name?.trim() || email.split('@')[0] || 'Owner',
         hashedPassword,
+        emailVerified: true,
         identity: null,
       });
       // Membership runs through the ONE acceptance path, so the join event fires exactly as it does for a browser accept.

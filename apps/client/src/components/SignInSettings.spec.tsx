@@ -33,11 +33,34 @@ beforeEach(() => {
 });
 
 describe("SignInSettings", () => {
-  it("is absent on an instance without single sign-on", async () => {
+  it("is absent on an instance without single sign-on, and never asks who you are there", async () => {
     account({ password: true, sso: null });
+    authMe.mockRejectedValue(new Error("Can't reach the Sarati server."));
     const { container } = render(<SignInSettings />);
-    await waitFor(() => expect(authMe).toHaveBeenCalled());
-    expect(container).toBeEmptyDOMElement();
+    await waitFor(() => expect(getLocalAuthStatus).toHaveBeenCalled());
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+    expect(authMe).not.toHaveBeenCalled();
+  });
+
+  it("holds the row's place while it loads on an instance with single sign-on", async () => {
+    account({ password: true, sso: { connected: false, email: null } });
+    let answer: (value: Awaited<ReturnType<typeof api.authMe>>) => void = () => {};
+    authMe.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    render(<SignInSettings />);
+
+    expect(await screen.findByRole("status", { name: "Loading how you sign in" })).toBeInTheDocument();
+    answer({ user: { id: "u1", email: "a@example.com", name: "A" }, sign_in: { password: true, sso: { connected: false, email: null } } });
+    expect(await screen.findByRole("button", { name: "Connect" })).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("puts focus back on Connect when the password step is cancelled", async () => {
+    account({ password: true, sso: { connected: false, email: null } });
+    render(<SignInSettings />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Connect" })).toHaveFocus();
   });
 
   it("asks for the current password before connecting a password account", async () => {

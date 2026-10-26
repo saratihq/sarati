@@ -454,7 +454,8 @@ CREATE TABLE public.users (
     name character varying(255) NOT NULL,
     created_at timestamp with time zone,
     updated_at timestamp with time zone,
-    clerk_user_id character varying(64)
+    clerk_user_id character varying(64),
+    email_verified boolean DEFAULT true NOT NULL
 );
 
 

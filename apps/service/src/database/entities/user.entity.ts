@@ -22,6 +22,10 @@ export class UserEntity {
   @Column({ type: 'varchar', length: 255 })
   name!: string;
 
+  /** False only when single sign-on made the account from an email its provider did not confirm; no invite is matched to such an email. */
+  @Column({ name: 'email_verified', type: 'boolean', default: true })
+  emailVerified!: boolean;
+
   @Column({ name: 'created_at', type: 'timestamptz', nullable: true })
   createdAt!: Date | null;
 

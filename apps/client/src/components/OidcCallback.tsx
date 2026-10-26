@@ -41,6 +41,10 @@ const NOT_THIS_TAB: Failure = {
   action: "login",
 };
 
+const KEEPS_HAPPENING = "If it keeps happening, tell whoever runs this instance — their service log says why.";
+const OTHER_ACCOUNT =
+  "Confirm your address at your identity provider, or sign in there with an account whose address it has confirmed, then try again.";
+
 const forLink = (failure: Failure): Failure => ({ ...failure, title: "Single sign-on wasn't connected", action: "settings" });
 
 function providerFailure(error: string): Failure {
@@ -66,19 +70,29 @@ async function serviceFailure(err: unknown): Promise<Failure> {
     case "oidc_unavailable":
       return {
         title: "Can't reach your identity provider",
-        body: "Sarati couldn't talk to it just now. If it keeps happening, the service log says why.",
+        body: `Sarati couldn't talk to it just now. ${KEEPS_HAPPENING}`,
         action: "restart",
       };
     case "oidc_token_rejected":
       return {
         title: "Sign-in couldn't be verified",
-        body: "Your identity provider's answer didn't pass Sarati's checks. If it keeps happening, the service log says why.",
+        body: `Your identity provider's answer didn't pass Sarati's checks. ${KEEPS_HAPPENING}`,
         action: "restart",
       };
     case "oidc_email_unverified":
-    case "oidc_email_missing":
+      return { title: "This instance can't admit you", body: `${detail} ${OTHER_ACCOUNT}`, action: "login" };
     case "oidc_domain_not_allowed":
+      return {
+        title: "This instance can't admit you",
+        body: `${detail} Sign in at your identity provider with your work account, or sign out there first, then try again.`,
+        action: "login",
+      };
+    case "oidc_email_missing":
       return { title: "This instance can't admit you", body: detail, action: "login" };
+    case "invite_email_mismatch":
+      return { title: "This invite is for someone else", body: detail, action: "login" };
+    case "invite_email_unverified":
+      return { title: "This invite can't be matched to you", body: `${detail} ${OTHER_ACCOUNT}`, action: "login" };
     case "oidc_account_exists":
       return accountExists();
     default:
@@ -142,6 +156,8 @@ async function finish(
 export default function OidcCallback() {
   const router = useRouter();
   const [failure, setFailure] = useState<Failure | null>(null);
+  // Each failure remounts its heading and message, so focus and the announcement follow a repeat of the same one.
+  const [shown, setShown] = useState(0);
   const [restarting, setRestarting] = useLeavingState();
   const flow = useRef<OidcPending | null>(null);
   // The code is single use: StrictMode's second mount must not send it again.
@@ -155,14 +171,19 @@ export default function OidcCallback() {
     flow.current = takePending();
     const link = flow.current?.purpose === "link";
     void finish(flow.current, params, (path) => router.replace(path)).then((failed) => {
-      if (failed) setFailure(link && failed !== NOT_THIS_TAB ? forLink(failed) : failed);
+      if (!failed) return;
+      setFailure(link && failed !== NOT_THIS_TAB ? forLink(failed) : failed);
+      setShown((n) => n + 1);
     });
   }, [router]);
 
   const act = async (action: Action) => {
     if (action === "settings") return router.replace("/settings");
     if (action === "login") return router.replace("/login");
-    if (action === "password") return router.replace("/login?method=password");
+    if (action === "password") {
+      const next = flow.current?.invite_token ? flow.current.return_to : "/settings";
+      return router.replace(`/login?method=password&redirect_url=${encodeURIComponent(next)}`);
+    }
     setRestarting(true);
     try {
       await beginOidcFlow({
@@ -172,6 +193,7 @@ export default function OidcCallback() {
       });
     } catch (err) {
       setFailure(await serviceFailure(err));
+      setShown((n) => n + 1);
       setRestarting(false);
     }
   };
@@ -189,12 +211,10 @@ export default function OidcCallback() {
 
   return (
     <AuthShell title={failure.title}>
-      <div aria-live="polite">
-        <AuthHeading title={failure.title} subtitle="Single sign-on" focus />
-        <p className="text-[13px] text-center leading-relaxed m-0 mb-6" style={{ color: "var(--orchestr-ink-muted)" }}>
-          {failure.body}
-        </p>
-      </div>
+      <AuthHeading key={`heading-${shown}`} title={failure.title} subtitle="Single sign-on" focus />
+      <p key={`body-${shown}`} role="alert" className="text-[13px] text-center leading-relaxed m-0 mb-6" style={{ color: "var(--orchestr-ink-muted)" }}>
+        {failure.body}
+      </p>
       <Button variant="secondary" className="w-full" disabled={restarting} onClick={() => act(failure.action)}>
         {restarting ? "Redirecting..." : ACTION_LABEL[failure.action]}
       </Button>

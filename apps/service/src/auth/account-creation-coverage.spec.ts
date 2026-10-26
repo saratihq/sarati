@@ -15,7 +15,9 @@ const CREATES_A_USER = [
   /\bcreate\(\s*UserEntity\b/,
   /\binsert\(\s*UserEntity\b/,
   /\bsave\(\s*UserEntity\b/,
-  /INSERT\s+INTO\s+(public\.)?users\b/i,
+  /\binto\(\s*UserEntity\b/,
+  /\b(get|Inject)Repository\(\s*UserEntity\b/,
+  /INSERT\s+INTO\s+("?public"?\.)?"?users\b/i,
 ];
 
 function sourceFiles(dir: string): string[] {
@@ -32,6 +34,20 @@ describe('account creation coverage', () => {
     .filter((file) => CREATES_A_USER.some((pattern) => pattern.test(readFileSync(file, 'utf8'))))
     .map((file) => relative(SRC_ROOT, file))
     .sort();
+
+  it('recognises each way of writing one', () => {
+    const forms = [
+      'em.create(UserEntity, row)',
+      'em.insert(UserEntity, row)',
+      'em.save(UserEntity, user)',
+      'qb.insert().into(UserEntity).values(row)',
+      'em.getRepository(UserEntity).save(user)',
+      '@InjectRepository(UserEntity) private readonly users',
+      'INSERT INTO users (id) VALUES ($1)',
+      'INSERT INTO "public"."users" (id) VALUES ($1)',
+    ];
+    expect(forms.filter((form) => !CREATES_A_USER.some((pattern) => pattern.test(form)))).toEqual([]);
+  });
 
   it('finds the creation sites it guards', () => {
     expect(creating.length).toBeGreaterThan(0);

@@ -37,6 +37,7 @@ export class HostileIdp {
   discoveryReply: Responder | null = null;
   token: Responder = () => json({ error: 'server_error' }, 500);
   userinfo: Responder = () => json({}, 404);
+  jwks: Responder = () => json({ keys: [this.publicJwk] });
   private server!: Server;
   private privateKey!: KeyLike;
   private publicJwk!: JWK;
@@ -70,6 +71,7 @@ export class HostileIdp {
       authorization_response_iss_parameter_supported: true,
     };
     this.userinfo = () => json({}, 404);
+    this.jwks = () => json({ keys: [this.publicJwk] });
   }
 
   /** Answer the next code exchanges with an ID token carrying `claims`, signed as `opts` says. */
@@ -128,7 +130,7 @@ export class HostileIdp {
       case '/tenant/.well-known/openid-configuration':
         return this.discoveryReply ? this.discoveryReply(req) : json(this.discovery);
       case '/tenant/jwks':
-        return json({ keys: [this.publicJwk] });
+        return this.jwks(req);
       case '/tenant/token':
         return this.token(req);
       case '/tenant/userinfo':

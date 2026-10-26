@@ -9,15 +9,15 @@ import { UserSettingsEntity } from '../../database/entities/user-settings.entity
 import { rawQuery } from '../../database/raw-query';
 import { EventsService } from '../../events/events.service';
 import { OrgsService } from '../../orgs/orgs.service';
-
-/** The two-key advisory-lock space every account admission takes first, apart from the triggers' 7301. */
-export const ADMISSION_LOCK_SPACE = 7302;
+import { ADMISSION_LOCK_SPACE } from './admission-lock';
 
 /** An account about to be created; `email` is already normalized. */
 export interface NewAccount {
   email: string;
   name: string;
   hashedPassword: string | null;
+  /** Whether an invite may be matched to `email`: false only for an address single sign-on's provider did not confirm. */
+  emailVerified: boolean;
   /** The single sign-on identity it signs in with, or null for a password account. */
   identity: { issuer: string; subject: string; emailAtLink: string | null } | null;
 }
@@ -56,6 +56,7 @@ export class AdmissionService {
       name: account.name,
       clerkUserId: null,
       hashedPassword: account.hashedPassword,
+      emailVerified: account.emailVerified,
       createdAt: now(),
       updatedAt: now(),
     });

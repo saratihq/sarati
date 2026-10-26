@@ -1,8 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import JoinPage from "@/app/join/[token]/page";
+import { clearLocalSession, writeLocalSession } from "@/lib/localSession";
 import * as flow from "@/lib/oidcFlow";
 import { useLocalAuthStatus } from "@/lib/useLocalAuthStatus";
 
@@ -18,6 +19,7 @@ vi.mock("@/lib/useLocalAuthStatus", () => ({ useLocalAuthStatus: vi.fn() }));
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof api>()),
   previewOrgInvite: vi.fn(),
+  acceptOrgInvite: vi.fn(),
 }));
 vi.mock("@/lib/oidcFlow", async (importOriginal) => ({
   ...(await importOriginal<typeof flow>()),
@@ -62,5 +64,38 @@ describe("JoinPage: an invitee with no session", () => {
 
     expect(await screen.findByLabelText("Password")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue with single sign-on" })).not.toBeInTheDocument();
+  });
+});
+
+describe("JoinPage: a signed-in account", () => {
+  beforeEach(() => {
+    offer(true, true);
+    writeLocalSession("a.b.c", new Date(Date.now() + 3_600_000).toISOString());
+  });
+
+  afterEach(() => clearLocalSession());
+
+  it("says the invite is for another address without sending them for a fresh link", async () => {
+    vi.mocked(api.acceptOrgInvite).mockRejectedValue(
+      new api.ApiError(
+        "This invite was sent to a different email address than a@example.com. Ask whoever invited you to invite that address, or sign in with the account the invite was sent to.",
+        403,
+        "invite_email_mismatch",
+      ),
+    );
+    render(<JoinPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Join Acme" }));
+    expect(await screen.findByText(/sent to a different email address than a@example.com/)).toBeInTheDocument();
+    expect(screen.queryByText(/Ask whoever invited you for a fresh link/)).not.toBeInTheDocument();
+  });
+
+  it("asks for a fresh link when the invite is spent", async () => {
+    vi.mocked(api.acceptOrgInvite).mockRejectedValue(new api.ApiError("Invite not found or expired", 404));
+    render(<JoinPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Join Acme" }));
+    expect(await screen.findByText("Invite not found or expired")).toBeInTheDocument();
+    expect(screen.getByText(/Ask whoever invited you for a fresh link/)).toBeInTheDocument();
   });
 });

@@ -10,7 +10,8 @@ Start from a running instance — see [Install](/start/install/).
 
 ## 1. Create the owner account
 
-Open <http://localhost:8080>. The first account is the owner; everyone after joins by invite.
+Open <http://localhost:8080>. The first account is the owner; everyone after joins by invite
+([single sign-on](/operate/users/#single-sign-on) admits people differently).
 
 ## 2. New workflow
 

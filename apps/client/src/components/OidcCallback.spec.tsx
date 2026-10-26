@@ -182,6 +182,8 @@ describe("OidcCallback: the service refused", () => {
     ["oidc_email_missing", 403, "This instance can't admit you", "Back to sign in"],
     ["oidc_domain_not_allowed", 403, "This instance can't admit you", "Back to sign in"],
     ["oidc_disabled", 404, "Single sign-on isn't set up", "Back to sign in"],
+    ["invite_email_mismatch", 403, "This invite is for someone else", "Back to sign in"],
+    ["invite_email_unverified", 403, "This invite can't be matched to you", "Back to sign in"],
     [undefined, 429, "Sign-in didn't finish", "Try again"],
   ])("%s (%i) gets its own copy and one action", async (code, status, title, action) => {
     completeOidcSignIn.mockRejectedValue(new api.ApiError("Service detail.", status, code));
@@ -190,6 +192,7 @@ describe("OidcCallback: the service refused", () => {
 
     const heading = await screen.findByRole("heading", { name: title });
     await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getByRole("alert")).toHaveTextContent(/\S/);
     expect(screen.getAllByRole("button")).toHaveLength(1);
     expect(screen.getByRole("button", { name: action })).toBeInTheDocument();
   });
@@ -201,6 +204,36 @@ describe("OidcCallback: the service refused", () => {
     arrive("?code=c-1&state=st-1", signIn());
     render(<OidcCallback />);
     expect(await screen.findByText(/the email_verified claim/)).toBeInTheDocument();
+  });
+
+  it("sends the person to whoever runs the instance, not to a log they cannot read", async () => {
+    completeOidcSignIn.mockRejectedValue(new api.ApiError("x", 502, "oidc_unavailable"));
+    arrive("?code=c-1&state=st-1", signIn());
+    render(<OidcCallback />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "If it keeps happening, tell whoever runs this instance — their service log says why.",
+    );
+  });
+
+  it.each([
+    ["oidc_domain_not_allowed", /with your work account, or sign out there first/],
+    ["oidc_email_unverified", /sign in there with an account whose address it has confirmed/],
+  ])("tells someone %s how to come back as another account", async (code, nextStep) => {
+    completeOidcSignIn.mockRejectedValue(new api.ApiError("Service detail.", 403, code));
+    arrive("?code=c-1&state=st-1", signIn());
+    render(<OidcCallback />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(nextStep);
+  });
+
+  it("moves focus to the new failure when trying again fails the same way", async () => {
+    completeOidcSignIn.mockRejectedValue(new api.ApiError("x", 400, "oidc_state_invalid"));
+    beginOidcFlow.mockRejectedValue(new api.ApiError("x", 400, "oidc_state_invalid"));
+    arrive("?code=c-1&state=st-1", signIn());
+    render(<OidcCallback />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(beginOidcFlow).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "This sign-in can't be finished" })).toHaveFocus());
   });
 
   it("restarts single sign-on in this tab, carrying the invite and destination it started with", async () => {
@@ -219,7 +252,17 @@ describe("OidcCallback: the service refused", () => {
     render(<OidcCallback />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Sign in with password" }));
-    expect(router.replace).toHaveBeenCalledWith("/login?method=password");
+    expect(router.replace).toHaveBeenCalledWith("/login?method=password&redirect_url=%2Fsettings");
+  });
+
+  it("brings an invitee who signs in with their password back to the invite", async () => {
+    getLocalAuthStatus.mockResolvedValue({ enabled: true, awaiting_bootstrap: false, oidc: true });
+    completeOidcSignIn.mockRejectedValue(new api.ApiError("x", 409, "oidc_account_exists"));
+    arrive("?code=c-1&state=st-1", signIn({ return_to: "/join/inv-1", invite_token: "inv-1" }));
+    render(<OidcCallback />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in with password" }));
+    expect(router.replace).toHaveBeenCalledWith("/login?method=password&redirect_url=%2Fjoin%2Finv-1");
   });
 
   it("names the operator for an existing account when passwords are off", async () => {

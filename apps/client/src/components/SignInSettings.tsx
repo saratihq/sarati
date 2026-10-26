@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import * as api from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -16,8 +16,22 @@ interface Loaded {
   passwordsOn: boolean;
 }
 
+function SkeletonRow() {
+  return (
+    <div role="status" aria-label="Loading how you sign in" className="rounded-lg p-5 mt-2 flex items-center gap-4" style={ROW_STYLE}>
+      <div className="w-10 h-10 rounded-lg shrink-0 animate-pulse" style={{ background: "var(--orchestr-accent-tint)" }} />
+      <div className="flex-1 flex flex-col gap-2">
+        <div className="h-3 w-28 rounded animate-pulse" style={{ background: "var(--orchestr-accent-tint)" }} />
+        <div className="h-2.5 w-48 rounded animate-pulse" style={{ background: "var(--orchestr-accent-tint)" }} />
+      </div>
+    </div>
+  );
+}
+
 /** Profile → single sign-on: connect the account to the identity provider, or disconnect it. Hidden without single sign-on. */
 export default function SignInSettings() {
+  // null until the instance says whether it offers single sign-on at all.
+  const [offered, setOffered] = useState<boolean | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
@@ -25,12 +39,17 @@ export default function SignInSettings() {
   const [error, setError] = useState<string | null>(null);
   const [leaving, setLeaving] = useLeavingState();
   const [confirming, setConfirming] = useState(false);
+  const connectButton = useRef<HTMLButtonElement>(null);
+  const refocusConnect = useRef(false);
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
-      const [me, status] = await Promise.all([api.authMe(), api.getLocalAuthStatus()]);
+      const status = await api.getLocalAuthStatus();
+      setOffered(status.oidc);
+      if (!status.oidc) return;
+      const me = await api.authMe();
       setLoaded({ signIn: me.sign_in, passwordsOn: status.enabled });
-      setLoadError(null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Couldn't load how you sign in");
     }
@@ -42,9 +61,17 @@ export default function SignInSettings() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (asking || !refocusConnect.current) return;
+    refocusConnect.current = false;
+    connectButton.current?.focus();
+  }, [asking]);
+
+  if (offered === false) return null;
   if (loadError) return <div className="mt-2"><InlineError message={loadError} onRetry={() => void load()} /></div>;
   const sso = loaded?.signIn.sso;
-  if (!loaded || !sso) return null;
+  if (!loaded) return <SkeletonRow />;
+  if (!sso) return null;
   const hasPassword = loaded.signIn.password;
 
   const connect = async (e?: React.FormEvent) => {
@@ -105,6 +132,7 @@ export default function SignInSettings() {
         ) : (
           !asking && (
             <Button
+              ref={connectButton}
               variant="secondary"
               size="sm"
               disabled={leaving}
@@ -154,6 +182,7 @@ export default function SignInSettings() {
               size="sm"
               disabled={leaving}
               onClick={() => {
+                refocusConnect.current = true;
                 setAsking(false);
                 setPassword("");
                 setError(null);

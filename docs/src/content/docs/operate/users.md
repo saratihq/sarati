@@ -16,7 +16,7 @@ the instance signs people in:
 - **[Single sign-on](#single-sign-on):** anyone your identity provider signs in gets an account of
   their own the first time — only from your email domains, if you set them.
 
-Either way, an organization is joined only by invite.
+Either way, an organization is joined only by an invite sent to your email address.
 
 ## Personal and organization
 
@@ -39,9 +39,19 @@ curl -X POST http://localhost:8080/api/orgs/<org-id>/invites \
 That returns an invite token. The link built from it is what the new person opens — they set a
 password, or continue with single sign-on, and land in the organization.
 
-A new password account can only be created with the email address the invite was sent to. Someone
-who continues with single sign-on from the link, or already has an account and opens it while signed
-in, joins with the link alone — so treat it like a password and delete one you did not mean to send.
+An invite admits only the account at the address it was sent to. A new password account is created
+with that address; someone who continues with single sign-on, or opens the link already signed in,
+joins only if their account's email is that address — for an account single sign-on made, an
+address the provider confirmed (the `email_verified` claim). Anyone else holding the link is
+refused, and the invite stays pending:
+
+```json
+{"code":"invite_email_mismatch",
+ "detail":"This invite was sent to a different email address than sam@personal.example. Ask whoever invited you to invite that address, or sign in with the account the invite was sent to."}
+```
+
+So invite the address people sign in with — at your identity provider, that is the email it
+releases for them.
 
 An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
 accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever
@@ -63,20 +73,33 @@ Once single sign-on is [configured](/operate/configuration/#single-sign-on):
   a personal workspace and no organization until someone invites them. With `OIDC_ALLOWED_DOMAINS`
   set, only addresses at those domains get in, and only when the provider confirms the address
   (the `email_verified` claim).
+- **A provider anyone can join:** with Google, Apple, GitLab.com or personal Microsoft accounts as the
+  provider, anyone with an account there can make one here unless `OIDC_ALLOWED_DOMAINS` is set. In
+  production the boot log warns.
+- **A provider that lets people set their own address:** set `OIDC_ALLOWED_DOMAINS` too, which also
+  requires the address to be confirmed. Without it, someone can sign in first with another person's
+  address: each email holds one account, so the real person is then refused as "You already have an
+  account", and the other account shows that address in member lists and approvals. It gains no
+  organization, since an invite is never matched to an address the provider did not confirm.
 - **An account follows the person, not the email:** Sarati keys it by the provider's subject
   (`sub`), so someone whose email changes at the provider still lands in their own account. An email
   never connects anyone to an account that already exists: signing in with the email of an existing
   account is refused with "You already have an account".
 - **Connecting an existing account:** sign in with its password, then **Settings → Profile → Single
   sign-on → Connect**. It asks for the password again and sends you to the provider; after that,
-  either way leads into the same account. **Disconnect** is beside it while the account has a
-  password and the instance still allows passwords.
+  either way leads into the same account. **Disconnect** works only while the account has a password
+  and the instance still allows passwords; otherwise it says why it is unavailable.
 - **Moving an instance over:** set the three `OIDC_*` values with `LOCAL_AUTH_ENABLED=true`, have
-  everyone connect, then remove `LOCAL_AUTH_ENABLED`. Passwords then stop working, so the provider's
-  MFA and offboarding cover everyone.
+  everyone connect, then remove `LOCAL_AUTH_ENABLED`. Passwords then stop working, so every sign-in
+  goes through the provider and its MFA.
 - **Sessions:** a sign-in lasts 12 hours. Removing someone at the provider stops their next sign-in,
   not one already open. Signing out of Sarati leaves the provider signed in, and the sign-in screen
   says so — on a shared computer, sign out there too.
+- **Offboarding:** removing someone at the provider does not touch what they already hold here. To
+  end their access to an organization at once, remove them from it in Settings → Organization: that
+  covers a session still open and their [API keys](/agents/api-keys/), since a key acts only in its
+  owner's personal workspace. Keys they made keep working there until revoked, and only their owner
+  sees them, in Settings → API keys.
 
 An operator with shell access can connect an account to its subject at the provider directly — for
 an account that cannot sign in to connect it, such as one made before v0.2.27 by an identity-provider

@@ -185,7 +185,7 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
   {
     migration: '042_sso_sign_in.sql',
     probe:
-      "SELECT 1 WHERE to_regclass('public.user_identities') IS NOT NULL AND to_regclass('public.ix_oidc_login_states_expires_at') IS NOT NULL",
+      "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='email_verified' AND to_regclass('public.user_identities') IS NOT NULL AND to_regclass('public.ix_oidc_login_states_expires_at') IS NOT NULL",
   },
 ];
 

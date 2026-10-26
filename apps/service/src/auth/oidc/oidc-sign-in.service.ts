@@ -79,7 +79,8 @@ function bindingMatches(binding: string, bindingHash: string): boolean {
 
 function usableEmail(raw: string | null): string | null {
   const email = raw === null ? '' : normalizeEmail(raw);
-  return /^[^\s@]+@[^\s@]+$/.test(email) && email.length <= MAX_EMAIL_LENGTH ? email : null;
+  const shaped = /^[^\s@]+@[^\s@]+$/.test(email) && !/[\p{Cc}\p{Cf}]/u.test(email);
+  return shaped && email.length <= MAX_EMAIL_LENGTH ? email : null;
 }
 
 function displayName(claims: IdpClaims, email: string): string {
@@ -159,7 +160,7 @@ export class OidcSignInService {
     const email = this.admitted(claims);
     const issuer = this.env.oidcIssuer;
     try {
-      await this.dataSource.transaction(async (em) => {
+      await this.admission.admitting(async (em) => {
         const holder = await em.findOne(UserIdentityEntity, { where: { issuer, subject: claims.subject } });
         if (holder) throw holder.userId === user.id ? this.alreadyLinked() : this.identityInUse();
         if (await this.identityOf(em, user.id)) throw this.alreadyLinked();
@@ -333,7 +334,7 @@ export class OidcSignInService {
     email: string | null,
     inviteToken: string | null,
   ): Promise<{ user: UserEntity; joined: { org_id: string } | null }> {
-    const known = await this.userOf(this.dataSource.manager, claims.subject);
+    const known = await this.userOf(this.dataSource.manager, claims, email);
     if (known) {
       return {
         user: known,
@@ -341,7 +342,7 @@ export class OidcSignInService {
       };
     }
     return this.admission.admitting(async (em) => {
-      const raced = await this.userOf(em, claims.subject);
+      const raced = await this.userOf(em, claims, email);
       if (raced) {
         return {
           user: raced,
@@ -361,6 +362,7 @@ export class OidcSignInService {
         email,
         name: displayName(claims, email),
         hashedPassword: null,
+        emailVerified: claims.emailVerified,
         identity: { issuer: this.env.oidcIssuer, subject: claims.subject, emailAtLink: email },
       });
       const joined = inviteToken ? await this.orgManagement.acceptInviteWith(em, user.id, inviteToken) : null;
@@ -371,14 +373,22 @@ export class OidcSignInService {
     });
   }
 
-  /** The account this subject signs in as at the configured issuer, its last sign-in recorded. */
-  private async userOf(em: EntityManager, subject: string): Promise<UserEntity | null> {
+  /** The account this subject signs in as at the configured issuer, its last sign-in recorded and its email confirmed once the provider confirms it. */
+  private async userOf(
+    em: EntityManager,
+    claims: IdpClaims,
+    email: string | null,
+  ): Promise<UserEntity | null> {
     const identity = await em.findOne(UserIdentityEntity, {
-      where: { issuer: this.env.oidcIssuer, subject },
+      where: { issuer: this.env.oidcIssuer, subject: claims.subject },
     });
     if (!identity) return null;
     await em.update(UserIdentityEntity, { id: identity.id }, { lastLoginAt: now() });
-    return em.findOneOrFail(UserEntity, { where: { id: identity.userId } });
+    const user = await em.findOneOrFail(UserEntity, { where: { id: identity.userId } });
+    if (user.emailVerified || !claims.emailVerified || email !== user.email) return user;
+    await em.update(UserEntity, { id: user.id }, { emailVerified: true });
+    user.emailVerified = true;
+    return user;
   }
 
   private identityOf(em: EntityManager, userId: string): Promise<UserIdentityEntity | null> {

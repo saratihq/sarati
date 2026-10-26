@@ -503,7 +503,7 @@ function OrgManagement({
               </Button>
             </div>
             <p className="text-[11px] mt-2 m-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
-              Creating an invite gives you a link to share with your teammate.
+              Creating an invite gives you a link to share with your teammate. Only an account with that email can use it.
             </p>
 
             {createdLink && (
