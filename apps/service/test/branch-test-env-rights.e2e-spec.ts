@@ -454,4 +454,109 @@ describe('a branch test under an environment takes the right to promote there (e
       ]);
     }, 30_000);
   });
+
+  describe("from outside the workflow's organization", () => {
+    let personalProduction = '';
+    const notFound = (): string => `Workflow ${wf} not found`;
+    const contexts = [
+      ['with no organization chosen', (r: request.Test): request.Test => r],
+      [
+        'with their personal workspace chosen',
+        (r: request.Test): request.Test => r.set('X-Org-Id', personalOrgId),
+      ],
+    ] as const;
+    const kept = async (): Promise<{ results: number; lastTest: unknown; runs: number }> => ({
+      results: (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM review_test_results WHERE review_id = $1`,
+          [review],
+        )
+      ).rows[0]!.n,
+      lastTest: (
+        await db.query<{ last_test: unknown }>(`SELECT last_test FROM workflow_reviews WHERE id = $1`, [
+          review,
+        ])
+      ).rows[0]!.last_test,
+      runs: (await reviewRuns()).length,
+    });
+
+    beforeAll(async () => {
+      const envs = (
+        await http()
+          .get('/api/environments')
+          .set('Authorization', `Bearer ${asOwner}`)
+          .set('X-Org-Id', personalOrgId)
+          .expect(200)
+      ).body.environments as Array<{ id: string; name: string }>;
+      personalProduction = envs.find((e) => e.name === 'production')!.id;
+    }, 30_000);
+
+    it.each(contexts)(
+      'an owner %s is refused a branch test as every run of the workflow is, on Default and under either production — nothing is tested or kept',
+      async (_, context) => {
+        const before = await kept();
+
+        for (const environmentId of [undefined, personalProduction, production]) {
+          const refused = await context(
+            http()
+              .post(`/api/workflows/${wf}/reviews/${review}/test`)
+              .set('Authorization', `Bearer ${asOwner}`),
+          )
+            .send(environmentId ? { environment_id: environmentId } : {})
+            .expect(404);
+          expect(refused.body.detail).toBe(notFound());
+        }
+
+        expect(await kept()).toEqual(before);
+      },
+      30_000,
+    );
+
+    it.each(contexts)(
+      "an owner %s is told the same before running, whichever environment they'd pick",
+      async (_, context) => {
+        for (const query of ['', `?environment_id=${personalProduction}`, `?environment_id=${production}`]) {
+          const refused = await context(
+            http()
+              .get(`/api/workflows/${wf}/reviews/${review}/test/readiness${query}`)
+              .set('Authorization', `Bearer ${asOwner}`),
+          ).expect(404);
+          expect(refused.body.detail).toBe(notFound());
+        }
+      },
+      30_000,
+    );
+
+    it("in the workflow's organization the same owner's personal production is not found, to test under or before running — nothing is tested or kept", async () => {
+      const before = await kept();
+
+      const refused = await testBranch(asOwner, personalProduction).expect(404);
+      expect(refused.body.detail).toBe('Environment not found');
+      const unready = await inOrg(
+        http().get(
+          `/api/workflows/${wf}/reviews/${review}/test/readiness?environment_id=${personalProduction}`,
+        ),
+        asOwner,
+      ).expect(404);
+      expect(unready.body.detail).toBe('Environment not found');
+
+      expect(await kept()).toEqual(before);
+    }, 30_000);
+
+    it("in the workflow's organization the same owner tests under its production, both runs kept in it", async () => {
+      const ran = (await reviewRuns()).length;
+
+      const res = await testBranch(asOwner, production).expect(201);
+
+      expect(res.body).toMatchObject({ verdict: 'green', environment_id: production });
+      const runs = await db.query<{ org_id: string; environment_id: string }>(
+        `SELECT org_id, environment_id FROM runtime_runs WHERE review_id = $1 AND source = 'review_test' ORDER BY started_at OFFSET $2`,
+        [review, ran],
+      );
+      expect(runs.rows).toEqual([
+        { org_id: orgId, environment_id: production },
+        { org_id: orgId, environment_id: production },
+      ]);
+    }, 30_000);
+  });
 });
