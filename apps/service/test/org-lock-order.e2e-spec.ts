@@ -15,7 +15,7 @@ import { EventsService, type DomainEventInput } from '../src/events/events.servi
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { gmailFake } from './support/gmail-fake';
 import { listenOnLoopback } from './support/listen';
-import { lockProbes, pause, type Hold } from './support/lock-probes';
+import { bounded, lockProbes, pause, type Hold } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 interface Team {
@@ -345,18 +345,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       refusal: HAS_WORKFLOW,
     },
   ];
-
-  // Fails within seconds when the write never reaches its hold, so the test's finally restores the spy.
-  const bounded = (hold: Hold, what: string): Hold => {
-    const arrived = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${what} never reached its hold`)), 5_000);
-      void hold.arrived.then(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-    return { ...hold, arrived };
-  };
 
   const holdWriter = (writer: Writer): Hold => {
     const gate = writer.heldAt === 'event' && writer.event ? gateEmits(writer.event) : null;
