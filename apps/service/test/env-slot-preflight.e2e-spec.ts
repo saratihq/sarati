@@ -161,8 +161,10 @@ describe('env slot preflight (e2e, isolated DB)', () => {
     // Creating is NOT gated — only asserting "run this here" is.
     const deployed = await as(http().post('/api/deploy').send({ workflow_json: irDoc() })).expect(201);
     wfId = deployed.body.workflow_id as string;
-    const staging = await as(http().post('/api/environments').send({ name: 'staging' })).expect(201);
-    stagingId = staging.body.id as string;
+    const envs = await as(http().get('/api/environments')).expect(200);
+    stagingId = (envs.body.environments as Array<{ id: string; name: string }>).find(
+      (e) => e.name === 'staging',
+    )!.id;
     const versions = await as(http().get(`/api/workflows/${wfId}/versions`)).expect(200);
     versionId = (versions.body.versions as Array<{ id: string; version_number: number }>).find(
       (v) => v.version_number === 1,

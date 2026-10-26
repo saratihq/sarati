@@ -383,7 +383,6 @@ async function shutdown(): Promise<void> {
 const workspace = async (name: string): Promise<{ org: string; production: string; staging: string }> => {
   const created = await asA(http().post('/api/orgs').send({ name })).expect(201);
   const org = created.body.id as string;
-  await asA(http().get('/api/environments').set('X-Org-Id', org)).expect(200);
   const envs = await db.query<{ id: string; name: string }>(
     `SELECT id, lower(name) AS name FROM environments WHERE org_id = $1`,
     [org],

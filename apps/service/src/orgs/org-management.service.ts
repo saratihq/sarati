@@ -16,6 +16,7 @@ import {
   type OrgRole,
 } from '../database/entities/organization.entity';
 import { rawQuery } from '../database/raw-query';
+import { seedDefaultEnvironments } from '../environments/default-environments';
 import { EventsService } from '../events/events.service';
 import { isUniqueViolation } from '../database/pg-errors';
 import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
@@ -69,6 +70,7 @@ export class OrgManagementService {
         role: 'owner',
         createdAt: now(),
       });
+      await seedDefaultEnvironments(em, org.id);
       await this.events.emit(em, {
         orgId: org.id,
         actorUserId: actorId,

@@ -6,6 +6,7 @@ import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
 import { OrgMemberEntity, OrganizationEntity, type OrgRole } from '../database/entities/organization.entity';
 import type { UserEntity } from '../database/entities/user.entity';
+import { seedDefaultEnvironments } from '../environments/default-environments';
 
 export interface ActiveOrg {
   orgId: string | null;
@@ -17,7 +18,7 @@ export interface ActiveOrg {
 export class OrgsService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
-  /** Idempotent: returns the user's personal org, creating org + owner membership if absent. */
+  /** Idempotent: returns the user's personal org, creating org + owner membership + default environments if absent. */
   async ensurePersonalOrg(em: EntityManager, user: UserEntity): Promise<OrganizationEntity> {
     const existing = await em
       .createQueryBuilder(OrganizationEntity, 'org')
@@ -42,6 +43,7 @@ export class OrgsService {
       role: 'owner',
       createdAt: now(),
     });
+    await seedDefaultEnvironments(em, org.id);
     return org;
   }
 
