@@ -8,6 +8,7 @@ import type { OrgRole } from "@/api/client";
 import { useOrgs } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 import { LocalAuthForm } from "@/components/LocalAuthForm";
+import { SsoButton } from "@/components/SsoButton";
 import { clerkEnabled } from "@/lib/config";
 import { readLocalSession } from "@/lib/localSession";
 import { toast } from "@/lib/toast";
@@ -26,7 +27,8 @@ const CARD_STYLE = {
  * no org-scoped caches to drop yet, and SPA nav lets the "Joined" toast survive.
  *
  * On a self-hosted instance the invitee may have no account at all, in which case the page registers
- * them against the invite instead — the service accepts it as part of registration.
+ * them against the invite instead, or signs them in through single sign-on carrying it — either way the
+ * service accepts it as part of the sign-in.
  */
 export default function JoinPage() {
   useDocumentTitle("Join organization");
@@ -48,7 +50,11 @@ export default function JoinPage() {
   // A Clerk build gates this route in middleware, so the visitor always has a session there. Until the
   // status lands we cannot tell "accept" from "register", so neither card may render yet.
   const resolving = !clerkEnabled && !status && !statusError;
-  const needsAccount = !clerkEnabled && status?.enabled === true && !signedIn;
+  const password = status?.enabled === true;
+  const sso = status?.oidc === true;
+  const needsAccount = !clerkEnabled && (password || sso) && !signedIn;
+  const [method, setMethod] = useState<"sso" | "password">("sso");
+  const showPassword = password && (!sso || method === "password");
 
   // Unauthenticated by design, so this runs even for an invitee with no account yet.
   useEffect(() => {
@@ -129,19 +135,38 @@ export default function JoinPage() {
                   <span className="capitalize" style={{ color: "var(--orchestr-ink)" }}>
                     {preview.role}
                   </span>
-                  . Create your account using the email address the invite was sent to.
+                  .{" "}
+                  {showPassword
+                    ? "Create your account using the email address the invite was sent to."
+                    : "Continue with single sign-on to join."}
                 </>
-              ) : (
+              ) : showPassword ? (
                 "Create your account to join the team. Use the email address the invite was sent to."
+              ) : (
+                "Continue with single sign-on to join the team."
               )}
             </p>
           </div>
-          <LocalAuthForm
-            kind="register"
-            inviteToken={token}
-            submitLabel="Create account & join"
-            onDone={enterAsNewMember}
-          />
+          {showPassword ? (
+            <LocalAuthForm
+              kind="register"
+              inviteToken={token}
+              submitLabel="Create account & join"
+              onDone={enterAsNewMember}
+            />
+          ) : (
+            <SsoButton returnTo={`/join/${encodeURIComponent(token)}`} inviteToken={token} />
+          )}
+          {password && sso && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full mt-3"
+              onClick={() => setMethod(method === "sso" ? "password" : "sso")}
+            >
+              {method === "sso" ? "Create an account with email instead" : "Use single sign-on instead"}
+            </Button>
+          )}
         </div>
       ) : preview && !resolving ? (
         <div className="rounded-2xl p-8 max-w-[420px] w-full text-center" style={CARD_STYLE}>

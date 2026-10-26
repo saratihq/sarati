@@ -102,6 +102,35 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
+### v0.2.27: sign in through your own identity provider
+
+People can now sign in through your own OpenID Connect provider — see
+[Single sign-on](/operate/configuration/#single-sign-on). An instance with no `OIDC_*` set needs
+nothing from you.
+
+What changes for an instance that had `OIDC_*` set:
+
+- **An identity provider's token is no longer an API credential.** Earlier versions accepted one
+  sent as `Authorization: Bearer`, made an account for any subject it named, and needed only
+  `OIDC_ISSUER`. It is now refused with `401` and the code `token_rejected`. Scripts and integrations
+  that sent one switch to [API keys](/agents/api-keys/).
+- **`OIDC_JWKS_URL` and `OIDC_AUDIENCE` are no longer read,** and `OIDC_ISSUER` on its own does
+  nothing. The boot log warns about each until you remove it or add `OIDC_CLIENT_ID` and
+  `OIDC_CLIENT_SECRET`.
+- **Accounts that path made are not connected for you.** Connect each one before its owner signs in,
+  with `sarati-link-sso <email> <sub>` ([Users](/operate/users/#single-sign-on)). Otherwise their
+  first sign-in is refused as "You already have an account", or, for an account the old path gave
+  an `@oidc.local` address, makes a second, empty account.
+
+What changes once you set the three `OIDC_*` values:
+
+- **Email and password turns off,** and password sessions already issued stop working at the
+  restart. Set `LOCAL_AUTH_ENABLED=true` to keep passwords while people
+  [move over](/operate/users/#single-sign-on).
+- **The redirect URI is fixed:** `<SARATI_URL>/auth/oidc/callback`, registered at your provider.
+- **Clerk and your own provider cannot both be set:** `CLERK_ISSUER` with `OIDC_CLIENT_ID` stops
+  the service at boot.
+
 ### v0.2.26: the service opens no port but its own
 
 The service listens on its `PORT` alone. Earlier versions, with durable runs on (`DBOS_ENABLED`, the

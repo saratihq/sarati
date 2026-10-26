@@ -117,8 +117,9 @@ v0.2.12, the composer's Claude Agent SDK could send Anthropic usage and error re
 set.) The
 installer fetches its stack definition from GitHub and pulls the image from the registry, and after
 that the instance only contacts what you connect — the accounts you link, Composio if you add a key,
-Clerk if you configure cloud sign-in, and the model provider behind the composer. The pages your
-browser loads come from your instance too, fonts included.
+Clerk if you configure cloud sign-in, your identity provider if you configure single sign-on, and the
+model provider behind the composer. The pages your browser loads come from your instance too, fonts
+included.
 
 ## Run it from source
 

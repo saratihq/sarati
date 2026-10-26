@@ -5,15 +5,23 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 
 /**
- * Where to land after auth resolves: the middleware's `redirect_url` when same-origin, else the
- * dashboard — this is what lets a deep link (e.g. /join/{token}) survive a login bounce.
- * Read from window, not useSearchParams, to avoid the Suspense requirement.
+ * Where to land after auth resolves: `raw` (default: the middleware's `redirect_url`) when it is a
+ * path on this origin, else the dashboard — this is what lets a deep link survive a login bounce.
  */
-export function safeReturnTo(): string {
-  if (typeof window === "undefined") return "/";
-  const raw = new URLSearchParams(window.location.search).get("redirect_url");
-  // Same-origin paths only — "//host" and absolute URLs would be open redirects.
-  return raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
+export function safeReturnTo(
+  raw: string | null = typeof window === "undefined"
+    ? null
+    : new URLSearchParams(window.location.search).get("redirect_url"),
+): string {
+  if (typeof window === "undefined" || !raw?.startsWith("/")) return "/";
+  try {
+    const url = new URL(raw, window.location.origin);
+    // A same-origin URL can still normalise to a "//host" path, which the router reads as another origin.
+    const local = url.origin === window.location.origin && !url.pathname.startsWith("//");
+    return local ? url.pathname + url.search + url.hash : "/";
+  } catch {
+    return "/";
+  }
 }
 
 /**

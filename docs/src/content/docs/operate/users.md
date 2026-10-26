@@ -3,13 +3,20 @@ title: Users and organizations
 description: Invite people, and decide who can ship.
 ---
 
-The first account on an instance is the owner. **Everyone after joins by invite** — signing up
-without one is refused:
+The first account on an instance is the owner. Who can make an account after that depends on how
+the instance signs people in:
 
-```json
-{"code":"signup_closed",
- "detail":"This instance is not open for signup — ask an owner for an invite link."}
-```
+- **Email and password:** everyone after joins by invite — signing up without one is refused:
+
+  ```json
+  {"code":"signup_closed",
+   "detail":"This instance is not open for signup — ask an owner for an invite link."}
+  ```
+
+- **[Single sign-on](#single-sign-on):** anyone your identity provider signs in gets an account of
+  their own the first time — only from your email domains, if you set them.
+
+Either way, an organization is joined only by invite.
 
 ## Personal and organization
 
@@ -30,21 +37,57 @@ curl -X POST http://localhost:8080/api/orgs/<org-id>/invites \
 ```
 
 That returns an invite token. The link built from it is what the new person opens — they set a
-password and land in the organization.
+password, or continue with single sign-on, and land in the organization.
 
-A new account can only be created with the email address the invite was sent to. Someone who
-already has an account joins by opening the link while signed in — for them the link alone is
-enough, so treat it like a password and delete one you did not mean to send.
+A new password account can only be created with the email address the invite was sent to. Someone
+who continues with single sign-on from the link, or already has an account and opens it while signed
+in, joins with the link alone — so treat it like a password and delete one you did not mean to send.
 
 An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
 accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever
 comes second answers `404`, as for an invite that isn't there. Accepting again with an account that
-is already in it is a no-op, and signing up with a spent link is refused as `signup_closed`.
+is already in it is a no-op, and signing up with a spent link is refused as `signup_closed`. A spent
+link says "This invite can't be used" as soon as it opens.
 
 Only an owner can invite someone as an owner; an admin's attempt is refused.
 
 <img class="shot shot-dark" src="/shots/org-members-dark.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />
 <img class="shot shot-light" src="/shots/org-members-light.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />
+
+## Single sign-on
+
+Once single sign-on is [configured](/operate/configuration/#single-sign-on):
+
+- **Who gets an account:** the first person to sign in on an empty instance becomes its owner, as with
+  a password. After that, anyone your identity provider signs in gets an account the first time, with
+  a personal workspace and no organization until someone invites them. With `OIDC_ALLOWED_DOMAINS`
+  set, only addresses at those domains get in, and only when the provider confirms the address
+  (the `email_verified` claim).
+- **An account follows the person, not the email:** Sarati keys it by the provider's subject
+  (`sub`), so someone whose email changes at the provider still lands in their own account. An email
+  never connects anyone to an account that already exists: signing in with the email of an existing
+  account is refused with "You already have an account".
+- **Connecting an existing account:** sign in with its password, then **Settings → Profile → Single
+  sign-on → Connect**. It asks for the password again and sends you to the provider; after that,
+  either way leads into the same account. **Disconnect** is beside it while the account has a
+  password and the instance still allows passwords.
+- **Moving an instance over:** set the three `OIDC_*` values with `LOCAL_AUTH_ENABLED=true`, have
+  everyone connect, then remove `LOCAL_AUTH_ENABLED`. Passwords then stop working, so the provider's
+  MFA and offboarding cover everyone.
+- **Sessions:** a sign-in lasts 12 hours. Removing someone at the provider stops their next sign-in,
+  not one already open. Signing out of Sarati leaves the provider signed in, and the sign-in screen
+  says so — on a shared computer, sign out there too.
+
+An operator with shell access can connect an account to its subject at the provider directly — for
+an account that cannot sign in to connect it, such as one made before v0.2.27 by an identity-provider
+token sent to the API:
+
+```bash
+cd sarati && docker compose exec sarati sarati-link-sso sam@example.com <their sub>
+```
+
+The `sub` is the person's ID at the provider; the old token path stored it as the account's
+`clerk_user_id`. On a five-container install it is `docker compose exec service` instead.
 
 ## Roles
 
@@ -90,3 +133,6 @@ cd sarati && docker compose exec sarati sarati-set-password someone@example.com
 
 On a five-container install the service is its own container, so it is `docker compose exec service`
 instead. Running it by hand without the installer, it is `docker exec -it sarati`.
+
+With single sign-on on and passwords off, this is also the way in while the provider is down: set
+`LOCAL_AUTH_ENABLED=true`, run `docker compose up -d`, and sign in with the password you set.

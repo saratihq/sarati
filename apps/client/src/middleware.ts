@@ -10,6 +10,7 @@ const PUBLIC_ROUTES = [
   "/signup",
   "/forgot-password",
   "/sso-callback",
+  "/auth/oidc/callback",
   "/integrations/callback",
   "/api/health", // platform liveness probe — must not redirect to /login
 ];

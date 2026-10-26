@@ -136,9 +136,57 @@ If you are upgrading and had them there, enter them once in Settings and delete 
 
 ## Integrations and auth
 
-Single sign-on (`OIDC_*`, `CLERK_*`) and operator OAuth apps (`OAUTH_<PROVIDER>_CLIENT_ID` /
-`_CLIENT_SECRET`) are set here too. With every auth variable empty, email and password is the way
-in.
+Sign-in (`OIDC_*` for your own identity provider, `CLERK_*` for Clerk) and operator OAuth apps
+(`OAUTH_<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET`) are set here too. With every auth variable empty,
+email and password is the way in.
+
+### Single sign-on
+
+People sign in through your own identity provider — any that speaks OpenID Connect. At the provider,
+register Sarati as a web application with a client secret (the authorization code flow), and give it
+one redirect URI:
+
+```
+<SARATI_URL>/auth/oidc/callback
+```
+
+Then put the three values it gives you in `.env` and run `docker compose up -d`:
+
+```bash
+# The issuer exactly as the provider's tokens carry it — trailing slash included, or not.
+OIDC_ISSUER=https://login.example.com
+OIDC_CLIENT_ID=sarati
+OIDC_CLIENT_SECRET=
+# Optional: the email domains an account may come from, comma-separated. Empty admits any.
+OIDC_ALLOWED_DOMAINS=example.com
+```
+
+The sign-in screen then leads with **Continue with single sign-on**. Who that admits, and how
+people already on the instance move over, is in [Users](/operate/users/#single-sign-on).
+
+- **The three go together:** setting `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` without the other two
+  stops the service at boot and names what is missing. `OIDC_ISSUER` alone does nothing, and the
+  boot log says so.
+- **The issuer has to match exactly:** Sarati reads `<OIDC_ISSUER>/.well-known/openid-configuration`
+  and refuses a document whose `issuer` differs by so much as a trailing slash. Every endpoint comes
+  from that document, so there is nothing else to set.
+- **What the provider has to offer:** the `openid`, `email` and `profile` scopes, PKCE with `S256`,
+  and ID tokens signed with RS256, PS256 or ES256. Sarati authenticates with the client secret as
+  HTTP Basic, or in the request body when that is all the provider accepts. A new account needs an
+  email address, from the ID token or from the provider's UserInfo endpoint.
+- **`SARATI_URL` is the address people use:** the redirect URI is built from it, and a sign-in
+  started at any other address cannot finish. In production, `SARATI_URL` and `OIDC_ISSUER` must be
+  `https://`, or `http://` to this machine; anything else stops the service at boot.
+- **A provider behind a private certificate authority:** point Node's `NODE_EXTRA_CA_CERTS` at the
+  authority's certificate, at a path inside the container.
+- **Clerk or your own provider, not both:** `CLERK_ISSUER` with `OIDC_CLIENT_ID` stops the service
+  at boot.
+- **Email and password turns off:** once the three are set, `LOCAL_AUTH_ENABLED` defaults to off,
+  and a password session already issued stops working. Set `LOCAL_AUTH_ENABLED=true` to keep
+  passwords beside single sign-on while people move over, or as a way in while the provider is down.
+  In production the boot log then warns that passwords skip the provider's MFA and offboarding.
+- **The composer:** the AI composer accepts single sign-on sessions once it sees `OIDC_ISSUER` and
+  `OIDC_CLIENT_ID` too. Both stacks hand it the same `.env`, so there is nothing to do.
 
 ### Private addresses
 
