@@ -226,8 +226,12 @@ the environment is gone, every fifteen minutes when pg-boss is enabled; see
 removes its triggers from their apps the same way.
 
 If a workflow is promoted or published while one of these deletes is running, the delete keeps the
-environment or workflow and answers `409`; send it again. A change that reaches a workflow as its
-delete is finishing waits for the delete, then answers `404`.
+environment or workflow and answers `409`; send it again. A promote that lands just before an
+environment's delete doesn't hold it up: its trigger is either never set up there, or set up and
+removed with the others. A change that reaches a workflow as its delete is finishing waits for the
+delete, then answers `404`. So does assigning an account to one of an environment's slots as its
+delete is finishing; an assignment made before then lands, and the delete removes that slot with the
+environment.
 
 ## Publishing
 
