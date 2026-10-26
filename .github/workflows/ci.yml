@@ -14,6 +14,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16-alpine
@@ -56,6 +57,7 @@ jobs:
   # Publishing lives in release.yml, driven by a version tag.
   stack:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # Every image builds from the workspace root — the lockfile lives there, so a package
