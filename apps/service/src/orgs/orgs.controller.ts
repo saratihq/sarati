@@ -17,7 +17,13 @@ import { IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { KEY_SCOPED_TO_OTHER_ORG, reachesOrg, requirePrincipal, type Principal } from '../auth/principal';
+import {
+  isOrgPinned,
+  KEY_SCOPED_TO_OTHER_ORG,
+  reachesOrg,
+  requirePrincipal,
+  type Principal,
+} from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { CapabilityPath } from '../common/request-log-redaction';
 import type { EnvConfig } from '../config/env.config';
@@ -86,7 +92,9 @@ export class OrgsController {
   @Scope('org:manage')
   @Post()
   async create(@Req() req: Request, @Body() body: CreateOrgDto): Promise<OrgSummary> {
-    return this.mgmt.createOrg(requirePrincipal(req).user.id, body.name);
+    const principal = requirePrincipal(req);
+    this.requireUnpinned(principal);
+    return this.mgmt.createOrg(principal.user.id, body.name);
   }
 
   /** The link finds the invite; only the account at the address it was sent to joins. */
@@ -98,7 +106,9 @@ export class OrgsController {
     @Req() req: Request,
     @Param('token') token: string,
   ): Promise<{ org_id: string; name: string }> {
-    return this.mgmt.acceptInvite(requirePrincipal(req).user.id, token);
+    const principal = requirePrincipal(req);
+    this.requireUnpinned(principal);
+    return this.mgmt.acceptInvite(principal.user.id, token);
   }
 
   @Scope('org:manage')
@@ -241,6 +251,10 @@ export class OrgsController {
     if (!membership) throw new DomainError('Not a member of this organization', 403);
     if (!reachesOrg(principal, org.id)) throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
     return { org, role: membership.role };
+  }
+
+  private requireUnpinned(principal: Principal): void {
+    if (isOrgPinned(principal)) throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
   }
 
   private async requireManager(
