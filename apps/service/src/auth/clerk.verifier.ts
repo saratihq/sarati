@@ -17,7 +17,7 @@ export class ClerkVerifier implements TokenVerifier {
 
   async verify(token: string): Promise<VerifiedIdentity | null> {
     const env = this.config.get('env', { infer: true });
-    if (!env.clerkIssuer) return null; // Clerk not configured — inert, like OIDC.
+    if (!env.clerkIssuer) return null; // Clerk not configured — inert.
 
     // Leave another issuer's token — and a malformed one — for the next verifier rather than
     // rejecting it: throwing here would reject tokens this verifier does not own.

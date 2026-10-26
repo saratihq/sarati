@@ -20,8 +20,9 @@ import type { EnvConfig } from '../config/env.config';
  *   against the instance JWKS — issuer + exp checked, optional azp allow-list,
  *   `aud` not verified (Clerk session tokens carry none). Mirrors
  *   workflow-service's ClerkVerifier.
- * **Local session** (workflow-service): a self-host signs in with
- *   email + password and gets an HS256 JWT signed with the shared SECRET_KEY.
+ * **Local session** (workflow-service): a self-host signs in with a password or
+ *   single sign-on and gets an HS256 JWT signed with the shared SECRET_KEY, naming
+ *   how they signed in; each method's sessions pass only while that method is on.
  *   Without this path the composer 401s every self-host caller, so an operator
  *   who supplied ANTHROPIC_API_KEY still could not reach it.
  *
@@ -56,17 +57,40 @@ export function callerSubOf(req: Request): string | null {
   return (req as unknown as Record<symbol, string | null>)[CALLER_SUB] ?? null;
 }
 
-/**
- * The user id named by a local-session token, or null when the token is well
- * formed but carries no subject. Throws when it is not a valid local session —
- * the guard reads JWTExpired off that to keep saying "Token expired".
- */
-export async function verifyLocalSession(token: string, secret: string): Promise<string | null> {
+/** How a session's holder signed in — mirrors workflow-service's SessionMethod; a token without the claim predates it and is a password session. */
+export type SessionMethod = { method: 'password' } | { method: 'oidc'; idp: string };
+
+/** The user id and sign-in method a local session names, either null when it lacks it; throws when it is not a valid local session, so the guard can still say "Token expired". */
+export async function verifyLocalSession(
+  token: string,
+  secret: string,
+): Promise<{ sub: string | null; via: SessionMethod | null }> {
   const { payload } = await jwtVerify(token, new TextEncoder().encode(secret), {
     issuer: LOCAL_ISSUER,
     algorithms: ['HS256'],
   });
-  return typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
+  const sub = typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
+  if (payload.method === undefined || payload.method === 'password')
+    return { sub, via: { method: 'password' } };
+  if (payload.method === 'oidc' && typeof payload.idp === 'string' && payload.idp) {
+    return { sub, via: { method: 'oidc', idp: payload.idp } };
+  }
+  return { sub, via: null };
+}
+
+/** Why this process refuses a session minted this way, or null when it accepts it — workflow-service's sessionRefusal, mirrored. */
+export function sessionRefusal(via: SessionMethod | null, env: EnvConfig): string | null {
+  if (via === null) return 'a session naming a sign-in method this process does not know';
+  if (via.method === 'password') {
+    return env.passwordSessions
+      ? null
+      : 'a password session, and password sign-in is off (LOCAL_AUTH_ENABLED)';
+  }
+  if (env.oidcSessionIssuer === null)
+    return 'a single sign-on session, and single sign-on is not configured here';
+  return via.idp === env.oidcSessionIssuer
+    ? null
+    : 'a single sign-on session from an issuer other than OIDC_ISSUER';
 }
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
@@ -116,7 +140,10 @@ export class ComposerAuthGuard implements CanActivate {
 
     if (env.localSessionSecret) {
       try {
-        sub = await verifyLocalSession(token, env.localSessionSecret);
+        const session = await verifyLocalSession(token, env.localSessionSecret);
+        const refused = sessionRefusal(session.via, env);
+        if (refused === null) sub = session.sub;
+        else rejection = refused;
       } catch (err) {
         if (err instanceof joseErrors.JWTExpired) expired = true;
         rejection = err instanceof Error ? err.message : String(err);

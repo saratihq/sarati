@@ -59,6 +59,8 @@ const ENV = {
   clerkIssuer: 'https://clerk.example',
   clerkAuthorizedParties: 'http://localhost:3100,http://localhost:3101',
   localSessionSecret: null as string | null,
+  passwordSessions: false,
+  oidcSessionIssuer: null as string | null,
 };
 
 function scriptedQuery(messages: Array<Record<string, unknown>>, thenThrow?: Error): QueryFn {
@@ -1865,7 +1867,7 @@ describe('ComposerAuthGuard', () => {
   // default). Each pins its own issuer, so neither can accept the other's token.
   describe('with local sessions alongside Clerk', () => {
     const SECRET = 'shared-secret';
-    const BOTH = { ...ENV, localSessionSecret: SECRET };
+    const BOTH = { ...ENV, localSessionSecret: SECRET, passwordSessions: true };
 
     const mint = (over: { secret?: string; issuer?: string } = {}): Promise<string> =>
       new SignJWT({})

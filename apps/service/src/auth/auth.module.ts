@@ -6,7 +6,6 @@ import { AuthController } from './auth.controller';
 import { ScopeEnforcer } from './scope-enforcer';
 import { AuthGuard } from './auth.guard';
 import { ClerkVerifier } from './clerk.verifier';
-import { OidcVerifier } from './oidc.verifier';
 import { LocalSessionVerifier } from './local/local-session.verifier';
 import { TOKEN_VERIFIERS } from './token-verifier';
 import { UserProvisioningService } from './user-provisioning.service';
@@ -15,24 +14,22 @@ import { UserProvisioningService } from './user-provisioning.service';
   controllers: [AuthController],
   providers: [
     ClerkVerifier,
-    OidcVerifier,
     LocalSessionVerifier,
     ApiKeysService,
     ApiKeyVerifier,
     UserProvisioningService,
     ScopeEnforcer,
     AuthGuard,
-    // The pluggable-auth seam, tried in order: API key → local session → OIDC → Clerk. Each is inert
+    // The pluggable-auth seam, tried in order: API key → local session → Clerk. Each is inert
     // unless configured, and each owns a distinct token shape or issuer.
     {
       provide: TOKEN_VERIFIERS,
-      inject: [ApiKeyVerifier, LocalSessionVerifier, OidcVerifier, ClerkVerifier],
-      useFactory: (
-        apiKey: ApiKeyVerifier,
-        local: LocalSessionVerifier,
-        oidc: OidcVerifier,
-        clerk: ClerkVerifier,
-      ) => [apiKey, local, oidc, clerk],
+      inject: [ApiKeyVerifier, LocalSessionVerifier, ClerkVerifier],
+      useFactory: (apiKey: ApiKeyVerifier, local: LocalSessionVerifier, clerk: ClerkVerifier) => [
+        apiKey,
+        local,
+        clerk,
+      ],
     },
   ],
   // ScopeEnforcer must stay exported — AuthGuard depends on it in every module that guards a controller.

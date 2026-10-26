@@ -15,7 +15,8 @@ const LOOPBACK = new BlockList();
 LOOPBACK.addSubnet('127.0.0.0', 8, 'ipv4');
 LOOPBACK.addAddress('::1', 'ipv6');
 
-function isLoopbackHost(hostname: string): boolean {
+/** Whether a URL's hostname reaches only this machine: localhost, 127.0.0.0/8 or ::1. */
+export function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   const family = isIP(host);
   if (family === 0) return host === 'localhost';
@@ -175,23 +176,25 @@ export class EnvConfig {
 
   /**
    * Email + password sign-in. Defaults ON so a self-hoster can reach their own instance,
-   * and OFF where Clerk is configured so a managed deployment gains no second front door.
+   * and OFF where Clerk or OIDC sign-in is configured so that door gains no second one beside it.
    */
   @IsBoolean()
   localAuthEnabled = true;
 
-  // ── OSS self-host auth: generic OIDC. Empty issuer = inert. ──
-  /** Your IdP's issuer URL (Auth0/Keycloak/Okta/…). Empty disables the OIDC verifier. */
+  // ── Single sign-on through your own OpenID Connect provider: all three together turn it on. ──
+  /** The provider's issuer, exactly as its tokens carry it — a trailing slash is part of it. */
   @IsString()
   oidcIssuer = '';
 
-  /** JWKS URL; defaults to `<issuer>/.well-known/jwks.json` when empty. */
   @IsString()
-  oidcJwksUrl = '';
+  oidcClientId = '';
 
-  /** Expected `aud`; empty skips the audience check. */
   @IsString()
-  oidcAudience = '';
+  oidcClientSecret = '';
+
+  /** Comma-separated email domains single sign-on admits new accounts from; empty admits any. */
+  @IsString()
+  oidcAllowedDomains = '';
 
   /** Dev/test only: bypass auth with a fixed test user. */
   @IsBoolean()
@@ -220,6 +223,12 @@ export class EnvConfig {
 
   // Materialized (not getters) so they survive @nestjs/config's plain merge.
   corsOriginList!: readonly string[];
+
+  /** Whether browser single sign-on is on: OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET all set. */
+  oidcSignInEnabled!: boolean;
+
+  /** OIDC_ALLOWED_DOMAINS, lowercased; empty admits any domain. */
+  oidcAllowedDomainList!: readonly string[];
 }
 
 /** The ONE env-var truthiness rule — `1/true/yes/on` (case-insensitive); blank/unset takes the fallback. */
@@ -237,10 +246,125 @@ function asInt(name: string, value: string | undefined, fallback: number): numbe
 
 /** Warn at boot when a variable the service no longer reads is still set, since it silently does nothing. */
 export function warnRetiredEnv(raw: Record<string, string | undefined>): void {
-  if (!raw.COMPOSIO_FALLBACK_APPS?.trim()) return;
-  new Logger('EnvConfig').warn(
-    'COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.',
-  );
+  const logger = new Logger('EnvConfig');
+  if (raw.COMPOSIO_FALLBACK_APPS?.trim()) {
+    logger.warn('COMPOSIO_FALLBACK_APPS is no longer supported and has no effect. Remove it from .env.');
+  }
+  for (const name of ['OIDC_JWKS_URL', 'OIDC_AUDIENCE']) {
+    if (raw[name]?.trim()) {
+      logger.warn(
+        `${name} is no longer read — single sign-on finds the provider's keys through its discovery document. Remove it from .env.`,
+      );
+    }
+  }
+  if (raw.OIDC_ISSUER?.trim() && !raw.OIDC_CLIENT_ID?.trim() && !raw.OIDC_CLIENT_SECRET?.trim()) {
+    logger.warn(
+      'OIDC_ISSUER alone no longer does anything — add OIDC_CLIENT_ID and OIDC_CLIENT_SECRET for browser sign-in. An identity-provider token is not accepted as an API bearer; use an API key.',
+    );
+  }
+}
+
+function oidcTrioSet(raw: Record<string, string | undefined>): boolean {
+  return Boolean(raw.OIDC_ISSUER?.trim() && raw.OIDC_CLIENT_ID?.trim() && raw.OIDC_CLIENT_SECRET?.trim());
+}
+
+// Anyone can hold an account at these, so single sign-on through one without OIDC_ALLOWED_DOMAINS is open sign-up.
+const PUBLIC_ISSUERS = new Set([
+  'https://accounts.google.com',
+  'https://appleid.apple.com',
+  'https://gitlab.com',
+  'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0',
+]);
+
+function assertIssuerUsable(issuer: string): void {
+  const parsed = httpUrl(issuer);
+  if (!parsed) {
+    throw new Error(
+      `Invalid OIDC_ISSUER ${JSON.stringify(issuer)} — it must be an http(s) URL with a hostname, like https://login.example.com`,
+    );
+  }
+  if (parsed.username || parsed.password || /[?#]/.test(issuer)) {
+    throw new Error(
+      `OIDC_ISSUER (${parsed.origin}${parsed.pathname}) must not carry a username, password, query string or fragment`,
+    );
+  }
+}
+
+function assertFrontendOrigin(frontendUrl: string): void {
+  const parsed = httpUrl(frontendUrl);
+  const bare = parsed && !parsed.username && !parsed.password && !/[?#]/.test(frontendUrl);
+  if (!parsed || !bare || parsed.pathname !== '/') {
+    throw new Error(
+      `FRONTEND_URL ${JSON.stringify(frontendUrl)} must be the bare http(s) origin Sarati is reached at, like https://sarati.example.com — single sign-on derives its redirect URI from it.`,
+    );
+  }
+}
+
+/** Parse OIDC_ALLOWED_DOMAINS: comma-separated bare domains, lowercased; anything else fails at boot. */
+export function parseAllowedDomains(raw: string): string[] {
+  const domains: string[] = [];
+  for (const part of raw.split(',')) {
+    const domain = part.trim().toLowerCase();
+    if (!domain) continue;
+    if (!/^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(domain)) {
+      throw new Error(
+        `Invalid domain ${JSON.stringify(part.trim())} in OIDC_ALLOWED_DOMAINS — list bare email domains, like acme.com,acme.io`,
+      );
+    }
+    domains.push(domain);
+  }
+  return domains;
+}
+
+function applySignInDoors(cfg: EnvConfig, raw: Record<string, string | undefined>): void {
+  const trio = {
+    OIDC_ISSUER: cfg.oidcIssuer,
+    OIDC_CLIENT_ID: cfg.oidcClientId,
+    OIDC_CLIENT_SECRET: cfg.oidcClientSecret,
+  };
+  const missing = Object.entries(trio)
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+  if ((cfg.oidcClientId || cfg.oidcClientSecret) && missing.length > 0) {
+    throw new Error(
+      `OIDC sign-in needs OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET together — missing: ${missing.join(', ')}`,
+    );
+  }
+  if (cfg.clerkIssuer && cfg.oidcClientId) {
+    throw new Error(
+      'Configure one external sign-in: Clerk or OIDC — CLERK_ISSUER and OIDC_CLIENT_ID are both set.',
+    );
+  }
+  cfg.oidcSignInEnabled = missing.length === 0;
+  cfg.oidcAllowedDomainList = Object.freeze(parseAllowedDomains(cfg.oidcAllowedDomains));
+  if (!cfg.oidcSignInEnabled) return;
+
+  assertIssuerUsable(cfg.oidcIssuer);
+  assertFrontendOrigin(cfg.frontendUrl);
+  if (cfg.environment !== 'production') return;
+
+  for (const [name, url] of [
+    ['OIDC_ISSUER', cfg.oidcIssuer],
+    ['FRONTEND_URL', cfg.frontendUrl],
+  ] as const) {
+    const { protocol, hostname } = new URL(url);
+    if (protocol === 'http:' && !isLoopbackHost(hostname)) {
+      throw new Error(
+        `${name} must be https in production — sign-in codes and secrets cross it; plain http only reaches this machine.`,
+      );
+    }
+  }
+  const logger = new Logger('EnvConfig');
+  if (asBool(raw.LOCAL_AUTH_ENABLED, false)) {
+    logger.warn(
+      "Password sign-in is on beside single sign-on (LOCAL_AUTH_ENABLED=true): passwords bypass your identity provider's MFA and offboarding — set LOCAL_AUTH_ENABLED=false once everyone has connected single sign-on.",
+    );
+  }
+  if (PUBLIC_ISSUERS.has(cfg.oidcIssuer.replace(/\/+$/, '')) && cfg.oidcAllowedDomainList.length === 0) {
+    logger.warn(
+      `OIDC_ISSUER is ${cfg.oidcIssuer}, where anyone can hold an account, and OIDC_ALLOWED_DOMAINS is unset — anyone can create an account here. Set OIDC_ALLOWED_DOMAINS to your email domains.`,
+    );
+  }
 }
 
 /** TRUST_PROXY_HOPS, or the replaced TRUST_PROXY_HEADERS flag read as one hop; never suggests a value that shares a bucket. */
@@ -299,10 +423,11 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       clerkSecretKey: raw.CLERK_SECRET_KEY ?? '',
       clerkApiUrl: raw.CLERK_API_URL ? parseApiBaseUrl('CLERK_API_URL', raw.CLERK_API_URL) : undefined,
       clerkAuthorizedParties: raw.CLERK_AUTHORIZED_PARTIES ?? undefined,
-      localAuthEnabled: asBool(raw.LOCAL_AUTH_ENABLED, !raw.CLERK_ISSUER),
-      oidcIssuer: raw.OIDC_ISSUER ?? '',
-      oidcJwksUrl: raw.OIDC_JWKS_URL ?? '',
-      oidcAudience: raw.OIDC_AUDIENCE ?? '',
+      localAuthEnabled: asBool(raw.LOCAL_AUTH_ENABLED, !raw.CLERK_ISSUER && !oidcTrioSet(raw)),
+      oidcIssuer: raw.OIDC_ISSUER?.trim() ?? '',
+      oidcClientId: raw.OIDC_CLIENT_ID?.trim() ?? '',
+      oidcClientSecret: raw.OIDC_CLIENT_SECRET?.trim() ?? '',
+      oidcAllowedDomains: raw.OIDC_ALLOWED_DOMAINS ?? '',
       mockAuth: asBool(raw.MOCK_AUTH, false),
       composioBaseUrl: raw.COMPOSIO_BASE_URL
         ? parseApiBaseUrl('COMPOSIO_BASE_URL', raw.COMPOSIO_BASE_URL)
@@ -352,6 +477,8 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
     }
   }
 
+  applySignInDoors(cfg, raw);
+
   // Dev mode boots with insecure defaults, so fail closed rather than run it against a real database.
   if (cfg.environment !== 'production' && !isLocalDatabaseHost(cfg.databaseUrl)) {
     throw new Error(
@@ -366,9 +493,9 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
   // presents as being logged out mid-task rather than as a configuration problem. Say so at boot.
   if (cfg.environment !== 'production' && cfg.secretKey === INSECURE_SECRET_KEY) {
     const logger = new Logger('EnvConfig');
-    if (cfg.localAuthEnabled) {
+    if (cfg.localAuthEnabled || cfg.oidcSignInEnabled) {
       logger.warn(
-        `SECRET_KEY is the built-in default (${INSECURE_SECRET_KEY}) and local auth is ON, so sessions ` +
+        `SECRET_KEY is the built-in default (${INSECURE_SECRET_KEY}) and sign-in is ON, so sessions ` +
           'are signed with a value every checkout shares. Any other build started on this port with a ' +
           'real SECRET_KEY will reject them and sign you out mid-task. Set SECRET_KEY in .env — a git ' +
           'worktree does not inherit one, because .env is gitignored.',

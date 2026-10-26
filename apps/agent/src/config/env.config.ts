@@ -44,13 +44,15 @@ export interface EnvConfig {
   /** Comma-separated azp allow-list (browser origins); empty = azp not checked. */
   readonly clerkAuthorizedParties: string;
   /**
-   * workflow-service's SECRET_KEY, non-null exactly when local-session auth is
-   * usable here: a self-host signs in with email + password on workflow-service
-   * and carries an HS256 session JWT, so agent-service must share the
-   * secret to verify it. Folded into one nullable field so "enabled" and "has a
-   * key" cannot disagree. Null = this instance verifies no local sessions.
+   * workflow-service's SECRET_KEY, non-null exactly when it issues sessions this process must verify:
+   * a self-host signs in with a password or single sign-on there and carries an HS256 session JWT.
+   * Folded into one nullable field so "enabled" and "has a key" cannot disagree.
    */
   readonly localSessionSecret: string | null;
+  /** Whether password sessions are accepted — workflow-service's LOCAL_AUTH_ENABLED, under the same default. */
+  readonly passwordSessions: boolean;
+  /** OIDC_ISSUER while single sign-on is configured: a session it minted is accepted only from this issuer. */
+  readonly oidcSessionIssuer: string | null;
   /**
    * workflow-service's SECRET_KEY as held, independent of whether local sessions
    * are accepted here: it also authenticates this process when it reads the
@@ -110,10 +112,12 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
     errors.push('MOCK_AUTH=true needs WORKFLOW_SERVICE_API_KEY — mock callers have no token to forward');
   }
 
-  // Mirrors workflow-service: local auth is on by default and off when Clerk is
-  // configured, so a Clerk deployment never silently grows a second front door.
-  const localAuthEnabled = asBool(raw.LOCAL_AUTH_ENABLED, !clerkIssuer);
-  const localSessionSecret = localAuthEnabled ? raw.SECRET_KEY?.trim() || null : null;
+  // Mirrors workflow-service: password sign-in is on by default and off when Clerk or single sign-on is
+  // configured, so neither door silently grows a second one beside it.
+  const oidcIssuer = raw.OIDC_ISSUER?.trim() || null;
+  const oidcSessionIssuer = oidcIssuer && raw.OIDC_CLIENT_ID?.trim() ? oidcIssuer : null;
+  const passwordSessions = asBool(raw.LOCAL_AUTH_ENABLED, !clerkIssuer && !oidcSessionIssuer);
+  const localSessionSecret = passwordSessions || oidcSessionIssuer ? raw.SECRET_KEY?.trim() || null : null;
   const trustProxyHops = proxyHops(raw.TRUST_PROXY_HOPS, errors);
 
   if (errors.length > 0) {
@@ -136,6 +140,8 @@ export function validateEnv(raw: NodeJS.ProcessEnv): EnvConfig {
     clerkIssuer,
     clerkAuthorizedParties: raw.CLERK_AUTHORIZED_PARTIES ?? '',
     localSessionSecret,
+    passwordSessions,
+    oidcSessionIssuer,
     serviceSharedSecret: raw.SECRET_KEY?.trim() || null,
     callerAuthConfigured: mockAuth || Boolean(clerkIssuer) || Boolean(localSessionSecret),
     trustProxyHops,

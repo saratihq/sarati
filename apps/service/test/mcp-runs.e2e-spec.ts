@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { Client } from '@modelcontextprotocol/client';
@@ -7,18 +6,18 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { exportJWK, generateKeyPair, type KeyLike, SignJWT } from 'jose';
 import { Client as PgClient } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { fernetEncrypt } from '../src/common/crypto/fernet';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
-const ISSUER = 'https://idp.mcp-runs.local';
+const SECRET = 'mcp-runs-session-secret';
 
 /** Secrets seeded into the connection store; NONE may ever appear in a tool result. */
 const BYO_CLIENT_SECRET = 'byo-client-secret-must-never-ship';
@@ -74,15 +73,14 @@ function approvalIr(topic: string): Record<string, unknown> {
 
 /**
  * `orchestr_get_run` + `orchestr_list_connections` through the real MCP client, with BOTH
- * credential kinds live: `ork_` keys and OIDC sessions, so the api-key narrowing is provable against
+ * credential kinds live: `ork_` keys and signed-in sessions, so the api-key narrowing is provable against
  * the session behaviour it must not regress.
  */
 describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () => {
   let app: INestApplication;
   let db: PgClient;
   let baseUrl: string;
-  let jwks: Server;
-  let privateKey: KeyLike;
+  let secretBefore: string | undefined;
 
   const userA = randomUUID();
   const userB = randomUUID();
@@ -141,8 +139,8 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
   async function seedUsers(): Promise<void> {
     await db.query(
       `INSERT INTO users (id, email, name, clerk_user_id, created_at, updated_at)
-       VALUES ($1, 'owner-a@mcp.local', 'Owner A', 'oidc-a', now(), now()),
-              ($2, 'member-b@mcp.local', 'Member B', 'oidc-b', now(), now())`,
+       VALUES ($1, 'owner-a@mcp.local', 'Owner A', NULL, now(), now()),
+              ($2, 'member-b@mcp.local', 'Member B', NULL, now(), now())`,
       [userA, userB],
     );
     await db.query(
@@ -214,15 +212,6 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
   }
 
   beforeAll(async () => {
-    const { publicKey, privateKey: priv } = await generateKeyPair('RS256');
-    privateKey = priv;
-    const jwk = { ...(await exportJWK(publicKey)), kid: 'mcp-kid', alg: 'RS256', use: 'sig' };
-    jwks = createServer((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ keys: [jwk] }));
-    });
-    await new Promise<void>((resolve) => jwks.listen(0, '127.0.0.1', resolve));
-
     const e2eUrl = await createE2eDatabase(ADMIN_URL);
     db = new PgClient({ connectionString: e2eUrl });
     await db.connect();
@@ -236,19 +225,10 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
     process.env.CLERK_ISSUER = '';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
-    process.env.OIDC_ISSUER = ISSUER;
-    process.env.OIDC_JWKS_URL = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks`;
-
-    const sign = (subject: string): Promise<string> =>
-      new SignJWT({})
-        .setProtectedHeader({ alg: 'RS256', kid: 'mcp-kid' })
-        .setIssuer(ISSUER)
-        .setSubject(subject)
-        .setIssuedAt()
-        .setExpirationTime('30m')
-        .sign(privateKey);
-    sessionA = await sign('oidc-a');
-    sessionB = await sign('oidc-b');
+    secretBefore = process.env.SECRET_KEY;
+    process.env.SECRET_KEY = SECRET;
+    sessionA = (await mintSession(userA, SECRET)).token;
+    sessionB = (await mintSession(userB, SECRET)).token;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
@@ -291,10 +271,9 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
   afterAll(async () => {
     await app.close();
     await db.end();
-    await new Promise<void>((resolve, reject) => jwks.close((e) => (e ? reject(e) : resolve())));
     process.env.DATABASE_URL = ADMIN_URL;
-    process.env.OIDC_ISSUER = '';
-    process.env.OIDC_JWKS_URL = '';
+    if (secretBefore === undefined) delete process.env.SECRET_KEY;
+    else process.env.SECRET_KEY = secretBefore;
   });
 
   // ── The finding: org-wide run reach is a SESSION property, never a token's ──

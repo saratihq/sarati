@@ -5,13 +5,13 @@ import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { Response } from 'supertest';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
@@ -19,7 +19,7 @@ import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
-const ISSUER = 'https://idp.approval-deciders.local';
+const SECRET = 'approval-deciders-session-secret';
 
 interface Decider {
   id: string;
@@ -103,7 +103,8 @@ describe.each([
 ])('who answered each wait, $rail (e2e, isolated DB, two session members)', ({ dbos }) => {
   let app: INestApplication;
   let db: Client;
-  let jwks: Server;
+  let boomServer: Server;
+  let secretBefore: string | undefined;
   let sessionA = '';
   let sessionB = '';
   let workflowId = '';
@@ -171,25 +172,18 @@ describe.each([
       .rows[0];
 
   beforeAll(async () => {
-    const { publicKey, privateKey } = await generateKeyPair('RS256');
-    const jwk = { ...(await exportJWK(publicKey)), kid: 'deciders-kid', alg: 'RS256', use: 'sig' };
-    jwks = createServer((req, res) => {
-      if (req.url === '/boom') {
-        res.writeHead(500, { 'content-type': 'application/json' });
-        res.end('{"error":"boom"}');
-        return;
-      }
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ keys: [jwk] }));
+    boomServer = createServer((_req, res) => {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end('{"error":"boom"}');
     });
-    await new Promise<void>((resolve) => jwks.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => boomServer.listen(0, '127.0.0.1', resolve));
 
     process.env.DATABASE_URL = await createE2eDatabase(ADMIN_URL);
     db = new Client({ connectionString: process.env.DATABASE_URL });
     await db.connect();
     await db.query(
       `INSERT INTO users (id, email, name, clerk_user_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 'oidc-ada', now(), now()), ($4, $5, $6, 'oidc-bo', now(), now())`,
+       VALUES ($1, $2, $3, NULL, now(), now()), ($4, $5, $6, NULL, now(), now())`,
       [ada.id, ada.email, ada.name, bo.id, bo.email, bo.name],
     );
     await db.query(
@@ -208,20 +202,12 @@ describe.each([
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
-    process.env.OIDC_ISSUER = ISSUER;
-    process.env.OIDC_JWKS_URL = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks`;
+    secretBefore = process.env.SECRET_KEY;
+    process.env.SECRET_KEY = SECRET;
     process.env.DBOS_ENABLED = String(dbos);
     delete process.env.DBOS_SYSTEM_DATABASE_URL;
-    const sign = (subject: string): Promise<string> =>
-      new SignJWT({})
-        .setProtectedHeader({ alg: 'RS256', kid: 'deciders-kid' })
-        .setIssuer(ISSUER)
-        .setSubject(subject)
-        .setIssuedAt()
-        .setExpirationTime('30m')
-        .sign(privateKey);
-    sessionA = await sign('oidc-ada');
-    sessionB = await sign('oidc-bo');
+    sessionA = (await mintSession(userA, SECRET)).token;
+    sessionB = (await mintSession(userB, SECRET)).token;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
@@ -240,10 +226,10 @@ describe.each([
   afterAll(async () => {
     await app.close();
     await db.end();
-    await new Promise<void>((resolve, reject) => jwks.close((e) => (e ? reject(e) : resolve())));
+    await new Promise<void>((resolve, reject) => boomServer.close((e) => (e ? reject(e) : resolve())));
     process.env.DATABASE_URL = ADMIN_URL;
-    process.env.OIDC_ISSUER = '';
-    process.env.OIDC_JWKS_URL = '';
+    if (secretBefore === undefined) delete process.env.SECRET_KEY;
+    else process.env.SECRET_KEY = secretBefore;
     process.env.DBOS_ENABLED = 'false';
   }, 60_000);
 
@@ -517,7 +503,7 @@ describe.each([
       type_version: 1,
       parameters: {
         method: 'POST',
-        url: `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/boom`,
+        url: `http://127.0.0.1:${(boomServer.address() as AddressInfo).port}/boom`,
         body: {},
       },
       position: { x: 0, y: 240 },

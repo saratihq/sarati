@@ -11,11 +11,11 @@ export class UserEntity {
   @Column({ type: 'varchar', length: 255, unique: true })
   email!: string;
 
-  /** Null only on legacy password-era rows not yet adopted by Clerk sign-in. */
+  /** The Clerk user id — an OIDC `sub` on accounts the retired bearer sign-in created; null otherwise. */
   @Column({ name: 'clerk_user_id', type: 'varchar', length: 64, unique: true, nullable: true })
   clerkUserId!: string | null;
 
-  /** Legacy — retained for pre-Clerk rows; no code path writes it anymore. */
+  /** scrypt hash of the account's password; null when it has none. */
   @Column({ name: 'hashed_password', type: 'varchar', length: 255, nullable: true })
   hashedPassword!: string | null;
 

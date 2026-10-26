@@ -46,13 +46,6 @@ export class UserProvisioningService {
     return this.provision(clerkUserId, identity);
   }
 
-  /** Provision from an OIDC token's own claims — `subject` shares the external-subject column with Clerk. */
-  async getOrProvisionFromClaims(subject: string, email: string, name: string): Promise<UserEntity> {
-    const existing = await this.findByClerkId(subject);
-    if (existing) return existing;
-    return this.provision(subject, { email, name });
-  }
-
   /** Adopt-by-email or create user + settings + personal org; race-safe. */
   private async provision(
     clerkUserId: string,

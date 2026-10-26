@@ -1,10 +1,9 @@
-import { createHash, randomBytes } from 'node:crypto';
-
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
 import { EncryptionService } from '../common/crypto/encryption.service';
+import { pkceChallenge, randomToken } from '../common/pkce';
 import { OAuthStateEntity } from '../database/entities/oauth-state.entity';
 import { newId, now } from '../database/ids';
 import { ConnectionsService, type ConnectionSummary } from './connections.service';
@@ -33,15 +32,6 @@ export class OAuthStateError extends Error {
 }
 
 const STATE_TTL_MS = 10 * 60_000;
-
-function randomToken(bytes = 24): string {
-  return randomBytes(bytes).toString('base64url');
-}
-
-/** PKCE S256 challenge = base64url(sha256(verifier)). */
-function pkceChallenge(verifier: string): string {
-  return createHash('sha256').update(verifier).digest('base64url');
-}
 
 /**
  * The OAuth2 authorization-code flow: authorize → consent → callback → token exchange → stored connection.

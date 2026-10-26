@@ -13,6 +13,9 @@ const PUBLIC_CONTROLLERS = [
   // Login and registration are how a caller GETS a session, so they cannot require one. Both are
   // rate-limited, and registration is bootstrap-or-invite only.
   'auth/local/local-auth.controller.ts',
+  // Single sign-on's start and completion are the same way in: rate-limited, and completing one
+  // needs a live single-use state bound to the tab that started it.
+  'auth/oidc/oidc-sign-in.controller.ts',
   'health/health.controller.ts',
   // An invitee has no account yet on a self-hosted instance, so reading which org they were
   // invited to cannot require one; the token is the capability.

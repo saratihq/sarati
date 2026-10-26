@@ -5,13 +5,12 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../../common/domain-error';
 import type { EnvConfig } from '../../config/env.config';
-import { newId, now } from '../../database/ids';
 import { OrgInviteEntity } from '../../database/entities/org-invite.entity';
 import { UserEntity } from '../../database/entities/user.entity';
 import { OrgManagementService } from '../../orgs/org-management.service';
-import { OrgsService } from '../../orgs/orgs.service';
+import { AdmissionService } from './admission.service';
 import { MIN_PASSWORD_LENGTH, hashPassword, verifyPassword } from './password';
-import { mintSession } from './local-session';
+import { mintSession, type SessionMethod } from './local-session';
 
 /** A password never verified against a real hash still costs time, so login cannot be an account oracle. */
 const DUMMY_HASH =
@@ -21,6 +20,15 @@ export interface SessionGrant {
   token: string;
   expires_at: string;
   user: { id: string; email: string; name: string };
+  /** The org an invite carried through sign-in just joined, so the client can open it. */
+  joined_org_id?: string;
+}
+
+/** The refusal for a sign-up the instance does not admit — one answer, whatever the reason. */
+export function signupClosed(): DomainError {
+  return new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
+    code: 'signup_closed',
+  });
 }
 
 /** Email + password for self-host: bootstrap-or-invite registration, then signed sessions. */
@@ -31,8 +39,8 @@ export class LocalAuthService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
-    private readonly orgs: OrgsService,
     private readonly orgManagement: OrgManagementService,
+    private readonly admission: AdmissionService,
   ) {}
 
   /** Whether this instance offers local login at all — the client asks before drawing a form. */
@@ -40,9 +48,15 @@ export class LocalAuthService {
     return this.config.get('env', { infer: true }).localAuthEnabled;
   }
 
-  /** True while the instance has no users: the first-run window in which an owner account is made. */
+  /** Whether browser single sign-on is configured. */
+  get ssoEnabled(): boolean {
+    return this.config.get('env', { infer: true }).oidcSignInEnabled;
+  }
+
+  /** True while the instance has no users and a first-party sign-in can make its first account. */
   async awaitingBootstrap(): Promise<boolean> {
-    if (!this.enabled) return false;
+    const env = this.config.get('env', { infer: true });
+    if (!env.localAuthEnabled && !env.oidcSignInEnabled) return false;
     return (await this.dataSource.manager.count(UserEntity)) === 0;
   }
 
@@ -55,33 +69,34 @@ export class LocalAuthService {
     this.assertEnabled();
     const email = normalizeEmail(input.email);
     this.assertPasswordUsable(input.password);
+    const hashedPassword = await hashPassword(input.password);
+    const inviteToken = input.inviteToken?.trim();
 
-    const grant = await this.dataSource.transaction(async (em) => {
-      await this.assertAdmissible(em, email, input.inviteToken);
-      if (await em.findOne(UserEntity, { where: { email } })) {
+    return this.admission.admitting(async (em) => {
+      await this.assertAdmissible(em, email, inviteToken);
+      if (await this.admission.emailTaken(em, email)) {
         throw new DomainError('An account with that email already exists — sign in instead.', 409, {
           code: 'email_taken',
         });
       }
 
-      const user = em.create(UserEntity, {
-        id: newId(),
+      const user = await this.admission.createAccount(em, {
         email,
         name: input.name?.trim() || email.split('@')[0] || 'Owner',
-        hashedPassword: await hashPassword(input.password),
-        createdAt: now(),
-        updatedAt: now(),
+        hashedPassword,
+        identity: null,
       });
-      await em.save(UserEntity, user);
-      await this.orgs.ensurePersonalOrg(em, user);
+      // Membership runs through the ONE acceptance path, so the join event fires exactly as it does for a browser accept.
+      const joined = inviteToken ? await this.orgManagement.acceptInviteWith(em, user.id, inviteToken) : null;
+      if (inviteToken && !joined) throw signupClosed();
       this.logger.log(`local account created for ${email}`);
-      return { session: await this.grant(user), userId: user.id };
+      return grantSession(
+        user,
+        this.config.get('env', { infer: true }).secretKey,
+        { method: 'password' },
+        joined,
+      );
     });
-
-    // Membership runs through the ONE acceptance path, so the join event fires exactly as it does
-    // for a browser accept. It owns its own transaction, hence after the commit above.
-    if (input.inviteToken) await this.orgManagement.acceptInvite(grant.userId, input.inviteToken.trim());
-    return grant.session;
   }
 
   async login(email: string, password: string): Promise<SessionGrant> {
@@ -96,36 +111,24 @@ export class LocalAuthService {
         code: 'invalid_credentials',
       });
     }
-    return this.grant(user);
+    return grantSession(
+      user,
+      this.config.get('env', { infer: true }).secretKey,
+      { method: 'password' },
+      null,
+    );
   }
 
-  private async grant(user: UserEntity): Promise<SessionGrant> {
-    const { secretKey } = this.config.get('env', { infer: true });
-    const { token, expiresAt } = await mintSession(user.id, secretKey);
-    return {
-      token,
-      expires_at: expiresAt,
-      user: { id: user.id, email: user.email ?? '', name: user.name ?? '' },
-    };
-  }
-
-  /**
-   * Registration is never open: the FIRST account on an empty instance, or one matching a live
-   * invite. Returns the invite to accept, or null for the bootstrap case.
-   */
+  /** Registration is never open: the FIRST account on an empty instance, or one matching a live invite. */
   private async assertAdmissible(em: EntityManager, email: string, token: string | undefined): Promise<void> {
-    if ((await em.count(UserEntity)) === 0) return;
+    if (await this.admission.isFirstAccount(em)) return;
 
-    const invite = token ? await em.findOne(OrgInviteEntity, { where: { token: token.trim() } }) : null;
+    const invite = token ? await em.findOne(OrgInviteEntity, { where: { token } }) : null;
     const live =
       invite !== null &&
       normalizeEmail(invite.email ?? '') === email &&
       (await this.orgManagement.isRedeemable(em, invite));
-    if (!live) {
-      throw new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
-        code: 'signup_closed',
-      });
-    }
+    if (!live) throw signupClosed();
   }
 
   private assertEnabled(): void {
@@ -147,6 +150,22 @@ export class LocalAuthService {
   }
 }
 
-function normalizeEmail(email: string): string {
+/** A fresh session for `user`, minted for the method they signed in with. */
+export async function grantSession(
+  user: UserEntity,
+  secret: string,
+  via: SessionMethod,
+  joined: { org_id: string } | null,
+): Promise<SessionGrant> {
+  const { token, expiresAt } = await mintSession(user.id, secret, via);
+  return {
+    token,
+    expires_at: expiresAt,
+    user: { id: user.id, email: user.email ?? '', name: user.name ?? '' },
+    ...(joined ? { joined_org_id: joined.org_id } : {}),
+  };
+}
+
+export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }

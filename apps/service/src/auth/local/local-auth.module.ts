@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { OrgsModule } from '../../orgs/orgs.module';
+import { AdmissionService } from './admission.service';
 import { LocalAuthController } from './local-auth.controller';
 import { LocalAuthService } from './local-auth.service';
 
@@ -12,6 +13,7 @@ import { LocalAuthService } from './local-auth.service';
 @Module({
   imports: [OrgsModule],
   controllers: [LocalAuthController],
-  providers: [LocalAuthService],
+  providers: [LocalAuthService, AdmissionService],
+  exports: [AdmissionService],
 })
 export class LocalAuthModule {}

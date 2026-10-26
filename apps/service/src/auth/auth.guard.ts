@@ -56,14 +56,7 @@ export class AuthGuard implements CanActivate {
         const user = identity.userId
           ? await this.provisioning.getById(identity.userId)
           : identity.clerkUserId
-            ? identity.email
-              ? // OIDC self-host: provision from token claims (no external fetch).
-                await this.provisioning.getOrProvisionFromClaims(
-                  identity.clerkUserId,
-                  identity.email,
-                  identity.name ?? identity.email,
-                )
-              : await this.provisioning.getOrProvision(identity.clerkUserId)
+            ? await this.provisioning.getOrProvision(identity.clerkUserId)
             : null;
         if (!user) throw new InvalidTokenError('Token identity did not resolve to a user');
         const principal = await this.attach(req, user, identity.apiKey);

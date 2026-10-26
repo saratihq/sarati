@@ -374,38 +374,16 @@ export class OrgManagementService {
 
   /** Token-bound accept: the link's holder joins with the invited role; already-a-member is a no-op. */
   async acceptInvite(userId: string, token: string): Promise<{ org_id: string; name: string }> {
+    const joined = await this.joinByInvite(userId, token);
+    if (!joined) throw new DomainError('Invite not found or expired', 404);
+    return joined;
+  }
+
+  /** {@link acceptInvite} in a transaction of its own, answering null for a token that can no longer be redeemed. */
+  async joinByInvite(userId: string, token: string): Promise<{ org_id: string; name: string } | null> {
     try {
       return await this.dataSource.transaction(async (em) => {
-        const spent = new DomainError('Invite not found or expired', 404);
-        const sought = await em.findOne(OrgInviteEntity, { where: { token } });
-        if (!sought) throw spent;
-        await lockOrgForWrite(em, sought.orgId, spent);
-        const invite = await lockInvite(em, { id: sought.id });
-        if (!invite) throw spent;
-        const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
-
-        const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
-        if (existing) return { org_id: org.id, name: org.name };
-
-        if (!(await this.isRedeemable(em, invite))) throw spent;
-
-        await em.insert(OrgMemberEntity, {
-          id: newId(),
-          orgId: org.id,
-          userId,
-          role: invite.role,
-          createdAt: now(),
-        });
-        await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
-        await this.events.emit(em, {
-          orgId: org.id,
-          actorUserId: userId,
-          type: 'org.member_joined',
-          subjectType: 'org_member',
-          subjectId: userId,
-          payload: { role: invite.role, invite_id: invite.id },
-        });
-        return { org_id: org.id, name: org.name };
+        return this.acceptInviteWith(em, userId, token);
       });
     } catch (err) {
       // Double-submit race: the membership unique constraint makes the loser idempotent.
@@ -418,6 +396,49 @@ export class OrgManagementService {
       }
       throw err;
     }
+  }
+
+  /** {@link acceptInvite} inside the caller's transaction, so joining commits with what the caller writes beside it; null for a token that can no longer be redeemed. */
+  async acceptInviteWith(
+    em: EntityManager,
+    userId: string,
+    token: string,
+  ): Promise<{ org_id: string; name: string } | null> {
+    const sought = await em.findOne(OrgInviteEntity, { where: { token } });
+    if (!sought) return null;
+    const orgGone = new DomainError('Organization not found', 404);
+    try {
+      await lockOrgForWrite(em, sought.orgId, orgGone);
+    } catch (err) {
+      if (err === orgGone) return null;
+      throw err;
+    }
+    const invite = await lockInvite(em, { id: sought.id });
+    if (!invite) return null;
+    const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
+
+    const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
+    if (existing) return { org_id: org.id, name: org.name };
+
+    if (!(await this.isRedeemable(em, invite))) return null;
+
+    await em.insert(OrgMemberEntity, {
+      id: newId(),
+      orgId: org.id,
+      userId,
+      role: invite.role,
+      createdAt: now(),
+    });
+    await em.update(OrgInviteEntity, { id: invite.id }, { acceptedBy: userId, acceptedAt: now() });
+    await this.events.emit(em, {
+      orgId: org.id,
+      actorUserId: userId,
+      type: 'org.member_joined',
+      subjectType: 'org_member',
+      subjectId: userId,
+      payload: { role: invite.role, invite_id: invite.id },
+    });
+    return { org_id: org.id, name: org.name };
   }
 
   async orgById(orgId: string): Promise<OrganizationEntity> {
