@@ -33,8 +33,8 @@ deleted. You can add others.
 
 Promoting moves the pointer — nothing is copied, and the version being promoted does not change.
 
-Connections belong to the environment, so a step names the app it needs and the environment
-supplies the account. Staging hits the sandbox; production hits the real thing.
+Connections belong to the environment, so a step or an app trigger names the app it needs and the
+environment supplies the account. Staging hits the sandbox; production hits the real thing.
 
 ## Run
 

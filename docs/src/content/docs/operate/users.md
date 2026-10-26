@@ -36,6 +36,11 @@ A new account can only be created with the email address the invite was sent to.
 already has an account joins by opening the link while signed in — for them the link alone is
 enough, so treat it like a password and delete one you did not mean to send.
 
+An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
+accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever
+comes second answers `404`, as for an invite that isn't there. Accepting again with an account that
+is already in it is a no-op, and signing up with a spent link is refused as `signup_closed`.
+
 Only an owner can invite someone as an owner; an admin's attempt is refused.
 
 <img class="shot shot-dark" src="/shots/org-members-dark.webp" alt="Organization settings: members with their roles, the invite form, and the danger zone." />

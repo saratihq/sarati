@@ -199,9 +199,11 @@ the provider's own. Requests to them carry an API secret, so in production each 
 `https://`, or `http://` to the same machine (`localhost`, `127.0.0.1`, `::1`); anything else stops
 the service at boot — `CLERK_API_URL` only once `CLERK_SECRET_KEY` is set. Neither may carry a
 username, a password, a query string or a fragment, in any environment: the service stops at boot
-and names only the address and path. A redirect from `COMPOSIO_BASE_URL` is followed only while it
-stays on the same origin; one to any other origin fails the request and names where it pointed, so
-the Composio API key only reaches the address you set.
+and names only the address and path. Every request that carries the Composio API key — to
+Composio's own API or to `COMPOSIO_BASE_URL`, from a managed step or from the service itself —
+follows a redirect only while it stays on the same origin. One to any other origin fails the call
+without retrying and names where it pointed, so neither the key nor the request leaves that origin
+([the message](/operate/troubleshooting/#a-managed-step-says-composio-redirected-it-elsewhere)).
 
 ## Container defaults differ from the source template
 

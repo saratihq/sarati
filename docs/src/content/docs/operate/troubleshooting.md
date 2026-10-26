@@ -234,6 +234,21 @@ Point the step at the app's own address:
   `https://<your-domain>.my.salesforce.com`. A legacy instance host such as `na123.salesforce.com`,
   a `cloudforce.com` host or an Experience Cloud `my.site.com` host is refused.
 
+## A managed step says Composio redirected it elsewhere
+
+```
+slack.send_channel_message failed: Composio answered 307, a redirect to https://elsewhere.example/api/v3/tools/execute/proxy; the API key is only sent to https://backend.composio.dev, so it was not followed
+```
+
+The Composio address the service calls answered with a redirect to another origin. The Composio API
+key and the request only go to the origin they were sent to, so the call failed instead of following it,
+and nothing reached the other address. Listing managed apps, connecting an app with one click and a
+one-click trigger's subscription fail the same way, with
+`Composio request failed: Composio answered …`. If `COMPOSIO_BASE_URL` points at a proxy, set it to
+an address that answers the request itself rather than redirecting it to another origin; an `http://` address that
+redirects to its `https://` form is another origin too. See
+[Private addresses](/operate/configuration/#private-addresses).
+
 ## A Mailchimp or Zendesk step refuses its server prefix or subdomain
 
 ```
@@ -301,6 +316,23 @@ slot holds only once an owner assigns it there.
 The two Anthropic credentials are separate on purpose: the Settings key builds workflows, a
 connection runs them. See
 [Connections](/build/connections/#the-ai-agent-step-needs-one-too).
+
+## Test this branch refuses an environment
+
+```
+Only owners and admins can test a branch under 'production' in an organization, the same as promoting to it — test it on Default (your connections)
+```
+
+```
+This API key is missing the "workflow:deploy" scope it takes to test a branch under 'production', the same as promoting to it — test it on Default (your connections)
+```
+
+Testing a branch under an environment runs it on that environment's accounts before any review has
+passed it, so it takes the right to promote there: in an organization an owner or admin, and through
+an API key the `workflow:deploy` scope as well as `run:execute`. The refusal is `403` with the code
+`promote_not_permitted`, and nothing ran. Test on Default, or have an owner or admin test it under
+the environment. For the second message, mint a key with `workflow:deploy` as well; a member's key is
+refused with the first message once it holds that scope. See [Who can promote](/run/environments/#who-can-promote).
 
 ## An API call returns 403 naming a scope
 
