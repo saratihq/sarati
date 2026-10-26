@@ -13,6 +13,7 @@ import { Throttle } from '@nestjs/throttler';
 import { Observable } from 'rxjs';
 
 import { DomainError } from '../common/domain-error';
+import { CapabilityPath } from '../common/request-log-redaction';
 import { isIdShape } from '../database/ids';
 import { AgentStepBus, channelKey } from '../runtime/agent-step-bus';
 import { TriggersService } from './triggers.service';
@@ -43,6 +44,7 @@ export class ChatController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Header('Cache-Control', 'no-cache, no-transform')
   @Header('X-Accel-Buffering', 'no')
+  @CapabilityPath()
   @Sse(':workflowId/:env/events')
   streamChatEvents(
     @Param('workflowId') workflowId: string,
@@ -76,6 +78,7 @@ export class ChatController {
 
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @HttpCode(200)
+  @CapabilityPath()
   @Post(':workflowId/:env')
   async fireChat(
     @Param('workflowId') workflowId: string,
