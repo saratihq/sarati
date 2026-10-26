@@ -62,7 +62,8 @@ A missing scope is refused by name, so the fix is obvious:
 
 A key is personal: it acts only in your personal workspace, the organization it is minted for. A
 team organization's workflows answer `404` as if they did not exist, even ones you can open
-yourself, and its organization routes refuse:
+yourself. Its organization routes refuse, and so do creating an organization and accepting an
+invite into one:
 
 ```json
 {"detail":"This API key is scoped to a different organization"}
