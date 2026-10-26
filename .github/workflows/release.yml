@@ -14,6 +14,7 @@ on:
 jobs:
   images:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -78,6 +79,7 @@ jobs:
   all-in-one:
     needs: images
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -137,6 +139,7 @@ jobs:
     needs: all-in-one
     if: vars.DOCKERHUB_USERNAME != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -175,6 +178,7 @@ jobs:
     needs: hub-description
     if: vars.DOCKERHUB_USERNAME != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -205,6 +209,7 @@ jobs:
   verify:
     needs: [images, all-in-one]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: read
