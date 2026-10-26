@@ -7,7 +7,9 @@ import type { Response } from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { eventTopicFor } from '../src/runtime/event-wait';
+import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import { listenOnLoopback } from './support/listen';
+import { deferred, reached } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** One wait in a run: on `topic` it waits on a person, without one it sleeps on its own clock. */
@@ -229,6 +231,27 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       [runId, stepKey],
     );
     return res.rows[0]!.waiting_timeout_at.toISOString();
+  }
+
+  function holdTake(scoped: string, stepKey: string): { taking: Promise<void>; release: () => void } {
+    const recorder = app.get(RunRecorderService);
+    const record = recorder.stepResumed.bind(recorder);
+    const taking = deferred();
+    const released = deferred();
+    const spy = jest.spyOn(recorder, 'stepResumed').mockImplementation(async (runKey, key, answered) => {
+      if (runKey === scoped && key === stepKey) {
+        taking.resolve();
+        await released.promise;
+      }
+      return record(runKey, key, answered);
+    });
+    return {
+      taking: taking.promise,
+      release: () => {
+        released.resolve();
+        spy.mockRestore();
+      },
+    };
   }
 
   const answer = (runId: string, topic: string, payload: unknown, stepKey?: string) =>
@@ -529,11 +552,25 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       'both approvals listed',
     );
 
-    await answer('stale', 'approval', { decision: 'approved' }, firstKey).expect(200);
+    const [run] = (await db.query<{ id: string }>(`SELECT id FROM runtime_runs WHERE run_id = $1`, ['stale']))
+      .rows;
+    const take = holdTake(run!.id, firstKey);
+    try {
+      await answer('stale', 'approval', { decision: 'approved' }, firstKey).expect(200);
+      await reached(take.taking, 'the run taking the first decision');
+      const onItsWay = await answer('stale', 'approval', { decision: 'rejected' }, firstKey);
+      expect(onItsWay.status).toBe(409);
+      expect(onItsWay.body.detail).toBe(`Step "${firstKey}" of run stale is already decided`);
+      expect((await inboxFor('stale')).map((r) => r.step_key)).toEqual([secondKey]);
+    } finally {
+      take.release();
+    }
+
     await eventually(
-      () => inboxFor('stale'),
-      (rows) => rows.length === 1,
-      'the first answered',
+      async () =>
+        (await http().get('/api/runs/stale').expect(200)).body.steps as Array<Record<string, unknown>>,
+      (steps) => steps.find((s) => s.step_key === firstKey)?.status === 'completed',
+      'the run took the first decision',
     );
     const late = await answer('stale', 'approval', { decision: 'rejected' }, firstKey);
     expect(late.status).toBe(409);
