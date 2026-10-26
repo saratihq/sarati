@@ -3,7 +3,6 @@ import { PROD_ENV, UAT_ENV } from './env-name';
 /** The environments an org is created with. */
 export const DEFAULT_ENVS: readonly string[] = [PROD_ENV, 'staging', UAT_ENV];
 
-/** What the seed needs: a transaction's EntityManager, or a pg client. */
 interface Sql {
   query(text: string, params: unknown[]): Promise<unknown>;
 }

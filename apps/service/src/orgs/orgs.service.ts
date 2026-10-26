@@ -3,10 +3,11 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
-import { isIdShape, newId, now } from '../database/ids';
+import { isIdShape } from '../database/ids';
 import { OrgMemberEntity, OrganizationEntity, type OrgRole } from '../database/entities/organization.entity';
 import type { UserEntity } from '../database/entities/user.entity';
-import { seedDefaultEnvironments } from '../environments/default-environments';
+
+import { insertOrg } from './insert-org';
 
 export interface ActiveOrg {
   orgId: string | null;
@@ -27,24 +28,7 @@ export class OrgsService {
       .andWhere('org.is_personal = true')
       .getOne();
     if (existing) return existing;
-
-    const org = em.create(OrganizationEntity, {
-      id: newId(),
-      name: user.name,
-      isPersonal: true,
-      createdAt: now(),
-      updatedAt: now(),
-    });
-    await em.insert(OrganizationEntity, org);
-    await em.insert(OrgMemberEntity, {
-      id: newId(),
-      orgId: org.id,
-      userId: user.id,
-      role: 'owner',
-      createdAt: now(),
-    });
-    await seedDefaultEnvironments(em, org.id);
-    return org;
+    return insertOrg(em, { name: user.name, isPersonal: true, ownerId: user.id });
   }
 
   async roleOf(em: EntityManager, userId: string, orgId: string): Promise<OrgRole | null> {
