@@ -14,8 +14,11 @@ A workflow has exactly one trigger. Click the **Trigger** step, then **Change**.
 | Called by another workflow | Another workflow's step, or an AI agent, runs it and uses its result. |
 
 Beyond these, the same picker searches app triggers — Slack, GitHub and others — which fire on
-events in a connected account. The count depends on your instance: the built-in actions bring a few
-dozen, and configuring [managed connections](/build/connections/) takes it into the hundreds.
+events in an app. One that signs in listens as the account each environment assigns for its app
+([how](/run/environments/#triggers-listen-as-the-environments-account)); an RSS or HTTP feed signs
+in to nothing. The count depends on your
+instance: the built-in actions bring a few dozen, and configuring
+[managed connections](/build/connections/) takes it into the hundreds.
 
 <img class="shot shot-dark" src="/shots/trigger-picker-dark.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
 <img class="shot shot-light" src="/shots/trigger-picker-light.webp" alt="The trigger picker listing manual, incoming webhook, schedule, chat and callable-by-an-agent." />
@@ -112,6 +115,13 @@ registration:
 Until the new one is in place, an old polled trigger is not checked, so nothing it finds starts the
 version you promoted.
 
+A version whose trigger the environment's account can't serve is refused when you promote it, so
+nothing is replaced. If the account stops being active after the promote, before the trigger is
+replaced, what is live stays at the app but starts no run, and the change waits until the account is
+active again. If the new trigger is for another app, the old one is taken down all the same, and the
+new one waits for its account; see
+[Triggers listen as the environment's account](/run/environments/#triggers-listen-as-the-environments-account).
+
 A promote that changes only other steps, or where the trigger sits on the canvas, replaces nothing:
 a polled trigger carries on from where it was.
 
@@ -122,8 +132,11 @@ rename is refused; see [Rename and delete](/run/environments/#rename-and-delete)
 
 If the app can't delete the old webhook, or doesn't answer within ten seconds, the new trigger goes
 live anyway, and the delete is tried again every fifteen minutes — even after you remove the trigger,
-its workflow or its environment. An app that allows one webhook per address, such as GitHub, gets
-that delete first when a trigger is registered again at the same address.
+its workflow or its environment. No delete is sent with an account that isn't active: it waits until
+the account that registered the webhook is active again. An app that allows one webhook per address,
+such as GitHub, gets that delete first when a trigger is registered again at the same address. While
+the old webhook's account isn't active, that delete is made with the account registering the new
+one, if it can reach the webhook, and counts only once the app answers that it deleted it.
 A webhook that a live trigger has registered again is never deleted: Typeform keeps one webhook per
 form for each workflow environment, and a new trigger on that form takes it over. A webhook that no
 live trigger holds is given up when the account that created it has been removed, or when the app

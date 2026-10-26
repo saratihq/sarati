@@ -110,7 +110,48 @@ that makes runs durable. That API answers without signing in: it lists runs with
 with and every step's output, and cancels, resumes or forks any run. Neither stack file nor the
 one-container image publishes the port, but any container on the same Docker network could reach it,
 and so could anything that reaches the machine when the service runs outside Docker. Nothing in
-Sarati used it, so there is nothing to change: upgrade from any earlier version.
+Sarati used it, so it needs nothing from you.
+
+What a caller of the API sees change:
+
+- **Testing a branch under an environment takes the right to promote there.** In an organization
+  only owners and admins have it, and an API key needs `workflow:deploy` as well as `run:execute`,
+  in a personal workspace too. Without it the test answers `403` with the code
+  `promote_not_permitted` and nothing runs; testing on Default is unchanged. A promote, publish,
+  restore or un-promote refused for a member's role now carries the same code. See
+  [Who can promote](/run/environments/#who-can-promote).
+- **Promoting, publishing or restoring checks each app trigger against the environment's account
+  for its app,** as it checks each step. Before, it refused only a trigger that named an account of
+  its own where the environment had none assigned. A version whose trigger the account can't serve —
+  there is none, it is for another app, it isn't active, or it is of the wrong kind — is refused with
+  `428`, the trigger listed under `triggers`. A trigger already live on such an account stops
+  listening at the first fifteen-minute sweep after the upgrade, when pg-boss is enabled (the
+  default), and the workflow overview shows it as **Not listening** with the reason; one whose
+  account only stopped being active is **held** instead,
+  keeping what it set up at the app. A change to an account reconciles the triggers that listen as it
+  straight away. The refusal for an account that isn't active now says its owner tests it under
+  Integrations, where it used to say to reconnect it: **Reconnect** connects a new account, which
+  the slot holds only once an owner assigns it. See
+  [Triggers listen as the environment's account](/run/environments/#triggers-listen-as-the-environments-account).
+- **Renaming an environment is refused with `409`** while one of its webhook triggers is registered
+  with an account that isn't active, each listed under `held_webhooks`. No webhook delete is sent
+  with such an account either: it waits until the account is active again. See
+  [Rename and delete](/run/environments/#rename-and-delete).
+- **Every request carrying the Composio API key follows a redirect only while it stays on the same
+  origin.** One to another origin fails the call without retrying and names where it pointed, and
+  neither the key nor the request reaches it. A managed step used to follow it there, key and all,
+  and the service's own calls to Composio, such as a connect link, followed no redirect at all. See
+  [the message](/operate/troubleshooting/#a-managed-step-says-composio-redirected-it-elsewhere).
+  A username or password in `COMPOSIO_BASE_URL` or `CLERK_API_URL` now stops the service at boot;
+  see [What survives](#what-survives).
+- **Deleting an environment just after promoting into it** removes the new trigger with the others.
+  It could answer `409` and leave that trigger set up at its app until a later reconcile.
+- **A delete that crosses another write ends as if the two ran one after the other.** Deleting a
+  workflow, an environment or an organization while another delete, or a write under the same
+  organization, was under way could fail on a deadlock or with a `500`. Now they take turns: a write
+  already under way lands first and the delete sees it, and a write that reaches what the delete
+  holds waits for it, then answers `404` if what it changes is gone. A revoke and an accept of one
+  invite, or two accepts, take turns the same way, so an invite admits one account.
 
 ### v0.2.25: runs with parallel branches resume as they ran
 
