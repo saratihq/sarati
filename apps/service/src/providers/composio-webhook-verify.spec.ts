@@ -6,10 +6,12 @@ import { verifyComposioWebhook } from './composio-webhook-verify';
 describe('verifyComposioWebhook', () => {
   const secret = 'whsec_test_raw_secret_value';
   const id = 'msg_2abc';
-  const rawBody = JSON.stringify({ type: 'composio.trigger.message', metadata: { trigger_id: 'ti_x' } });
+  const rawBody = Buffer.from(
+    JSON.stringify({ type: 'composio.trigger.message', metadata: { trigger_id: 'ti_x' } }),
+  );
 
-  const sign = (webhookId: string, timestamp: string, body: string, key: string): string =>
-    'v1,' + createHmac('sha256', key).update(`${webhookId}.${timestamp}.${body}`).digest('base64');
+  const sign = (webhookId: string, timestamp: string, body: Buffer, key: string): string =>
+    'v1,' + createHmac('sha256', key).update(`${webhookId}.${timestamp}.`).update(body).digest('base64');
 
   const nowTs = (): string => String(Math.floor(Date.now() / 1000));
 
@@ -36,7 +38,7 @@ describe('verifyComposioWebhook', () => {
   });
 
   it('rejects a tampered body against a good signature', () => {
-    const res = verifyComposioWebhook(rawBody + ' tampered', headers(), secret);
+    const res = verifyComposioWebhook(Buffer.concat([rawBody, Buffer.from(' ')]), headers(), secret);
     expect(res.ok).toBe(false);
   });
 
