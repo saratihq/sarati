@@ -19,6 +19,7 @@ jobs:
   # it gates, not what it does — 'build' would collide with any future job of that name.
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: docs
