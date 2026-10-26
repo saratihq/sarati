@@ -10,14 +10,14 @@ import { Client } from 'pg';
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
 import { RUN_PLAN_V2_WORKFLOW, RUN_PLAN_WORKFLOW } from '../src/dbos/run-plan-workflow';
 import { failedNodeIdOf, NOT_RESUMED_STEP_ERROR } from '../src/runs/run-failure';
-import { GOLDEN_DIR, PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
+import { GOLDEN_DIR, LEGACY_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { bootService, startService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 const WINDOW_MS = 10 * 60_000;
-// v0.2.24, the build before this one, and v0.2.23, the release before it, whose waits on one topic all share a receive.
-const LATEST = PREVIOUS_BUILD;
+// v0.2.24, the last release whose runs start on the legacy engine, and v0.2.23, the release before it, whose waits on one topic all share a receive.
+const LATEST = LEGACY_BUILD;
 const RELEASED = '0af0a76';
 const EXPOSED = [
   'inside-step-fan-out',
