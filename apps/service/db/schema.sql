@@ -1127,10 +1127,10 @@ CREATE UNIQUE INDEX ix_users_clerk_user_id ON public.users USING btree (clerk_us
 
 
 --
--- Name: ix_users_email; Type: INDEX; Schema: public; Owner: orchestr
+-- Name: ix_users_confirmed_email; Type: INDEX; Schema: public; Owner: orchestr
 --
 
-CREATE UNIQUE INDEX ix_users_email ON public.users USING btree (email);
+CREATE UNIQUE INDEX ix_users_confirmed_email ON public.users USING btree (lower((email)::text)) WHERE email_verified;
 
 
 --

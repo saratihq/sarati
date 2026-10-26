@@ -59,7 +59,15 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
       const code = new URLSearchParams(req.body).get('code');
       const { flow, sub, email } = flows.find((f) => f.code === code)!;
       const now = Math.floor(Date.now() / 1000);
-      const claims = { iss: idp.issuer, aud: idp.clientId, sub, nonce: flow.nonce, iat: now, exp: now + 300 };
+      const claims = {
+        iss: idp.issuer,
+        aud: idp.clientId,
+        sub,
+        nonce: flow.nonce,
+        iat: now,
+        exp: now + 300,
+        auth_time: now,
+      };
       return {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -334,6 +342,46 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
       1, 1,
     ]);
   }, 90_000);
+
+  it('lets an account taking the address its provider now confirms and a first sign-in at that address take turns, so one account holds it', async () => {
+    await freshInstance(ssoEnv());
+    const first = await startSso();
+    answerFlows([{ code: 'owner', flow: first, sub: 'sub-renamed', email: 'before@example.com' }]);
+    const owner = await completeSso(first, 'owner').expect(200);
+    const returning = await startSso();
+    const newcomer = await startSso();
+    answerFlows([
+      { code: 'returning', flow: returning, sub: 'sub-renamed', email: 'wanted@example.com' },
+      { code: 'newcomer', flow: newcomer, sub: 'sub-newcomer', email: 'wanted@example.com' },
+    ]);
+
+    await side.query('SELECT pg_advisory_lock($1, 0)', [ADMISSION_LOCK_SPACE]);
+    let taking: Promise<request.Response>;
+    let arriving: Promise<request.Response>;
+    try {
+      taking = completeSso(returning, 'returning').then((res) => res);
+      await waitersOnAdmission(1);
+      arriving = completeSso(newcomer, 'newcomer').then((res) => res);
+      await waitersOnAdmission(2);
+    } finally {
+      await side.query('SELECT pg_advisory_unlock($1, 0)', [ADMISSION_LOCK_SPACE]);
+    }
+    const [took, arrived] = await Promise.all([taking, arriving]);
+
+    expect({ status: took.status, email: took.body.user?.email }).toEqual({
+      status: 200,
+      email: 'wanted@example.com',
+    });
+    expect({ status: arrived.status, code: arrived.body.code }).toEqual({
+      status: 409,
+      code: 'oidc_account_exists',
+    });
+    const holders = await db.query(
+      `SELECT id FROM users WHERE lower(email) = 'wanted@example.com' AND email_verified`,
+    );
+    expect(holders.rows).toEqual([{ id: owner.body.user.id }]);
+    expect(await count(`SELECT 1 FROM users`)).toBe(1);
+  }, 60_000);
 
   it('lets a link and a first sign-in of the same identity take turns, so the sign-in lands in the linked account', async () => {
     await freshInstance({ ...ssoEnv(), LOCAL_AUTH_ENABLED: 'true' });

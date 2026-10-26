@@ -16,13 +16,13 @@ export interface NewAccount {
   email: string;
   name: string;
   hashedPassword: string | null;
-  /** Whether an invite may be matched to `email`: false only for an address single sign-on's provider did not confirm. */
+  /** Whether the account holds `email`, so an invite may be matched to it: false for an address single sign-on's provider did not confirm. */
   emailVerified: boolean;
   /** The single sign-on identity it signs in with, or null for a password account. */
   identity: { issuer: string; subject: string; emailAtLink: string | null } | null;
 }
 
-/** The one place a first-party account is born; admissions take turns on one advisory lock, so two first-run sign-ups cannot both see an empty instance. */
+/** The one place a first-party account is born; admissions and address claims take turns on one advisory lock, so two first-run sign-ups cannot both see an empty instance, nor two accounts both take one address. */
 @Injectable()
 export class AdmissionService {
   constructor(
@@ -43,8 +43,13 @@ export class AdmissionService {
     return (await em.count(UserEntity)) === 0;
   }
 
-  async emailTaken(em: EntityManager, email: string): Promise<boolean> {
-    const rows = await rawQuery(em, 'SELECT 1 FROM users WHERE lower(email) = $1', [email]);
+  /** Whether an account other than `except` holds `email` confirmed — an unconfirmed one holds nothing; ask it under the admission lock. */
+  async addressHeld(em: EntityManager, email: string, except?: string): Promise<boolean> {
+    const rows = await rawQuery(
+      em,
+      'SELECT 1 FROM users WHERE lower(email) = $1 AND email_verified AND id IS DISTINCT FROM $2',
+      [email.toLowerCase(), except ?? null],
+    );
     return rows.length > 0;
   }
 

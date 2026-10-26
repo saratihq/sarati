@@ -44,6 +44,7 @@ describe("JoinPage: an invitee with no session", () => {
     render(<JoinPage />);
 
     expect(await screen.findByRole("heading", { name: "Join Acme" })).toBeInTheDocument();
+    expect(screen.getByText(/The invite is for the account at the email address it was sent to\./)).toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Continue with single sign-on" }));
     expect(beginOidcFlow).toHaveBeenCalledWith({ purpose: "sign_in", returnTo: "/join/inv-1", inviteToken: "inv-1" });

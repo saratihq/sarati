@@ -74,7 +74,7 @@ export class LocalAuthService {
 
     return this.admission.admitting(async (em) => {
       await this.assertAdmissible(em, email, inviteToken);
-      if (await this.admission.emailTaken(em, email)) {
+      if (await this.admission.addressHeld(em, email)) {
         throw new DomainError('An account with that email already exists — sign in instead.', 409, {
           code: 'email_taken',
         });
@@ -82,7 +82,7 @@ export class LocalAuthService {
 
       const user = await this.admission.createAccount(em, {
         email,
-        name: input.name?.trim() || email.split('@')[0] || 'Owner',
+        name: cleanName(input.name ?? '') || email.split('@')[0] || 'Owner',
         hashedPassword,
         emailVerified: true,
         identity: null,
@@ -102,9 +102,10 @@ export class LocalAuthService {
 
   async login(email: string, password: string): Promise<SessionGrant> {
     this.assertEnabled();
-    const user = await this.dataSource.manager.findOne(UserEntity, {
-      where: { email: normalizeEmail(email) },
-    });
+    const user = await this.dataSource.manager
+      .createQueryBuilder(UserEntity, 'u')
+      .where('lower(u.email) = :email AND u.email_verified', { email: normalizeEmail(email) })
+      .getOne();
     // Hash even when the account is unknown, so the response time reveals nothing.
     const ok = await verifyPassword(password, user?.hashedPassword ?? DUMMY_HASH);
     if (!user || !ok) {
@@ -169,4 +170,9 @@ export async function grantSession(
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/** A display name without control or format characters, which would garble or reverse it wherever it is shown. */
+export function cleanName(raw: string): string {
+  return raw.replace(/[\p{Cc}\p{Cf}]/gu, '').trim();
 }

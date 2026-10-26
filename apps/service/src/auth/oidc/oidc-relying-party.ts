@@ -28,6 +28,9 @@ export class OidcUnavailableError extends Error {}
 /** The provider refused the grant, or its answer failed verification — the operator log names which check. */
 export class OidcRejectedError extends Error {}
 
+/** The provider did not show that it signed the person in after the flow began, though asked to. */
+export class OidcStaleSignInError extends OidcRejectedError {}
+
 /** What the provider's discovery document says, checked. */
 export interface OidcDiscovery {
   authorizationEndpoint: string;
@@ -38,6 +41,8 @@ export interface OidcDiscovery {
   clientAuth: 'client_secret_basic' | 'client_secret_post';
   /** RFC 9207: the provider names itself in every authorization response. */
   issParameter: boolean;
+  /** `prompt=login` is among the prompt values the provider lists. */
+  promptLogin: boolean;
 }
 
 /** A discovery document with the provider's keys behind its jwks_uri. */
@@ -169,6 +174,7 @@ export function parseDiscovery(doc: unknown, issuer: string, production: boolean
     algorithms,
     clientAuth,
     issParameter: doc.authorization_response_iss_parameter_supported === true,
+    promptLogin: Array.isArray(doc.prompt_values_supported) && doc.prompt_values_supported.includes('login'),
   };
 }
 
@@ -199,6 +205,19 @@ function idTokenRefusal(err: unknown): string {
     return `the ID token's ${err.claim} is out of range — check this machine's clock against the provider's: ${err.message}`;
   }
   return `the ID token failed verification: ${errorMessage(err)}`;
+}
+
+// OIDC Core 3.1.2.1: a request carrying max_age obliges the provider to return auth_time.
+function assertSignedInSince(payload: JWTPayload, since: Date): void {
+  const authTime = payload.auth_time;
+  if (typeof authTime !== 'number' || !Number.isFinite(authTime)) {
+    throw new OidcStaleSignInError('the ID token carries no auth_time, though max_age=0 asked for one');
+  }
+  if (authTime < Math.floor(since.getTime() / 1000) - CLOCK_TOLERANCE_SECONDS) {
+    throw new OidcStaleSignInError(
+      `the provider signed the person in at ${new Date(authTime * 1000).toISOString()}, before this connection began (auth_time) — it did not ask them to sign in again`,
+    );
+  }
 }
 
 /** The confidential relying party for ONE issuer; its calls reach operator configuration, so they bypass the step SSRF guard as CLERK_API_URL does. */
@@ -241,9 +260,10 @@ export class OidcRelyingParty {
     this.cached = null;
   }
 
+  /** The authorization request; `reauthenticate` asks the provider to sign the person in again even when it holds a session. */
   authorizeUrl(
     discovery: OidcDiscovery,
-    flow: { state: string; nonce: string; codeVerifier: string },
+    flow: { state: string; nonce: string; codeVerifier: string; reauthenticate: boolean },
   ): string {
     const url = new URL(discovery.authorizationEndpoint);
     const params: Record<string, string> = {
@@ -255,19 +275,22 @@ export class OidcRelyingParty {
       nonce: flow.nonce,
       code_challenge: pkceChallenge(flow.codeVerifier),
       code_challenge_method: 'S256',
+      ...(flow.reauthenticate ? { max_age: '0' } : {}),
+      ...(flow.reauthenticate && discovery.promptLogin ? { prompt: 'login' } : {}),
     };
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
     return url.toString();
   }
 
-  /** Redeem an authorization code for a verified identity: the token exchange, the ID token's every check, and UserInfo when the email was held back. */
+  /** Redeem an authorization code for a verified identity: the token exchange, the ID token's every check, and UserInfo when the email was held back; with `signedInSince`, the ID token must show a sign-in no earlier. */
   async redeem(
     discovery: LoadedDiscovery,
-    flow: { code: string; codeVerifier: string; nonce: string },
+    flow: { code: string; codeVerifier: string; nonce: string; signedInSince?: Date },
   ): Promise<IdpClaims> {
     try {
       const tokens = await this.exchange(discovery, flow);
       const payload = await this.verifyIdToken(discovery, tokens.idToken, flow.nonce);
+      if (flow.signedInSince) assertSignedInSince(payload, flow.signedInSince);
       const subject = payload.sub as string;
       const fromToken = profileOf(payload);
       if (fromToken.email !== null || !discovery.userinfoEndpoint || !tokens.accessToken) {

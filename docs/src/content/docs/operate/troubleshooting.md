@@ -426,10 +426,26 @@ account cannot be made:
 
 ## Single sign-on: "You already have an account"
 
-An account with that email exists, and an email never connects anyone to it. Sign in to it with its
-password and connect single sign-on in **Settings → Profile**. With password sign-in off, an operator
-connects it from the server with `sarati-link-sso` — see
-[Users](/operate/users/#single-sign-on).
+Another account already holds that email, confirmed, and an email never connects anyone to it. If
+it has a password, sign in with it and connect single sign-on in **Settings → Profile**. If it has
+none — an account made through Clerk, or by the retired token sign-in — or password sign-in is off,
+an operator connects it from the server with `sarati-link-sso` — see
+[Connecting accounts from the server](/operate/users/#connecting-accounts-from-the-server).
+
+## Single sign-on: "This invite can't be matched to you"
+
+The provider did not confirm the address on your account (no `email_verified: true`), so no invite is
+matched to it. Have the provider verify the address, or release that claim. Microsoft Entra ID sends
+no `email_verified` at all, so it cannot be used for invites yet.
+
+## Connecting single sign-on: "Your identity provider did not ask you to sign in again"
+
+**Connect** asks the provider to sign you in afresh (`max_age=0`) and checks the ID token's
+`auth_time` to be sure it did, so the identity connected is the one that just signed in. The service
+log says which check failed, on a line starting `Single sign-on refused:`. One that says the provider
+signed the person in before the connection began means it reused a session: sign out at the
+provider and connect again. One that says the ID token carries no `auth_time` means the provider
+does not support `max_age`; an operator connects the account with `sarati-link-sso` instead.
 
 ## A setting is not taking effect
 

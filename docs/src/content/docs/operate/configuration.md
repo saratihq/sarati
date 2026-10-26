@@ -180,7 +180,11 @@ people already on the instance move over, is in [Users](/operate/users/#single-s
 - **What the provider has to offer:** the `openid`, `email` and `profile` scopes, PKCE with `S256`,
   and ID tokens signed with RS256, PS256 or ES256. Sarati authenticates with the client secret as
   HTTP Basic, or in the request body when that is all the provider accepts. A new account needs an
-  email address, from the ID token or from the provider's UserInfo endpoint.
+  email address, from the ID token or from the provider's UserInfo endpoint. Invites and
+  `OIDC_ALLOWED_DOMAINS` need the `email_verified` claim, which Microsoft Entra ID does not send.
+  Connecting an existing account needs `max_age`, answered with `auth_time` in the ID token.
+- **Changing `OIDC_ISSUER` later** connects nobody: accounts are connected per issuer —
+  [Users](/operate/users/#changing-oidc_issuer) says how to carry them over.
 - **`SARATI_URL` is the address people use:** the redirect URI is built from it, and a sign-in
   started at any other address cannot finish. In production, `SARATI_URL` and `OIDC_ISSUER` must be
   `https://`, or `http://` to this machine; anything else stops the service at boot.

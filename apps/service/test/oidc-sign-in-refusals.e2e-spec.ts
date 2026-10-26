@@ -77,6 +77,7 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
       nonce: flow.nonce,
       iat: now,
       exp: now + 300,
+      auth_time: now,
       email: `${randomUUID()}@example.com`,
       email_verified: true,
       ...over,
@@ -261,6 +262,60 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
         [ann.id, ben.id],
       ]);
       expect(identities.rows).toEqual([]);
+    });
+  });
+
+  describe('connecting, which needs the person to sign in at the provider again', () => {
+    const params = (flow: Flow): Record<string, string> => Object.fromEntries(flow.authorizeUrl.searchParams);
+
+    it('asks for a fresh sign-in on a link — max_age=0, and prompt=login only where the provider lists it — and on a sign-in neither', async () => {
+      const ann = await bareUser();
+      const signIn = params(await begin());
+      expect([signIn.max_age, signIn.prompt]).toEqual([undefined, undefined]);
+      const unlisted = params(await begin('/api/auth/oidc/link/start', ann.session));
+      expect([unlisted.max_age, unlisted.prompt]).toEqual(['0', undefined]);
+
+      idp.discovery.prompt_values_supported = ['none', 'login', 'consent'];
+      app.get(OidcRelyingParty).forget();
+      const listed = params(await begin('/api/auth/oidc/link/start', ann.session));
+      expect([listed.max_age, listed.prompt]).toEqual(['0', 'login']);
+      expect(params(await begin()).prompt).toBeUndefined();
+    });
+
+    it('refuses a link whose ID token shows no sign-in since the link began, or no auth_time at all, connecting nothing', async () => {
+      const ann = await bareUser();
+      const cases: Array<[Record<string, unknown>, RegExp]> = [
+        [
+          { auth_time: nowSeconds() - 10 * 60 },
+          /signed the person in at .* before this connection began \(auth_time\)/,
+        ],
+        [{ auth_time: undefined }, /carries no auth_time, though max_age=0 asked for one/],
+        [{ auth_time: String(nowSeconds()) }, /carries no auth_time, though max_age=0 asked for one/],
+      ];
+      for (const [over, reason] of cases) {
+        const link = await begin('/api/auth/oidc/link/start', ann.session);
+        idp.answerWith(claimsFor(link, over));
+        const res = await finish(link, {}, '/api/auth/oidc/link/complete', ann.session);
+        expect({ status: res.status, code: res.body.code }).toEqual({
+          status: 401,
+          code: 'oidc_reauthentication_required',
+        });
+        expect(res.body.detail).toContain('sign in');
+        expect(warned().at(-1)).toMatch(reason);
+      }
+      const connected = await db.query(`SELECT 1 FROM user_identities WHERE user_id = $1`, [ann.id]);
+      expect(connected.rows).toEqual([]);
+
+      const fresh = await begin('/api/auth/oidc/link/start', ann.session);
+      idp.answerWith(claimsFor(fresh, { auth_time: nowSeconds() - 30 }));
+      const linked = await finish(fresh, {}, '/api/auth/oidc/link/complete', ann.session);
+      expect(linked.status).toBe(200);
+    });
+
+    it('signs in without auth_time — only a link asks for one', async () => {
+      const flow = await begin();
+      idp.answerWith(claimsFor(flow, { auth_time: undefined }));
+      expect((await finish(flow)).status).toBe(200);
     });
   });
 
@@ -557,6 +612,14 @@ describe('single sign-on refusals against a hostile provider (e2e, isolated DB)'
         idp.answerWith(claimsFor(flow, { email }));
         await refused(flow, 403, 'oidc_email_missing');
       }
+    });
+
+    it('keeps control and format characters, a direction override among them, out of a name the provider gives', async () => {
+      const flow = await begin();
+      idp.answerWith(claimsFor(flow, { name: '\u200bAdmin\u202egnp.exe\u0007' }));
+      const res = await finish(flow);
+      expect(res.status).toBe(200);
+      expect(res.body.user.name).toBe('Admingnp.exe');
     });
 
     describe('with OIDC_ALLOWED_DOMAINS', () => {

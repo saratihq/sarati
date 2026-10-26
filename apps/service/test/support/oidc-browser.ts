@@ -15,6 +15,15 @@ function unescapeHtml(text: string): string {
     .replace(/&gt;/g, '>');
 }
 
+function hiddenFields(html: string): Record<string, string> {
+  return Object.fromEntries(
+    [...html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"\/?>/g)].map((m) => [
+      m[1]!,
+      unescapeHtml(m[2]!),
+    ]),
+  );
+}
+
 /** A browser as far as a provider can tell: one cookie jar, redirects followed by hand, its own sign-in and consent pages submitted — no back door. */
 export class OidcBrowser {
   private readonly cookies = new Map<string, string>();
@@ -43,6 +52,11 @@ export class OidcBrowser {
         continue;
       }
       const html = await res.text();
+      const selfSubmitting = /<form method="post" action="([^"]+)">/.exec(html);
+      if (res.status === 200 && selfSubmitting) {
+        url = await this.submit(new URL(unescapeHtml(selfSubmitting[1]!), url), hiddenFields(html));
+        continue;
+      }
       const form = /<form[^>]*action="([^"]+)"[^>]*method="post"/.exec(html);
       const prompt = /name="prompt" value="(\w+)"/.exec(html);
       if (res.status !== 200 || !form || !prompt) {
@@ -55,19 +69,23 @@ export class OidcBrowser {
       }
       const fields: Record<string, string> =
         prompt[1] === 'login' ? { prompt: 'login', login, password: 'any password' } : { prompt: prompt[1]! };
-      const submitted = await this.fetch(action.toString(), {
-        method: 'POST',
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(fields).toString(),
-      });
-      if (submitted.status < 300 || submitted.status >= 400) {
-        throw new Error(
-          `the provider answered ${submitted.status} to the ${prompt[1]} form: ${(await submitted.text()).slice(0, 400)}`,
-        );
-      }
-      url = new URL(submitted.headers.get('location') ?? '', action).toString();
+      url = await this.submit(action, fields);
     }
     throw new Error('the provider never redirected back');
+  }
+
+  private async submit(action: URL, fields: Record<string, string>): Promise<string> {
+    const submitted = await this.fetch(action.toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(fields).toString(),
+    });
+    if (submitted.status < 300 || submitted.status >= 400) {
+      throw new Error(
+        `the provider answered ${submitted.status} to the form at ${action.pathname}: ${(await submitted.text()).slice(0, 400)}`,
+      );
+    }
+    return new URL(submitted.headers.get('location') ?? '', action).toString();
   }
 
   private async fetch(url: string, init: RequestInit = {}): Promise<Response> {

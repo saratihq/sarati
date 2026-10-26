@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
@@ -12,21 +12,22 @@ import { newId, now } from '../../database/ids';
 import { OidcLoginStateEntity, type OidcFlowPurpose } from '../../database/entities/oidc-login-state.entity';
 import { UserIdentityEntity } from '../../database/entities/user-identity.entity';
 import { UserEntity } from '../../database/entities/user.entity';
-import { isUniqueViolation } from '../../database/pg-errors';
-import { rawMutate, rawMutateReturning } from '../../database/raw-query';
+import { rawMutate, rawMutateReturning, rawQuery } from '../../database/raw-query';
 import { EventsService } from '../../events/events.service';
 import { OrgManagementService } from '../../orgs/org-management.service';
 import { OrgsService } from '../../orgs/orgs.service';
 import { AdmissionService } from '../local/admission.service';
-import { grantSession, normalizeEmail, type SessionGrant } from '../local/local-auth.service';
+import { cleanName, grantSession, normalizeEmail, type SessionGrant } from '../local/local-auth.service';
 import { verifyPassword } from '../local/password';
 import {
   type IdpClaims,
   type LoadedDiscovery,
   OidcRejectedError,
   OidcRelyingParty,
+  OidcStaleSignInError,
   OidcUnavailableError,
 } from './oidc-relying-party';
+import { UNCONNECTED_ACCOUNTS_SQL } from './unconnected-accounts';
 
 const STATE_TTL_MS = 10 * 60_000;
 const MAX_NAME_LENGTH = 80;
@@ -53,6 +54,7 @@ interface ConsumedState {
   purpose: OidcFlowPurpose;
   user_id: string | null;
   invite_token: string | null;
+  created_at: Date;
   expires_at: Date;
 }
 
@@ -85,18 +87,20 @@ function usableEmail(raw: string | null): string | null {
 
 function displayName(claims: IdpClaims, email: string): string {
   const local = email.split('@')[0] ?? email;
-  const chosen = claims.name?.trim() || claims.preferredUsername?.trim() || local;
-  return (
-    chosen
-      .replace(/\p{Cc}/gu, '')
-      .trim()
-      .slice(0, MAX_NAME_LENGTH) || local
-  );
+  const chosen = cleanName(claims.name ?? '') || cleanName(claims.preferredUsername ?? '') || local;
+  return chosen.slice(0, MAX_NAME_LENGTH).trim();
+}
+
+// An account with a password keeps the address it signs in by; one without follows its provider's confirmed email.
+function addressToTake(user: UserEntity, claims: IdpClaims, email: string | null): string | null {
+  if (!claims.emailVerified || email === null) return null;
+  if (user.email.toLowerCase() === email) return user.emailVerified ? null : user.email;
+  return user.hashedPassword ? null : email;
 }
 
 /** Browser single sign-on: an identity is keyed by (issuer, subject), an email never links or adopts an account, and org membership comes only from an invite. */
 @Injectable()
-export class OidcSignInService {
+export class OidcSignInService implements OnApplicationBootstrap {
   private readonly logger = new Logger(OidcSignInService.name);
 
   constructor(
@@ -111,6 +115,22 @@ export class OidcSignInService {
 
   private get env(): EnvConfig {
     return this.config.get('env', { infer: true });
+  }
+
+  /** Point the operator at the accounts from before single sign-on that a first sign-in would duplicate. */
+  async onApplicationBootstrap(): Promise<void> {
+    if (!this.env.oidcSignInEnabled) return;
+    const [row] = await rawQuery<{ n: number }>(
+      this.dataSource.manager,
+      `SELECT count(*)::int AS n FROM (${UNCONNECTED_ACCOUNTS_SQL}) AS waiting`,
+      [this.env.oidcIssuer],
+    );
+    const n = row?.n ?? 0;
+    if (n === 0) return;
+    const one = n === 1;
+    this.logger.warn(
+      `${n} ${one ? 'account' : 'accounts'} from before single sign-on ${one ? 'is' : 'are'} not connected to it — a first sign-in by ${one ? 'its owner' : 'one of their owners'} makes a new, empty account. Connect ${one ? 'it' : 'them'} with sarati-link-sso; sarati-link-sso --list names ${one ? 'it' : 'them'}.`,
+    );
   }
 
   async start(input: { bindingHash: string; inviteToken?: string }): Promise<FlowStart> {
@@ -159,26 +179,21 @@ export class OidcSignInService {
     const claims = await this.redeem(answer, flow);
     const email = this.admitted(claims);
     const issuer = this.env.oidcIssuer;
-    try {
-      await this.admission.admitting(async (em) => {
-        const holder = await em.findOne(UserIdentityEntity, { where: { issuer, subject: claims.subject } });
-        if (holder) throw holder.userId === user.id ? this.alreadyLinked() : this.identityInUse();
-        if (await this.identityOf(em, user.id)) throw this.alreadyLinked();
-        await em.insert(UserIdentityEntity, {
-          id: newId(),
-          userId: user.id,
-          issuer,
-          subject: claims.subject,
-          emailAtLink: email,
-          createdAt: now(),
-          lastLoginAt: null,
-        });
-        await this.emitFor(em, user.id, 'user.identity_linked', { issuer });
+    await this.admission.admitting(async (em) => {
+      const holder = await em.findOne(UserIdentityEntity, { where: { issuer, subject: claims.subject } });
+      if (holder) throw holder.userId === user.id ? this.alreadyLinked() : this.identityInUse();
+      if (await this.identityOf(em, user.id)) throw this.alreadyLinked();
+      await em.insert(UserIdentityEntity, {
+        id: newId(),
+        userId: user.id,
+        issuer,
+        subject: claims.subject,
+        emailAtLink: email,
+        createdAt: now(),
+        lastLoginAt: null,
       });
-    } catch (err) {
-      if (isUniqueViolation(err)) throw this.identityInUse();
-      throw err;
-    }
+      await this.emitFor(em, user.id, 'user.identity_linked', { issuer });
+    });
     return { connected: true, email };
   }
 
@@ -232,7 +247,11 @@ export class OidcSignInService {
       createdAt: now(),
       expiresAt: new Date(Date.now() + STATE_TTL_MS),
     });
-    return { authorize_url: this.rp.authorizeUrl(discovery, { state, nonce, codeVerifier }), state };
+    const reauthenticate = flow.purpose === 'link';
+    return {
+      authorize_url: this.rp.authorizeUrl(discovery, { state, nonce, codeVerifier, reauthenticate }),
+      state,
+    };
   }
 
   /** Spend the flow's state — single use, before any other check — and refuse it, indistinguishably, unless it is this flow's. */
@@ -244,7 +263,7 @@ export class OidcSignInService {
     const [row] = await rawMutateReturning<ConsumedState>(
       this.dataSource.manager,
       `DELETE FROM oidc_login_states WHERE state_hash = $1
-       RETURNING nonce, code_verifier, binding_hash, purpose, user_id, invite_token, expires_at`,
+       RETURNING nonce, code_verifier, binding_hash, purpose, user_id, invite_token, created_at, expires_at`,
       [hashOf(answer.state, 'hex')],
     );
     const valid =
@@ -265,6 +284,7 @@ export class OidcSignInService {
         code: answer.code,
         codeVerifier: flow.code_verifier,
         nonce: flow.nonce,
+        signedInSince: flow.purpose === 'link' ? new Date(flow.created_at) : undefined,
       });
     });
   }
@@ -293,6 +313,14 @@ export class OidcSignInService {
       if (err instanceof OidcUnavailableError) {
         this.logger.warn(`Single sign-on unavailable: ${err.message}`);
         throw refusal(502, 'oidc_unavailable', 'The identity provider could not be reached — try again.');
+      }
+      if (err instanceof OidcStaleSignInError) {
+        this.logger.warn(`Single sign-on refused: ${err.message}`);
+        throw refusal(
+          401,
+          'oidc_reauthentication_required',
+          'Your identity provider did not ask you to sign in again, so single sign-on was not connected — sign out at the provider, then connect again.',
+        );
       }
       if (err instanceof OidcRejectedError) {
         this.logger.warn(`Single sign-on refused: ${err.message}`);
@@ -334,23 +362,27 @@ export class OidcSignInService {
     email: string | null,
     inviteToken: string | null,
   ): Promise<{ user: UserEntity; joined: { org_id: string } | null }> {
-    const known = await this.userOf(this.dataSource.manager, claims, email);
+    const known = await this.userOf(this.dataSource.manager, claims.subject);
     if (known) {
+      const user = addressToTake(known, claims, email)
+        ? await this.admission.admitting((em) => this.followProvider(em, known.id, claims, email))
+        : known;
       return {
-        user: known,
-        joined: inviteToken ? await this.orgManagement.joinByInvite(known.id, inviteToken) : null,
+        user,
+        joined: inviteToken ? await this.orgManagement.joinByInvite(user.id, inviteToken) : null,
       };
     }
     return this.admission.admitting(async (em) => {
-      const raced = await this.userOf(em, claims, email);
+      const raced = await this.userOf(em, claims.subject);
       if (raced) {
+        const user = await this.followProvider(em, raced.id, claims, email);
         return {
-          user: raced,
-          joined: inviteToken ? await this.orgManagement.acceptInviteWith(em, raced.id, inviteToken) : null,
+          user,
+          joined: inviteToken ? await this.orgManagement.acceptInviteWith(em, user.id, inviteToken) : null,
         };
       }
       if (!email) throw this.emailMissing();
-      if (await this.admission.emailTaken(em, email)) {
+      if (claims.emailVerified && (await this.admission.addressHeld(em, email))) {
         throw refusal(
           409,
           'oidc_account_exists',
@@ -373,22 +405,30 @@ export class OidcSignInService {
     });
   }
 
-  /** The account this subject signs in as at the configured issuer, its last sign-in recorded and its email confirmed once the provider confirms it. */
-  private async userOf(
-    em: EntityManager,
-    claims: IdpClaims,
-    email: string | null,
-  ): Promise<UserEntity | null> {
+  /** The account this subject signs in as at the configured issuer, its last sign-in recorded. */
+  private async userOf(em: EntityManager, subject: string): Promise<UserEntity | null> {
     const identity = await em.findOne(UserIdentityEntity, {
-      where: { issuer: this.env.oidcIssuer, subject: claims.subject },
+      where: { issuer: this.env.oidcIssuer, subject },
     });
     if (!identity) return null;
     await em.update(UserIdentityEntity, { id: identity.id }, { lastLoginAt: now() });
-    const user = await em.findOneOrFail(UserEntity, { where: { id: identity.userId } });
-    if (user.emailVerified || !claims.emailVerified || email !== user.email) return user;
-    await em.update(UserEntity, { id: user.id }, { emailVerified: true });
-    user.emailVerified = true;
-    return user;
+    return em.findOneOrFail(UserEntity, { where: { id: identity.userId } });
+  }
+
+  /** Under the admission lock the caller holds, give the account the address {@link addressToTake} names unless another account holds it. */
+  private async followProvider(
+    em: EntityManager,
+    userId: string,
+    claims: IdpClaims,
+    email: string | null,
+  ): Promise<UserEntity> {
+    const user = await em.findOneOrFail(UserEntity, { where: { id: userId } });
+    const address = addressToTake(user, claims, email);
+    if (!address || (await this.admission.addressHeld(em, address, user.id))) return user;
+    const moved = address !== user.email;
+    await em.update(UserEntity, { id: user.id }, { email: address, emailVerified: true, updatedAt: now() });
+    if (moved) await this.emitFor(em, user.id, 'user.email_changed', { issuer: this.env.oidcIssuer });
+    return Object.assign(user, { email: address, emailVerified: true });
   }
 
   private identityOf(em: EntityManager, userId: string): Promise<UserIdentityEntity | null> {

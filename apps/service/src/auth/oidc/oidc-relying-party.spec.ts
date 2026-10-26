@@ -20,7 +20,18 @@ describe('parseDiscovery', () => {
       algorithms: ['RS256', 'PS256', 'ES256'],
       clientAuth: 'client_secret_basic',
       issParameter: false,
+      promptLogin: false,
     });
+  });
+
+  it('reads prompt=login as supported only when the provider lists it among its prompt values', () => {
+    const listed = (values: unknown) =>
+      parseDiscovery(document({ prompt_values_supported: values }), ISSUER, true).promptLogin;
+    expect([listed(['none', 'login']), listed(['none', 'consent']), listed('login')]).toEqual([
+      true,
+      false,
+      false,
+    ]);
   });
 
   it('narrows the algorithms to the ones the provider lists, and uses client_secret_post only when it lists nothing else', () => {

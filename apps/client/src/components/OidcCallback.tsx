@@ -108,7 +108,7 @@ async function accountExists(): Promise<Failure> {
   return passwords
     ? {
         title: "You already have an account",
-        body: "An account with this email exists. Sign in to it with your password, then connect single sign-on in Settings.",
+        body: "An account with this email exists. If it has a password, sign in with it, then connect single sign-on in Settings. If it has none, ask an operator to connect single sign-on to it.",
         action: "password",
       }
     : {

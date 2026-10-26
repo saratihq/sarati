@@ -1,8 +1,7 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { promisify } from 'node:util';
 
-import type { INestApplication } from '@nestjs/common';
+import { type INestApplication, Logger } from '@nestjs/common';
 import { decodeJwt, SignJWT } from 'jose';
 import { Client } from 'pg';
 
@@ -41,6 +40,15 @@ const ACCOUNTS: Record<string, IdpAccount> = {
   'sub-member': { email: 'member@example.com', email_verified: true },
   'sub-stranger': { email: 'stranger@example.com', email_verified: true },
   'sub-quiet': { email: 'quiet@other.org', email_verified: false },
+  'sub-kim': { email: 'kim.sso@example.com', email_verified: true },
+  'sub-left-open': { email: 'left.open@example.com', email_verified: true },
+  'sub-mallory': { email: 'ceo@corp.example', email_verified: false },
+  'sub-ceo': { email: 'ceo@corp.example', email_verified: true, name: 'The CEO' },
+  'sub-mallory-too': { email: 'cfo@corp.example', email_verified: false },
+  'sub-prober': { email: 'ada@example.com', email_verified: false },
+  'sub-prober-too': { email: 'nobody.yet@corp.example', email_verified: false },
+  'sub-early': { email: 'early@example.com', email_verified: true },
+  'sub-clerk-person': { email: 'clerk.person@example.com', email_verified: true },
 };
 
 interface Started {
@@ -114,9 +122,59 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
     return complete(flow, await authorize(flow, login));
   }
 
+  /** An authorization request straight to the provider, as another app on it would make. */
+  async function directAuthorization(): Promise<{
+    url: string;
+    verifier: string;
+    discovery: Record<string, string>;
+  }> {
+    const discovery = (await (
+      await fetch(`${idp.issuer}/.well-known/openid-configuration`)
+    ).json()) as Record<string, string>;
+    const verifier = randomBytes(32).toString('base64url');
+    const url = new URL(discovery.authorization_endpoint!);
+    for (const [k, v] of Object.entries({
+      response_type: 'code',
+      client_id: idp.clientId,
+      redirect_uri: REDIRECT_URI,
+      scope: 'openid email',
+      state: 'direct',
+      nonce: 'direct-nonce',
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+    })) {
+      url.searchParams.set(k, v);
+    }
+    return { url: url.toString(), verifier, discovery };
+  }
+
   async function count(sql: string, params: unknown[] = []): Promise<number> {
     const res = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM (${sql}) AS rows`, params);
     return res.rows[0]!.n;
+  }
+
+  /** Run an operator CLI against this instance's database: its stdout when it succeeds, its stderr when it fails. */
+  function runCli(
+    script: string,
+    args: string[],
+    opts: { issuer?: string; input?: string } = {},
+  ): Promise<{ code: number; out: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        ['-r', 'ts-node/register/transpile-only', `src/scripts/${script}`, ...args],
+        {
+          cwd: THIS_SERVICE,
+          env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, OIDC_ISSUER: opts.issuer ?? idp.issuer },
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+      child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+      child.on('close', (code) => resolve({ code: code ?? 1, out: code === 0 ? stdout : stderr }));
+      child.stdin.end(opts.input ?? '');
+    });
   }
 
   const rowsCreated = async (): Promise<number[]> =>
@@ -241,19 +299,31 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       expect(await count(`SELECT 1 FROM org_members WHERE user_id = $1`, [ownerId])).toBe(before);
     });
 
-    it('signs a returning identity into the same account and creates nothing, even after the provider changes its email', async () => {
+    it('signs a returning identity into the same account and creates nothing after the provider changes its email — which an account with no password then takes', async () => {
       idp.setAccounts({ ...ACCOUNTS, 'sub-ada': { email: 'ada.renamed@example.com', email_verified: true } });
       const before = await rowsCreated();
       try {
         const res = await signIn('sub-ada');
         expect(res.status).toBe(200);
-        expect(res.body.user).toEqual({ id: ownerId, email: 'ada@example.com', name: 'Ada Lovelace' });
+        expect(res.body.user).toEqual({
+          id: ownerId,
+          email: 'ada.renamed@example.com',
+          name: 'Ada Lovelace',
+        });
       } finally {
         idp.setAccounts(ACCOUNTS);
       }
       expect(await rowsCreated()).toEqual(before);
       const seen = await db.query(`SELECT last_login_at FROM user_identities WHERE subject = 'sub-ada'`);
       expect(seen.rows[0].last_login_at).not.toBeNull();
+
+      const back = await signIn('sub-ada');
+      expect(back.body.user).toEqual({ id: ownerId, email: 'ada@example.com', name: 'Ada Lovelace' });
+      expect(
+        await count(`SELECT 1 FROM domain_events WHERE type = 'user.email_changed' AND subject_id = $1`, [
+          ownerId,
+        ]),
+      ).toBe(2);
     });
 
     it('never links or adopts an account by its email: a match is refused and the account left as it was', async () => {
@@ -268,6 +338,26 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
         [existing],
       );
       expect(row.rows).toEqual([{ email: 'dup@example.com', has_password: true }]);
+    });
+
+    it('keeps an account’s address when its provider names one another account holds, or one it did not confirm', async () => {
+      for (const changed of [
+        { email: 'dup@example.com', email_verified: true },
+        { email: 'ada.unconfirmed@example.com', email_verified: false },
+      ]) {
+        idp.setAccounts({ ...ACCOUNTS, 'sub-ada': changed });
+        try {
+          const res = await signIn('sub-ada');
+          expect({ status: res.status, email: res.body.user?.email }).toEqual({
+            status: 200,
+            email: 'ada@example.com',
+          });
+        } finally {
+          idp.setAccounts(ACCOUNTS);
+        }
+      }
+      const held = await db.query(`SELECT email_verified FROM users WHERE lower(email) = 'dup@example.com'`);
+      expect(held.rows).toEqual([{ email_verified: true }]);
     });
 
     it('refuses an identity with no email to make an account from, creating nothing', async () => {
@@ -390,6 +480,108 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
     });
   });
 
+  describe('an address its provider did not confirm, which holds and blocks nothing', () => {
+    beforeAll(async () => {
+      await reboot(ssoEnv({ LOCAL_AUTH_ENABLED: 'true' }));
+    }, 30_000);
+
+    afterAll(async () => {
+      await reboot(ssoEnv());
+    }, 30_000);
+
+    async function holders(email: string): Promise<unknown[]> {
+      const res = await db.query(
+        `SELECT id, email_verified FROM users WHERE lower(email) = $1 ORDER BY email_verified`,
+        [email],
+      );
+      return res.rows;
+    }
+
+    it('lets the person the provider confirms at an address take it after someone signed in with it unconfirmed, and their invite lands them', async () => {
+      const mallory = await signIn('sub-mallory');
+      expect(mallory.status).toBe(200);
+      const { orgId, token } = await invite('ceo@corp.example', 'admin');
+      const ceo = await signIn('sub-ceo', { invite: token });
+      expect({ status: ceo.status, joined: ceo.body.joined_org_id }).toEqual({ status: 200, joined: orgId });
+      const held = [
+        { id: mallory.body.user.id, email_verified: false },
+        { id: ceo.body.user.id, email_verified: true },
+      ];
+      expect(await holders('ceo@corp.example')).toEqual(held);
+
+      idp.setAccounts({ ...ACCOUNTS, 'sub-mallory': { ...ACCOUNTS['sub-mallory'], email_verified: true } });
+      try {
+        const confirmedLater = await signIn('sub-mallory');
+        expect({ status: confirmedLater.status, user: confirmedLater.body.user?.id }).toEqual({
+          status: 200,
+          user: mallory.body.user.id,
+        });
+      } finally {
+        idp.setAccounts(ACCOUNTS);
+      }
+      expect(await holders('ceo@corp.example')).toEqual(held);
+    });
+
+    it('lets a password sign-up take an address someone signed in with unconfirmed, and its password reach that account', async () => {
+      const mallory = await signIn('sub-mallory-too');
+      expect(mallory.status).toBe(200);
+      const { orgId, token } = await invite('cfo@corp.example');
+      const registered = await from(app).post('/api/auth/local/register').send({
+        email: 'CFO@corp.example',
+        password: PASSWORD,
+        name: '\u200bThe CFO\u202e',
+        invite_token: token,
+      });
+      expect({
+        status: registered.status,
+        joined: registered.body.joined_org_id,
+        name: registered.body.user?.name,
+      }).toEqual({ status: 201, joined: orgId, name: 'The CFO' });
+      const login = await from(app)
+        .post('/api/auth/local/login')
+        .send({ email: 'cfo@corp.example', password: PASSWORD });
+      expect({ status: login.status, user: login.body.user?.id }).toEqual({
+        status: 200,
+        user: registered.body.user.id,
+      });
+
+      const reset = await runCli('set-password.cli.ts', ['CFO@corp.example'], {
+        input: `${PASSWORD}-again\n${PASSWORD}-again\n`,
+      });
+      expect(reset).toEqual({
+        code: 0,
+        out: expect.stringContaining('Password updated for cfo@corp.example'),
+      });
+      const passwords = await db.query(
+        `SELECT id, hashed_password IS NOT NULL AS has FROM users WHERE lower(email) = 'cfo@corp.example' ORDER BY 2`,
+      );
+      expect(passwords.rows).toEqual([
+        { id: mallory.body.user.id, has: false },
+        { id: registered.body.user.id, has: true },
+      ]);
+      await from(app)
+        .post('/api/auth/local/login')
+        .send({ email: 'cfo@corp.example', password: `${PASSWORD}-again` })
+        .expect(200);
+    }, 60_000);
+
+    it('answers an unconfirmed address alike whether an account holds it or not, so signing in reveals no one’s account', async () => {
+      const probes = [await signIn('sub-prober'), await signIn('sub-prober-too')];
+      expect(probes.map((p) => [p.status, Object.keys(p.body).sort()])).toEqual([
+        [200, ['expires_at', 'token', 'user']],
+        [200, ['expires_at', 'token', 'user']],
+      ]);
+      expect(await holders('ada@example.com')).toEqual([
+        { id: probes[0]!.body.user.id, email_verified: false },
+        { id: ownerId, email_verified: true },
+      ]);
+      expect(await runCli('set-password.cli.ts', ['nobody.yet@corp.example'])).toEqual({
+        code: 1,
+        out: expect.stringContaining('never confirmed'),
+      });
+    }, 60_000);
+  });
+
   describe('connecting single sign-on to a password account', () => {
     let carol = '';
     let carolSession = '';
@@ -458,7 +650,7 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
 
       const sso = await signIn('sub-carol');
       expect(sso.status).toBe(200);
-      expect(sso.body.user.id).toBe(carol);
+      expect(sso.body.user).toMatchObject({ id: carol, email: 'carol@example.com' });
       const me = await from(app)
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${carolSession}`)
@@ -467,6 +659,32 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
         password: true,
         sso: { connected: true, email: 'carol.sso@example.com' },
       });
+    });
+
+    it('makes the person sign in at the provider again, so a provider session someone left open in the browser is never the one connected', async () => {
+      const kim = await passwordAccount('kim@example.com');
+      const kimSession = (await mintSession(kim, SSO_SECRET_KEY)).token;
+      const browser = new OidcBrowser();
+      const leftOpen = await browser.authorize(
+        (await directAuthorization()).url,
+        REDIRECT_URI,
+        'sub-left-open',
+      );
+      expect(leftOpen.code).toEqual(expect.any(String));
+
+      const { res, flow } = await linkStart(kimSession, PASSWORD);
+      expect(res.status).toBe(200);
+      const answer = await authorize({ ...flow, binding: flow.binding }, 'sub-kim', browser);
+      const linked = await complete(
+        { ...flow, binding: flow.binding },
+        answer,
+        '/api/auth/oidc/link/complete',
+        kimSession,
+      );
+      expect(linked.body).toEqual({ connected: true, email: 'kim.sso@example.com' });
+      const identities = await db.query(`SELECT subject FROM user_identities WHERE user_id = $1`, [kim]);
+      expect(identities.rows).toEqual([{ subject: 'sub-kim' }]);
+      expect(await count(`SELECT 1 FROM user_identities WHERE subject = 'sub-left-open'`)).toBe(0);
     });
 
     it('refuses a second identity for the same account, and an identity another account holds', async () => {
@@ -654,24 +872,8 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
     });
 
     it('takes no identity-provider token as an API bearer: the retired door answers 401 and creates nothing', async () => {
-      const discovery = (await (
-        await fetch(`${idp.issuer}/.well-known/openid-configuration`)
-      ).json()) as Record<string, string>;
-      const verifier = randomBytes(32).toString('base64url');
-      const url = new URL(discovery.authorization_endpoint!);
-      for (const [k, v] of Object.entries({
-        response_type: 'code',
-        client_id: idp.clientId,
-        redirect_uri: REDIRECT_URI,
-        scope: 'openid email',
-        state: 'direct',
-        nonce: 'direct-nonce',
-        code_challenge: createHash('sha256').update(verifier).digest('base64url'),
-        code_challenge_method: 'S256',
-      })) {
-        url.searchParams.set(k, v);
-      }
-      const callback = await new OidcBrowser().authorize(url.toString(), REDIRECT_URI, 'sub-member');
+      const { url, verifier, discovery } = await directAuthorization();
+      const callback = await new OidcBrowser().authorize(url, REDIRECT_URI, 'sub-member');
       const basic = Buffer.from(
         `${encodeURIComponent(idp.clientId)}:${encodeURIComponent(idp.clientSecret)}`,
       ).toString('base64');
@@ -747,27 +949,34 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
     });
   });
 
-  describe('pnpm auth:link-sso — for accounts the retired bearer door created', () => {
-    const run = (args: string[], issuer = idp.issuer) =>
-      promisify(execFile)(
-        process.execPath,
-        ['-r', 'ts-node/register/transpile-only', 'src/scripts/link-sso.cli.ts', ...args],
-        {
-          cwd: THIS_SERVICE,
-          env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, OIDC_ISSUER: issuer },
-        },
-      ).then(
-        ({ stdout }) => ({ code: 0, out: stdout }),
-        (err: { code: number; stderr: string }) => ({ code: err.code, out: err.stderr }),
+  describe('pnpm auth:link-sso — connecting accounts made before single sign-on', () => {
+    const run = (args: string[], issuer = idp.issuer) => runCli('link-sso.cli.ts', args, { issuer });
+    const CLERK_ID = 'user_2NNEqL2nrIRdJ194ndJqAHwEfxC';
+
+    async function account(
+      email: string,
+      clerkUserId: string | null,
+      verified = true,
+      id = randomUUID(),
+    ): Promise<string> {
+      await db.query(
+        `INSERT INTO users (id, email, name, clerk_user_id, email_verified, created_at, updated_at)
+         VALUES ($1, $2, 'Before', $3, $4, now(), now())`,
+        [id, email, clerkUserId, verified],
       );
+      return id;
+    }
+
+    async function subjectsOf(userId: string): Promise<unknown[]> {
+      const res = await db.query(`SELECT subject FROM user_identities WHERE user_id = $1 AND issuer = $2`, [
+        userId,
+        idp.issuer,
+      ]);
+      return res.rows;
+    }
 
     it('links the account to its subject, and its next single sign-on lands there', async () => {
-      const legacy = randomUUID();
-      await db.query(
-        `INSERT INTO users (id, email, name, clerk_user_id, created_at, updated_at)
-         VALUES ($1, 'legacy@example.com', 'Legacy', 'sub-legacy', now(), now())`,
-        [legacy],
-      );
+      const legacy = await account('legacy@example.com', 'sub-legacy');
       const linked = await run(['Legacy@Example.com', 'sub-legacy']);
       expect(linked).toEqual({
         code: 0,
@@ -788,7 +997,7 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       });
       expect(await run(['dup@example.com', 'sub-ada'])).toEqual({
         code: 1,
-        out: expect.stringContaining('already signs in to another account'),
+        out: expect.stringMatching(/already signs in to another account .*--move/s),
       });
       expect(await run(['legacy@example.com', 'sub-legacy-elsewhere'])).toEqual({
         code: 1,
@@ -799,6 +1008,133 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
         out: expect.stringContaining('OIDC_ISSUER is not set'),
       });
       expect(await count(`SELECT 1 FROM user_identities WHERE subject = 'sub-x'`)).toBe(0);
+    }, 60_000);
+
+    it('lists the accounts not yet connected that hold a subject from before, and connects one to the subject the retired token sign-in stored', async () => {
+      const token = await account('sub-oldtoken@oidc.local', 'sub-oldtoken');
+      const clerk = await account('clerk.person@example.com', CLERK_ID);
+      const listed = await run(['--list']);
+      expect(listed.code).toBe(0);
+      expect(listed.out).toContain(
+        `${token}\tsub-oldtoken@oidc.local\tsub-oldtoken (the retired token sign-in)`,
+      );
+      expect(listed.out).toContain(`${clerk}\tclerk.person@example.com\t${CLERK_ID} (Clerk)`);
+      expect(listed.out).not.toContain('legacy@example.com');
+
+      expect(await run(['sub-oldtoken@oidc.local'])).toEqual({
+        code: 0,
+        out: expect.stringContaining('Linked sub-oldtoken@oidc.local to sub-oldtoken'),
+      });
+      expect(await subjectsOf(token)).toEqual([{ subject: 'sub-oldtoken' }]);
+      expect(await run([clerk])).toEqual({ code: 1, out: expect.stringContaining('issued by Clerk') });
+      expect(await subjectsOf(clerk)).toEqual([]);
+    }, 60_000);
+
+    it('connects every account the retired token sign-in made with --all, leaving Clerk’s for a subject of its own', async () => {
+      const a = await account('sub-all-a@oidc.local', 'sub-all-a');
+      const b = await account('all.b@example.com', 'sub-all-b');
+      const all = await run(['--all']);
+      expect(all.code).toBe(0);
+      expect(all.out).toContain('Linked sub-all-a@oidc.local to sub-all-a');
+      expect(all.out).toContain('Linked all.b@example.com to sub-all-b');
+      expect(all.out).toContain('Skipped clerk.person@example.com');
+      expect([await subjectsOf(a), await subjectsOf(b)]).toEqual([
+        [{ subject: 'sub-all-a' }],
+        [{ subject: 'sub-all-b' }],
+      ]);
+      expect(await count(`SELECT 1 FROM user_identities WHERE subject = $1`, [CLERK_ID])).toBe(0);
+      expect((await run(['--list'])).out).not.toContain('sub-all-a');
+    }, 60_000);
+
+    it('moves an identity a first sign-in gave a new account with --move: the old account then signs in and takes its address, which the new one gives up', async () => {
+      const old = await account('sub-early@oidc.local', 'sub-early');
+      const early = await signIn('sub-early');
+      expect(early.status).toBe(200);
+      const made = early.body.user.id as string;
+      expect(made).not.toBe(old);
+
+      expect(await run(['sub-early@oidc.local'])).toEqual({
+        code: 1,
+        out: expect.stringContaining('--move'),
+      });
+      expect(await run(['sub-early@oidc.local', '--move'])).toEqual({
+        code: 0,
+        out: expect.stringContaining(`Moved sub-early at ${idp.issuer} from early@example.com`),
+      });
+      expect([await subjectsOf(old), await subjectsOf(made)]).toEqual([[{ subject: 'sub-early' }], []]);
+
+      const back = await signIn('sub-early');
+      expect(back.body.user).toMatchObject({ id: old, email: 'early@example.com' });
+      const held = await db.query(
+        `SELECT id, email_verified FROM users WHERE lower(email) = 'early@example.com' ORDER BY email_verified`,
+      );
+      expect(held.rows).toEqual([
+        { id: made, email_verified: false },
+        { id: old, email_verified: true },
+      ]);
+    }, 60_000);
+
+    it('takes the account that holds an address over one using it unconfirmed in other letter case, and an account by its id', async () => {
+      const suffix = randomBytes(6).toString('hex');
+      const loose = await account(
+        'Case.Person@example.com',
+        null,
+        false,
+        `00000000-0000-4000-8000-${suffix}`,
+      );
+      const holder = await account(
+        'case.person@example.com',
+        null,
+        true,
+        `ffffffff-0000-4000-8000-${suffix}`,
+      );
+      expect(await run(['CASE.person@example.com', 'sub-case'])).toEqual({
+        code: 0,
+        out: expect.stringContaining('Linked case.person@example.com to sub-case'),
+      });
+      expect([await subjectsOf(holder), await subjectsOf(loose)]).toEqual([[{ subject: 'sub-case' }], []]);
+      expect(await run([loose, 'sub-case-loose'])).toEqual({
+        code: 0,
+        out: expect.stringContaining('Linked Case.Person@example.com to sub-case-loose'),
+      });
+      expect(await subjectsOf(loose)).toEqual([{ subject: 'sub-case-loose' }]);
+    }, 60_000);
+
+    it('warns at boot while an account from before single sign-on is not connected to it, naming the CLI', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn');
+      try {
+        await reboot(ssoEnv());
+        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
+          expect.stringMatching(
+            /^1 account from before single sign-on is not connected to it .*sarati-link-sso --list/,
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    }, 60_000);
+
+    it('reaches a Clerk-made account only once an operator connects it, never by its email', async () => {
+      const clerk = await db.query<{ id: string }>(`SELECT id FROM users WHERE clerk_user_id = $1`, [
+        CLERK_ID,
+      ]);
+      const before = await rowsCreated();
+      const early = await signIn('sub-clerk-person');
+      expect({ status: early.status, code: early.body.code }).toEqual({
+        status: 409,
+        code: 'oidc_account_exists',
+      });
+      expect(await rowsCreated()).toEqual(before);
+
+      expect(await run(['clerk.person@example.com', 'sub-clerk-person'])).toEqual({
+        code: 0,
+        out: expect.stringContaining('Linked clerk.person@example.com to sub-clerk-person'),
+      });
+      const connected = await signIn('sub-clerk-person');
+      expect({ status: connected.status, user: connected.body.user?.id }).toEqual({
+        status: 200,
+        user: clerk.rows[0]!.id,
+      });
     }, 60_000);
   });
 });

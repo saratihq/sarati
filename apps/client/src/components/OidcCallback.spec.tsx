@@ -251,6 +251,7 @@ describe("OidcCallback: the service refused", () => {
     arrive("?code=c-1&state=st-1", signIn());
     render(<OidcCallback />);
 
+    expect(await screen.findByText(/If it has none, ask an operator to connect single sign-on to it/)).toBeInTheDocument();
     await userEvent.click(await screen.findByRole("button", { name: "Sign in with password" }));
     expect(router.replace).toHaveBeenCalledWith("/login?method=password&redirect_url=%2Fsettings");
   });
@@ -274,7 +275,7 @@ describe("OidcCallback: the service refused", () => {
     expect(screen.getByRole("button", { name: "Back to sign in" })).toBeInTheDocument();
   });
 
-  it.each(["oidc_identity_in_use", "oidc_already_linked", "oidc_token_rejected"])(
+  it.each(["oidc_identity_in_use", "oidc_already_linked", "oidc_token_rejected", "oidc_reauthentication_required"])(
     "sends a failed connect (%s) back to Settings",
     async (code) => {
       completeOidcLink.mockRejectedValue(new api.ApiError("That identity already signs in to another account.", 409, code));

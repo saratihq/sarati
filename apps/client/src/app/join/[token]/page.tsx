@@ -143,12 +143,12 @@ export default function JoinPage() {
                   .{" "}
                   {showPassword
                     ? "Create your account using the email address the invite was sent to."
-                    : "Continue with single sign-on as the email address the invite was sent to."}
+                    : "Continue with single sign-on. The invite is for the account at the email address it was sent to."}
                 </>
               ) : showPassword ? (
                 "Create your account to join the team. Use the email address the invite was sent to."
               ) : (
-                "Continue with single sign-on as the email address the invite was sent to."
+                "Continue with single sign-on. The invite is for the account at the email address it was sent to."
               )}
             </p>
           </div>

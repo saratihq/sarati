@@ -8,7 +8,8 @@ export class UserEntity {
   @PrimaryColumn('uuid')
   id!: string;
 
-  @Column({ type: 'varchar', length: 255, unique: true })
+  /** One account holds an address confirmed, in any letter case (`ix_users_confirmed_email`); unconfirmed ones may share it. */
+  @Column({ type: 'varchar', length: 255 })
   email!: string;
 
   /** The Clerk user id — an OIDC `sub` on accounts the retired bearer sign-in created; null otherwise. */
@@ -22,7 +23,7 @@ export class UserEntity {
   @Column({ type: 'varchar', length: 255 })
   name!: string;
 
-  /** False only when single sign-on made the account from an email its provider did not confirm; no invite is matched to such an email. */
+  /** Whether the account holds its email: false when single sign-on made it from an address its provider did not confirm, or it gave the address up; no invite is matched to an address it does not hold. */
   @Column({ name: 'email_verified', type: 'boolean', default: true })
   emailVerified!: boolean;
 

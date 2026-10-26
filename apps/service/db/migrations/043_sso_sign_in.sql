@@ -1,6 +1,7 @@
--- 042 — single sign-on: the identities a person signs in with at an OpenID Connect provider, keyed by (issuer, subject),
--- the single-use state a browser sign-in holds between its start and its completion, and whether an account's email
--- is one an invite may be matched to (false only when single sign-on made it from an address the provider did not confirm).
+-- 043 — single sign-on: the identities a person signs in with at an OpenID Connect provider, keyed by (issuer, subject),
+-- the single-use state a browser sign-in holds between its start and its completion, and whether an account holds its
+-- email (false when single sign-on made it from an address the provider did not confirm). One account holds an address,
+-- in any letter case; an unconfirmed one claims and blocks nothing, so the unique index on email becomes a partial one.
 -- Idempotent: db:migrate re-runs every file.
 
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS email_verified boolean DEFAULT true NOT NULL;
@@ -35,3 +36,25 @@ CREATE TABLE IF NOT EXISTS public.oidc_login_states (
 );
 
 CREATE INDEX IF NOT EXISTS ix_oidc_login_states_expires_at ON public.oidc_login_states USING btree (expires_at);
+
+-- Two accounts holding one address apart from letter case: the one already in lower case keeps it, else the oldest.
+DO $$
+DECLARE
+  twin record;
+BEGIN
+  FOR twin IN
+    SELECT id, email FROM (
+      SELECT id, email,
+             row_number() OVER (PARTITION BY lower(email)
+                                ORDER BY (email = lower(email)) DESC, created_at NULLS LAST, id) AS rank
+        FROM public.users WHERE email_verified
+    ) ranked WHERE rank > 1
+  LOOP
+    UPDATE public.users SET email_verified = false WHERE id = twin.id;
+    RAISE WARNING '% (%) shares its address with another account apart from letter case, so it no longer holds it: an invite to it goes to the other', twin.email, twin.id;
+  END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ix_users_confirmed_email ON public.users USING btree (lower((email)::text)) WHERE email_verified;
+
+DROP INDEX IF EXISTS public.ix_users_email;
