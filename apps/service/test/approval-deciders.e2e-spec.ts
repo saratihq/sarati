@@ -9,7 +9,7 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Client } from 'pg';
 import request from 'supertest';
 import type { Response } from 'supertest';
-import type { DataSource, EntityManager } from 'typeorm';
+import type { DataSource } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
@@ -17,6 +17,7 @@ import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
 import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import { listenOnLoopback } from './support/listen';
+import { holdResume } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ISSUER = 'https://idp.approval-deciders.local';
@@ -34,37 +35,6 @@ interface Step {
   waiting?: unknown;
   decided_by: Decider | null;
   decided_at: string | null;
-}
-
-/**
- * Holds the next resume a wait records until released: the moment a cancel or a sibling's failure can overtake it.
- * Given `failing`, that resume's transaction then fails as a lost connection would, and the resume logs it.
- */
-function holdNextResume(
-  recorder: RunRecorderService,
-  failing?: EntityManager,
-): { entered: Promise<void>; release: () => void; restore: () => void; failed: () => boolean } {
-  const original = recorder.stepResumed.bind(recorder);
-  let enter!: () => void;
-  let release!: () => void;
-  let failed = false;
-  const entered = new Promise<void>((r) => (enter = r));
-  const released = new Promise<void>((r) => (release = r));
-  const spy = jest.spyOn(recorder, 'stepResumed').mockImplementationOnce(async (...args) => {
-    enter();
-    await released;
-    if (!failing) return original(...args);
-    const lost = jest.spyOn(failing, 'transaction').mockImplementationOnce(() => {
-      failed = true;
-      return Promise.reject(new Error('Connection terminated unexpectedly'));
-    });
-    try {
-      return await original(...args);
-    } finally {
-      lost.mockRestore();
-    }
-  });
-  return { entered, release, restore: () => spy.mockRestore(), failed: () => failed };
 }
 
 /** Approvals on topics named after their node ids — unconnected roots park at once, chained ones in turn. */
@@ -480,7 +450,7 @@ describe.each([
   });
 
   it('a decision the run took keeps who made it when a cancel lands before the run records it', async () => {
-    const resume = holdNextResume(app.get(RunRecorderService));
+    const resume = holdResume(app.get(RunRecorderService));
     try {
       const run = start('took-then-cancelled', ['legal'], false);
       await eventually(
@@ -489,7 +459,7 @@ describe.each([
         'the approval listed',
       );
       await answer(asB, 'took-then-cancelled', 'legal', { decision: 'approved' }).expect(200);
-      await resume.entered;
+      await resume.arrived;
       await cancel('took-then-cancelled').expect(200);
       resume.release();
       const res = await run;
@@ -538,7 +508,7 @@ describe.each([
         },
       ],
     };
-    const resume = holdNextResume(app.get(RunRecorderService));
+    const resume = holdResume(app.get(RunRecorderService));
     try {
       const run = asA(
         http()
@@ -551,7 +521,7 @@ describe.each([
         'both approvals listed',
       );
       await answer(asB, 'sibling-fails', 'legal', { decision: 'approved' }).expect(200);
-      await resume.entered;
+      await resume.arrived;
       await answer(asA, 'sibling-fails', 'finance', { decision: 'approved' }).expect(200);
       if (dbos) {
         // On the sequenced engine the resume write holds the run's turn: nothing else in the run moves until it lands.
@@ -589,7 +559,7 @@ describe.each([
   }, 30_000);
 
   it('a claim a cancel leaves for a resume that never comes is shown and acted on by nothing, and is dropped once its run is long over', async () => {
-    const resume = holdNextResume(app.get(RunRecorderService));
+    const resume = holdResume(app.get(RunRecorderService));
     let run: Promise<Response> | undefined;
     try {
       run = start('resume-never-came', ['legal'], false);
@@ -599,7 +569,7 @@ describe.each([
         'the approval listed',
       );
       await answer(asB, 'resume-never-came', 'legal', { decision: 'approved' }).expect(200);
-      await resume.entered;
+      await resume.arrived;
       await cancel('resume-never-came').expect(200);
       expect(await stepRowOf('resume-never-came', 'legal')).toEqual({
         status: 'running',
@@ -651,7 +621,7 @@ describe.each([
   }, 30_000);
 
   it('a decision recorded after a later one never replaces it on the run, for an older image', async () => {
-    const resume = holdNextResume(app.get(RunRecorderService));
+    const resume = holdResume(app.get(RunRecorderService));
     try {
       const run = start('recorded-late', ['legal', 'finance'], false);
       await eventually(
@@ -660,7 +630,7 @@ describe.each([
         'both approvals listed',
       );
       await answer(asA, 'recorded-late', 'legal', { decision: 'approved' }).expect(200);
-      await resume.entered;
+      await resume.arrived;
       await answer(asB, 'recorded-late', 'finance', { decision: 'approved' }).expect(200);
       // In process the later decision is taken first; the sequenced engine's held turn keeps the order they came in.
       if (!dbos) {
@@ -695,7 +665,7 @@ describe.each([
     async (_when, cancelled) => {
       const runId = cancelled ? 'lost-resume-cancelled' : 'lost-resume';
       const manager = app.get<DataSource>(getDataSourceToken()).manager;
-      const resume = holdNextResume(app.get(RunRecorderService), manager);
+      const resume = holdResume(app.get(RunRecorderService), { failing: manager });
       try {
         if (!cancelled) resume.release();
         const run = start(runId, ['legal'], false);
@@ -705,7 +675,7 @@ describe.each([
           'the approval listed',
         );
         await answer(asB, runId, 'legal', { decision: 'approved' }).expect(200);
-        await resume.entered;
+        await resume.arrived;
         if (cancelled) {
           await cancel(runId).expect(200);
           resume.release();
