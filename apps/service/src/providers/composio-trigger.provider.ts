@@ -152,7 +152,7 @@ export class ComposioTriggerProvider {
    */
   async verifyWebhook(
     scope: PlatformKeyScope,
-    rawBody: string,
+    rawBody: Buffer,
     headers: Record<string, string>,
   ): Promise<ComposioWebhookVerifyResult> {
     const secret = (await this.platformKeys.get(scope, 'composio_webhook_secret')) ?? '';

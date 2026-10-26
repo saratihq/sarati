@@ -62,6 +62,24 @@ curl "http://localhost:8080/api/workflows/<id>/webhook-secret?node_id=trigger&en
 
 `{"secret_present":false}` means verification is on with nothing to verify against.
 
+## A webhook returns 415
+
+```json
+{"detail":"Unsupported Content-Type \"multipart/form-data\": send JSON, form fields or text"}
+```
+
+Sarati can't read the body, so nothing ran. A webhook or chat takes:
+
+- JSON: `application/json`, or any `+json` type.
+- Form fields: `application/x-www-form-urlencoded`.
+- Text: `text/*`, `application/xml`, or any `+xml` type.
+- A body with no `Content-Type`, as long as it is UTF-8 text.
+
+Set the sender's content type to one of those. The same `415` comes for a `charset` Sarati doesn't
+know (`Unsupported charset "…"`) and for a body compressed with anything but `gzip`, `deflate` or
+`br` (`unsupported content encoding "…"`). `multipart/form-data` and `application/octet-stream`
+aren't read, so a sender that can only post those can't start a run.
+
 ## A promote or publish says a trigger or step "can't run there"
 
 ```

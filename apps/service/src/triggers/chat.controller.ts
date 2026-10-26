@@ -15,6 +15,7 @@ import { Observable } from 'rxjs';
 import { DomainError } from '../common/domain-error';
 import { isIdShape } from '../database/ids';
 import { AgentStepBus, channelKey } from '../runtime/agent-step-bus';
+import { CHAT_PREFIX } from './canvas/webhook-url';
 import { TriggersService } from './triggers.service';
 
 /** Idle keepalive cadence — a named `ping` frame every 15s so proxies never drop the stream. */
@@ -23,10 +24,10 @@ const HEARTBEAT_MS = 15_000;
 /**
  * The public SYNCHRONOUS chat intake — NO auth guard: the unguessable
  * per-`(workflow, env)` path is the capability token. Locked contract:
- * `POST /api/chat/:workflowId/:env` `{ chatInput, sessionId?, action? }` →
- * 200 `{ run_id, session_id, reply, outputs }`, 404 when the env has no live chat node.
+ * `POST /api/chat/:workflowId/:env` `{ chatInput, sessionId?, action? }` as JSON or form fields, or the
+ * message as text → 200 `{ run_id, session_id, reply, outputs }`, 404 when the env has no live chat node.
  */
-@Controller('api/chat')
+@Controller(CHAT_PREFIX)
 export class ChatController {
   constructor(
     private readonly triggers: TriggersService,
@@ -94,12 +95,15 @@ export class ChatController {
   }
 }
 
-/** Validate + narrow the chat request body to the locked shape (`chatInput` required, non-empty). */
 function parseChatBody(body: unknown): { chatInput: string; sessionId?: string; action?: string } {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-    throw new DomainError('Chat request body must be an object with a "chatInput" string', 400);
+  const message: unknown = typeof body === 'string' ? { chatInput: body } : body;
+  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+    throw new DomainError(
+      'Chat request body must be the message text, or an object with a "chatInput" string',
+      400,
+    );
   }
-  const record = body as Record<string, unknown>;
+  const record = message as Record<string, unknown>;
   if (typeof record.chatInput !== 'string' || record.chatInput.length === 0) {
     throw new DomainError('Chat request needs a non-empty "chatInput" string', 400);
   }

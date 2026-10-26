@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import { verifyWebhookSignature } from './webhook-verify';
 
 const SECRET = 'shhh-signing-secret';
-const BODY = JSON.stringify({ event: 'push', id: 42 });
+const BODY = Buffer.from(JSON.stringify({ event: 'push', id: 42 }));
 
 describe('verifyWebhookSignature', () => {
   it('github preset: accepts a valid sha256=<hex> and rejects a forgery', () => {
@@ -12,9 +12,9 @@ describe('verifyWebhookSignature', () => {
       true,
     );
     // wrong body
-    expect(verifyWebhookSignature({ preset: 'github' }, '{}', { 'x-hub-signature-256': sig }, SECRET)).toBe(
-      false,
-    );
+    expect(
+      verifyWebhookSignature({ preset: 'github' }, Buffer.from('{}'), { 'x-hub-signature-256': sig }, SECRET),
+    ).toBe(false);
     // wrong secret
     expect(verifyWebhookSignature({ preset: 'github' }, BODY, { 'x-hub-signature-256': sig }, 'nope')).toBe(
       false,
@@ -35,7 +35,7 @@ describe('verifyWebhookSignature', () => {
 
   it('stripe preset: verifies v1 over `${t}.${body}` and rejects tampering', () => {
     const t = '1700000000';
-    const v1 = createHmac('sha256', SECRET).update(`${t}.${BODY}`).digest('hex');
+    const v1 = createHmac('sha256', SECRET).update(`${t}.`).update(BODY).digest('hex');
     const header = `t=${t},v1=${v1}`;
     expect(verifyWebhookSignature({ preset: 'stripe' }, BODY, { 'stripe-signature': header }, SECRET)).toBe(
       true,
@@ -50,6 +50,25 @@ describe('verifyWebhookSignature', () => {
         SECRET,
       ),
     ).toBe(false);
+  });
+
+  it('signs the bytes received, not a UTF-8 reading of them', () => {
+    const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+    const lossy = Buffer.from(latin1.toString('utf8'));
+    const sig = 'sha256=' + createHmac('sha256', SECRET).update(latin1).digest('hex');
+    expect(verifyWebhookSignature({ preset: 'github' }, latin1, { 'x-hub-signature-256': sig }, SECRET)).toBe(
+      true,
+    );
+    expect(verifyWebhookSignature({ preset: 'github' }, lossy, { 'x-hub-signature-256': sig }, SECRET)).toBe(
+      false,
+    );
+    const t = '1700000000';
+    const v1 = createHmac('sha256', SECRET)
+      .update(Buffer.concat([Buffer.from(`${t}.`), latin1]))
+      .digest('hex');
+    expect(
+      verifyWebhookSignature({ preset: 'stripe' }, latin1, { 'stripe-signature': `t=${t},v1=${v1}` }, SECRET),
+    ).toBe(true);
   });
 
   it('generic: honours a custom header/algo/format/prefix', () => {
