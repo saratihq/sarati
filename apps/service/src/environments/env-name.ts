@@ -5,11 +5,16 @@ export const PROD_ENV = 'production';
 /** Predefined like production: locked name, undeletable. */
 export const UAT_ENV = 'uat';
 
+const LEGACY_PROD_ALIAS = 'prod';
+
 /** Environment name shape (lowercase slugs; matched case-insensitively). */
 export const ENV_NAME_SHAPE = /^[a-z0-9][a-z0-9_-]{0,99}$/i;
 
-/** Reserved: 'default' labels the per-user connection pool, 'prod' is the legacy production alias. */
-export const RESERVED_ENV_NAMES = new Set(['default', 'prod']);
+/** Names no environment may take, each with the reason a refusal gives. */
+export const RESERVED_ENV_NAMES: ReadonlyMap<string, string> = new Map([
+  ['default', 'it names the connection pool'],
+  [LEGACY_PROD_ALIAS, `it is another name for '${PROD_ENV}'`],
+]);
 
 /** Env names are case-insensitive slugs — stored and compared lowercase. */
 export function normalizeEnvName(name: string): string {
@@ -19,5 +24,5 @@ export function normalizeEnvName(name: string): string {
 /** Legacy-name seam: pre-rename callers (old clients, scripts) still say 'prod'. */
 export function canonicalEnvName(name: string): string {
   const normalized = normalizeEnvName(name);
-  return normalized === 'prod' ? PROD_ENV : normalized;
+  return normalized === LEGACY_PROD_ALIAS ? PROD_ENV : normalized;
 }

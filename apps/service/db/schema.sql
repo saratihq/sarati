@@ -269,7 +269,8 @@ CREATE TABLE public.organizations (
     name character varying(255) NOT NULL,
     is_personal boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
+    updated_at timestamp with time zone DEFAULT now(),
+    environments_seeded_at timestamp with time zone
 );
 
 

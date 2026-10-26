@@ -295,12 +295,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       heldAt: 'org lock',
     },
     {
-      name: "an environment list that creates the org's default environments",
-      send: (t) => asOwner(http().get('/api/environments'), t.org),
-      status: 200,
-      heldAt: 'org lock',
-    },
-    {
       name: 'a slot assign',
       send: fillSlot,
       status: 200,
@@ -673,10 +667,10 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         await slotIn(org, two, deleter.app, connection).expect(200);
         await slotIn(org, one, deleter.app, connection).expect(200);
         const scans = await db.query<{ envs: string[]; slots: string[] }>(
-          `SELECT (SELECT array_agg(id ORDER BY ctid) FROM environments WHERE org_id = $1) AS envs,
+          `SELECT (SELECT array_agg(id ORDER BY ctid) FROM environments WHERE org_id = $1 AND id = ANY($3::uuid[])) AS envs,
                   (SELECT array_agg(environment_id ORDER BY ctid) FROM environment_connections
                     WHERE connection_id = $2) AS slots`,
-          [org, connection],
+          [org, connection, [one, two]],
         );
         const { envs, slots } = scans.rows[0]!;
         if (envs.join() === [one, two].join() && slots.join() === [two, one].join()) return { org, one, two };
@@ -775,10 +769,20 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         const one = await team('Crossed clusters, one');
         const two = await team('Crossed clusters, two');
         const clusters = [await clusterIn(one), await clusterIn(two)];
-        await slotIn(two.org, two.env, 'slack', clusters[0]!.connection).expect(200);
-        await slotIn(one.org, one.env, 'slack', clusters[1]!.connection).expect(200);
-        // The first takes the lower id, the second's environment, before its own.
-        const [second, first] = one.env < two.env ? [one, two] : [two, one];
+        // The first locks the lowest id of all, the second's environment its connection fills, before its own lowest, which the second's connection fills.
+        const lowestIn = async (orgs: string[]): Promise<{ id: string; org_id: string }> =>
+          (
+            await db.query<{ id: string; org_id: string }>(
+              `SELECT id, org_id FROM environments WHERE org_id = ANY($1::uuid[]) ORDER BY id LIMIT 1`,
+              [orgs],
+            )
+          ).rows[0]!;
+        const lowest = await lowestIn([one.org, two.org]);
+        const [second, first] = lowest.org_id === one.org ? [one, two] : [two, one];
+        const [secondCluster, firstCluster] = second === one ? clusters : [clusters[1], clusters[0]];
+        const firstLowest = await lowestIn([first.org]);
+        await slotIn(second.org, lowest.id, 'slack', firstCluster!.connection).expect(200);
+        await slotIn(first.org, firstLowest.id, 'slack', secondCluster!.connection).expect(200);
         const held = bounded(holdQuery(at, 'after'), 'the first org delete');
         const before = await deadlocks();
         try {
