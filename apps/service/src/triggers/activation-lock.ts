@@ -1,7 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 
-// Two-key advisory locks live apart from the one-key ones pg-boss and DBOS take.
-const ACTIVATION_LOCK_SPACE = 7301;
+import { ACTIVATION_LOCK_SPACE } from '../database/advisory-lock-spaces';
 
 /** Run `work` holding the activation's lock, waiting for it, so a teardown or stand-up never overlaps a poll. */
 export async function withActivationLock<T>(

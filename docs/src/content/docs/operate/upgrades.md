@@ -102,7 +102,9 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
-### v0.2.27: a TypeScript Code step may await and return
+### v0.2.27
+
+#### A TypeScript Code step may await and return
 
 A **Code** step written in TypeScript runs as the async function body its editor describes, so one
 snippet may both `await` and `return`. Earlier versions refused such a step with
@@ -123,6 +125,26 @@ What a caller of the API sees change:
   says `at the end of the snippet` for one left unclosed. It used to read
   `has a TypeScript error: Error: Transform failed with 1 error: <stdin>:2:29: ERROR: Unexpected "="`,
   its column counted from 0 and in bytes.
+
+#### Signing up with an invite makes an account only by joining
+
+There is nothing to change on upgrade. What a caller of `POST /api/auth/local/register` sees
+change:
+
+- **A sign-up with an invite makes its account in the same step as joining.** When the invite is
+  revoked or accepted by another account, or its organization deleted, while the sign-up is under
+  way, the sign-up is refused with `403` and the code `signup_closed` and makes no account. It used
+  to make the account and then answer `404`, leaving an account no invite had let in. A revoke that
+  reaches the invite while a sign-up holds it waits for it, and once the sign-up lands answers `404`
+  as for an accepted invite. See [Invite someone](/operate/users/#invite-someone).
+- **A sign-up carrying an invite token on an instance with no accounts yet is judged by that
+  invite.** One that names no invite is refused with `403` `signup_closed`, and the instance still
+  waits for its first account. It used to make the owner account and then answer `404`.
+- **Sign-ups take turns.** Two first sign-ups at once on an empty instance make one account, and the
+  other is refused with `403` `signup_closed`; both could get in before. Two sign-ups of one email at
+  once make one account, and the other answers `409` `email_taken`, or `403` `signup_closed` on an
+  empty instance, which the first account closes; it used to answer `500`.
+
 
 ### v0.2.26: the service opens no port but its own
 

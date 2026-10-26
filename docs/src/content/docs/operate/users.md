@@ -3,8 +3,8 @@ title: Users and organizations
 description: Invite people, and decide who can ship.
 ---
 
-The first account on an instance is the owner. **Everyone after joins by invite** — signing up
-without one is refused:
+The first account on an instance is the owner, and if two people sign up at once only one gets in.
+**Everyone after joins by invite** — signing up without one is refused:
 
 ```json
 {"code":"signup_closed",
@@ -38,8 +38,10 @@ enough, so treat it like a password and delete one you did not mean to send.
 
 An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
 accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever
-comes second answers `404`, as for an invite that isn't there. Accepting again with an account that
-is already in it is a no-op, and signing up with a spent link is refused as `signup_closed`.
+comes second answers `404`, as for an invite that isn't there. Signing up with the link is an accept
+too: the account is made only together with joining, so a sign-up that comes second, or uses a spent
+link, is refused as `signup_closed` and makes no account. Accepting again with an account that is
+already in it is a no-op.
 
 Only an owner can invite someone as an owner; an admin's attempt is refused.
 
