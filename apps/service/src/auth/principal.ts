@@ -28,6 +28,11 @@ export function reachesOrg(principal: Principal, orgId: string | null): boolean 
   return principal.kind !== 'api_key' || !principal.keyOrgId || principal.keyOrgId === orgId;
 }
 
+/** Whether the principal is a key pinned to one org: it reaches nothing outside it, so it never creates or joins another. */
+export function isOrgPinned(principal: Principal): boolean {
+  return !reachesOrg(principal, null);
+}
+
 /** The scopes to hold this principal to; a session is not scope-limited, so it holds them all. */
 export function principalScopes(principal: Principal): string[] | null {
   return principal.kind === 'api_key' ? principal.scopes : null;

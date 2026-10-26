@@ -1,4 +1,4 @@
-import { reachesOrg, type Principal } from '../auth/principal';
+import { isOrgPinned, type Principal } from '../auth/principal';
 import type { PolicyService } from '../policy/policy.service';
 
 /** How far a caller may reach into run history: always their own runs, org-wide only for an interactive session. */
@@ -25,7 +25,7 @@ export async function runAccessOf(principal: Principal, policy: PolicyService): 
     activeOrgId: principal.activeOrgId,
     orgWide: principal.kind !== 'api_key',
     orgIds: await policy.reachableOrgIds(principal),
-    pinned: !reachesOrg(principal, null),
+    pinned: isOrgPinned(principal),
   };
 }
 

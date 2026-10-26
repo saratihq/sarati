@@ -13,8 +13,10 @@ import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entit
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
 import { ReviewTestResultEntity } from '../database/entities/review-test-result.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
-import { isIdShape, now } from '../database/ids';
+import type { WorkflowEntity } from '../database/entities/workflow.entity';
+import { now } from '../database/ids';
 import { type NamedEnvironment, slotRefusalError, stepsRefusedIn } from '../environments/env-slot-preflight';
+import { EnvironmentsService } from '../environments/environments.service';
 import type { WorkflowIR } from '../ir/models';
 import { isRunCancelled, RunsService } from '../runs/runs.service';
 import { isDecisiveTest, isNewerTest } from '../workflows/branch.service';
@@ -69,13 +71,15 @@ export class ReviewTestService {
     private readonly reviews: ReviewsService,
     private readonly connections: ConnectionsService,
     private readonly envPointers: EnvPointersService,
+    private readonly environments: EnvironmentsService,
   ) {}
 
   /** The branch head's steps a test would refuse for want of an account — the run-as rule, dry, for this tester and environment. */
   async readiness(workflowId: string, reviewId: string, scope: TestScope): Promise<ReviewTestReadiness> {
+    const wf = await this.runs.runnableWorkflow(workflowId, scope.principal.activeOrgId);
     const review = await this.reviews.getReviewScoped(workflowId, reviewId);
-    const environment = await this.environmentOf(scope);
     const em = this.dataSource.manager;
+    const environment = await this.environmentOf(em, wf, scope.environmentId);
     const headIr = await this.headIr(em, (await this.headsOf(em, review)).source);
     const plan = await planRunAs(
       headIr,
@@ -107,20 +111,15 @@ export class ReviewTestService {
     reviewId: string,
     opts: TestBranchOptions,
   ): Promise<ReviewTestSummary> {
+    const wf = await this.runs.runnableWorkflow(workflowId, opts.principal.activeOrgId);
     const review = await this.reviews.getReviewScoped(workflowId, reviewId);
     if (review.status === 'merged' || review.status === 'closed') {
       throw new DomainError('Cannot test a closed or merged review');
     }
-    const environment = await this.environmentOf(opts);
     const em = this.dataSource.manager;
+    const environment = await this.environmentOf(em, wf, opts.environmentId);
     if (environment) {
-      await this.envPointers.assertMayPromote(
-        em,
-        opts.principal.activeOrgId,
-        environment.name,
-        opts.principal,
-        'test',
-      );
+      await this.envPointers.assertMayPromote(em, wf.orgId, environment.name, opts.principal, 'test');
     }
     const { source, target } = await this.headsOf(em, review);
 
@@ -136,8 +135,8 @@ export class ReviewTestService {
       opts.triggerPayload !== undefined ? opts.triggerPayload : await this.defaultPayload(opts, workflowId);
 
     const [base, head] = await Promise.all([
-      this.runSide(baseIr, payload, workflowId, reviewId, opts, environment),
-      this.runSide(headIr, payload, workflowId, reviewId, opts, environment),
+      this.runSide(baseIr, payload, wf, reviewId, opts, environment),
+      this.runSide(headIr, payload, wf, reviewId, opts, environment),
     ]);
     // A cancelled run neither passed nor failed, so the test has no result to keep or to gate a merge on.
     if (base.cancelled || head.cancelled) {
@@ -196,17 +195,16 @@ export class ReviewTestService {
     });
   }
 
-  // SECURITY (cross-tenant): a caller-supplied environment resolves to real connections, so another org's is a 404.
-  private async environmentOf(scope: TestScope): Promise<NamedEnvironment | null> {
-    if (!scope.environmentId) return null;
-    if (!isIdShape(scope.environmentId)) throw new DomainError('Environment not found', 404);
-    const rows: NamedEnvironment[] = await this.dataSource.query(
-      `SELECT id, name FROM environments WHERE id = $1 AND org_id = $2`,
-      [scope.environmentId, scope.principal.activeOrgId],
-    );
-    const [environment] = rows;
-    if (!environment) throw new DomainError('Environment not found', 404);
-    return environment;
+  // SECURITY (cross-tenant): a caller-supplied environment resolves to real connections, so one outside the workflow's org is a 404.
+  private async environmentOf(
+    em: EntityManager,
+    wf: WorkflowEntity,
+    environmentId: string | null | undefined,
+  ): Promise<NamedEnvironment | null> {
+    if (!environmentId) return null;
+    if (!wf.orgId) throw new DomainError('Environment not found', 404);
+    const { id, name } = await this.environments.byIdForOrg(em, wf.orgId, environmentId);
+    return { id, name };
   }
 
   private async headsOf(em: EntityManager, review: WorkflowReviewEntity): Promise<ReviewHeads> {
@@ -230,7 +228,7 @@ export class ReviewTestService {
   private async runSide(
     ir: WorkflowIR,
     payload: unknown,
-    workflowId: string,
+    wf: WorkflowEntity,
     reviewId: string,
     opts: TestBranchOptions,
     environment: NamedEnvironment | null,
@@ -241,12 +239,12 @@ export class ReviewTestService {
         externalUserId: opts.principal.user.id,
         activeOrgId: opts.principal.activeOrgId,
         runId,
-        workflowId,
+        workflowId: wf.id,
         source: 'review_test',
         reviewId,
         environment: environment?.name ?? null,
         environmentId: environment?.id ?? null,
-        orgId: opts.principal.activeOrgId,
+        orgId: wf.orgId,
         initialScope: payload !== undefined ? { trigger: payload } : undefined,
       });
       return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
