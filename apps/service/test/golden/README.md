@@ -9,17 +9,19 @@ new run id, with every time in it moved forward by its age.
 - `0af0a76` is v0.2.23, the release before the recovery guard. Its waits park on the run's row, not
   their steps, and two waits on one topic share a receive, so it has no `shared-receive-*` shapes: its
   `inside-wait-fan-out` is that shape.
-- `bdf9cd7` is v0.2.24, the release that added the recovery guard, and the build before this one
-  (`PREVIOUS_BUILD`).
+- `bdf9cd7` is v0.2.24, the release that added the recovery guard, and the last release whose runs
+  start on `orchestr.runPlan` (`LEGACY_BUILD`).
 
 They are recovered on this build by:
 
-- `test/golden-recovery.e2e-spec.ts`, over `PREVIOUS_BUILD`: a history with an `outcome` must come to
+- `test/golden-recovery.e2e-spec.ts`, over `LEGACY_BUILD`: a history with an `outcome` must come to
   the same outcome, and any other is ended by the recovery guard;
 - `test/recovery-guard.e2e-spec.ts`, over both builds, after migrating the database as an upgrade does,
   under the guard's own checks.
 
-`test/rollback-to-earlier-build.e2e-spec.ts` boots `PREVIOUS_BUILD`.
+`test/rollback-to-earlier-build.e2e-spec.ts` boots `LEGACY_BUILD` over runs this build started. Going
+back to the release this build replaces, `LAST_RELEASE` in `test/support/earlier-build.ts`, is
+`test/rollback-to-last-release.e2e-spec.ts`.
 
 Record a build's histories from `apps/service`, all shapes or those named after the sha:
 

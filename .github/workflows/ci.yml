@@ -36,7 +36,7 @@ jobs:
       NEXT_PUBLIC_API_URL: same-origin
       NEXT_PUBLIC_AGENT_URL: same-origin
     steps:
-      # Full history: the rollback e2e unpacks the build before this one from it.
+      # Full history and tags: the rollback e2es unpack earlier releases and check which is the newest.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

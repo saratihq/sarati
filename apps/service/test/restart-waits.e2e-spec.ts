@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
-import { PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
+import { LEGACY_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
@@ -463,7 +463,7 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     // Served once, the mock user has the org the restore moves the run into.
     expect((await fetch(url('/api/runs/waiting'))).ok).toBe(true);
     await crash();
-    await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/shared-receive-before-fan-out`, runId);
+    await restoreGoldenHistory(db, dbos, `${LEGACY_BUILD}/shared-receive-before-fan-out`, runId);
     await boot();
     expect((await post(`/api/runs/${runId}/events`, { topic: 'gate', payload: { d: 'go' } })).status).toBe(
       200,

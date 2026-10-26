@@ -23,7 +23,7 @@ import type { EnvConfig } from '../config/env.config';
  * **Local session** (workflow-service): a self-host signs in with
  *   email + password and gets an HS256 JWT signed with the shared SECRET_KEY.
  *   Without this path the composer 401s every self-host caller, so an operator
- *   who supplied ANTHROPIC_API_KEY still could not reach it.
+ *   who stored an Anthropic key in Settings still could not reach it.
  *
  * Each path pins its OWN issuer and algorithm, so a token minted for one can
  * never be accepted by the other — the property relies on. Local runs

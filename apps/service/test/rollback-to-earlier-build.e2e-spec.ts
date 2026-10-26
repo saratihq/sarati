@@ -1,96 +1,22 @@
-import { createServer as createHttpServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
-
-import { Client } from 'pg';
-
 import { PARK_DELAY_ABOVE_MS } from '../src/runtime/timer-wait';
-import { unpackBuild, type EarlierBuild } from './support/earlier-build';
-import { goldenBuild } from './support/golden-history';
-import { bootService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
-import { ADMIN_URL, createE2eDatabase } from './support/test-db';
+import { goldenBuild, LEGACY_BUILD } from './support/golden-history';
+import { MOCK_USER_ID, rollbackSuite } from './support/rollback';
 
-const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 const WINDOW_MS = 10 * 60_000;
 const LAPSING_MS = 4_000;
 const PARKED_DELAY_MS = PARK_DELAY_ABOVE_MS + 1_000;
 
-interface RunRow {
-  run_id: string;
-  status: string;
-  error: string | null;
-  finished_at: Date | null;
-  decided_by: string | null;
-}
-
-/** v0.2.24, the build this one replaces, booted on a run this one started and booted back over it (child processes, DBOS on, mock auth). */
+/** v0.2.24, the last release without `orchestr.runPlan.v2`, booted on a run this build started and booted back over it (child processes, DBOS on, mock auth). */
 describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)', () => {
-  let earlier: EarlierBuild;
-  let databaseUrl: string;
-  let db: Client;
-  let dbos: Client | undefined;
-  let service: ServiceProcess | undefined;
   let slowCalls = 0;
-  const fixture = createHttpServer((req) => {
+  const rollback = rollbackSuite(goldenBuild(LEGACY_BUILD), (req) => {
     if (req.url === '/slow') slowCalls += 1;
   });
+  const { post, eventually, runs, workflows } = rollback;
 
-  const post = (path: string, body: unknown): Promise<Response> =>
-    fetch(`${service!.base}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-  async function eventually<T>(
-    read: () => Promise<T>,
-    done: (value: T) => boolean,
-    what: string,
-    tries = 300,
-  ): Promise<T> {
-    for (let i = 0; i < tries; i++) {
-      const value = await read().catch(() => undefined);
-      if (value !== undefined && done(value)) return value;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error(`never saw ${what}\n${service?.log().slice(-4_000) ?? ''}`);
-  }
-
-  const runs = async (): Promise<Record<string, RunRow>> =>
-    Object.fromEntries(
-      (
-        await db.query<RunRow>(
-          `SELECT run_id, status, error, finished_at, decided_by FROM runtime_runs ORDER BY run_id`,
-        )
-      ).rows.map((r) => [r.run_id, r]),
-    );
-  const workflows = async (): Promise<Record<string, string>> =>
-    Object.fromEntries(
-      (
-        await dbos!.query<{ workflow_uuid: string; status: string }>(
-          `SELECT workflow_uuid, status FROM dbos.workflow_status`,
-        )
-      ).rows.map((r) => [r.workflow_uuid.slice(MOCK_USER_ID.length + 1), r.status]),
-    );
-
-  beforeAll(async () => {
-    earlier = unpackBuild(goldenBuild());
-    databaseUrl = await createE2eDatabase(ADMIN_URL);
-    db = new Client({ connectionString: databaseUrl });
-    await db.connect();
-    await new Promise<void>((r) => fixture.listen(0, '127.0.0.1', r));
-  }, 300_000);
-
-  afterAll(async () => {
-    await service?.crash();
-    await dbos?.end();
-    await db.end();
-    fixture.closeAllConnections();
-    await new Promise((r) => fixture.close(r));
-    earlier.remove();
-  }, 60_000);
-
-  it('is listed and decided on the build before, ended there past the max or its window, and picked up where it was on coming back, a Wait step waking then', async () => {
-    const slow = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/slow`;
+  it('is listed and decided on v0.2.24, ended there past the max or its window, and picked up where it was on coming back, a Wait step waking then', async () => {
+    const db = rollback.db();
+    const slow = rollback.fixtureUrl('/slow');
     const approve = (timeoutMs: number) => [
       { kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs },
     ];
@@ -105,11 +31,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
       'timed-overdue': [{ kind: 'delay', id: 'pause', ms: PARKED_DELAY_MS }],
     };
 
-    service = await bootService({ service: THIS_SERVICE, databaseUrl });
-    const sysUrl = new URL(databaseUrl);
-    sysUrl.pathname = `${sysUrl.pathname}_dbos`;
-    dbos = new Client({ connectionString: sysUrl.toString() });
-    await dbos.connect();
+    let service = await rollback.boot('this');
     for (const [runId, nodes] of Object.entries(plans)) {
       expect(
         (await post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes } })).status,
@@ -129,18 +51,13 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
     );
     await service.crash();
     await new Promise((r) => setTimeout(r, LAPSING_MS));
-    // Its time long up, as the build before reads it: the test can't wait that long.
+    // Its time long up, as v0.2.24 reads it: the test can't wait that long.
     await db.query(
       `UPDATE runtime_run_steps SET waiting_timeout_at = now() - interval '1 hour' WHERE run_id = $1`,
       [`${MOCK_USER_ID}:timed-overdue`],
     );
 
-    service = await bootService({
-      service: earlier.service,
-      earlier: true,
-      databaseUrl,
-      env: { RUN_MAX_DURATION_SECONDS: '2' },
-    });
+    service = await rollback.boot('earlier', { RUN_MAX_DURATION_SECONDS: '2' });
     for (const runId of Object.keys(plans)) {
       expect(service.log()).toContain(
         `Recovery of workflow ${MOCK_USER_ID}:${runId} failed: Cannot find workflow function`,
@@ -152,7 +69,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
         now.lapsed?.status === 'error' &&
         now.overdue?.status === 'error' &&
         now['timed-overdue']?.status === 'error',
-      'the build before ending the lapsed, the overdue and the timed-overdue run',
+      'v0.2.24 ending the lapsed, the overdue and the timed-overdue run',
     );
     expect(ended).toMatchObject({
       decided: { status: 'waiting' },
@@ -178,7 +95,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
     ).toBe(200);
     await service.crash();
 
-    service = await bootService({ service: THIS_SERVICE, databaseUrl });
+    service = await rollback.boot('this');
     const back = await eventually(
       runs,
       (now) => now.decided?.status === 'completed',

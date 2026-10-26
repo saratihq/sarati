@@ -8,10 +8,11 @@ import {
   type LegacyHistory,
   type Sql,
 } from '../dbos/recovery-guard';
+import { recoveryIdentityOf } from '../dbos/recovery-identity';
 import { systemDatabaseUrlOf } from '../dbos/system-db-url';
 
 /**
- * List the runs in flight on `orchestr.runPlan` and whether each would resume, reading only:
+ * List the runs in flight on `orchestr.runPlan` that the service recovers as it starts, and whether each would resume, reading only:
  *
  *   pnpm runs:legacy-report
  */
@@ -25,7 +26,11 @@ async function main(): Promise<void> {
   const app = new Client({ connectionString: databaseUrl });
   await app.connect();
   try {
-    await readLegacyHistory(systemUrl, (history) => report(history, app));
+    const identity = recoveryIdentityOf({
+      dbosAppVersion: process.env.DBOS_APP_VERSION ?? '',
+      dbosExecutorId: process.env.DBOS_EXECUTOR_ID ?? '',
+    });
+    await readLegacyHistory(systemUrl, identity, (history) => report(history, app));
   } finally {
     await app.end();
   }
