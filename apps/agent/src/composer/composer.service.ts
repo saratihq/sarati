@@ -1,10 +1,10 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { query, type SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk';
 
 import type { EnvConfig } from '../config/env.config';
 import { buildComposerServer, COMPOSER_TOOL_NAMES, summarizeDraft } from './agent-tools';
-import { DISABLED_MESSAGE } from './composer-availability.service';
+import { DISABLED_MESSAGE, noKeyReason } from './composer-availability.service';
 import { EventChannel } from './event-channel';
 import { anthropicParamCompleter, type ParamCompleteFn } from './param-filler';
 import { PendingAnswers } from './pending-answers';
@@ -403,59 +403,26 @@ export class ComposerService {
     session.turnAbort = new AbortController();
     const abort = AbortSignal.any([session.turnAbort.signal, AbortSignal.timeout(TURN_TIMEOUT_MS)]);
     const emit = (event: ComposerEvent): void => emitToSession(session, event);
-    // ComposerEnabledGuard already 503s every route into here without a key; reaching this
-    // without one means it was cleared mid-turn, and a keyless subprocess would surface that
-    // as an opaque SDK failure instead.
-    const keyRead = await this.platformKeys.readAnthropicKey(sessionCaller(session));
-    if (keyRead.rateLimited) throw new Error(DISABLED_MESSAGE.rate_limited);
-    const anthropicApiKey = keyRead.key;
-    if (!anthropicApiKey) throw new Error('No Anthropic API key is configured — the composer is disabled.');
-    const paramCompleter = this.paramCompleterFor(anthropicApiKey);
-    const server = buildComposerServer({
-      session,
-      client: this.workflowService,
-      emit,
-      answers: this.answers,
-      paramCompleter,
-    });
-
-    const q = this.queryFn({
-      prompt: this.buildPrompt(session, message, missing),
-      options: {
-        model: this.env.composerModel,
-        systemPrompt: composerSystemPrompt(paramCompleter !== null),
-        mcpServers: { composer: server },
-        // Custom-tools-only: no built-in file/bash tools in context at all.
-        tools: [],
-        allowedTools: [...COMPOSER_TOOL_NAMES],
-        includePartialMessages: true,
-        maxTurns: MAX_TURNS,
-        ...(session.sdkSessionId ? { resume: session.sdkSessionId } : {}),
-        // Minimal explicit allowlist (A1 hardening): the subprocess gets what
-        // it needs to run and authenticate — never the whole parent env
-        // (which holds the ork_ service key, DB URLs, etc.).
-        // MCP_TOOL_TIMEOUT covers the ask_user pause: the in-process tool call
-        // legitimately blocks for up to QUESTION_TIMEOUT_MS.
-        env: {
-          PATH: process.env.PATH,
-          HOME: process.env.HOME,
-          TMPDIR: process.env.TMPDIR,
-          ANTHROPIC_API_KEY: anthropicApiKey,
-          MCP_TIMEOUT: '30000',
-          MCP_TOOL_TIMEOUT: '360000',
-          // The SDK's own usage and error reporting, which the docs promise a self-host never sends.
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-        },
-      },
-    });
-    const onAbort = (): void => q.close();
-    abort.addEventListener('abort', onAbort, { once: true });
+    const endWithError = (error: string): void => {
+      emit({ event: 'error', data: { message: error } });
+      emit({ event: 'done', data: { session_id: session.id, duration_ms: Date.now() - startedAt } });
+    };
+    let q: Query | null = null;
+    const onAbort = (): void => q?.close();
 
     let sawResult = false;
     let sawText = false;
     let providerError: SDKAssistantMessageError | null = null;
     const failure = (): string => providerFailureMessage(providerError, this.env.composerModel);
+    // Every way out of a turn is inside this try: stream() awaits the turn only once its channel has closed.
     try {
+      const keyRead = await this.platformKeys.readAnthropicKey(sessionCaller(session));
+      if (!keyRead.key) {
+        endWithError(DISABLED_MESSAGE[noKeyReason(keyRead)]);
+        return;
+      }
+      q = this.startQuery(session, message, missing, keyRead.key, emit);
+      abort.addEventListener('abort', onAbort, { once: true });
       for await (const msg of q) {
         if (abort.aborted) break;
         if (msg.type === 'system' && msg.subtype === 'init') {
@@ -504,16 +471,7 @@ export class ComposerService {
       if (!sawResult) {
         // Subprocess ended without a result (orphan-aborted, timed out, or
         // died) — the buffered history must still END coherently for replay.
-        emit({
-          event: 'error',
-          data: {
-            message: abort.aborted ? 'The conversation was interrupted — the build stopped.' : failure(),
-          },
-        });
-        emit({
-          event: 'done',
-          data: { session_id: session.id, duration_ms: Date.now() - startedAt },
-        });
+        endWithError(abort.aborted ? 'The conversation was interrupted — the build stopped.' : failure());
       }
     } catch (err) {
       this.logger.error(
@@ -521,13 +479,7 @@ export class ComposerService {
         err instanceof Error ? (err.stack ?? err.message) : String(err),
       );
       // The SDK throws after an error result it has already delivered; that turn is closed.
-      if (!sawResult) {
-        emit({ event: 'error', data: { message: failure() } });
-        emit({
-          event: 'done',
-          data: { session_id: session.id, duration_ms: Date.now() - startedAt },
-        });
-      }
+      if (!sawResult) endWithError(failure());
     } finally {
       abort.removeEventListener('abort', onAbort);
       session.turnAbort = null;
@@ -542,6 +494,52 @@ export class ComposerService {
       session.subscriber?.close();
       session.subscriber = null;
     }
+  }
+
+  private startQuery(
+    session: ComposerSession,
+    message: string,
+    missing: CanvasStep[],
+    anthropicApiKey: string,
+    emit: (event: ComposerEvent) => void,
+  ): Query {
+    const paramCompleter = this.paramCompleterFor(anthropicApiKey);
+    const server = buildComposerServer({
+      session,
+      client: this.workflowService,
+      emit,
+      answers: this.answers,
+      paramCompleter,
+    });
+    return this.queryFn({
+      prompt: this.buildPrompt(session, message, missing),
+      options: {
+        model: this.env.composerModel,
+        systemPrompt: composerSystemPrompt(paramCompleter !== null),
+        mcpServers: { composer: server },
+        // Custom-tools-only: no built-in file/bash tools in context at all.
+        tools: [],
+        allowedTools: [...COMPOSER_TOOL_NAMES],
+        includePartialMessages: true,
+        maxTurns: MAX_TURNS,
+        ...(session.sdkSessionId ? { resume: session.sdkSessionId } : {}),
+        // Minimal explicit allowlist (A1 hardening): the subprocess gets what
+        // it needs to run and authenticate — never the whole parent env
+        // (which holds the ork_ service key, DB URLs, etc.).
+        // MCP_TOOL_TIMEOUT covers the ask_user pause: the in-process tool call
+        // legitimately blocks for up to QUESTION_TIMEOUT_MS.
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TMPDIR: process.env.TMPDIR,
+          ANTHROPIC_API_KEY: anthropicApiKey,
+          MCP_TIMEOUT: '30000',
+          MCP_TOOL_TIMEOUT: '360000',
+          // The SDK's own usage and error reporting, which the docs promise a self-host never sends.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        },
+      },
+    });
   }
 
   /** Long-turn token refresh (A3): the client calls this when Clerk rotates the token mid-stream. */

@@ -1175,8 +1175,8 @@ export async function runFillParams(ctx: ToolContext, nodeId: string, intent: st
 
 /** Compact post-apply summary so the agent tracks canvas state without re-reading it. */
 export function summarizeDraft(ir: Record<string, unknown>): string {
-  const nodes = Array.isArray(ir.nodes) ? (ir.nodes as Array<Record<string, unknown>>) : [];
-  const edges = Array.isArray(ir.edges) ? (ir.edges as Array<Record<string, unknown>>) : [];
+  const nodes = recordsIn(ir.nodes);
+  const edges = recordsIn(ir.edges);
   const nodeList = nodes.map((n) => `${String(n.id)} (${String(n.node_type)})`).join(', ');
   const edgeList = edges
     .map((e) => `${String(e.source_node_id)}:${String(e.source_port)}→${String(e.target_node_id)}`)
@@ -1184,6 +1184,14 @@ export function summarizeDraft(ir: Record<string, unknown>): string {
   return `Applied. Canvas now has ${nodes.length} step(s): ${nodeList || '(none)'}${
     edges.length > 0 ? ` — wired: ${edgeList}` : ''
   }`;
+}
+
+const isRecord = (item: unknown): item is Record<string, unknown> =>
+  Boolean(item) && typeof item === 'object';
+
+// A canvas arrives from the client unchecked, so an entry that is not an object is skipped, as stepsOf does.
+function recordsIn(list: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(list) ? list.filter(isRecord) : [];
 }
 
 function formatEntry(e: CatalogEntry): string {
