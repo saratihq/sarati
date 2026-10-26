@@ -14,7 +14,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
   });
   const { post, eventually, runs, workflows } = rollback;
 
-  it('is listed and decided on the build before, ended there past the max or its window, and picked up where it was on coming back, a Wait step waking then', async () => {
+  it('is listed and decided on v0.2.24, ended there past the max or its window, and picked up where it was on coming back, a Wait step waking then', async () => {
     const db = rollback.db();
     const slow = rollback.fixtureUrl('/slow');
     const approve = (timeoutMs: number) => [
@@ -51,7 +51,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
     );
     await service.crash();
     await new Promise((r) => setTimeout(r, LAPSING_MS));
-    // Its time long up, as the build before reads it: the test can't wait that long.
+    // Its time long up, as v0.2.24 reads it: the test can't wait that long.
     await db.query(
       `UPDATE runtime_run_steps SET waiting_timeout_at = now() - interval '1 hour' WHERE run_id = $1`,
       [`${MOCK_USER_ID}:timed-overdue`],
@@ -69,7 +69,7 @@ describe('a run this version starts, across a rollback to v0.2.24 and back (e2e)
         now.lapsed?.status === 'error' &&
         now.overdue?.status === 'error' &&
         now['timed-overdue']?.status === 'error',
-      'the build before ending the lapsed, the overdue and the timed-overdue run',
+      'v0.2.24 ending the lapsed, the overdue and the timed-overdue run',
     );
     expect(ended).toMatchObject({
       decided: { status: 'waiting' },

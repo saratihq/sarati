@@ -94,15 +94,22 @@ and **Test this branch** fail the same way. Pick an account on the step, and pro
 again for an environment to run it. An AI Agent step is the exception under an environment: there it
 runs as the environment's account with or without one.
 
-**Triggers, going back to v0.2.25 or v0.2.24.** Neither holds a trigger whose environment's account
-isn't active: there such a trigger is polled as that account, and a change a promote left waiting for
-it is tried at its app as that account. A webhook delete waiting for its account to be active again
-is tried there with that account, and one the app refuses that account for is given up: the log names
-the webhook at warn level, so you can delete it in the app. Coming back holds such a trigger again at
-once. One whose account became active while you were away listens again at the next fifteen-minute
-sweep, when pg-boss is enabled (the default), or when its account next changes. Everything else
-[v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own) goes back to how it was too, port 3001
-included.
+**Triggers, going back to v0.2.25 or earlier.** None of them holds a trigger whose environment's
+account isn't active: there such a trigger is polled as that account, and a change a promote left
+waiting for it is tried at its app as that account. A webhook delete waiting for its account to be
+active again is tried there with that account from v0.2.23 to v0.2.25, which give up one the app
+refuses that account for: the log names the webhook at warn level, so you can delete it in the app.
+Earlier versions never try it. Coming back, this version judges every app trigger by its
+environment's account again when it starts, without waiting for a sweep: one whose account isn't
+active is held, one held whose account is active again listens again, and one held back for an
+account that is active again is set up with that account.
+
+**Going back to v0.2.25 or earlier** also undoes everything else
+[v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own). Above all, with durable runs on, the
+images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
+answers without signing in, and can cancel, resume or fork any run. Neither stack file nor the
+one-container image publishes that port, but any container on the same Docker network can reach it,
+and so can anything that reaches the machine when the service runs outside Docker.
 
 Running it by hand, without the installer:
 

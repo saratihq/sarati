@@ -2,7 +2,8 @@ import type { ConfigService } from '@nestjs/config';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 
 import type { EnvConfig } from '../config/env.config';
-import { DbosLifecycle, DBOS_APP_VERSION_DEFAULT } from './dbos.lifecycle';
+import { DbosLifecycle } from './dbos.lifecycle';
+import { DBOS_APP_VERSION_DEFAULT } from './recovery-identity';
 
 jest.mock('@dbos-inc/dbos-sdk', () => ({
   DBOS: {
@@ -40,10 +41,12 @@ describe('DbosLifecycle (B9 — pinned recovery identity)', () => {
   it('pins a STABLE applicationVersion (not DBOS code-hash) so a deploy recovers in-flight runs', async () => {
     await new DbosLifecycle(configWith(enabled())).onApplicationBootstrap();
     expect(setConfig).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'orchestr', applicationVersion: DBOS_APP_VERSION_DEFAULT }),
+      expect.objectContaining({
+        name: 'orchestr',
+        applicationVersion: DBOS_APP_VERSION_DEFAULT,
+        executorID: 'local',
+      }),
     );
-    // executorID is omitted → DBOS keeps its stable 'local' default.
-    expect(setConfig.mock.calls[0][0]).not.toHaveProperty('executorID');
     expect(launch).toHaveBeenCalledTimes(1);
   });
 

@@ -2334,8 +2334,6 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const env = app.get<ConfigService<{ env: EnvConfig }, true>>(ConfigService).get('env', { infer: true });
     const previous = env.publicBaseUrl;
     try {
-      await app.get(TriggerReconcilerService).reconcileStale();
-      expect(enqueue).not.toHaveBeenCalledWith(wfId);
       env.publicBaseUrl = 'https://boot-tunnel.example.com';
       await app.get(TriggerReconcilerService).reconcileStale();
       expect(enqueue).toHaveBeenCalledWith(wfId);

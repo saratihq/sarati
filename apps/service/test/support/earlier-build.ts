@@ -11,19 +11,18 @@ export interface Release {
   sha: string;
 }
 
-/** The release this build replaces, which going back lands on: re-point it, and run its rollback e2e, at every release. */
-export const LAST_RELEASE: Release = { tag: 'v0.2.26', sha: '2d4323676428fb8034057093bc244bd7294c1a4d' };
-
 const git = (...args: string[]): string =>
   execFileSync('git', ['-C', REPO, ...args], { encoding: 'utf8' }).trim();
 
-/** The newest `v*` release in this clone's history before `head`, a tag on `head` itself left out; null when there is none. */
-export function newestReleaseBefore(head = 'HEAD'): Release | null {
-  const onHead = new Set(git('tag', '--points-at', head).split('\n'));
-  const tag = git('tag', '--merged', head, '--list', 'v*', '--sort=-v:refname')
+/** The release going back from this build lands on: the newest `v*` tag in this clone's history, one on this build itself left out. */
+export function lastRelease(): Release {
+  const onHead = new Set(git('tag', '--points-at', 'HEAD').split('\n'));
+  const tag = git('tag', '--merged', 'HEAD', '--list', 'v*', '--sort=-v:refname')
     .split('\n')
     .find((name) => name !== '' && !onHead.has(name));
-  return tag ? { tag, sha: git('rev-parse', `${tag}^{commit}`) } : null;
+  if (!tag)
+    throw new Error('No v* release tag before this build in this clone: fetch the tags (git fetch --tags)');
+  return { tag, sha: git('rev-parse', `${tag}^{commit}`) };
 }
 
 /** An earlier build of the service, unpacked beside this one. */

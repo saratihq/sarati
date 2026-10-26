@@ -1,9 +1,10 @@
 import { PARK_DELAY_ABOVE_MS } from '../src/runtime/timer-wait';
-import { LAST_RELEASE, newestReleaseBefore } from './support/earlier-build';
+import { lastRelease } from './support/earlier-build';
 import { MOCK_USER_ID, rollbackSuite } from './support/rollback';
 
 const WINDOW_MS = 10 * 60_000;
 const PARKED_DELAY_MS = PARK_DELAY_ABOVE_MS + 1_000;
+const LAST_RELEASE = lastRelease();
 
 /** The release this build replaces, booted on runs this build started and booted back over them (child processes, DBOS on, mock auth). */
 describe(`a run this version starts, across a rollback to ${LAST_RELEASE.tag} and back (e2e)`, () => {
@@ -31,10 +32,6 @@ describe(`a run this version starts, across a rollback to ${LAST_RELEASE.tag} an
           )
       ).rows.map((r) => [r.step_key, r.decided_by]),
     );
-
-  it('goes back to the newest release before this build', () => {
-    expect(newestReleaseBefore()).toEqual(LAST_RELEASE);
-  });
 
   it('carries on there — decided, woken and its in-flight step run once more — and is picked up where it was on coming back', async () => {
     const approve = (id: string, topic: string) => ({

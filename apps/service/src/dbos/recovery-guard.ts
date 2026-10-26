@@ -22,6 +22,7 @@ import {
   type Resumability,
 } from '../runtime/recovery-exposure';
 import { CLEAR_SLOT, CLEAR_WAIT, lockRunRow } from '../runtime/run-recorder.service';
+import { recoveryIdentityOf, type RecoveryIdentity } from './recovery-identity';
 import { RUN_PLAN_WORKFLOW } from './run-plan-workflow';
 import { systemDatabaseUrlOf } from './system-db-url';
 
@@ -106,13 +107,16 @@ export function checkpointedRun(input: unknown): CheckpointedRun {
   return { plan: args.plan, pins: args.pins ?? {}, initialScope: args.initialScope ?? {} };
 }
 
-/** The runs the legacy engine has in flight, each with what it checkpointed, read from outside any workflow. */
+/** The runs the legacy engine has in flight that DBOS recovers as `identity`, each with what it checkpointed, read from outside any workflow. */
 export async function pendingLegacyRuns(
   client: DBOSClient,
+  identity: RecoveryIdentity,
 ): Promise<Array<{ runId: string; run: CheckpointedRun }>> {
   const pending = await client.listWorkflows({
     workflowName: RUN_PLAN_WORKFLOW,
     status: 'PENDING',
+    applicationVersion: identity.applicationVersion,
+    executorId: identity.executorId,
     loadInput: true,
   });
   return pending.map((workflow) => ({ runId: workflow.workflowID, run: checkpointedRun(workflow.input) }));
@@ -126,14 +130,18 @@ export interface LegacyHistory {
   opsOf: (scopedRunId: string) => Promise<RecordedOp[]>;
 }
 
-/** Read the legacy engine's history over `systemDatabaseUrl` until `read` settles. */
+/** Read the legacy engine's history over `systemDatabaseUrl`, as DBOS recovers it as `identity`, until `read` settles. */
 export async function readLegacyHistory<T>(
   systemDatabaseUrl: string,
+  identity: RecoveryIdentity,
   read: (history: LegacyHistory) => Promise<T>,
 ): Promise<T> {
   const client = await DBOSClient.create({ systemDatabaseUrl });
   try {
-    return await read({ pending: () => pendingLegacyRuns(client), opsOf: (id) => recordedOps(client, id) });
+    return await read({
+      pending: () => pendingLegacyRuns(client, identity),
+      opsOf: (id) => recordedOps(client, id),
+    });
   } finally {
     await client.destroy();
   }
@@ -166,13 +174,16 @@ const ATTEMPTS = 40;
 export class RecoveryGuard implements OnModuleDestroy {
   private readonly logger = new Logger(RecoveryGuard.name);
   private readonly systemUrl: string;
+  private readonly identity: RecoveryIdentity;
   private client?: Promise<DBOSClient>;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     config: ConfigService<{ env: EnvConfig }, true>,
   ) {
-    this.systemUrl = systemDatabaseUrlOf(config.get('env', { infer: true }));
+    const env = config.get('env', { infer: true });
+    this.systemUrl = systemDatabaseUrlOf(env);
+    this.identity = recoveryIdentityOf(env);
   }
 
   /** Let a run go on only if it can resume, else end it and throw {@link RunNotResumable}; `recheck` stops it between tries once its row ended. */
@@ -193,10 +204,11 @@ export class RecoveryGuard implements OnModuleDestroy {
     throw new RunNotResumable(message);
   }
 
-  /** How many runs the legacy engine has in flight would resume, would fail, or had already ended, as of now. */
+  /** How many runs the legacy engine has in flight that DBOS recovers at this launch would resume, would fail, or had already ended, as of now. */
   async legacyRuns(): Promise<{ resume: number; fail: number; ended: number }> {
     const counts = { resume: 0, fail: 0, ended: 0 };
-    for (const { runId, run } of await pendingLegacyRuns(await this.history()).catch(noneBeforeFirstLaunch)) {
+    const pending = await pendingLegacyRuns(await this.history(), this.identity).catch(noneBeforeFirstLaunch);
+    for (const { runId, run } of pending) {
       if (await alreadyEnded((text, params) => this.dataSource.query(text, params), runId)) counts.ended += 1;
       else counts[(await this.resumability(runId, run)).resumable ? 'resume' : 'fail'] += 1;
     }

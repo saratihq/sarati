@@ -33,6 +33,11 @@ const recorded = (shapes: string[], latestOnly: string[] = []): string[] => [
 const RECORDED_EXPOSED = recorded(EXPOSED, ['shared-receive-wait-fan-out']);
 const RECORDED_RESUMABLE = recorded(RESUMABLE);
 const runIdOf = (golden: string): string => golden.replace('/', '-');
+// Runs this build's DBOS never recovers, so neither the boot count nor the report lists them.
+const ELSEWHERE = [
+  ['uncounted-version', 'application_version', 'orchestr-0'],
+  ['uncounted-executor', 'executor_id', 'replica-b'],
+] as const;
 const HISTORY_READ = 'SELECT step_key, kind, pinned FROM runtime_run_steps';
 const LOCK_RUN_STEPS = 'LOCK TABLE runtime_run_steps IN ACCESS EXCLUSIVE MODE';
 const seen = (log: string, line: string): number => log.split(line).length - 1;
@@ -213,7 +218,15 @@ describe('the recovery guard (e2e)', () => {
             WHERE id = $1`,
           [`${MOCK_USER_ID}:already-ended`],
         );
-        // As an upgrade does: this build migrates what the build before left, then starts on it.
+        // Recorded under another DBOS_APP_VERSION, and by another executor: DBOS recovers neither as this build launches.
+        for (const [runId, column, value] of ELSEWHERE) {
+          await restoreGoldenHistory(db, dbos, `${LATEST}/linear-parked`, runId);
+          await dbos.query(`UPDATE dbos.workflow_status SET ${column} = $2 WHERE workflow_uuid = $1`, [
+            `${MOCK_USER_ID}:${runId}`,
+            value,
+          ]);
+        }
+        // As an upgrade does: this build migrates what earlier builds left, then starts on it.
         await promisify(execFile)(process.execPath, ['scripts/migrate-db.mjs'], {
           cwd: THIS_SERVICE,
           env: { ...process.env, DATABASE_URL: databaseUrl },
@@ -250,6 +263,7 @@ describe('the recovery guard (e2e)', () => {
         ).toHaveLength(1);
       }
       expect(lines).toContain(`already ended ${MOCK_USER_ID}:already-ended`);
+      for (const [runId] of ELSEWHERE) expect(report).not.toContain(`${MOCK_USER_ID}:${runId}`);
       expect(lines.at(-1)).toBe(
         `${RECORDED_RESUMABLE.length} would resume, ${failing} would fail, 1 had already ended.`,
       );
