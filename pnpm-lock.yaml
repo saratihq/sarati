@@ -232,8 +232,8 @@ importers:
         specifier: ^11.0.3
         version: 11.0.3(@nestjs/common@11.1.28(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.28)(reflect-metadata@0.2.2)(rxjs@7.8.2)(typeorm@1.1.0(pg@8.22.0)(ts-node@10.9.2(@types/node@22.20.1)(typescript@5.9.3)))
       '@sarati/actions-sdk':
-        specifier: ^0.2.1
-        version: 0.2.1
+        specifier: ^0.3.0
+        version: 0.3.0
       class-transformer:
         specifier: ^0.5.1
         version: 0.5.1
@@ -2473,8 +2473,8 @@ packages:
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
 
-  '@sarati/actions-sdk@0.2.1':
-    resolution: {integrity: sha512-HScRour7YEv8cOfV2ElFWYP2Xf2pvsMgfhCbbI2TD6vJowoqbUx38fiwTF3CGlY+vo+MRiNz3h9NHiSYo1baSQ==}
+  '@sarati/actions-sdk@0.3.0':
+    resolution: {integrity: sha512-B23VbAsPGIeVNtuz/4fUaylYJo1agyuRgKt92AEA1A+WJMDnPljUqdv12uhG3CMLSA84cx9Wef4Z41Hv7Keu6w==}
     engines: {node: '>=22'}
 
   '@sinclair/typebox@0.27.12':
@@ -8298,7 +8298,7 @@ snapshots:
       express: 5.2.1
       express-rate-limit: 8.6.1(express@5.2.1)
       hono: 4.13.0
-      jose: 6.2.8
+      jose: 6.2.12
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
@@ -9329,7 +9329,7 @@ snapshots:
 
   '@rtsao/scc@1.1.0': {}
 
-  '@sarati/actions-sdk@0.2.1':
+  '@sarati/actions-sdk@0.3.0':
     dependencies:
       exceljs: 4.4.0
       fast-xml-parser: 4.5.7
