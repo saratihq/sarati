@@ -4,6 +4,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ir, irEdge, irNode } from './support/golden-docs';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -34,38 +35,23 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
     process.env.MOCK_AUTH = 'false';
   }, 30_000);
 
-  const irNode = (id: string, node_type: string, parameters: Record<string, unknown>) => ({
-    id,
-    name: id,
-    node_type,
-    type_version: 1,
-    parameters,
-    position: { x: 0, y: 0 },
-    metadata: {},
-  });
   const codeNode = (id: string, parameters: Record<string, unknown>) =>
     irNode(id, 'orchestr:code', parameters);
-  const irOf = (name: string, nodes: unknown[], edges: unknown[] = []) => ({
-    version: '1',
-    name,
-    description: '',
-    nodes,
-    edges,
-    settings: { execution_order: 'v1', extra: {} },
-    metadata: {},
-  });
   const runIr = (workflow_ir: unknown, trigger_payload?: unknown) =>
     request(app.getHttpServer()).post('/api/runs/from-ir').send({ workflow_ir, trigger_payload });
   const runTs = (id: string, code: string, trigger_payload?: unknown) =>
-    runIr(irOf(`code-ts-${id}`, [codeNode(id, { language: 'ts', code })]), trigger_payload);
+    runIr(ir([codeNode(id, { language: 'ts', code })], []), trigger_payload);
 
   it('runs a JS snippet that transforms the trigger payload and feeds a downstream ref', async () => {
-    const workflow_ir = irOf('code-js', [
-      codeNode('total', {
-        language: 'js',
-        code: 'return { sum: trigger.items.reduce((a, b) => a + b, 0), count: trigger.items.length };',
-      }),
-    ]);
+    const workflow_ir = ir(
+      [
+        codeNode('total', {
+          language: 'js',
+          code: 'return { sum: trigger.items.reduce((a, b) => a + b, 0), count: trigger.items.length };',
+        }),
+      ],
+      [],
+    );
     const res = await runIr(workflow_ir, { items: [10, 20, 12] }).expect(201);
     expect(res.body.outputs.total).toEqual({ sum: 42, count: 3 });
   });
@@ -93,16 +79,8 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
 
   it('a TypeScript snippet that awaits and returns saves through the commit door', async () => {
     const trigger = irNode('trigger', 'orchestr:trigger', {});
-    const edge = {
-      id: 'e1',
-      source_node_id: 'trigger',
-      source_port: 0,
-      target_node_id: 'calc',
-      target_port: 0,
-      port_type: 'main',
-    };
     const withCode = (language: string, code: string) =>
-      irOf('code-ts-commit', [trigger, codeNode('calc', { language, code })], [edge]);
+      ir([trigger, codeNode('calc', { language, code })], [irEdge('trigger', 'calc')]);
     const dep = await request(app.getHttpServer())
       .post('/api/deploy')
       .send({ workflow_json: withCode('js', 'return 1;') })
@@ -120,10 +98,10 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
   });
 
   it("a TS syntax error is refused before any step runs, at the snippet's own line and column", async () => {
-    const res = await runTs('bad', 'const total = 1;\nconst note = "café"; const x: = total;').expect(400);
+    const res = await runTs('bad', 'const total = 1;\nconst note = "€"; const x: = total;').expect(400);
     expect(res.body.code).toBe('compile_failed');
     expect(res.body.detail).toContain(
-      'Code node "bad" has a TypeScript syntax error at line 2, column 31: Unexpected "="',
+      'Code node "bad" has a TypeScript syntax error at line 2, column 28: Unexpected "="',
     );
   });
 
@@ -134,8 +112,15 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
     );
   });
 
+  it('a stray closing brace is refused at its own line, not where it closed the step early', async () => {
+    const res = await runTs('stray', 'const a = await Promise.resolve(1);\n}\nreturn a;').expect(400);
+    expect(res.body.detail).toContain(
+      'Code node "stray" has a TypeScript syntax error at line 2, column 1: Unexpected "}"',
+    );
+  });
+
   it('a snippet that throws fails the run with a clean sandbox error (no raw host trace)', async () => {
-    const workflow_ir = irOf('code-throw', [codeNode('boom', { code: 'throw new Error("intentional");' })]);
+    const workflow_ir = ir([codeNode('boom', { code: 'throw new Error("intentional");' })], []);
     const res = await runIr(workflow_ir).expect(400);
     expect(JSON.stringify(res.body)).toContain('intentional');
   });

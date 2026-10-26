@@ -1,11 +1,18 @@
-import { type Location, type TransformFailure, transformSync } from 'esbuild';
+import { type Location, type Message, type TransformFailure, transformSync } from 'esbuild';
 
 import { errorMessage } from '../common/error-message';
 import type { DagCodeNode, Guard } from '../runtime/dag-plan';
 import type { CodeNode } from '../runtime/run-plan';
 
 const TS_FRAME = '__orchestr_ts';
+const FRAME_OPENING_LINES = 1;
 const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/;
+
+interface SnippetError {
+  text: string;
+  line: number;
+  location: Location;
+}
 
 /** Lower a `CodeNode` to runnable JS; TypeScript is type-stripped, not type-checked: a syntax error fails. */
 export function toDagCodeNode(node: CodeNode, guards: Guard[]): DagCodeNode {
@@ -31,15 +38,36 @@ function transpileToJs(code: string, language: 'js' | 'ts', nodeId: string): str
 }
 
 function transpileFailure(err: unknown, code: string): string {
-  const first = (err as Partial<TransformFailure>).errors?.[0];
-  if (!first?.location) return `could not be transpiled: ${errorMessage(err)}`;
-  return `has a TypeScript syntax error ${positionInSnippet(first.location, code)}: ${first.text}`;
+  const framed = inSnippet(firstError(err), FRAME_OPENING_LINES);
+  if (!framed) return `could not be transpiled: ${errorMessage(err)}`;
+  const lineCount = code.split(LINE_BREAK).length;
+  // Past the snippet, a stray `}` may have closed the frame early: only the bare snippet shows where.
+  const shown = framed.line > lineCount ? (inSnippet(bareParseError(code), 0) ?? framed) : framed;
+  return `has a TypeScript syntax error ${positionInSnippet(shown, lineCount)}: ${shown.text}`;
 }
 
-function positionInSnippet(location: Location, code: string): string {
-  // esbuild's line counts the frame's opening line, and its column is in UTF-8 bytes.
-  const line = location.line - 1;
-  if (line > code.split(LINE_BREAK).length) return 'at the end of the snippet';
-  const before = Buffer.from(location.lineText).subarray(0, location.column).toString();
-  return `at line ${line}, column ${Array.from(before).length + 1}`;
+function bareParseError(code: string): Message | undefined {
+  try {
+    transformSync(code, { loader: 'ts' });
+    return undefined;
+  } catch (err) {
+    return firstError(err);
+  }
+}
+
+function firstError(err: unknown): Message | undefined {
+  return (err as Partial<TransformFailure>).errors?.[0];
+}
+
+function inSnippet(message: Message | undefined, linesBefore: number): SnippetError | undefined {
+  if (!message?.location) return undefined;
+  return { text: message.text, line: message.location.line - linesBefore, location: message.location };
+}
+
+function positionInSnippet({ line, location }: SnippetError, lineCount: number): string {
+  // esbuild's column counts UTF-8 bytes.
+  const lineBytes = Buffer.from(location.lineText);
+  const atEnd = line > lineCount || (line === lineCount && location.column >= lineBytes.length);
+  if (atEnd) return 'at the end of the snippet';
+  return `at line ${line}, column ${Array.from(lineBytes.subarray(0, location.column).toString()).length + 1}`;
 }
