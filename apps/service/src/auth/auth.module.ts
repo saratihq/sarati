@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { ApiKeysService } from '../api-keys/api-keys.service';
 import { ApiKeyVerifier } from '../api-keys/api-key.verifier';
 import { AuthController } from './auth.controller';
+import { ClerkLinkController } from './clerk-link.controller';
 import { ScopeEnforcer } from './scope-enforcer';
 import { AuthGuard } from './auth.guard';
 import { ClerkVerifier } from './clerk.verifier';
@@ -12,7 +13,7 @@ import { TOKEN_VERIFIERS } from './token-verifier';
 import { UserProvisioningService } from './user-provisioning.service';
 
 @Module({
-  controllers: [AuthController],
+  controllers: [AuthController, ClerkLinkController],
   providers: [
     ClerkVerifier,
     OidcVerifier,

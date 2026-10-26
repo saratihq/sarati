@@ -5,7 +5,7 @@ import * as api from "@/api/client";
 import { MIN_PASSWORD_LENGTH } from "@/api/client";
 import { Button } from "@/components/ui/button";
 
-const INPUT_STYLE = {
+export const INPUT_STYLE = {
   background: "var(--orchestr-accent-tint)",
   border: "1px solid var(--orchestr-line)",
   color: "var(--orchestr-ink)",
