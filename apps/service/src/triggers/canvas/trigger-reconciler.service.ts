@@ -5,7 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { Pool } from 'pg';
 import { In, Not } from 'typeorm';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { runBounded } from '../../common/bounded';
 import { withDeadline } from '../../common/deadline';
@@ -71,7 +71,7 @@ import {
   type EnvPointerInput,
   type ReconcilePlan,
 } from './reconcile';
-import { lockWorkflowForWrite } from '../../workflows/workflow-row-lock';
+import { lockWorkflowForPointerMove } from '../../workflows/workflow-row-lock';
 
 /** How long, in ms, a teardown waits on an app's webhook delete before leaving it to a retry. */
 export const WEBHOOK_DELETE_WAIT_MS = Symbol('WEBHOOK_DELETE_WAIT_MS');
@@ -84,6 +84,16 @@ interface PointerRow {
   environment_id: string;
   environment: string;
   version_id: string;
+}
+
+// An activation insert re-checks the pointer it serves, waiting out a removal in flight, so a plan read before the removal inserts nothing (constitution row 11).
+async function pointerStillServes(em: EntityManager, key: DesiredActivation['key']): Promise<boolean> {
+  const rows = await rawQuery(
+    em,
+    `SELECT 1 FROM workflow_env_pointers WHERE workflow_id = $1 AND environment_id = $2 FOR KEY SHARE`,
+    [key.workflowId, key.environmentId],
+  );
+  return rows.length > 0;
 }
 
 /**
@@ -331,11 +341,13 @@ export class TriggerReconcilerService {
       materialized: standsUp ? null : materializedOf(desired),
     });
     await withActivationLock(this.pool, id, async () => {
-      await this.dataSource.transaction(async (em) => {
-        await lockWorkflowForWrite(em, desired.key.workflowId);
+      const created = await this.dataSource.transaction(async (em) => {
+        await lockWorkflowForPointerMove(em, desired.key.workflowId);
+        if (!(await pointerStillServes(em, desired.key))) return false;
         await em.save(RuntimeTriggerActivationEntity, row);
+        return true;
       });
-      if (standsUp) await this.standUp(id, desired);
+      if (created && standsUp) await this.standUp(id, desired);
     });
   }
 

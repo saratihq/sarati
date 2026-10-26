@@ -27,9 +27,9 @@ import {
   WEBHOOK_DELETE_WAIT_MS,
 } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggerSignalsService } from '../src/triggers/trigger-signals.service';
-import { EventsService, type DomainEventInput } from '../src/events/events.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
+import { bounded, lockProbes, reached } from './support/lock-probes';
 import { seedPlatformKeyEverywhere, setPlatformKey } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -62,6 +62,10 @@ const headerOf = (headers: Record<string, string> | undefined, name: string): st
   Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name)?.[1] ?? '';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
+
+const RECONCILE_POINTER_READ = /SELECT p\.environment_id, e\.name AS environment, p\.version_id/;
+const ACTIVATION_POINTER_FENCE =
+  /FROM workflow_env_pointers WHERE workflow_id = \$1 AND environment_id = \$2 FOR KEY SHARE/;
 
 const providerCalls: Array<{ method: string; url: string; body: string; authorization: string }> = [];
 
@@ -601,7 +605,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     return res.body.id as string;
   };
 
-  const promote = async (org: string, wfId: string, environment: string): Promise<void> => {
+  const promoteOnly = async (org: string, wfId: string, environment: string): Promise<void> => {
     const versions = await asA(http().get(`/api/workflows/${wfId}/versions`).set('X-Org-Id', org)).expect(
       200,
     );
@@ -614,8 +618,17 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         .set('X-Org-Id', org)
         .send({ environment, version_id: head.id }),
     ).expect(201);
+  };
+
+  const promote = async (org: string, wfId: string, environment: string): Promise<void> => {
+    await promoteOnly(org, wfId, environment);
     await reconcile(wfId);
   };
+
+  const { gateEmits, holdQuery, lockWaiters } = lockProbes(
+    () => app,
+    () => db,
+  );
 
   const eventually = async (done: () => Promise<boolean>): Promise<void> => {
     for (let i = 0; i < 50; i++) {
@@ -2079,6 +2092,74 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     expect(await envExists(undrained)).toBe(false);
   });
 
+  it('a reconcile planned before an environment delete removed its pointer stands nothing up there, and the delete goes', async () => {
+    const { org, production } = await workspace('Stale plan env');
+    const stripeKey = await tokenConnection('stripe', 'sk_test_stale_plan', org);
+    await assignSlot(org, production, 'stripe', stripeKey);
+    const stale = await createEnv(org, 'stale');
+    await assignSlot(org, stale, 'stripe', stripeKey);
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'stale plan'), org);
+    const mark = providerCalls.length;
+
+    const planned = bounded(holdQuery(RECONCILE_POINTER_READ, 'after'), "the promote's reconcile");
+    const unpromoting = gateEmits('workflow.unpromoted');
+    let deleting: Promise<request.Response> | undefined;
+    try {
+      await promoteOnly(org, wfId, 'stale');
+      await planned.arrived;
+      deleting = asA(http().delete(`/api/environments/${stale}`).set('X-Org-Id', org)).then((res) => res);
+      await reached(unpromoting.arrived(0), 'the environment delete');
+      planned.release();
+      await lockWaiters(1);
+    } finally {
+      planned.restore();
+      unpromoting.restore();
+      await deleting;
+    }
+    const deleted = await deleting;
+    await converge(wfId);
+
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toEqual({ removed_pointers: 1, unbound_triggers: 0 });
+    expect(await envExists(stale)).toBe(false);
+    expect(subscribedEvents(mark)).toEqual([]);
+    expect(deletedEndpoints(mark)).toEqual([]);
+    expect((await activations(wfId)).map((r) => r.environment_id)).toEqual([production]);
+  });
+
+  it('an environment delete waits for an activation insert holding its pointer, then lists that trigger and tears it down', async () => {
+    const { org, production } = await workspace('Inserting env');
+    const stripeKey = await tokenConnection('stripe', 'sk_test_inserting', org);
+    await assignSlot(org, production, 'stripe', stripeKey);
+    const busy = await createEnv(org, 'busy');
+    await assignSlot(org, busy, 'stripe', stripeKey);
+    const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'inserting'), org);
+    const mark = providerCalls.length;
+
+    const inserting = bounded(
+      holdQuery(ACTIVATION_POINTER_FENCE, 'after'),
+      "the promote's activation insert",
+    );
+    let deleting: Promise<request.Response> | undefined;
+    try {
+      await promoteOnly(org, wfId, 'busy');
+      await inserting.arrived;
+      deleting = asA(http().delete(`/api/environments/${busy}`).set('X-Org-Id', org)).then((res) => res);
+      await lockWaiters(1);
+    } finally {
+      inserting.restore();
+      await deleting;
+    }
+    const deleted = await deleting;
+
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toEqual({ removed_pointers: 1, unbound_triggers: 1 });
+    expect(await envExists(busy)).toBe(false);
+    expect(subscribedEvents(mark)).toEqual(['customer.created']);
+    expect(deletedEndpoints(mark)).toHaveLength(1);
+    expect((await activations(wfId)).map((r) => r.environment_id)).toEqual([production]);
+  });
+
   it('deleting a live workflow deletes its webhook at the provider, and is refused while its triggers were not torn down', async () => {
     const wfId = await deploy(triggerDoc('stripe.new_customer', {}, 'live workflow deleted'));
     const endpoint = await endpointOf((await activation(wfId)).id);
@@ -2113,16 +2194,6 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       200,
     );
     return (versions.body.versions as Array<{ id: string }>)[0]!.id;
-  };
-
-  // Resolves once a session in this database waits on a lock another holds.
-  const lockWaiter = async (): Promise<void> => {
-    await eventually(async () => {
-      const { rows } = await db.query(
-        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
-      );
-      return rows.length > 0;
-    });
   };
 
   it('renaming warns about a webhook that is live on a pointer whose reconcile has not run yet', async () => {
@@ -2174,7 +2245,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const env = await createEnv(org, 'racing');
     const wfId = await deploy(triggerDoc('orchestr:webhook', {}, 'racing webhook'), org);
     const versionId = await versionOf(org, wfId);
-    const held = holdAtEmit('workflow.promoted');
+    const held = gateEmits('workflow.promoted');
     try {
       const promoting = asA(
         http()
@@ -2182,10 +2253,10 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
           .set('X-Org-Id', org)
           .send({ environment: 'racing', version_id: versionId }),
       ).then((res) => res);
-      await held.reached;
+      await reached(held.arrived(0), 'the promote');
       const renaming = renameEnv(org, env, 'racing-two').then((res) => res);
-      await lockWaiter();
-      held.release();
+      await lockWaiters(1);
+      held.release(0);
 
       expect((await promoting).status).toBe(201);
       const refused = await renaming;
@@ -2194,7 +2265,6 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         expect.objectContaining({ workflow_id: wfId, trigger: 'webhook' }),
       ]);
     } finally {
-      held.release();
       held.restore();
     }
   });
@@ -2433,31 +2503,13 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     ).id;
   };
 
-  // Holds the transaction that emits `type` at that emit, until the returned release is called.
-  const holdAtEmit = (type: string): { reached: Promise<void>; release: () => void; restore: () => void } => {
-    const events = app.get(EventsService);
-    const emit = events.emit.bind(events);
-    let arrive = (): void => undefined;
-    let release = (): void => undefined;
-    const reached = new Promise<void>((resolve) => (arrive = resolve));
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const spy = jest.spyOn(events, 'emit').mockImplementation(async (em, event: DomainEventInput) => {
-      if (event.type === type) {
-        arrive();
-        await gate;
-      }
-      return emit(em, event);
-    });
-    return { reached, release, restore: () => spy.mockRestore() };
-  };
-
   it('a re-promote of a new version still committing when a rename starts is waited for, and listed', async () => {
     const { org } = await workspace('Rename re-promote');
     const env = await createEnv(org, 'mv');
     const wfId = await deploy(triggerDoc('orchestr:webhook', {}, 'moving webhook'), org);
     await promote(org, wfId, 'mv');
     const v2 = await commitOnly(org, wfId, triggerDoc('orchestr:webhook', {}, 'moving webhook', 'body'));
-    const held = holdAtEmit('workflow.promoted');
+    const held = gateEmits('workflow.promoted');
     try {
       const promoting = asA(
         http()
@@ -2465,10 +2517,10 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
           .set('X-Org-Id', org)
           .send({ environment: 'mv', version_id: v2 }),
       ).then((res) => res);
-      await held.reached;
+      await reached(held.arrived(0), 'the promote');
       const renaming = renameEnv(org, env, 'mv-two').then((res) => res);
-      await lockWaiter();
-      held.release();
+      await lockWaiters(1);
+      held.release(0);
 
       expect((await promoting).status).toBe(201);
       const refused = await renaming;
@@ -2477,7 +2529,6 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         expect.objectContaining({ workflow_id: wfId, trigger: 'webhook' }),
       ]);
     } finally {
-      held.release();
       held.restore();
     }
     await http().post(`/api/hooks/${wfId}/mv`).send({ title: 'still here' }).expect(202);
@@ -2488,23 +2539,22 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const env = await createEnv(org, 'qa');
     const racer = await deploy(triggerDoc('orchestr:webhook', {}, 'racing webhook'), org);
     const v1 = await versionOf(org, racer);
-    const held = holdAtEmit('environment.renamed');
+    const held = gateEmits('environment.renamed');
     try {
       const renaming = renameEnv(org, env, 'qa-two').then((res) => res);
-      await held.reached;
+      await reached(held.arrived(0), 'the rename');
       const promoting = asA(
         http()
           .post(`/api/workflows/${racer}/promote`)
           .set('X-Org-Id', org)
           .send({ environment: 'qa', version_id: v1 }),
       ).then((res) => res);
-      await lockWaiter();
-      held.release();
+      await lockWaiters(1);
+      held.release(0);
 
       expect((await renaming).status).toBe(200);
       expect((await promoting).status).toBe(201);
     } finally {
-      held.release();
       held.restore();
     }
     const mismatched = await db.query(
@@ -2650,7 +2700,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
         [org],
       );
       const renaming = renameEnv(org, env, 'bb').then((res) => res);
-      await lockWaiter();
+      await lockWaiters(1);
       await creating.query('COMMIT');
 
       const refused = await renaming;

@@ -23,7 +23,7 @@ export async function lockWorkflowForWrite(em: EntityManager, workflowId: string
     throw new DomainError(`Workflow ${workflowId} not found`, 404);
 }
 
-/** The first lock of an env-pointer move, FOR NO KEY UPDATE: two moves of one workflow take turns, other writes still pass, and a delete still queues them; 404 when it is gone. */
+/** The first lock of an env-pointer move and of the reconciler's activation insert, FOR NO KEY UPDATE: two of them on one workflow take turns, other writes still pass, and a delete still queues them; 404 when it is gone. */
 export async function lockWorkflowForPointerMove(em: EntityManager, workflowId: string): Promise<void> {
   if (!(await lockRow(em, workflowId, 'FOR NO KEY UPDATE')))
     throw new DomainError(`Workflow ${workflowId} not found`, 404);
