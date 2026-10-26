@@ -1,179 +1,73 @@
-import { fork, type ChildProcess } from 'node:child_process';
-import { createServer, type Server, type ServerResponse } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
-
-import { decodeJwt, SignJWT } from 'jose';
-
-import { TURN_SCRIPT } from '../testing/composer-process';
-import { LOCAL_ISSUER } from './composer-auth.guard';
+import {
+  AgentProcess,
+  answerKey,
+  readToEnd,
+  ServiceStub,
+  type KeyRead,
+  type SseEvent,
+} from '../testing/composer-harness';
+import { mintLocalSession } from '../testing/local-session';
+import { TURN_SCRIPT } from '../testing/turn-script';
 import { DISABLED_MESSAGE } from './composer-availability.service';
 import { providerFailureMessage } from './provider-failure';
 
-// The agent runs in a process of its own, so a crash shows as one rather than being inferred.
-
 const SECRET = 'shared-secret-off-the-data-volume';
 
-interface SseEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
-
 // The turn's own key read — a caller's second, after the guard's — for each caller whose read fails.
-const TURN_READ: Record<string, (res: ServerResponse) => void> = {
-  'rate-limited': (res) => res.writeHead(429).end(),
-  'service-error': (res) => res.writeHead(500).end(),
-  'service-gone': (res) => res.socket?.destroy(),
-  'key-removed': (res) => answerKey(res, null),
-};
-
-const reads = new Map<string, number>();
-const held: ServerResponse[] = [];
-let parked: () => void = () => undefined;
-let stub: Server;
-let agent: { base: string; child: ChildProcess; exited: Promise<number | null>; log: () => string };
-
-function answerKey(res: ServerResponse, key: string | null): void {
-  res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ api_key: key }));
-}
-
-async function startAgent(serviceUrl: string): Promise<typeof agent> {
-  let log = '';
-  const child = fork(join(__dirname, '..', 'testing', 'composer-process.ts'), [], {
-    cwd: join(__dirname, '..', '..'),
-    execArgv: ['-r', 'ts-node/register/transpile-only'],
-    env: {
-      PATH: process.env.PATH,
-      ENVIRONMENT: 'development',
-      SECRET_KEY: SECRET,
-      WORKFLOW_SERVICE_URL: serviceUrl,
-      LOG_LEVEL: 'warn',
-    },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  child.stdout?.on('data', (chunk: Buffer) => (log += chunk.toString()));
-  child.stderr?.on('data', (chunk: Buffer) => (log += chunk.toString()));
-  const exited = new Promise<number | null>((resolve) => child.once('exit', resolve));
-  const base = await Promise.race([
-    new Promise<string>((resolve) =>
-      child.once('message', (message) => resolve((message as { url: string }).url)),
-    ),
-    exited.then((code) => Promise.reject(new Error(`the agent exited as it booted (code ${code})\n${log}`))),
-  ]);
-  return { base, child, exited, log: () => log };
-}
-
-const answering = (): Promise<boolean> =>
-  fetch(`${agent.base}/api/health`).then(
-    (res) => res.ok,
-    () => false,
-  );
-
-async function tokenFor(sub: string): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({})
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer(LOCAL_ISSUER)
-    .setSubject(sub)
-    .setIssuedAt(now)
-    .setExpirationTime(now + 3600)
-    .sign(new TextEncoder().encode(SECRET));
-}
+const stub = new ServiceStub(
+  new Map<string, KeyRead>([
+    ['rate-limited', (res) => res.writeHead(429).end()],
+    ['service-error', (res) => res.writeHead(500).end()],
+    ['service-gone', (res) => res.socket?.destroy()],
+    ['key-removed', (res) => answerKey(res, null)],
+  ]),
+);
+let agent: AgentProcess | undefined;
 
 async function* sse(sub: string, body: Record<string, unknown>): AsyncGenerator<SseEvent> {
-  const res = await fetch(`${agent.base}/api/composer/stream`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${await tokenFor(sub)}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-  });
-  expect(res.status).toBe(200);
-  const decoder = new TextDecoder();
-  let pending = '';
-  for await (const chunk of res.body!) {
-    pending += decoder.decode(chunk, { stream: true });
-    for (let end = pending.indexOf('\n\n'); end !== -1; end = pending.indexOf('\n\n')) {
-      const frame = pending.slice(0, end).split('\n');
-      pending = pending.slice(end + 2);
-      const field = (name: string): string =>
-        frame.find((line) => line.startsWith(`${name}: `))?.slice(name.length + 2) ?? '';
-      yield { event: field('event'), data: JSON.parse(field('data')) as Record<string, unknown> };
-    }
-  }
-}
-
-async function readToEnd(stream: AsyncGenerator<SseEvent>): Promise<{ events: SseEvent[]; end: string }> {
-  const events: SseEvent[] = [];
-  try {
-    for await (const event of stream) events.push(event);
-    return { events, end: 'complete' };
-  } catch (err) {
-    return { events, end: `cut off: ${String(err)}` };
-  }
+  yield* agent!.turn(await mintLocalSession(SECRET, sub), body);
 }
 
 const opened = (): SseEvent => ({ event: 'session', data: { session_id: expect.any(String) } });
+const said = (text: unknown): SseEvent => ({ event: 'assistant_text', data: { text } });
 const failed = (message: string): SseEvent => ({ event: 'error', data: { message } });
 const done = (): SseEvent => ({
   event: 'done',
   data: { session_id: expect.any(String), duration_ms: expect.any(Number) },
 });
+const finished = expect.objectContaining({ event: 'done' }) as SseEvent;
 
 // Another caller's turn is parked mid-stream across `failing`, and has to finish once released.
 async function besideALiveTurn(failing: () => Promise<void>): Promise<void> {
-  const holding = new Promise<void>((resolve) => (parked = resolve));
+  const parked = stub.parking();
   const live = sse('steady', { message: TURN_SCRIPT.hold });
   expect((await live.next()).value).toMatchObject({ event: 'session' });
-  expect((await live.next()).value).toMatchObject({ event: 'assistant_text', data: { text: 'holding' } });
-  await holding;
+  expect((await live.next()).value).toEqual(said('holding'));
+  await parked;
 
   await failing();
 
-  expect(await answering()).toBe(true);
-  for (const res of held.splice(0)) res.end();
-  const after = await readToEnd(live);
-  expect(after).toEqual({
-    events: [
-      expect.objectContaining({ event: 'assistant_text' }),
-      expect.objectContaining({ event: 'done' }),
-    ],
+  expect(await agent!.answering()).toBe(true);
+  stub.release();
+  expect(await readToEnd(live)).toEqual({
+    events: [said(expect.any(String)), finished],
     end: 'complete',
   });
 }
 
-beforeAll(async () => {
-  stub = createServer((req, res) => {
-    if (req.url === '/release') {
-      held.push(res);
-      parked();
-      return;
-    }
-    if (req.url !== '/api/internal/platform-keys/anthropic') {
-      res.writeHead(404).end();
-      return;
-    }
-    const sub = decodeJwt((req.headers.authorization ?? '').slice('Bearer '.length)).sub ?? '';
-    const read = (reads.get(sub) ?? 0) + 1;
-    reads.set(sub, read);
-    const failing = read === 2 ? TURN_READ[sub] : undefined;
-    if (failing) failing(res);
-    else answerKey(res, 'sk-test');
-  });
-  await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
-  agent = await startAgent(`http://127.0.0.1:${(stub.address() as AddressInfo).port}`);
+beforeAll(() => stub.listen());
+
+afterAll(() => stub.close());
+
+beforeEach(async () => {
+  agent = await AgentProcess.start({ SECRET_KEY: SECRET, WORKFLOW_SERVICE_URL: stub.url });
 }, 60_000);
 
-afterAll(async () => {
-  agent.child.kill();
-  await agent.exited;
-  stub.closeAllConnections();
-  await new Promise((resolve) => stub.close(resolve));
-});
-
-// A refused probe means the process is gone, so its exit is certain and is waited for, never raced.
 afterEach(async () => {
-  if (await answering()) return;
-  throw new Error(`the agent exited (code ${await agent.exited})\n${agent.log().slice(-4_000)}`);
+  stub.release();
+  const running = agent;
+  agent = undefined;
+  await running?.stop();
 });
 
 describe('a composer turn that cannot start', () => {
@@ -205,22 +99,53 @@ describe('a composer turn that cannot start', () => {
       });
     });
   }, 20_000);
+});
 
-  it('reads a large canvas holding a step that is not an object, rather than failing the turn', async () => {
+describe('a canvas holding steps the client sent malformed', () => {
+  // The validation pipe drops keys naming an Object.prototype method, so String() still prints this id.
+  const shadowing = { toString: 0, valueOf: 0 };
+
+  it('reads a large one in the prompt rather than failing the turn', async () => {
     const ir = {
-      nodes: [null, { id: 'n1', node_type: 'orchestr:code', pad: 'x'.repeat(30_500) }],
+      nodes: [null, { id: 'n1', node_type: 'orchestr:code', pad: 'x'.repeat(30_500) }, { id: shadowing }],
       edges: [null],
     };
     await besideALiveTurn(async () => {
-      const turn = await readToEnd(sse('large-canvas', { message: 'hi', ir }));
-      expect(turn).toEqual({
+      expect(await readToEnd(sse('large-canvas', { message: 'hi', ir }))).toEqual({
         events: [
           opened(),
-          {
-            event: 'assistant_text',
-            data: { text: expect.stringContaining('Canvas now has 1 step(s): n1 (orchestr:code)\n') },
-          },
-          expect.objectContaining({ event: 'done' }),
+          said(
+            expect.stringContaining(
+              'Canvas now has 2 step(s): n1 (orchestr:code), [object Object] (undefined)\n',
+            ),
+          ),
+          finished,
+        ],
+        end: 'complete',
+      });
+    });
+  }, 20_000);
+
+  it('lets the composer tools read it', async () => {
+    const ir = { nodes: [null, { id: shadowing }, { id: 'n1', node_type: 'orchestr:code' }], edges: [null] };
+    const answered = (result: Record<string, unknown>): SseEvent => said(JSON.stringify(result));
+    await besideALiveTurn(async () => {
+      expect(await readToEnd(sse('tool-reads', { message: TURN_SCRIPT.assume, ir }))).toEqual({
+        events: [
+          opened(),
+          { event: 'assumption', data: { node_id: 'n1', text: 'assumed: #general' } },
+          answered({ content: [{ type: 'text', text: 'Noted — the badge is on the step.' }] }),
+          answered({
+            content: [
+              {
+                type: 'text',
+                text: 'note_assumption: no draft step with id "n2" — existing step ids: [object Object], n1. Add the step first.',
+              },
+            ],
+            isError: true,
+          }),
+          said(expect.stringMatching(/assume$/)),
+          finished,
         ],
         end: 'complete',
       });

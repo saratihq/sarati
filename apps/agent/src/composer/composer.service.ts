@@ -12,6 +12,7 @@ import { providerFailureMessage } from './provider-failure';
 import type { AttachEvent, CanvasStep, ComposerEvent, SequencedComposerEvent, WorkflowIr } from './protocol';
 import {
   emitToSession,
+  normalizeCanvas,
   recordUserMessage,
   ownedBy,
   refreshCaller,
@@ -70,6 +71,7 @@ const TURN_TIMEOUT_MS = 12 * 60 * 1000;
  */
 const ORPHAN_GRACE_MS = 90 * 1000;
 const MAX_TURNS = 40;
+const INTERRUPTED = 'The conversation was interrupted — the build stopped.';
 
 @Injectable()
 export class ComposerService {
@@ -106,10 +108,10 @@ export class ComposerService {
     userKey: string | null = null,
   ): AsyncGenerator<SequencedComposerEvent> {
     const workflowId = request.workflow_id ?? null;
+    const canvas = request.ir ? normalizeCanvas(request.ir) : null;
     const session = request.session_id
       ? this.sessions.get(request.session_id)
-      : ((await this.threadSession(userKey, workflowId)) ??
-        this.sessions.create(workflowId, request.ir ?? null));
+      : ((await this.threadSession(userKey, workflowId)) ?? this.sessions.create(workflowId, canvas));
     if (!session || (request.session_id && !ownedBy(session, userKey))) {
       yield { event: 'error', data: { message: 'Unknown or expired session — start a new one.' }, seq: 0 };
       return;
@@ -121,7 +123,7 @@ export class ComposerService {
     }
 
     session.busy = true;
-    session.turnBaseIr = request.ir ?? null;
+    session.turnBaseIr = canvas;
     try {
       // Freshest caller credentials win — tool calls run AS the user.
       refreshCaller(session, caller);
@@ -138,7 +140,6 @@ export class ComposerService {
       await this.bindThread(session, userKey);
       // The editor's canvas is the source of truth for the draft: refresh it
       // on every message so manual edits between turns are never clobbered.
-      const canvas = request.ir ?? null;
       const branch = request.branch ?? null;
       const missing = canvas ? notOnCanvas(session, canvas, branch) : [];
       if (canvas) session.draftIr = canvas;
@@ -417,6 +418,10 @@ export class ComposerService {
     // Every way out of a turn is inside this try: stream() awaits the turn only once its channel has closed.
     try {
       const keyRead = await this.platformKeys.readAnthropicKey(sessionCaller(session));
+      if (abort.aborted) {
+        endWithError(INTERRUPTED);
+        return;
+      }
       if (!keyRead.key) {
         endWithError(DISABLED_MESSAGE[noKeyReason(keyRead)]);
         return;
@@ -471,7 +476,7 @@ export class ComposerService {
       if (!sawResult) {
         // Subprocess ended without a result (orphan-aborted, timed out, or
         // died) — the buffered history must still END coherently for replay.
-        endWithError(abort.aborted ? 'The conversation was interrupted — the build stopped.' : failure());
+        endWithError(abort.aborted ? INTERRUPTED : failure());
       }
     } catch (err) {
       this.logger.error(

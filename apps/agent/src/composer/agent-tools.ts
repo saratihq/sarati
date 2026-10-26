@@ -375,11 +375,14 @@ export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<T
   }
 }
 
+// Every entry is an object: the client's canvas reaches the draft only through normalizeCanvas.
+function draftNodes(ctx: ToolContext): Array<Record<string, unknown>> {
+  const nodes = ctx.session.draftIr?.nodes;
+  return Array.isArray(nodes) ? (nodes as Array<Record<string, unknown>>) : [];
+}
+
 function draftNode(ctx: ToolContext, id: unknown): Record<string, unknown> | undefined {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
-  return nodes.find((n) => n.id === id);
+  return draftNodes(ctx).find((n) => n.id === id);
 }
 
 /** The node type an op writes parameters on — its own for an add, the draft's for an update. */
@@ -559,9 +562,7 @@ export async function runAskUser(
 
 /** The note_assumption handler: badge a draft step; unknown ids bounce back with the survivors. */
 export function runNoteAssumption(ctx: ToolContext, input: { node_id: string; text: string }): ToolResult {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   if (!nodes.some((n) => n.id === input.node_id)) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
     return {
@@ -623,9 +624,7 @@ export async function runTestStep(
   nodeId: string,
   sampleScope: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
@@ -1001,9 +1000,7 @@ export async function runNeedConnection(
   ctx: ToolContext,
   input: { node_id: string; provider: string; provider_label: string },
 ): Promise<ToolResult> {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === input.node_id);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
@@ -1114,9 +1111,7 @@ export async function runFillParams(ctx: ToolContext, nodeId: string, intent: st
       isError: true,
     };
   }
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
@@ -1175,8 +1170,8 @@ export async function runFillParams(ctx: ToolContext, nodeId: string, intent: st
 
 /** Compact post-apply summary so the agent tracks canvas state without re-reading it. */
 export function summarizeDraft(ir: Record<string, unknown>): string {
-  const nodes = recordsIn(ir.nodes);
-  const edges = recordsIn(ir.edges);
+  const nodes = Array.isArray(ir.nodes) ? (ir.nodes as Array<Record<string, unknown>>) : [];
+  const edges = Array.isArray(ir.edges) ? (ir.edges as Array<Record<string, unknown>>) : [];
   const nodeList = nodes.map((n) => `${String(n.id)} (${String(n.node_type)})`).join(', ');
   const edgeList = edges
     .map((e) => `${String(e.source_node_id)}:${String(e.source_port)}→${String(e.target_node_id)}`)
@@ -1184,14 +1179,6 @@ export function summarizeDraft(ir: Record<string, unknown>): string {
   return `Applied. Canvas now has ${nodes.length} step(s): ${nodeList || '(none)'}${
     edges.length > 0 ? ` — wired: ${edgeList}` : ''
   }`;
-}
-
-const isRecord = (item: unknown): item is Record<string, unknown> =>
-  Boolean(item) && typeof item === 'object';
-
-// A canvas arrives from the client unchecked, so an entry that is not an object is skipped, as stepsOf does.
-function recordsIn(list: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(list) ? list.filter(isRecord) : [];
 }
 
 function formatEntry(e: CatalogEntry): string {
