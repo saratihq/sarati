@@ -57,7 +57,7 @@ function safeEqual(a: string, b: string): boolean {
  */
 export function verifyWebhookSignature(
   cfg: WebhookVerification,
-  rawBody: string,
+  rawBody: Buffer,
   headers: Record<string, string>,
   secret: string,
 ): boolean {
@@ -71,7 +71,7 @@ export function verifyWebhookSignature(
 }
 
 /** Stripe: `stripe-signature: t=<ts>,v1=<hexHmacSha256 of `${t}.${rawBody}`>`. */
-function verifyStripe(rawBody: string, headers: Record<string, string>, secret: string): boolean {
+function verifyStripe(rawBody: Buffer, headers: Record<string, string>, secret: string): boolean {
   const raw = headers['stripe-signature'];
   if (!raw) return false;
   let t = '';
@@ -82,7 +82,7 @@ function verifyStripe(rawBody: string, headers: Record<string, string>, secret: 
     else if (k === 'v1' && v) v1.push(v);
   }
   if (!t || v1.length === 0) return false;
-  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
+  const expected = createHmac('sha256', secret).update(`${t}.`).update(rawBody).digest('hex');
   // Any of the provided v1 signatures matching is accepted (Stripe may send several).
   return v1.some((sig) => safeEqual(sig, expected));
 }

@@ -15,7 +15,7 @@ export interface ComposioWebhookVerifyResult {
 const DEFAULT_TOLERANCE_SECONDS = 300;
 
 export function verifyComposioWebhook(
-  rawBody: string,
+  rawBody: Buffer,
   headers: Record<string, string>,
   secret: string,
   toleranceSeconds: number = DEFAULT_TOLERANCE_SECONDS,
@@ -37,7 +37,10 @@ export function verifyComposioWebhook(
     }
   }
 
-  const expected = createHmac('sha256', secret).update(`${id}.${timestamp}.${rawBody}`).digest('base64');
+  const expected = createHmac('sha256', secret)
+    .update(`${id}.${timestamp}.`)
+    .update(rawBody)
+    .digest('base64');
   for (const part of signatureHeader.split(' ')) {
     if (!part) continue;
     const comma = part.indexOf(',');

@@ -146,6 +146,14 @@ export function stepsOf(ir: WorkflowIr): CanvasStep[] {
   });
 }
 
+const isObject = (entry: unknown): boolean => typeof entry === 'object' && entry !== null;
+
+/** The editor's canvas without its node and edge entries that are not objects, as it arrives unchecked. */
+export function normalizeCanvas(ir: WorkflowIr): WorkflowIr {
+  const objectsIn = (list: unknown): unknown => (Array.isArray(list) ? list.filter(isObject) : list);
+  return { ...ir, nodes: objectsIn(ir.nodes), edges: objectsIn(ir.edges) };
+}
+
 // What the composer last drafted, and on which branch — folded the same way live and on rehydrate.
 function trackCanvas(session: ComposerSession, event: ComposerEvent): void {
   if (event.event === 'op_applied') {

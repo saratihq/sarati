@@ -6,13 +6,13 @@ import type { AddressInfo } from 'node:net';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
-import { jwtVerify, SignJWT } from 'jose';
+import { jwtVerify } from 'jose';
 import request from 'supertest';
 
 import { AppModule } from '../app.module';
 import { trustProxies } from '../common/trust-proxies';
 import type { EnvConfig } from '../config/env.config';
-import { LOCAL_ISSUER } from './composer-auth.guard';
+import { mintLocalSession } from '../testing/local-session';
 
 /**
  * The self-host capability contract, exercised over real HTTP against a real
@@ -98,19 +98,9 @@ const BASE_ENV = {
   PORT: '8010',
 };
 
-/** Mirrors workflow-service's mintSession — the token a local login hands the client. */
-async function localToken(
+const localToken = (
   over: { secret?: string; sub?: string; issuer?: string; lifetime?: number } = {},
-): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({})
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer(over.issuer ?? LOCAL_ISSUER)
-    .setSubject(over.sub ?? 'user_selfhost_1')
-    .setIssuedAt(now)
-    .setExpirationTime(now + (over.lifetime ?? 3600))
-    .sign(new TextEncoder().encode(over.secret ?? SECRET));
-}
+): Promise<string> => mintLocalSession(over.secret ?? SECRET, over.sub ?? 'user_selfhost_1', over);
 
 async function boot(overrides: Record<string, string>): Promise<INestApplication> {
   process.env = { PATH: process.env.PATH, ...BASE_ENV, WORKFLOW_SERVICE_URL: serviceUrl, ...overrides };

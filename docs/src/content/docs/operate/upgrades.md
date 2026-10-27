@@ -102,7 +102,9 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
-### v0.2.27: a TypeScript Code step may await and return
+### v0.2.27
+
+#### A TypeScript Code step may await and return
 
 A **Code** step written in TypeScript runs as the async function body its editor describes, so one
 snippet may both `await` and `return`. Earlier versions refused such a step with
@@ -123,6 +125,39 @@ What a caller of the API sees change:
   says `at the end of the snippet` for one left unclosed. It used to read
   `has a TypeScript error: Error: Transform failed with 1 error: <stdin>:2:29: ERROR: Unexpected "="`,
   its column counted from 0 and in bytes.
+
+#### Webhooks take form fields and text
+
+A webhook, a test-event catch and a chat now read the body by its `Content-Type`, so form fields and
+text reach the run, and a signature is checked over the body's bytes whatever its type. See
+[What the run receives](/build/triggers/#what-the-run-receives).
+
+What a caller of the API sees change:
+
+- **Form fields, text and any JSON value reach `{{trigger.body}}`.** A body sent as
+  `application/x-www-form-urlencoded`, `text/*`, XML or a `+json` type used to start a run with
+  nothing in `{{trigger.body}}`, and a bare JSON value such as `42` or `"ping"` was refused with
+  `400`. A body with no `Content-Type` is read as UTF-8 text, where it was dropped too. A chat takes
+  `chatInput` and `sessionId` as form fields, or the message as text.
+- **A correctly signed form or text delivery is accepted.** It used to be refused with `401`,
+  because its signature was checked over no bytes. An empty signed JSON body is now checked over no
+  bytes, where it was checked over `{}`.
+- **A body Sarati can't read is refused with `415`, and nothing runs**, where it used to start a run
+  with nothing in `{{trigger.body}}`: `application/octet-stream`, `multipart/form-data` and any other
+  type not listed, a `charset` it doesn't know, and a body with no `Content-Type` that isn't UTF-8.
+  A sender that can only post `multipart/form-data`, such as an inbound-email service, can't start a
+  run. See [A webhook returns 415](/operate/troubleshooting/#a-webhook-returns-415).
+- **A request whose body can't be read answers with what went wrong, on every route,** where it
+  used to answer `500`: a `Content-Encoding` other than `gzip`, `deflate` or `br`, for one, answers
+  `415 unsupported content encoding "…"`.
+- **Invalid JSON sent to a webhook or chat answers `400`** and says the body is not valid JSON,
+  where the detail used to be the parser's message.
+- **An empty body leaves `{{trigger.body}}` empty**, where an empty `application/json` body made it
+  `{}`.
+- **A GitHub delivery sent as form fields is its event:** `{{trigger.body}}` is the event, as when it
+  is sent as JSON, where it used to be empty.
+- **A caught test event is the trigger as a run sees it.** `GET /api/catch/:id` returns `payload` with
+  the body at `body` and an object's fields beside it, where it returned the body alone.
 
 ### v0.2.26: the service opens no port but its own
 

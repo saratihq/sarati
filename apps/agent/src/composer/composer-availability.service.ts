@@ -2,7 +2,11 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import type { ComposerDisabledReason, EnvConfig } from '../config/env.config';
-import { PlatformKeysClient, type CallerContext } from '../config/platform-keys.client';
+import {
+  PlatformKeysClient,
+  type AnthropicKeyRead,
+  type CallerContext,
+} from '../config/platform-keys.client';
 
 /** One actionable sentence per reason — surfaced verbatim by the client. */
 export const DISABLED_MESSAGE = {
@@ -12,6 +16,11 @@ export const DISABLED_MESSAGE = {
     'The AI composer is not configured on this instance. Set SECRET_KEY to the same value the workflow service uses — it both authenticates composer callers and is how the composer reads the Anthropic key stored in Settings — and CLERK_ISSUER as well for a Clerk deployment. Then restart to enable it.',
   rate_limited: 'Too many requests from your address — try again in a minute.',
 } as const;
+
+/** Why a key read that brought back no key leaves the composer off for its caller. */
+export function noKeyReason(read: AnthropicKeyRead): 'rate_limited' | 'anthropic_api_key_missing' {
+  return read.rateLimited ? 'rate_limited' : 'anthropic_api_key_missing';
+}
 
 /**
  * Why the composer is off, answered per request rather than at boot: the Anthropic key is
@@ -47,8 +56,6 @@ export class ComposerAvailability {
     }
     if (opts.keyless) return null;
     const read = await this.platformKeys.readAnthropicKey(caller);
-    if (read.rateLimited) return 'rate_limited';
-    if (!read.key) return 'anthropic_api_key_missing';
-    return null;
+    return read.key ? null : noKeyReason(read);
   }
 }

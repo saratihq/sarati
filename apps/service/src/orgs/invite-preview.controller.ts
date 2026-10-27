@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
+import { CapabilityPath } from '../common/request-log-redaction';
 import { OrgManagementService } from './org-management.service';
 
 /**
@@ -13,6 +14,7 @@ export class InvitePreviewController {
   constructor(private readonly mgmt: OrgManagementService) {}
 
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @CapabilityPath()
   @Get(':token')
   preview(@Param('token') token: string): Promise<Record<string, unknown>> {
     return this.mgmt.previewInvite(token);

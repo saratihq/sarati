@@ -3,6 +3,7 @@ import type { Client } from 'pg';
 import { EntityManager } from 'typeorm';
 
 import { EventsService, type DomainEventInput } from '../../src/events/events.service';
+import type { RunRecorderService } from '../../src/runtime/run-recorder.service';
 
 /** A promise and the function that settles it. */
 export interface Deferred {
@@ -25,10 +26,10 @@ export interface Hold {
   restore: () => void;
 }
 
-/** Resolves once `arrived` does; rejects, naming `what`, if five seconds pass first. */
-export function reached(arrived: Promise<void>, what: string): Promise<void> {
+/** Resolves once `arrived` does; rejects, naming `what`, if `ms` pass first. */
+export function reached(arrived: Promise<void>, what: string, ms = 5_000): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${what} never reached its hold`)), 5_000);
+    const timer = setTimeout(() => reject(new Error(`${what} never reached its hold`)), ms);
     void arrived.then(() => {
       clearTimeout(timer);
       resolve();
@@ -43,6 +44,56 @@ export const bounded = (hold: Hold, what: string): Hold => ({
     return reached(hold.arrived, what);
   },
 });
+
+/** A hold on a wait's resume; `failed` says whether its transaction was made to fail. */
+export interface ResumeHold extends Hold {
+  failed: () => boolean;
+}
+
+/**
+ * Holds the first resume a wait records that `match` accepts until it is released or restored.
+ * Given `failing`, that resume's transaction then fails as a lost connection would, and the resume logs it.
+ */
+export function holdResume(
+  recorder: RunRecorderService,
+  {
+    match = () => true,
+    failing,
+  }: { match?: (scopedRunId: string, stepKey: string) => boolean; failing?: EntityManager } = {},
+): ResumeHold {
+  const record = recorder.stepResumed.bind(recorder);
+  const arrived = deferred();
+  const released = deferred();
+  let held = false;
+  let failed = false;
+  const spy = jest
+    .spyOn(recorder, 'stepResumed')
+    .mockImplementation(async (scopedRunId, stepKey, answered) => {
+      if (held || !match(scopedRunId, stepKey)) return record(scopedRunId, stepKey, answered);
+      held = true;
+      arrived.resolve();
+      await released.promise;
+      if (!failing) return record(scopedRunId, stepKey, answered);
+      const lost = jest.spyOn(failing, 'transaction').mockImplementationOnce(() => {
+        failed = true;
+        return Promise.reject(new Error('Connection terminated unexpectedly'));
+      });
+      try {
+        return await record(scopedRunId, stepKey, answered);
+      } finally {
+        lost.mockRestore();
+      }
+    });
+  return {
+    arrived: arrived.promise,
+    release: released.resolve,
+    restore: () => {
+      released.resolve();
+      spy.mockRestore();
+    },
+    failed: () => failed,
+  };
+}
 
 /** Holds on a suite's requests and reads of its database's locks, each read from the app and client when it runs. */
 export interface LockProbes {
