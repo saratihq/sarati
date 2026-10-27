@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import { DomainError } from '../common/domain-error';
 import { newId } from '../database/ids';
+import { coerceWebhookBody } from './triggers.service';
 
 /**
  * Ephemeral test-event inbox: the editor mints a catch URL, the user fires one event at it, and
@@ -16,7 +17,7 @@ const MAX_PAYLOAD_BYTES = 128 * 1024;
 interface CatchEntry {
   userId: string;
   expiresAt: number;
-  payload?: unknown;
+  body?: unknown;
   receivedAt?: number;
 }
 
@@ -37,23 +38,24 @@ export class CatchStore {
     return { catchId, expiresAt: new Date(expiresAt).toISOString() };
   }
 
-  /** Public intake: store the payload (last event wins). 404 on unknown/expired. */
-  receive(catchId: string, payload: unknown): void {
+  /** Public intake: store the delivery's body (last event wins). 404 on unknown/expired. */
+  receive(catchId: string, body: unknown): void {
     this.purge();
     const entry = this.entries.get(catchId);
     if (!entry) throw new DomainError('Catch not found or expired', 404);
-    const size = Buffer.byteLength(JSON.stringify(payload ?? null), 'utf8');
+    const size = Buffer.byteLength(JSON.stringify(body ?? null), 'utf8');
     if (size > MAX_PAYLOAD_BYTES) throw new DomainError('Test payload too large for a sample', 413);
-    entry.payload = payload;
+    entry.body = body;
     entry.receivedAt = Date.now();
   }
 
-  /** Owner poll: has anything landed yet? */
+  /** Owner poll: has anything landed yet? Its payload is the `trigger` scope a run it started would see. */
   read(catchId: string, userId: string): { received: boolean; payload: unknown } {
     this.purge();
     const entry = this.entries.get(catchId);
     if (!entry || entry.userId !== userId) throw new DomainError('Catch not found or expired', 404);
-    return { received: entry.receivedAt !== undefined, payload: entry.payload ?? null };
+    if (entry.receivedAt === undefined) return { received: false, payload: null };
+    return { received: true, payload: coerceWebhookBody(entry.body) };
   }
 
   private purge(): void {

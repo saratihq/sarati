@@ -104,7 +104,8 @@ describe('run samples + catch inbox (e2e, isolated DB, mock auth)', () => {
       .expect(201);
 
     const got = await request(app.getHttpServer()).get(`/api/catch/${catchId}`).expect(200);
-    expect(got.body).toEqual({ received: true, payload: { email: 'sara@acme.com', name: 'Sara' } });
+    const event = { email: 'sara@acme.com', name: 'Sara' };
+    expect(got.body).toEqual({ received: true, payload: { ...event, body: event } });
 
     // Unknown ids: capability-token model — 404, never enumeration.
     await request(app.getHttpServer())

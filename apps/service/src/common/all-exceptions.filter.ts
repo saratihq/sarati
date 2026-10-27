@@ -33,7 +33,18 @@ export function shapeKnownError(
       : raw;
     return { status, body: { ...record, detail } };
   }
+  if (isExposedClientError(exception)) {
+    const detail = exception.status === 413 ? 'Request body too large' : exception.message;
+    return { status: exception.status, body: { detail } };
+  }
   return null;
+}
+
+// The `http-errors` a body reader raises mark a message safe to show to the caller with `expose`.
+function isExposedClientError(exception: unknown): exception is Error & { status: number } {
+  if (!(exception instanceof Error) || !('expose' in exception) || exception.expose !== true) return false;
+  const status = (exception as { status?: unknown }).status;
+  return typeof status === 'number' && status >= 400 && status < 500;
 }
 
 /**
@@ -55,12 +66,6 @@ export class AllExceptionsFilter implements ExceptionFilter {
       return;
     }
 
-    // express/raw-body oversize errors (PayloadTooLargeError).
-    if (this.isHttpErrorsLike(exception) && exception.status === 413) {
-      res.status(413).json({ detail: 'Request body too large' });
-      return;
-    }
-
     const errorId = randomBytes(4).toString('hex');
     const err = exception instanceof Error ? exception : new Error(String(exception));
     this.logger.error(
@@ -68,14 +73,5 @@ export class AllExceptionsFilter implements ExceptionFilter {
       err.stack,
     );
     res.status(500).json({ detail: `Internal server error (ref ${errorId})`, error_id: errorId });
-  }
-
-  private isHttpErrorsLike(exception: unknown): exception is { status: number } {
-    return (
-      typeof exception === 'object' &&
-      exception !== null &&
-      'status' in exception &&
-      typeof exception.status === 'number'
-    );
   }
 }

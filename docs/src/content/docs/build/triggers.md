@@ -49,12 +49,35 @@ curl -X POST http://localhost:8080/api/hooks/<workflow-id>/production \
 The response is an acknowledgement, not the workflow's output. `202` means the run started. To see
 what it produced, open [Runs](/run/runs/).
 
-Two answers that are not `202`:
+Other answers:
 
 | | |
 |---|---|
 | `404 Webhook not found` | No version carrying this trigger is live in that environment — or the id is wrong. |
 | `202` with `"fired": 0` | Accepted, but nothing ran: a duplicate delivery, or a handshake. Not an error. |
+| `415` | Sarati can't read the body: its `Content-Type`, `charset` or `Content-Encoding` is not one of those below. Nothing ran. See [A webhook returns 415](/operate/troubleshooting/#a-webhook-returns-415). |
+| `400 The request body is not valid JSON` | Sent as JSON, but it does not parse. Nothing ran. |
+
+### What the run receives
+
+`{{trigger.body}}` is the whole body, decoded by its `Content-Type`:
+
+| Content-Type | `{{trigger.body}}` |
+|---|---|
+| `application/json`, or any `+json` type | The parsed JSON: an object, array, string, number, boolean or `null`. |
+| `application/x-www-form-urlencoded` | An object of the fields. A field sent more than once is a list of its values. |
+| `text/*`, `application/xml`, or any `+xml` type | The text. |
+| None | The text, which must be UTF-8. |
+
+JSON, form fields and text are read in the declared `charset`, UTF-8 if none. A body sent
+compressed with `gzip`, `deflate` or `br` is read once it is decompressed.
+
+An object's fields are also at `{{trigger.<field>}}`. A request with no body still starts a run, with
+nothing in `{{trigger.body}}`.
+
+A GitHub delivery is its event whichever **Content type** the GitHub webhook is set to: sent as form
+fields, the event GitHub puts in the field `payload` arrives as `{{trigger.body}}`, just as it does
+sent as JSON.
 
 ### Verify signatures
 
@@ -91,14 +114,16 @@ curl -X POST "$URL" -H "x-signature: $SIG" -H 'Content-Type: application/json' -
 | Wrong signature | `401 Invalid webhook signature` |
 | Correct signature | `202` and the run starts |
 
-Comparison is constant-time, and an empty raw body fails closed rather than being signed over a
-re-serialized copy.
+The signature is checked over the body's bytes as they were sent, once any `Content-Encoding` is
+undone, whatever their content type: an empty body over no bytes, never over a re-serialized copy.
+The comparison is constant-time.
 
 ### Sample event
 
-**Send a test event — I'll catch it** waits for one real request and keeps the payload as a sample,
-so later steps can pick real field names instead of guessing. No sender handy? Paste a sample
-event instead.
+**Send a test event — I'll catch it** waits for one real request and keeps it as a sample, so later
+steps can pick real field names instead of guessing. The sample is the trigger as a run would see
+it: the body at `body`, and an object's fields beside it. No sender handy? Paste a sample event
+instead.
 
 Catching a sample does not run the workflow.
 

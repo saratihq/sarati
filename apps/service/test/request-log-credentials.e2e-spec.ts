@@ -168,7 +168,10 @@ describe('the service log never prints a credential a request carried in its URL
 
     const polled = await send('GET', `/api/catch/${catchId}`, `/api/catch/${REDACTED}`, { key: ownerKey });
     expect(polled.status).toBe(200);
-    expect(await polled.json()).toEqual({ received: true, payload: { hello: 'world' } });
+    expect(await polled.json()).toEqual({
+      received: true,
+      payload: { body: { hello: 'world' }, hello: 'world' },
+    });
   });
 
   it('the webhook and chat intakes answer on their capability paths, and the chat stream opens', async () => {

@@ -6,11 +6,12 @@ import { Logger } from 'nestjs-pino';
 
 import { genRequestId } from './common/request-id';
 import type { EnvConfig } from './config/env.config';
+import { INBOUND_PATHS, inboundBody } from './triggers/inbound-body';
 
 /**
  * Shared app wiring for main.ts and the e2e harness — identical middleware
  * order in tests and production:
- *   request-id → JSON parser → CORS → routes.
+ *   request-id → public-intake body reader → JSON parser → CORS → routes.
  */
 export function configureApp(app: INestApplication): EnvConfig {
   app.useLogger(app.get(Logger));
@@ -29,16 +30,9 @@ export function configureApp(app: INestApplication): EnvConfig {
     next();
   });
 
-  // The `verify` hook stashes the RAW bytes so webhook intake (/api/hooks) can HMAC-verify a
-  // provider signature over the exact payload — parsing is lossy for that.
-  app.use(
-    json({
-      limit: env.maxRequestBodyBytes,
-      verify: (req: Request & { rawBody?: string }, _res: Response, buf: Buffer) => {
-        if (buf.length > 0) req.rawBody = buf.toString('utf8');
-      },
-    }),
-  );
+  // Must precede json(), which then skips the request because its body is already read.
+  app.use(INBOUND_PATHS, ...inboundBody(env.maxRequestBodyBytes));
+  app.use(json({ limit: env.maxRequestBodyBytes }));
 
   app.enableCors({
     origin: [...env.corsOriginList],
