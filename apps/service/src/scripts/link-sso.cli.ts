@@ -112,14 +112,14 @@ async function heldElsewhere(
 async function accountOf(db: Client, who: string): Promise<Account> {
   if (ID_SHAPE.test(who)) {
     const { rows } = await db.query<Account>(
-      'SELECT id, email, clerk_user_id FROM users WHERE id = $1 FOR UPDATE',
+      'SELECT id, email, clerk_user_id FROM users WHERE id = $1 FOR NO KEY UPDATE',
       [who],
     );
     return rows[0] ?? fail(`No account with the id ${who}.`);
   }
   const email = who.toLowerCase();
   const { rows } = await db.query<Account & { email_verified: boolean }>(
-    'SELECT id, email, clerk_user_id, email_verified FROM users WHERE lower(email) = $1 ORDER BY id FOR UPDATE',
+    'SELECT id, email, clerk_user_id, email_verified FROM users WHERE lower(email) = $1 ORDER BY id FOR NO KEY UPDATE',
     [email],
   );
   const holder = rows.find((row) => row.email_verified);
@@ -186,7 +186,7 @@ async function linkOne(
 // Left with no password, the account can no longer sign in by its address, so it gives the address up.
 async function moveOff(db: Client, issuer: string, subject: string, userId: string): Promise<void> {
   const { rows } = await db.query<{ email: string; hashed_password: string | null }>(
-    'SELECT email, hashed_password FROM users WHERE id = $1 FOR UPDATE',
+    'SELECT email, hashed_password FROM users WHERE id = $1 FOR NO KEY UPDATE',
     [userId],
   );
   const holder = rows[0]!;

@@ -22,7 +22,7 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
   let databaseUrl = '';
   let restoreEnv: () => void;
   const idp = new HostileIdp();
-  const { lockWaiters } = lockProbes(
+  const { lockWaiters, gateEmits, deadlocks, deadlocksSince } = lockProbes(
     () => app,
     () => db,
   );
@@ -112,6 +112,42 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
     }
     return Promise.all(settled);
   }
+
+  interface Invited {
+    orgId: string;
+    inviteId: string;
+    token: string;
+  }
+
+  /** The owner's org and an invite to it for `email`, on an instance whose first account the owner already is. */
+  async function inviteFrom(owner: string, email: string): Promise<Invited> {
+    const org = await from(app)
+      .post('/api/orgs')
+      .set('Authorization', `Bearer ${owner}`)
+      .send({ name: 'Team' });
+    const orgId = org.body.id as string;
+    const made = await from(app)
+      .post(`/api/orgs/${orgId}/invites`)
+      .set('Authorization', `Bearer ${owner}`)
+      .set('X-Org-Id', orgId)
+      .send({ email })
+      .expect(201);
+    return { orgId, inviteId: made.body.id as string, token: made.body.token as string };
+  }
+
+  /** Run `sarati-link-sso` against this instance, settling with its exit code and what it printed. */
+  const linkSso = (...args: string[]): Promise<{ code: number; out: string }> =>
+    promisify(execFile)(
+      process.execPath,
+      ['-r', 'ts-node/register/transpile-only', 'src/scripts/link-sso.cli.ts', ...args],
+      {
+        cwd: THIS_SERVICE,
+        env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, OIDC_ISSUER: idp.issuer },
+      },
+    ).then(
+      ({ stdout }) => ({ code: 0, out: stdout }),
+      (err: { code: number; stderr: string }) => ({ code: err.code, out: err.stderr }),
+    );
 
   async function freshInstance(env: Record<string, string>): Promise<void> {
     await app?.close();
@@ -206,28 +242,6 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
   }, 60_000);
 
   describe('an invite judged once the admission holds its org and invite locks', () => {
-    interface Invited {
-      orgId: string;
-      inviteId: string;
-      token: string;
-    }
-
-    /** The owner's org and an invite to it for `email`, on an instance whose first account the owner already is. */
-    async function inviteFrom(owner: string, email: string): Promise<Invited> {
-      const org = await from(app)
-        .post('/api/orgs')
-        .set('Authorization', `Bearer ${owner}`)
-        .send({ name: 'Team' });
-      const orgId = org.body.id as string;
-      const made = await from(app)
-        .post(`/api/orgs/${orgId}/invites`)
-        .set('Authorization', `Bearer ${owner}`)
-        .set('X-Org-Id', orgId)
-        .send({ email })
-        .expect(201);
-      return { orgId, inviteId: made.body.id as string, token: made.body.token as string };
-    }
-
     const PARKS: Record<string, { table: string; row: (i: Invited) => string }> = {
       'its org deleted': { table: 'organizations', row: (i) => i.orgId },
       'it revoked': { table: 'org_invites', row: (i) => i.inviteId },
@@ -305,23 +319,7 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
     let linking: Promise<{ code: number; out: string }>;
     let signingIn: Promise<request.Response>;
     try {
-      linking = promisify(execFile)(
-        process.execPath,
-        [
-          '-r',
-          'ts-node/register/transpile-only',
-          'src/scripts/link-sso.cli.ts',
-          'owner@example.com',
-          'cli-sub',
-        ],
-        {
-          cwd: THIS_SERVICE,
-          env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, OIDC_ISSUER: idp.issuer },
-        },
-      ).then(
-        ({ stdout }) => ({ code: 0, out: stdout }),
-        (err: { code: number; stderr: string }) => ({ code: err.code, out: err.stderr }),
-      );
+      linking = linkSso('owner@example.com', 'cli-sub');
       await waitersOnAdmission(1, 1_200);
       signingIn = completeSso(signIn, 'sign-in').then((res) => res);
       await waitersOnAdmission(2);
@@ -341,6 +339,49 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
     expect([await count(`SELECT 1 FROM users`), await count(`SELECT 1 FROM user_identities`)]).toEqual([
       1, 1,
     ]);
+  }, 90_000);
+
+  it('lets the operator CLI move an identity off an account disconnecting it at that moment, both completing instead of deadlocking', async () => {
+    await freshInstance({ ...ssoEnv(), LOCAL_AUTH_ENABLED: 'true' });
+    const owner = await from(app)
+      .post('/api/auth/local/register')
+      .send({ email: 'owner@example.com', password: PASSWORD })
+      .expect(201);
+    const invited = await inviteFrom(owner.body.token as string, 'holder@example.com');
+    const holder = await from(app)
+      .post('/api/auth/local/register')
+      .send({ email: 'holder@example.com', password: PASSWORD, invite_token: invited.token })
+      .expect(201);
+    const session = holder.body.token as string;
+    const link = await startSso('/api/auth/oidc/link/start', { current_password: PASSWORD }, session);
+    answerFlows([{ code: 'link', flow: link, sub: 'moving-sub', email: 'holder.sso@example.com' }]);
+    await completeSso(link, 'link', '/api/auth/oidc/link/complete', session).expect(200);
+
+    const gate = gateEmits('user.identity_unlinked');
+    const before = await deadlocks();
+    let unlinking: Promise<request.Response>;
+    let moving: Promise<{ code: number; out: string }>;
+    try {
+      unlinking = from(app)
+        .delete('/api/auth/oidc/link')
+        .set('Authorization', `Bearer ${session}`)
+        .then((res) => res);
+      await gate.arrived(0);
+      moving = linkSso('owner@example.com', 'moving-sub', '--move');
+      await lockWaiters(1, 1_200);
+    } finally {
+      gate.restore();
+    }
+    const [unlinked, moved] = await Promise.all([unlinking, moving]);
+
+    expect(unlinked.status).toBe(204);
+    expect(moved).toEqual({
+      code: 0,
+      out: expect.stringContaining('Linked owner@example.com to moving-sub'),
+    });
+    expect(await deadlocksSince(before)).toBe(0);
+    const holders = await db.query(`SELECT user_id FROM user_identities WHERE subject = 'moving-sub'`);
+    expect(holders.rows).toEqual([{ user_id: owner.body.user.id }]);
   }, 90_000);
 
   it('lets an account taking the address its provider now confirms and a first sign-in at that address take turns, so one account holds it', async () => {

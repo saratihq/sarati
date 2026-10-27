@@ -108,8 +108,8 @@ export interface LockProbes {
   };
   /** Holds the first query whose SQL matches `sql`, just before or just after it runs. */
   holdQuery: (sql: RegExp, at?: 'before' | 'after') => Hold;
-  /** Resolves once `count` backends of the database wait on a lock; throws after five seconds. */
-  lockWaiters: (count: number) => Promise<void>;
+  /** Resolves once `count` backends of the database wait on a lock; throws after `tries` reads 25 ms apart (five seconds). */
+  lockWaiters: (count: number, tries?: number) => Promise<void>;
   /** The database's deadlock count. */
   deadlocks: () => Promise<number>;
   /** The deadlocks since `before`, read 1.5 s on: Postgres 14 counts one at once, 15+ as the deadlocked backend idles (it waited deadlock_timeout, past the second 15+ keeps between reports), or up to 10 s later if another backend is reporting at that instant. */
@@ -129,8 +129,8 @@ export function lockProbes(app: () => INestApplication, db: () => Client): LockP
     return (await deadlocks()) - before;
   };
 
-  const lockWaiters = async (count: number): Promise<void> => {
-    for (let i = 0; i < 200; i++) {
+  const lockWaiters = async (count: number, tries = 200): Promise<void> => {
+    for (let i = 0; i < tries; i++) {
       const { rows } = await db().query(
         `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
       );
