@@ -7,9 +7,9 @@ import { LocalAuthForm } from "@/components/LocalAuthForm";
 import { SaratiLoader, SaratiSquircle } from "@/components/SaratiLogo";
 import { clerkEnabled } from "@/lib/config";
 import { readLocalSession } from "@/lib/localSession";
+import { safeReturnTo } from "@/lib/returnTo";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import { useLocalAuthStatus } from "@/lib/useLocalAuthStatus";
-import { safeReturnTo } from "@/lib/useRedirectIfSignedIn";
 
 /** Which auth route is asking: they share the local surface but land on different states. */
 export type LocalAuthVariant = "signin" | "signup" | "reset";
