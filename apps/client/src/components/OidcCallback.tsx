@@ -8,7 +8,7 @@ import { SaratiLoader } from "@/components/SaratiLogo";
 import { Button } from "@/components/ui/button";
 import { beginOidcFlow, takePending, useLeavingState, type OidcPending } from "@/lib/oidcFlow";
 import { toast } from "@/lib/toast";
-import { safeReturnTo } from "@/lib/useRedirectIfSignedIn";
+import { safeReturnTo } from "@/lib/returnTo";
 
 type Action = "restart" | "login" | "password" | "settings";
 

@@ -86,7 +86,7 @@ step and then an honest stop.
 
 ## Availability — the self-host capability probe
 
-The composer boots without `ANTHROPIC_API_KEY` and without `CLERK_ISSUER`, so a one-command stack
+The composer boots with no Anthropic key stored and without `CLERK_ISSUER`, so a one-command stack
 that ships it by default is still usable without an Anthropic account. It refuses to *pretend*,
 though.
 
@@ -97,11 +97,13 @@ though.
 { "status": "disabled", "reason": "anthropic_api_key_missing", "message": "…", "docs": "…" }
 ```
 
-`reason` is `anthropic_api_key_missing`, `caller_auth_unconfigured` (no caller-auth path at all —
-no `SECRET_KEY`, no `CLERK_ISSUER`, no `MOCK_AUTH`; unconfigured caller auth turns the feature OFF,
-it never leaves it open) or `rate_limited` (the service turned this visitor's key read away for asking
-too often — it passes in a minute, and is never reported as a missing key). An install missing both
-of the first two is told about the Anthropic key first: it is the documented opt-in.
+`reason` is `caller_auth_unconfigured` (no `SECRET_KEY`, which the stored key is read with, or no
+caller-auth path at all — no local sessions, no `CLERK_ISSUER`, no `MOCK_AUTH`; unconfigured caller
+auth turns the feature OFF, it never leaves it open), `anthropic_api_key_missing` (no key stored for
+the caller, nor for their organization) or `rate_limited` (the service turned this visitor's key read
+away for asking too often — it passes in a minute, and is never reported as a missing key). An
+install missing both of the first two is told about caller auth first: without it nobody can sign in
+to reach Settings and store the key.
 
 While disabled, every functional endpoint (`/stream`, `/attach`, `/token`, `/answer`, `/clear`)
 answers **503** with the same `reason` and `message` — **429** for `rate_limited` — *ahead of*
@@ -119,7 +121,7 @@ Two deliberate choices worth keeping:
 
 On a self-host the auth wall is cleared by `SECRET_KEY`: sign-in there is **local email + password**,
 and sharing that one value lets this service verify the resulting session. So the self-host path to a
-working composer is `ANTHROPIC_API_KEY` + `SECRET_KEY`, with no Clerk account anywhere.
+working composer is `SECRET_KEY` + an Anthropic key stored in Settings, with no Clerk account anywhere.
 
 ## Caller auth
 
@@ -172,9 +174,9 @@ From the repo root:
 
 ```bash
 pnpm install
-cp apps/agent/.env.example apps/agent/.env   # WORKFLOW_SERVICE_API_KEY + ANTHROPIC_API_KEY
-                                             # both optional — without them it boots with the
-                                             # composer disabled
+cp apps/agent/.env.example apps/agent/.env   # SECRET_KEY; without it, or with no Anthropic key
+                                             # stored in Settings, it boots and the composer
+                                             # answers disabled
 pnpm --filter @sarati/agent start:dev        # :8010
 ```
 
@@ -207,11 +209,10 @@ Required environment (**never commit secrets**; `apps/agent/.env.example` is the
 | -------------------------- | ------------------- | ------------------------------------------------------------------------------------------------ |
 | `ENVIRONMENT`              | yes — set `production` | Enables prod posture (refuses `MOCK_AUTH`). Defaults to `development` if unset.                |
 | `PORT`                     | platform-injected   | HTTP listen port. Leave unset locally to default to `8010`.                                       |
-| `ANTHROPIC_API_KEY`        | yes                 | Claude Agent SDK credential. Unset boots with the composer **disabled** (503 + `/api/composer/status` says so) rather than failing — see "Availability". |
 | `WORKFLOW_SERVICE_URL`     | yes                 | Base URL of `apps/service` (the tools' backend). Defaults to `http://localhost:8001`.             |
 | `WORKFLOW_SERVICE_API_KEY` | recommended         | `ork_` fallback key for tool calls. In authed mode each call forwards the caller's own token; this is the `MOCK_AUTH`/no-token fallback. |
 | `CLERK_ISSUER`             | Clerk deploys       | Clerk instance issuer. Callers' session JWTs are verified **networklessly against its JWKS** (RS256, iss/exp) — this is **not** `CLERK_SECRET_KEY`; this service holds no Clerk secret. Unset with no other caller-auth path boots with the composer **disabled**, never unauthenticated. |
-| `SECRET_KEY`               | self-host           | The **same value `apps/service` uses** (its `docker/entrypoint.sh` generates one onto the shared data volume) — lets this service verify local email + password sessions. The self-host alternative to `CLERK_ISSUER`; rotating it signs everyone out. |
+| `SECRET_KEY`               | yes                 | The **same value `apps/service` uses** (its `docker/entrypoint.sh` generates one onto the shared data volume). Every deployment needs it, Clerk ones included: it is how this service reads the Anthropic key stored in Settings, which is not an environment variable. On a self-host it is also the caller-auth path, in place of `CLERK_ISSUER`: it verifies local email + password sessions, and rotating it signs everyone out. Without it `/api/composer/status` reports `caller_auth_unconfigured`; with it but no key stored for the caller, `anthropic_api_key_missing`, and the composer's endpoints answer **503** with that reason — the service still boots. See "Availability". |
 | `LOCAL_AUTH_ENABLED`       | optional            | Forces local-session auth on or off. Default: on when `CLERK_ISSUER` is unset, off when it is set. |
 | `CLERK_AUTHORIZED_PARTIES` | recommended         | Comma-separated `azp` allow-list (the client origin[s]). Empty = `azp` not checked.               |
 | `CORS_ORIGINS`             | yes                 | Comma-separated browser origins allowed to open composer streams. Defaults to `http://localhost:3100`. |

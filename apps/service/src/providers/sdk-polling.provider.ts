@@ -97,7 +97,7 @@ export function sdkPollingTriggerSignsIn(type: string): boolean {
 
 /**
  * Runs the SDK's POLLING triggers (`runPoll` — the identity-deduped poll rail) IN-PROCESS, the counterpart of
- * {@link import('./sdk-webhook.provider').SdkWebhookProvider}. Always available (no COMPOSIO_API_KEY needed);
+ * {@link import('./sdk-webhook.provider').SdkWebhookProvider}. Always available (it never needs a Composio key);
  * owns credential resolution and the SDK glue.
  */
 @Injectable()

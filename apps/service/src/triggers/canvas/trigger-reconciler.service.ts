@@ -53,6 +53,7 @@ import {
   decideTriggerSlots,
   firesWhileHeld,
   heldBackBySlot,
+  listensAsSlot,
   type TriggerSlotDecision,
 } from './trigger-kind';
 import {
@@ -296,19 +297,13 @@ export class TriggerReconcilerService {
     if (rows.length > 0) this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
   }
 
-  /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or whose webhook is registered at a URL no longer served (a new public base URL). */
+  /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or that listens as its slot, as every registered webhook does, so its account's status and its webhook's URL are judged afresh after a stretch no build of this one saw. */
   async reconcileStale(): Promise<void> {
-    const em = this.dataSource.manager;
-    const rows = await em.find(RuntimeTriggerActivationEntity);
-    const envNames = new Map(
-      (await rawQuery<{ id: string; name: string }>(em, `SELECT id, name FROM environments`)).map((e) => [
-        e.id,
-        e.name,
-      ]),
-    );
-    const moved = (r: RuntimeTriggerActivationEntity): boolean =>
-      r.kind === 'registered_webhook' && r.webhookUrl !== this.webhookUrl(activationKeyOf(r), envNames);
-    const stale = rows.filter((r) => !applyFinished(actualOf(r)) || moved(r));
+    const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity);
+    const stale = rows.filter((r) => {
+      const actual = actualOf(r);
+      return !applyFinished(actual) || listensAsSlot(actual);
+    });
     for (const workflowId of new Set(stale.map((r) => r.workflowId))) await this.signals.enqueue(workflowId);
   }
 

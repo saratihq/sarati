@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
+import { ADMISSION_LOCK_SPACE } from '../../database/advisory-lock-spaces';
 import { newId, now } from '../../database/ids';
 import { UserEntity } from '../../database/entities/user.entity';
 import { UserIdentityEntity } from '../../database/entities/user-identity.entity';
@@ -9,7 +10,6 @@ import { UserSettingsEntity } from '../../database/entities/user-settings.entity
 import { rawQuery } from '../../database/raw-query';
 import { EventsService } from '../../events/events.service';
 import { OrgsService } from '../../orgs/orgs.service';
-import { ADMISSION_LOCK_SPACE } from './admission-lock';
 
 /** An account about to be created; `email` is already normalized. */
 export interface NewAccount {

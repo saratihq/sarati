@@ -554,11 +554,6 @@ export class ConnectionsService implements RunAsAccounts {
     }
   }
 
-  /** How many cluster connections in an org a given member owns (env steps run AS them). */
-  async countClusterConnectionsOwnedBy(orgId: string, userId: string): Promise<number> {
-    return this.dataSource.manager.count(ConnectionEntity, { where: { orgId, userId } });
-  }
-
   /** Every ORG CLUSTER connection (env + its owner) — for the owner UI. */
   async listClusters(
     orgId: string,

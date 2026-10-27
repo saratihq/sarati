@@ -184,7 +184,7 @@ describe('local email + password auth (e2e, isolated DB)', () => {
     expect(String(res.body.detail)).toContain('not found or expired');
   });
 
-  it('refuses an invite token that was issued for a different email', async () => {
+  it('refuses a sign-up with an invite token that names no invite', async () => {
     const res = await http()
       .post('/api/auth/local/register')
       .send({ email: 'someone-else@example.com', password: PASSWORD, invite_token: randomUUID() })

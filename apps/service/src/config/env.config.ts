@@ -470,9 +470,11 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
     assertSecretStaysOffPlaintext('COMPOSIO_BASE_URL', cfg.composioBaseUrl);
     if (!cfg.dbosAppVersion) {
       throw new Error(
-        'DBOS_APP_VERSION must be set to a stable value in production (e.g. "orchestr-1") so a ' +
-          'routine deploy recovers its in-flight runs. Set it once and hold it stable across ' +
-          'deploys — never the git SHA; bump it only on a backward-incompatible interpreter change.',
+        'DBOS_APP_VERSION must be set in production: to "orchestr-1", the value the images set, or ' +
+          "to the value this install's runs already carry. DBOS resumes only the runs recorded under " +
+          'the version it launches with, so never change it — not for a deploy, and not for an ' +
+          'upgrade, whose engine changes ship under a new workflow name: a changed value strands ' +
+          'every run in flight.',
       );
     }
   }

@@ -153,7 +153,7 @@ describe('auth slice (e2e, isolated DB)', () => {
     expect(res.body.detail).toBe('Invalid token');
   });
 
-  it('provisions on first sight: user + settings + personal org + domain event; response parity', async () => {
+  it('provisions on first sight: user + settings + personal org with its default environments + domain event; response parity', async () => {
     const token = await signToken({ sub: 'user_fresh_1', azp: 'http://localhost:5173' });
     const res = await request(app.getHttpServer())
       .get('/api/auth/me')
@@ -175,6 +175,16 @@ describe('auth slice (e2e, isolated DB)', () => {
       [users[0]!.id],
     );
     expect(orgs).toEqual([{ is_personal: true, role: 'owner' }]);
+    const envs = await query(
+      `SELECT e.name, e.is_prod FROM environments e
+       JOIN org_members m ON m.org_id = e.org_id WHERE m.user_id = $1 ORDER BY e.name`,
+      [users[0]!.id],
+    );
+    expect(envs).toEqual([
+      { name: 'production', is_prod: true },
+      { name: 'staging', is_prod: false },
+      { name: 'uat', is_prod: false },
+    ]);
     const events = await query('SELECT type FROM domain_events WHERE actor_user_id = $1', [users[0]!.id]);
     expect(events.map((e) => e.type)).toContain('user.provisioned');
 

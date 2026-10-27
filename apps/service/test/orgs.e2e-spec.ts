@@ -1013,7 +1013,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       [slotOrgId, userB],
     );
 
-    // Lazy defaults give the org a staging environment (owner-curated).
+    // The org starts with a staging environment.
     const envs = await asA(http().get('/api/environments').set('X-Org-Id', slotOrgId)).expect(200);
     const staging = (envs.body.environments as Array<{ id: string; name: string }>).find(
       (e) => e.name === 'staging',

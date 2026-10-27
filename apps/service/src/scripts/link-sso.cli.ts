@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import { Client } from 'pg';
 
-import { ADMISSION_LOCK_SPACE } from '../auth/local/admission-lock';
 import {
   isClerkUserId,
   UNCONNECTED_ACCOUNTS_SQL,
   type UnconnectedAccount,
 } from '../auth/oidc/unconnected-accounts';
 import { errorMessage } from '../common/error-message';
+import { ADMISSION_LOCK_SPACE } from '../database/advisory-lock-spaces';
 
 const USAGE = `Usage:
   pnpm auth:link-sso --list                      accounts not connected to OIDC_ISSUER that signed in some other way

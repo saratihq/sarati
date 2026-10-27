@@ -24,7 +24,7 @@ import type { EnvConfig } from '../config/env.config';
  *   single sign-on and gets an HS256 JWT signed with the shared SECRET_KEY, naming
  *   how they signed in; each method's sessions pass only while that method is on.
  *   Without this path the composer 401s every self-host caller, so an operator
- *   who supplied ANTHROPIC_API_KEY still could not reach it.
+ *   who stored an Anthropic key in Settings still could not reach it.
  *
  * Each path pins its OWN issuer and algorithm, so a token minted for one can
  * never be accepted by the other — the property relies on. Local runs

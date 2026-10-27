@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
-import { PREVIOUS_BUILD, restoreGoldenHistory } from './support/golden-history';
+import { LEGACY_BUILD, restoreGoldenHistory } from './support/golden-history';
 import { bootService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -115,8 +115,8 @@ describe('DBOS without its admin server (e2e)', () => {
     await startParked(current);
     await service!.crash();
     service = undefined;
-    await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/linear-parked`, 'earlier');
-    await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/parked-after-fan-out`, 'earlier-fanned');
+    await restoreGoldenHistory(db, dbos, `${LEGACY_BUILD}/linear-parked`, 'earlier');
+    await restoreGoldenHistory(db, dbos, `${LEGACY_BUILD}/parked-after-fan-out`, 'earlier-fanned');
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
 
     expect(await bootLog()).toContain(

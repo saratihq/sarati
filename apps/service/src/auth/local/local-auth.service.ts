@@ -5,9 +5,8 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../../common/domain-error';
 import type { EnvConfig } from '../../config/env.config';
-import { OrgInviteEntity } from '../../database/entities/org-invite.entity';
 import { UserEntity } from '../../database/entities/user.entity';
-import { OrgManagementService } from '../../orgs/org-management.service';
+import { OrgManagementService, type RedeemableInvite } from '../../orgs/org-management.service';
 import { AdmissionService } from './admission.service';
 import { MIN_PASSWORD_LENGTH, hashPassword, verifyPassword } from './password';
 import { mintSession, type SessionMethod } from './local-session';
@@ -70,10 +69,9 @@ export class LocalAuthService {
     const email = normalizeEmail(input.email);
     this.assertPasswordUsable(input.password);
     const hashedPassword = await hashPassword(input.password);
-    const inviteToken = input.inviteToken?.trim();
 
     return this.admission.admitting(async (em) => {
-      await this.assertAdmissible(em, email, inviteToken);
+      const invite = await this.admit(em, email, input.inviteToken?.trim());
       if (await this.admission.addressHeld(em, email)) {
         throw new DomainError('An account with that email already exists — sign in instead.', 409, {
           code: 'email_taken',
@@ -87,9 +85,7 @@ export class LocalAuthService {
         emailVerified: true,
         identity: null,
       });
-      // Membership runs through the ONE acceptance path, so the join event fires exactly as it does for a browser accept.
-      const joined = inviteToken ? await this.orgManagement.acceptInviteWith(em, user.id, inviteToken) : null;
-      if (inviteToken && !joined) throw signupClosed();
+      const joined = invite ? await this.orgManagement.redeemInvite(em, user.id, invite) : null;
       this.logger.log(`local account created for ${email}`);
       return grantSession(
         user,
@@ -121,16 +117,19 @@ export class LocalAuthService {
     );
   }
 
-  /** Registration is never open: the FIRST account on an empty instance, or one matching a live invite. */
-  private async assertAdmissible(em: EntityManager, email: string, token: string | undefined): Promise<void> {
-    if (await this.admission.isFirstAccount(em)) return;
-
-    const invite = token ? await em.findOne(OrgInviteEntity, { where: { token } }) : null;
-    const live =
-      invite !== null &&
-      normalizeEmail(invite.email ?? '') === email &&
-      (await this.orgManagement.isRedeemable(em, invite));
-    if (!live) throw signupClosed();
+  /** Registration is never open: the FIRST account on an empty instance, or one an invite to its email admits, judged on the invite held under its locks. */
+  private async admit(
+    em: EntityManager,
+    email: string,
+    token: string | undefined,
+  ): Promise<RedeemableInvite | null> {
+    if (!token) {
+      if (!(await this.admission.isFirstAccount(em))) throw signupClosed();
+      return null;
+    }
+    const claimed = await this.orgManagement.claimInvite(em, token, signupClosed());
+    if (!claimed.redeemable || normalizeEmail(claimed.invite.email ?? '') !== email) throw signupClosed();
+    return claimed;
   }
 
   private assertEnabled(): void {

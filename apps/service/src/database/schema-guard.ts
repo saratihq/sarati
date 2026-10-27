@@ -183,6 +183,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'",
   },
   {
+    migration: '042_org_default_environments.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='organizations' AND column_name='environments_seeded_at'",
+  },
+  {
     migration: '043_sso_sign_in.sql',
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='email_verified' AND to_regclass('public.user_identities') IS NOT NULL AND to_regclass('public.ix_oidc_login_states_expires_at') IS NOT NULL AND to_regclass('public.ix_users_confirmed_email') IS NOT NULL AND to_regclass('public.ix_users_email') IS NULL",

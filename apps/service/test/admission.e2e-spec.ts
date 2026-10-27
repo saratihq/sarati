@@ -5,7 +5,7 @@ import type { INestApplication } from '@nestjs/common';
 import { Client } from 'pg';
 import type request from 'supertest';
 
-import { ADMISSION_LOCK_SPACE } from '../src/auth/local/admission-lock';
+import { ADMISSION_LOCK_SPACE } from '../src/database/advisory-lock-spaces';
 import { HostileIdp } from './support/hostile-idp';
 import { lockProbes, pause } from './support/lock-probes';
 import { THIS_SERVICE } from './support/service-process';

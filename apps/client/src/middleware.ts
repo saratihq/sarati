@@ -1,6 +1,7 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 import { LOCAL_SESSION_COOKIE } from "@/lib/localSession";
+import { sameOriginPath } from "@/lib/returnTo";
 
 // Public routes — reachable without a session. Everything else is protected.
 // Mirrors the AuthRoute/ProtectedRoute split in the source App.tsx: auth pages
@@ -24,7 +25,7 @@ const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY?.t
 
 function toLogin(req: NextRequest) {
   const loginUrl = new URL("/login", req.url);
-  const returnTo = req.nextUrl.pathname + req.nextUrl.search;
+  const returnTo = sameOriginPath(req.nextUrl.pathname + req.nextUrl.search, req.nextUrl.origin);
   if (returnTo && returnTo !== "/") loginUrl.searchParams.set("redirect_url", returnTo);
   return NextResponse.redirect(loginUrl);
 }

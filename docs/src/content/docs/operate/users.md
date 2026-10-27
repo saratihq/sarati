@@ -3,8 +3,8 @@ title: Users and organizations
 description: Invite people, and decide who can ship.
 ---
 
-The first account on an instance is the owner. Who can make an account after that depends on how
-the instance signs people in:
+The first account on an instance is the owner, and if two people sign up at once only one gets in.
+Who can make an account after that depends on how the instance signs people in:
 
 - **Email and password:** everyone after joins by invite — signing up without one is refused:
 
@@ -60,9 +60,11 @@ sign-in screen still makes one.
 
 An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
 accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever
-comes second answers `404`, as for an invite that isn't there. Accepting again with an account that
-is already in it is a no-op, and signing up with a spent link is refused as `signup_closed`. A spent
-link says "This invite can't be used" as soon as it opens.
+comes second answers `404`, as for an invite that isn't there. A password sign-up through the link
+is an accept too: the account is made only together with joining, so a sign-up that comes second, or
+uses a spent link, is refused as `signup_closed` and makes no account. Accepting again with an
+account that is already in it is a no-op. A spent link says "This invite can't be used" as soon as
+it opens.
 
 Only an owner can invite someone as an owner; an admin's attempt is refused.
 

@@ -7,11 +7,8 @@ import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import { launchDbos } from './dbos-config';
 import { RecoveryGuard } from './recovery-guard';
+import { recoveryIdentityOf } from './recovery-identity';
 import { systemDatabaseUrlOf } from './system-db-url';
-
-/** Recovery version when `DBOS_APP_VERSION` is unset — must stay a CONSTANT (not DBOS's code hash)
- *  or every deploy orphans the runs in flight across it. */
-export const DBOS_APP_VERSION_DEFAULT = 'orchestr-1';
 
 /** Launches/stops the DBOS runtime on bootstrap, so module-load workflow registration precedes it. */
 @Injectable()
@@ -30,20 +27,16 @@ export class DbosLifecycle implements OnApplicationBootstrap, OnApplicationShutd
       this.logger.log('DBOS disabled (DBOS_ENABLED=false)');
       return;
     }
-    const systemDatabaseUrl = systemDatabaseUrlOf(env);
-    // Pin recovery identity so a restart picks up the runs in flight across it.
-    const applicationVersion = env.dbosAppVersion || DBOS_APP_VERSION_DEFAULT;
+    const { applicationVersion, executorId } = recoveryIdentityOf(env);
     await this.logRunsInFlight();
     await launchDbos({
       name: 'orchestr',
-      systemDatabaseUrl,
+      systemDatabaseUrl: systemDatabaseUrlOf(env),
       applicationVersion,
-      ...(env.dbosExecutorId ? { executorID: env.dbosExecutorId } : {}),
+      executorID: executorId,
     });
     this.launched = true;
-    this.logger.log(
-      `DBOS launched (appVersion=${applicationVersion}, executorId=${env.dbosExecutorId || 'local'})`,
-    );
+    this.logger.log(`DBOS launched (appVersion=${applicationVersion}, executorId=${executorId})`);
   }
 
   // Counted before launch starts recovering them, so the counts cover every run in flight; each is judged again then.

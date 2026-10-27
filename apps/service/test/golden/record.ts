@@ -346,10 +346,10 @@ async function outcome(r0: EarlierBuild, golden: string, raw: string): Promise<G
   }
 }
 
-// Records every shape, or those named after the sha, on the build at that sha: the build before this one.
+// Records every shape, or those named after the sha, on the build at that sha.
 async function main(): Promise<void> {
   const [build, ...only] = process.argv.slice(2);
-  if (!build) throw new Error('usage: pnpm golden:record <sha of the build before> [shape…]');
+  if (!build) throw new Error('usage: pnpm golden:record <sha of the build to record> [shape…]');
   const runId = randomBytes(4).toString('hex');
   process.env[E2E_RUN_ID_ENV] = runId;
   const r0 = unpackBuild(build);

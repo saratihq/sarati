@@ -35,16 +35,11 @@ interface CatalogCache {
   slugByType: Map<string, string>;
 }
 
-/**
- * The Composio TRIGGER rail — projects Composio's trigger types into the picker and is the façade the
- * reconciler/intake drive to make them fire. Owns projection, caching, verification, and public-type↔slug mapping;
- * HTTP lives once in {@link ComposioProvider}. Inert (empty catalog, no subscribe) when `COMPOSIO_API_KEY` is unset.
- */
-/** Cache partition per owning scope. */
 function cacheKeyOf(scope: PlatformKeyScope): string {
   return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
 }
 
+/** The Composio trigger rail: picker projection, caching, verification and type↔slug mapping; inert for a scope with no Composio key stored. */
 @Injectable()
 export class ComposioTriggerProvider {
   private readonly logger = new Logger(ComposioTriggerProvider.name);
@@ -152,7 +147,7 @@ export class ComposioTriggerProvider {
    */
   async verifyWebhook(
     scope: PlatformKeyScope,
-    rawBody: string,
+    rawBody: Buffer,
     headers: Record<string, string>,
   ): Promise<ComposioWebhookVerifyResult> {
     const secret = (await this.platformKeys.get(scope, 'composio_webhook_secret')) ?? '';

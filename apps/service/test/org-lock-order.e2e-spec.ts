@@ -23,6 +23,7 @@ interface Team {
   env: string;
   envName: string;
   invite: string;
+  inviteEmail: string;
   token: string;
   cluster?: string;
 }
@@ -37,13 +38,20 @@ interface Writer {
   prepare?: (team: Team) => Promise<void>;
   /** Where the lands-first test holds the write: just before its event or just after its org lock. */
   heldAt: 'event' | 'org lock';
+  /** The address a team's pending invite goes to, when not the joiner's. */
+  invitee?: () => string;
   /** What an org delete answers with 409 once the write has landed, when the org delete removes the org otherwise. */
   refusal?: string;
-  /** What the write answers once the org is gone, when not "Organization not found". */
-  gone?: string;
+  /** What the write answers once the org is gone, when not 404 "Organization not found". */
+  gone?: { status: number; detail: string };
 }
 
 const ORG_LOCK = /FROM organizations WHERE id = \$1 FOR KEY SHARE/;
+const ORG_GONE = { status: 404, detail: 'Organization not found' };
+const SIGNUP_CLOSED = {
+  status: 403,
+  detail: 'This instance is not open for signup — ask an owner for an invite link.',
+};
 const HAS_WORKFLOW =
   'This organization still has 1 workflow — move or delete them before deleting the organization.';
 
@@ -125,8 +133,8 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     Promise.race([work, pause(3_000).then(() => 'blocked' as const)]);
   const deleteOrg = (org: string): request.Test => asOwner(http().delete(`/api/orgs/${org}`));
 
-  // An org with a second member, a custom environment and a pending invite for the joiner: one row of each kind its delete cascades into.
-  const team = async (name: string): Promise<Team> => {
+  // An org with a second member, a custom environment and a pending invite for the joiner, or for `inviteEmail`: one row of each kind its delete cascades into.
+  const team = async (name: string, inviteEmail = 'joiner-lock@e2e.local'): Promise<Team> => {
     const created = await asOwner(http().post('/api/orgs')).send({ name }).expect(201);
     const org = created.body.id as string;
     const joining = await asOwner(http().post(`/api/orgs/${org}/invites`))
@@ -136,16 +144,22 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     const envName = `env-${suffix()}`;
     const env = await asOwner(http().post('/api/environments'), org).send({ name: envName }).expect(201);
     const pending = await asOwner(http().post(`/api/orgs/${org}/invites`))
-      .send({ email: 'joiner-lock@e2e.local' })
+      .send({ email: inviteEmail })
       .expect(201);
     return {
       org,
       env: env.body.id as string,
       envName,
       invite: pending.body.id as string,
+      inviteEmail,
       token: pending.body.token as string,
     };
   };
+
+  const register = (t: Team): request.Test =>
+    http()
+      .post('/api/auth/local/register')
+      .send({ email: t.inviteEmail, password: 'a-long-enough-passphrase', invite_token: t.token });
 
   const fillSlot = (t: Team): request.Test =>
     asOwner(http().put(`/api/environments/${t.env}/slots/gmail`), t.org).send({ connection_id: gmail });
@@ -264,19 +278,22 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       send: (t) => asJoiner(http().post(`/api/orgs/invites/${t.token}/accept`)),
       status: 200,
       heldAt: 'org lock',
-      gone: 'Invite not found or expired',
+      gone: { status: 404, detail: 'Invite not found or expired' },
+    },
+    {
+      name: 'a registration against an invite',
+      event: 'org.member_joined',
+      send: register,
+      invitee: () => `pending-${suffix()}@e2e.local`,
+      status: 201,
+      heldAt: 'org lock',
+      gone: SIGNUP_CLOSED,
     },
     {
       name: 'an environment create',
       event: 'environment.created',
       send: (t) => asOwner(http().post('/api/environments'), t.org).send({ name: `env-${suffix()}` }),
       status: 201,
-      heldAt: 'org lock',
-    },
-    {
-      name: "an environment list that creates the org's default environments",
-      send: (t) => asOwner(http().get('/api/environments'), t.org),
-      status: 200,
       heldAt: 'org lock',
     },
     {
@@ -490,7 +507,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     const event = writer.event ?? '';
     const then = writer.refusal ? 'refuses with 409' : 'removes the org';
     it(`${writer.name} holding the org row when an org delete starts lands first, and the org delete then ${then}`, async () => {
-      const t = await team(`${writer.name}, then an org delete`);
+      const t = await team(`${writer.name}, then an org delete`, writer.invitee?.());
       const accountsBefore = new Set(composioAccounts.created);
       await writer.prepare?.(t);
       const landed = (await outcome(t.org, event)).events;
@@ -517,8 +534,8 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       expect(await deadlocksSince(before)).toBe(0);
     });
 
-    it(`${writer.name} started while an org delete is in flight waits for it and answers 404`, async () => {
-      const t = await team(`an org delete, then ${writer.name}`);
+    it(`${writer.name} started while an org delete is in flight waits for it and answers ${(writer.gone ?? ORG_GONE).status}`, async () => {
+      const t = await team(`an org delete, then ${writer.name}`, writer.invitee?.());
       const accountsBefore = new Set(composioAccounts.created);
       await writer.prepare?.(t);
       const landed = (await outcome(t.org, event)).events;
@@ -531,7 +548,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         await lockWaiters(1);
         held.release(0);
         expect(await deleting).toBe(200);
-        expect(await writing).toEqual({ status: 404, detail: writer.gone ?? 'Organization not found' });
+        expect(await writing).toEqual(writer.gone ?? ORG_GONE);
       } finally {
         held.restore();
       }
@@ -652,10 +669,10 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         await slotIn(org, two, deleter.app, connection).expect(200);
         await slotIn(org, one, deleter.app, connection).expect(200);
         const scans = await db.query<{ envs: string[]; slots: string[] }>(
-          `SELECT (SELECT array_agg(id ORDER BY ctid) FROM environments WHERE org_id = $1) AS envs,
+          `SELECT (SELECT array_agg(id ORDER BY ctid) FROM environments WHERE org_id = $1 AND id = ANY($3::uuid[])) AS envs,
                   (SELECT array_agg(environment_id ORDER BY ctid) FROM environment_connections
                     WHERE connection_id = $2) AS slots`,
-          [org, connection],
+          [org, connection, [one, two]],
         );
         const { envs, slots } = scans.rows[0]!;
         if (envs.join() === [one, two].join() && slots.join() === [two, one].join()) return { org, one, two };
@@ -754,10 +771,20 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         const one = await team('Crossed clusters, one');
         const two = await team('Crossed clusters, two');
         const clusters = [await clusterIn(one), await clusterIn(two)];
-        await slotIn(two.org, two.env, 'slack', clusters[0]!.connection).expect(200);
-        await slotIn(one.org, one.env, 'slack', clusters[1]!.connection).expect(200);
-        // The first takes the lower id, the second's environment, before its own.
-        const [second, first] = one.env < two.env ? [one, two] : [two, one];
+        // The first locks the lowest id of all, the second's environment its connection fills, before its own lowest, which the second's connection fills.
+        const lowestIn = async (orgs: string[]): Promise<{ id: string; org_id: string }> =>
+          (
+            await db.query<{ id: string; org_id: string }>(
+              `SELECT id, org_id FROM environments WHERE org_id = ANY($1::uuid[]) ORDER BY id LIMIT 1`,
+              [orgs],
+            )
+          ).rows[0]!;
+        const lowest = await lowestIn([one.org, two.org]);
+        const [second, first] = lowest.org_id === one.org ? [one, two] : [two, one];
+        const [secondCluster, firstCluster] = second === one ? clusters : [clusters[1], clusters[0]];
+        const firstLowest = await lowestIn([first.org]);
+        await slotIn(second.org, lowest.id, 'slack', firstCluster!.connection).expect(200);
+        await slotIn(first.org, firstLowest.id, 'slack', secondCluster!.connection).expect(200);
         const held = bounded(holdQuery(at, 'after'), 'the first org delete');
         const before = await deadlocks();
         try {
@@ -896,7 +923,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     });
   });
 
-  describe('an invite accept beside a revoke or a second accept of the same invite', () => {
+  describe('an invite accept or a registration against it beside a revoke or another accept of the same invite', () => {
     const accept = (who: typeof asJoiner, t: Team): request.Test =>
       who(http().post(`/api/orgs/invites/${t.token}/accept`));
     const revoke = (t: Team): request.Test =>
@@ -931,6 +958,21 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       const row = rows[0]!;
       return { joined: row.joined ?? [], invite: row.invite, revoked: row.revoked };
     };
+
+    // Read on the test's own client, so an account shows only once the registration making it commits; the joiner's is not one a registration made.
+    const registered = async (
+      t: Team,
+    ): Promise<{ accounts: number; members: number; invite: string | null }> =>
+      (
+        await db.query<{ accounts: number; members: number; invite: string | null }>(
+          `SELECT (SELECT count(*)::int FROM users WHERE email = $1 AND id <> $4) AS accounts,
+                  (SELECT count(*)::int FROM org_members m JOIN users u ON u.id = m.user_id
+                    WHERE m.org_id = $2 AND u.email = $1 AND u.id <> $4) AS members,
+                  (SELECT coalesce(u.email, 'pending') FROM org_invites i
+                     LEFT JOIN users u ON u.id = i.accepted_by WHERE i.id = $3) AS invite`,
+          [t.inviteEmail, t.org, t.invite, joiner],
+        )
+      ).rows[0]!;
 
     it('an invite revoke holding the invite when an accept of it starts lands first, and the accept answers 404 as for a spent invite', async () => {
       const t = await team('Revoke, then accept');
@@ -989,6 +1031,75 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
         await holder.end();
       }
       expect(await settled(t)).toEqual({ joined: [joiner], invite: joiner, revoked: 0 });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an invite revoke holding the invite when a registration against it starts lands first, and the registration is refused as signup_closed, creating no account', async () => {
+      const t = await team('Revoke, then register', `pending-${suffix()}@e2e.local`);
+      const held = gateEmits('org.invite_revoked');
+      const before = await deadlocks();
+      try {
+        const revoking = statusOf(revoke(t));
+        await held.arrived(0);
+        await holdsInvite(t);
+        const registering = answer(register(t));
+        await lockWaiters(1);
+        held.release(0);
+        expect({ revoke: await revoking, register: await registering }).toEqual({
+          revoke: 200,
+          register: SIGNUP_CLOSED,
+        });
+      } finally {
+        held.restore();
+      }
+      expect(await registered(t)).toEqual({ accounts: 0, members: 0, invite: null });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('an invite accept holding the invite when a registration against it starts lands first, and the registration is refused as signup_closed, creating no account', async () => {
+      const t = await team('Accept, then register');
+      const holder = await parkJoiner();
+      const before = await deadlocks();
+      try {
+        const accepting = answer(accept(asJoiner, t));
+        await lockWaiters(1);
+        await holdsInvite(t);
+        const registering = answer(register(t));
+        await lockWaiters(2);
+        await holder.query('COMMIT');
+        expect({ accept: (await accepting).status, register: await registering }).toEqual({
+          accept: 200,
+          register: SIGNUP_CLOSED,
+        });
+      } finally {
+        await holder.end();
+      }
+      expect(await registered(t)).toEqual({ accounts: 0, members: 0, invite: 'joiner-lock@e2e.local' });
+      expect(await settled(t)).toEqual({ joined: [joiner], invite: joiner, revoked: 0 });
+      expect(await deadlocksSince(before)).toBe(0);
+    });
+
+    it('a registration against an invite holding it when a revoke of it starts lands first, its account committing only with its accept, and the revoke answers 404', async () => {
+      const t = await team('Register, then revoke', `pending-${suffix()}@e2e.local`);
+      const held = gateEmits('org.member_joined');
+      const before = await deadlocks();
+      try {
+        const registering = statusOf(register(t));
+        await held.arrived(0);
+        await holdsInvite(t);
+        expect(await registered(t)).toEqual({ accounts: 0, members: 0, invite: 'pending' });
+        const revoking = answer(revoke(t));
+        await lockWaiters(1);
+        held.release(0);
+        expect({ register: await registering, revoke: await revoking }).toEqual({
+          register: 201,
+          revoke: { status: 404, detail: 'Invite not found' },
+        });
+      } finally {
+        held.restore();
+      }
+      expect(await registered(t)).toEqual({ accounts: 1, members: 1, invite: t.inviteEmail });
+      expect((await settled(t)).revoked).toBe(0);
       expect(await deadlocksSince(before)).toBe(0);
     });
   });
