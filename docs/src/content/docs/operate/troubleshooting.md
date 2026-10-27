@@ -190,6 +190,19 @@ message again.
 **"The composer's model (…) is not available to the saved Anthropic API key."** — set
 [`COMPOSER_MODEL`](/operate/configuration/#commonly-set) to a model the key can use.
 
+Two answers come from this server rather than from Anthropic, when the message cannot start.
+
+**"Too many requests from your address — try again in a minute."** — too many composer requests came
+from your address, an IPv6 one counted per `/64`, in the last minute. Wait a minute and send the
+message again. If it reaches everyone at once, another proxy probably sits in front of Sarati's
+own: [Behind another proxy](/operate/configuration/#behind-another-proxy) says what to set.
+
+**"The AI composer needs an Anthropic API key. …"** while a key is saved — the agent could not read
+the key from the workflow service as the message started: the service was down, restarting, too slow
+or answered with an error. Check that it is up and read its log and the agent's
+([Reading the logs](#reading-the-logs)), then send the message again. With no key saved, add one in
+**Settings → Platform keys**.
+
 Anything else reads **"The composer hit a problem — please try again."**, and the reason is in
 [the logs](#reading-the-logs).
 
