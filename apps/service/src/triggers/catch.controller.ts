@@ -4,6 +4,7 @@ import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
+import { CapabilityPath } from '../common/request-log-redaction';
 import { CatchStore } from './catch-store';
 import { Scope } from '../auth/scope.decorator';
 
@@ -30,6 +31,7 @@ export class CatchController {
 
   @Throttle({ default: { limit: 240, ttl: 60_000 } }) // the picker polls ~every 2s
   @Scope('workflow:read')
+  @CapabilityPath()
   @Get(':catchId')
   read(@Req() req: Request, @Param('catchId') catchId: string): Record<string, unknown> {
     return this.store.read(catchId, this.userId(req));

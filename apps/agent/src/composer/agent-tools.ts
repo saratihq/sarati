@@ -375,11 +375,14 @@ export async function runApplyOps(ctx: ToolContext, ops: ComposeOp[]): Promise<T
   }
 }
 
+// Every entry is an object: the client's canvas reaches the draft only through normalizeCanvas.
+function draftNodes(ctx: ToolContext): Array<Record<string, unknown>> {
+  const nodes = ctx.session.draftIr?.nodes;
+  return Array.isArray(nodes) ? (nodes as Array<Record<string, unknown>>) : [];
+}
+
 function draftNode(ctx: ToolContext, id: unknown): Record<string, unknown> | undefined {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
-  return nodes.find((n) => n.id === id);
+  return draftNodes(ctx).find((n) => n.id === id);
 }
 
 /** The node type an op writes parameters on — its own for an add, the draft's for an update. */
@@ -559,9 +562,7 @@ export async function runAskUser(
 
 /** The note_assumption handler: badge a draft step; unknown ids bounce back with the survivors. */
 export function runNoteAssumption(ctx: ToolContext, input: { node_id: string; text: string }): ToolResult {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   if (!nodes.some((n) => n.id === input.node_id)) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
     return {
@@ -623,9 +624,7 @@ export async function runTestStep(
   nodeId: string,
   sampleScope: Record<string, unknown>,
 ): Promise<ToolResult> {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
@@ -1001,9 +1000,7 @@ export async function runNeedConnection(
   ctx: ToolContext,
   input: { node_id: string; provider: string; provider_label: string },
 ): Promise<ToolResult> {
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === input.node_id);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';
@@ -1114,9 +1111,7 @@ export async function runFillParams(ctx: ToolContext, nodeId: string, intent: st
       isError: true,
     };
   }
-  const nodes = Array.isArray(ctx.session.draftIr?.nodes)
-    ? (ctx.session.draftIr.nodes as Array<Record<string, unknown>>)
-    : [];
+  const nodes = draftNodes(ctx);
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) {
     const ids = nodes.map((n) => String(n.id)).join(', ') || '(none)';

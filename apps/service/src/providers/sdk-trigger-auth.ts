@@ -112,6 +112,7 @@ export function buildObservedDirectAuth(
   const direct = new DirectTransport({ scheme, credential, ...(fetchImpl ? { fetchImpl } : {}) });
   return createAuth(scheme, {
     kind: direct.kind,
+    redact: (text) => direct.redact(text),
     send: async (request) => {
       const response = await direct.send(request);
       onResponse(response);
