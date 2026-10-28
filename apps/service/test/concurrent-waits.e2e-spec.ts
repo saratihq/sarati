@@ -7,7 +7,9 @@ import type { Response } from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { eventTopicFor } from '../src/runtime/event-wait';
+import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import { listenOnLoopback } from './support/listen';
+import { holdResume, reached } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** One wait in a run: on `topic` it waits on a person, without one it sleeps on its own clock. */
@@ -529,11 +531,27 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       'both approvals listed',
     );
 
-    await answer('stale', 'approval', { decision: 'approved' }, firstKey).expect(200);
+    const [run] = (await db.query<{ id: string }>(`SELECT id FROM runtime_runs WHERE run_id = $1`, ['stale']))
+      .rows;
+    const take = holdResume(app.get(RunRecorderService), {
+      match: (scoped, stepKey) => scoped === run!.id && stepKey === firstKey,
+    });
+    try {
+      await answer('stale', 'approval', { decision: 'approved' }, firstKey).expect(200);
+      await reached(take.arrived, 'the run taking the first decision', 15_000);
+      const onItsWay = await answer('stale', 'approval', { decision: 'rejected' }, firstKey);
+      expect(onItsWay.status).toBe(409);
+      expect(onItsWay.body.detail).toBe(`Step "${firstKey}" of run stale is already decided`);
+      expect((await inboxFor('stale')).map((r) => r.step_key)).toEqual([secondKey]);
+    } finally {
+      take.restore();
+    }
+
     await eventually(
-      () => inboxFor('stale'),
-      (rows) => rows.length === 1,
-      'the first answered',
+      async () =>
+        (await http().get('/api/runs/stale').expect(200)).body.steps as Array<Record<string, unknown>>,
+      (steps) => steps.find((s) => s.step_key === firstKey)?.status === 'completed',
+      'the run took the first decision',
     );
     const late = await answer('stale', 'approval', { decision: 'rejected' }, firstKey);
     expect(late.status).toBe(409);
@@ -546,7 +564,7 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
       first: { decision: 'approved' },
       second: { decision: 'second' },
     });
-  });
+  }, 60_000);
 
   /** The run row's id, slot and each step's receive, by step key. */
   async function receivesOf(

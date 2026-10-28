@@ -518,7 +518,7 @@ export class RunsService {
     ir: WorkflowIR,
     opts: IrRunOptions,
   ): Promise<{ runId: string; pending: Promise<RunResult> }> {
-    if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
+    if (opts.workflowId) await this.runnableWorkflow(opts.workflowId, opts.activeOrgId ?? null);
     const runId = opts.runId ?? randomUUID();
     const plan = await this.compile({ ir }, opts, runId);
     return {
@@ -719,7 +719,7 @@ export class RunsService {
     this.requireDbos();
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
-    if (opts.workflowId) await this.assertWorkflowRunnable(opts.workflowId, opts.activeOrgId ?? null);
+    if (opts.workflowId) await this.runnableWorkflow(opts.workflowId, opts.activeOrgId ?? null);
     const dag = await this.compile(source, opts, runId);
     await this.recorder?.runStarted(scoped, runId, opts.externalUserId, dag, {
       workflowId: opts.workflowId ?? null,
@@ -1152,14 +1152,15 @@ export class RunsService {
     return { runId, status: 'cancelled' };
   }
 
-  /** Linkage guard: the workflow must exist AND live in the caller's active org — anything else is an indistinguishable 404. */
-  private async assertWorkflowRunnable(workflowId: string, activeOrgId: string | null): Promise<void> {
+  /** Linkage guard for a caller-started run of a workflow: it must exist AND live in the caller's active org — anything else is an indistinguishable 404. */
+  async runnableWorkflow(workflowId: string, activeOrgId: string | null): Promise<WorkflowEntity> {
     const notFound = new DomainError(`Workflow ${workflowId} not found`, 404);
     if (!isIdShape(workflowId)) throw notFound;
     const em = this.dataSource?.manager;
     if (!em) throw notFound;
     const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
     if (!wf || wf.orgId !== activeOrgId) throw notFound;
+    return wf;
   }
 
   /** The DBOS workflow id is namespaced per user, so a client-supplied `run_id` can never resolve or collide outside the caller's namespace. */

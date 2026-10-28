@@ -7,7 +7,11 @@ import { canonicalEnvName } from '../../environments/env-name';
  * within an env, so it must never be re-keyed per version. Env names canonicalize here (invariant #7).
  */
 
-const HOOKS_PREFIX = 'api/hooks';
+/** The route prefix of the public webhook intake, no leading slash. */
+export const HOOKS_PREFIX = 'api/hooks';
+
+/** The route prefix of the public chat intake, no leading slash. */
+export const CHAT_PREFIX = 'api/chat';
 
 /** The parsed target of a per-`(workflow, env)` webhook hit. */
 export interface WebhookTarget {
@@ -23,7 +27,7 @@ export function webhookPathFor(workflowId: string, environment: string): string 
 
 /** The canonical per-`(workflow, env)` chat PATH. */
 export function chatPathFor(workflowId: string, environment: string): string {
-  return `/api/chat/${workflowId}/${canonicalEnvName(environment)}`;
+  return `/${CHAT_PREFIX}/${workflowId}/${canonicalEnvName(environment)}`;
 }
 
 /** The absolute URL, given a public base (a trailing slash on the base is trimmed). */

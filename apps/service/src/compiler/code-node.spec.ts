@@ -106,7 +106,7 @@ describe('code node compilation', () => {
     it('rejects a TypeScript snippet that does not compile', () => {
       expect(() =>
         compileWorkflowIrDag(ir([codeIrNode('bad', { language: 'ts', code: 'const x: = ;' })])),
-      ).toThrow(/TypeScript error/);
+      ).toThrow('Code node "bad" has a TypeScript syntax error at line 1, column 10: Unexpected "="');
     });
   });
 
