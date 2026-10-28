@@ -182,6 +182,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_trigger_activations' AND column_name='held'",
   },
+  {
+    migration: '042_org_default_environments.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='organizations' AND column_name='environments_seeded_at'",
+  },
 ];
 
 /**

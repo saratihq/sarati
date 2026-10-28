@@ -577,7 +577,6 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   };
 
   const productionOf = async (org: string): Promise<string> => {
-    await asA(http().get('/api/environments').set('X-Org-Id', org)).expect(200);
     const env = await db.query<{ id: string }>(
       `SELECT id FROM environments WHERE org_id = $1 AND lower(name) = 'production'`,
       [org],

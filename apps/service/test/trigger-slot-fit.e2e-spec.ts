@@ -18,6 +18,7 @@ import { EncryptionService } from '../src/common/crypto/encryption.service';
 import type { EnvConfig } from '../src/config/env.config';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { ACTIVATION_LOCK_SPACE } from '../src/database/advisory-lock-spaces';
 import { RuntimeTriggerActivationEntity } from '../src/database/entities/runtime-trigger-activation.entity';
 import { WorkflowVersionEntity } from '../src/database/entities/workflow-version.entity';
 import * as ids from '../src/database/ids';
@@ -409,7 +410,6 @@ async function shutdown(): Promise<void> {
 const workspace = async (name: string): Promise<{ org: string; production: string; staging: string }> => {
   const created = await asA(http().post('/api/orgs').send({ name })).expect(201);
   const org = created.body.id as string;
-  await asA(http().get('/api/environments').set('X-Org-Id', org)).expect(200);
   const envs = await db.query<{ id: string; name: string }>(
     `SELECT id, lower(name) AS name FROM environments WHERE org_id = $1`,
     [org],
@@ -850,8 +850,8 @@ const activationLocked = async (activationId: string): Promise<boolean> =>
     await db.query<{ locked: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
           WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.granted
-            AND l.classid = 7301 AND l.objid = hashtext($1)::oid AND l.objsubid = 2) AS locked`,
-      [activationId],
+            AND l.classid = $2 AND l.objid = hashtext($1)::oid AND l.objsubid = 2) AS locked`,
+      [activationId, ACTIVATION_LOCK_SPACE],
     )
   ).rows[0]!.locked;
 

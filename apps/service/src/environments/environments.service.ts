@@ -33,7 +33,7 @@ import {
 export interface SlotView {
   app: string;
   connection_id: string;
-  /** The connection's display identity: its display name, else the account the provider named, else the app. */
+  /** The connection's display identity: its display name, else the account the provider named, else its provider. */
   account_label: string;
   owner_user_id: string;
   /** Whose account fills this slot — the owning user's email (human-readable). */
@@ -85,8 +85,6 @@ const DRAIN_CONCURRENCY = 5;
 
 const ENSURE_ATTEMPTS = 3;
 
-const DEFAULT_ENVS = [PROD_ENV, 'staging', UAT_ENV];
-
 const HAND_GIVEN_URLS = [
   { trigger: 'chat', nodeType: INCOMING_CHAT_PUBLIC, pathFor: chatPathFor },
   { trigger: 'webhook', nodeType: INCOMING_WEBHOOK_PUBLIC, pathFor: webhookPathFor },
@@ -114,7 +112,6 @@ export class EnvironmentsService {
 
   /** The org's environments (prod first), with slots and pointer/trigger counts. */
   async list(orgId: string): Promise<EnvironmentView[]> {
-    await this.ensureDefaults(orgId);
     const em = this.dataSource.manager;
     const envs = await rawQuery<{
       id: string;
@@ -571,25 +568,6 @@ export class EnvironmentsService {
     return env;
   }
 
-  /** Lazy defaults: prod (is_prod anchor) + staging + uat, once per org. */
-  private async ensureDefaults(orgId: string): Promise<void> {
-    const [present] = await rawQuery<{ count: number }>(
-      this.dataSource.manager,
-      `SELECT count(*)::int AS count FROM environments WHERE org_id = $1 AND lower(name) = ANY($2)`,
-      [orgId, DEFAULT_ENVS],
-    );
-    if (present?.count === DEFAULT_ENVS.length) return;
-    await this.dataSource.transaction(async (em) => {
-      await lockOrgForWrite(em, orgId);
-      await em.query(
-        `INSERT INTO environments (org_id, name, is_prod)
-         SELECT $1, name, name = $3 FROM unnest($2::text[]) AS name
-         ON CONFLICT (org_id, lower(name)) DO NOTHING`,
-        [orgId, DEFAULT_ENVS, PROD_ENV],
-      );
-    });
-  }
-
   private findByName(
     em: EntityManager,
     orgId: string,
@@ -606,9 +584,8 @@ export class EnvironmentsService {
   private validName(rawName: string): string {
     const name = normalizeEnvName(rawName.trim());
     if (!ENV_NAME_SHAPE.test(name)) throw new DomainError('Invalid environment name', 400);
-    if (RESERVED_ENV_NAMES.has(name)) {
-      throw new DomainError(`'${name}' is reserved — it names the connection pool`, 400);
-    }
+    const reserved = RESERVED_ENV_NAMES.get(name);
+    if (reserved) throw new DomainError(`'${name}' is reserved — ${reserved}`, 400);
     return name;
   }
 }

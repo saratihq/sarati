@@ -64,7 +64,8 @@ import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform
 /** One inbound delivery as the public intake sees it (raw bytes + headers required for HMAC verify). */
 export interface InboundWebhook {
   body: unknown;
-  rawBody: string;
+  /** The body's bytes as sent, once any Content-Encoding is undone — what every signature is checked over. */
+  rawBody: Buffer;
   headers: Record<string, string>;
 }
 
@@ -330,7 +331,7 @@ export class TriggersService {
         webhookUrl: '',
         secret: secret ?? '',
         registration: registration ?? undefined,
-        request: { headers: inbound.headers, body: inbound.body, rawBody: inbound.rawBody },
+        request: { headers: inbound.headers, body: inbound.body, rawBody: inbound.rawBody.toString('utf8') },
       });
     } catch (err) {
       throw mapRegisteredWebhookError(err);

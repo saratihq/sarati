@@ -543,6 +543,50 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     await asPinned(http().get(`/api/workflows/${own.body.workflow_id as string}`)).expect(200);
   });
 
+  it('a key issued for one org neither creates an organization nor joins one', async () => {
+    const pinned = 'ork_e2e_pinned_join_jjjjjjjjjjjjjjjjj';
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'pinned', $3, $4, $5, now())`,
+      [userA, personalA, hash(pinned), pinned.slice(0, 12), JSON.stringify(['org:manage'])],
+    );
+    const asPinned = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${pinned}`);
+    const membershipsOfA = async (): Promise<string[]> =>
+      (
+        await db.query<{ org_id: string }>(
+          `SELECT org_id FROM org_members WHERE user_id = $1 ORDER BY org_id`,
+          [userA],
+        )
+      ).rows.map((r) => r.org_id);
+    const before = await membershipsOfA();
+
+    const made = await asPinned(http().post('/api/orgs').send({ name: 'Pinned escape' })).expect(403);
+    expect(made.body.detail).toBe('This API key is scoped to a different organization');
+    expect((await db.query(`SELECT 1 FROM organizations WHERE name = 'Pinned escape'`)).rows).toEqual([]);
+
+    const gamma = (await asB(http().post('/api/orgs').send({ name: 'Gamma' })).expect(201)).body.id as string;
+    const invite = await asB(
+      http().post(`/api/orgs/${gamma}/invites`).send({ email: 'owner-a@e2e.local', role: 'owner' }),
+    ).expect(201);
+    const token = invite.body.token as string;
+    try {
+      const joined = await asPinned(http().post(`/api/orgs/invites/${token}/accept`)).expect(403);
+      expect(joined.body.detail).toBe('This API key is scoped to a different organization');
+      expect(await membershipsOfA()).toEqual(before);
+      const pending = await db.query<{ accepted_at: Date | null }>(
+        `SELECT accepted_at FROM org_invites WHERE id = $1`,
+        [invite.body.id],
+      );
+      expect(pending.rows).toEqual([{ accepted_at: null }]);
+
+      await asA(http().post(`/api/orgs/invites/${token}/accept`)).expect(200);
+      expect(await membershipsOfA()).toContain(gamma);
+    } finally {
+      await db.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`, [gamma, userA]);
+      await asB(http().delete(`/api/orgs/${gamma}`)).expect(200);
+    }
+  });
+
   it('only an owner can invite an owner', async () => {
     const setB = (role: string) =>
       db.query(`UPDATE org_members SET role = $3 WHERE org_id = $1 AND user_id = $2`, [orgId, userB, role]);
@@ -942,7 +986,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       [slotOrgId, userB],
     );
 
-    // Lazy defaults give the org a staging environment (owner-curated).
+    // The org starts with a staging environment.
     const envs = await asA(http().get('/api/environments').set('X-Org-Id', slotOrgId)).expect(200);
     const staging = (envs.body.environments as Array<{ id: string; name: string }>).find(
       (e) => e.name === 'staging',

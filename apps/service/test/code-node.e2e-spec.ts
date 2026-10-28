@@ -4,6 +4,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ir, irEdge, irNode } from './support/golden-docs';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -34,74 +35,93 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
     process.env.MOCK_AUTH = 'false';
   }, 30_000);
 
-  const codeNode = (id: string, parameters: Record<string, unknown>) => ({
-    id,
-    name: id,
-    node_type: 'orchestr:code',
-    type_version: 1,
-    parameters,
-    position: { x: 0, y: 0 },
-    metadata: {},
-  });
+  const codeNode = (id: string, parameters: Record<string, unknown>) =>
+    irNode(id, 'orchestr:code', parameters);
+  const runIr = (workflow_ir: unknown, trigger_payload?: unknown) =>
+    request(app.getHttpServer()).post('/api/runs/from-ir').send({ workflow_ir, trigger_payload });
+  const runTs = (id: string, code: string, trigger_payload?: unknown) =>
+    runIr(ir([codeNode(id, { language: 'ts', code })], []), trigger_payload);
 
   it('runs a JS snippet that transforms the trigger payload and feeds a downstream ref', async () => {
-    const workflow_ir = {
-      version: '1',
-      name: 'code-js',
-      description: '',
-      nodes: [
+    const workflow_ir = ir(
+      [
         codeNode('total', {
           language: 'js',
           code: 'return { sum: trigger.items.reduce((a, b) => a + b, 0), count: trigger.items.length };',
         }),
       ],
-      edges: [],
-      settings: { execution_order: 'v1', extra: {} },
-      metadata: {},
-    };
-    const res = await request(app.getHttpServer())
-      .post('/api/runs/from-ir')
-      .send({ workflow_ir, trigger_payload: { items: [10, 20, 12] } })
-      .expect(201);
+      [],
+    );
+    const res = await runIr(workflow_ir, { items: [10, 20, 12] }).expect(201);
     expect(res.body.outputs.total).toEqual({ sum: 42, count: 3 });
   });
 
   it('transpiles + runs a TypeScript snippet in the sandbox', async () => {
-    const workflow_ir = {
-      version: '1',
-      name: 'code-ts',
-      description: '',
-      nodes: [
-        codeNode('shape', {
-          language: 'ts',
-          code: 'const label: string = trigger.name as string; return { greeting: `hi ${label}` };',
-        }),
-      ],
-      edges: [],
-      settings: { execution_order: 'v1', extra: {} },
-      metadata: {},
-    };
-    const res = await request(app.getHttpServer())
-      .post('/api/runs/from-ir')
-      .send({ workflow_ir, trigger_payload: { name: 'ada' } })
-      .expect(201);
+    const res = await runTs(
+      'shape',
+      'const label: string = trigger.name as string; return { greeting: `hi ${label}` };',
+      { name: 'ada' },
+    ).expect(201);
     expect(res.body.outputs.shape).toEqual({ greeting: 'hi ada' });
   });
 
+  it('a TypeScript snippet may await and return, as the async function body it runs as', async () => {
+    const code = [
+      'const seen: number[] = [];',
+      'for await (const v of [Promise.resolve(1), 2]) seen.push(v);',
+      'const r: number = await Promise.resolve(trigger.n as number);',
+      'return { doubled: r * 2, seen };',
+    ].join('\n');
+    const res = await runTs('dbl', code, { n: 21 });
+    expect(res.body).toMatchObject({ outputs: { dbl: { doubled: 42, seen: [1, 2] } } });
+    expect(res.status).toBe(201);
+  });
+
+  it('a TypeScript snippet that awaits and returns saves through the commit door', async () => {
+    const trigger = irNode('trigger', 'orchestr:trigger', {});
+    const withCode = (language: string, code: string) =>
+      ir([trigger, codeNode('calc', { language, code })], [irEdge('trigger', 'calc')]);
+    const dep = await request(app.getHttpServer())
+      .post('/api/deploy')
+      .send({ workflow_json: withCode('js', 'return 1;') })
+      .expect(201);
+    const saved = await request(app.getHttpServer())
+      .post(`/api/workflows/${dep.body.workflow_id as string}/commit`)
+      .send({ workflow_ir: withCode('ts', 'const r: number = await Promise.resolve(2); return r * 2;') });
+    expect(saved.body).not.toHaveProperty('detail');
+    expect(saved.status).toBe(201);
+  });
+
+  it('TypeScript is type-stripped, not type-checked: a type error compiles and runs as JS', async () => {
+    const res = await runTs('loose', 'const n: number = "y"; return { n, kind: typeof n };').expect(201);
+    expect(res.body.outputs.loose).toEqual({ n: 'y', kind: 'string' });
+  });
+
+  it("a TS syntax error is refused before any step runs, at the snippet's own line and column", async () => {
+    const res = await runTs('bad', 'const total = 1;\nconst note = "€"; const x: = total;').expect(400);
+    expect(res.body.code).toBe('compile_failed');
+    expect(res.body.detail).toContain(
+      'Code node "bad" has a TypeScript syntax error at line 2, column 28: Unexpected "="',
+    );
+  });
+
+  it('an unclosed TypeScript snippet is refused at its end, not at a line it does not have', async () => {
+    const res = await runTs('open', 'if (trigger) {\n  return 1;').expect(400);
+    expect(res.body.detail).toContain(
+      'Code node "open" has a TypeScript syntax error at the end of the snippet: Unexpected end of file',
+    );
+  });
+
+  it('a stray closing brace is refused at its own line, not where it closed the step early', async () => {
+    const res = await runTs('stray', 'const a = await Promise.resolve(1);\n}\nreturn a;').expect(400);
+    expect(res.body.detail).toContain(
+      'Code node "stray" has a TypeScript syntax error at line 2, column 1: Unexpected "}"',
+    );
+  });
+
   it('a snippet that throws fails the run with a clean sandbox error (no raw host trace)', async () => {
-    const workflow_ir = {
-      version: '1',
-      name: 'code-throw',
-      description: '',
-      nodes: [codeNode('boom', { code: 'throw new Error("intentional");' })],
-      edges: [],
-      settings: { execution_order: 'v1', extra: {} },
-      metadata: {},
-    };
-    const res = await request(app.getHttpServer())
-      .post('/api/runs/from-ir')
-      .send({ workflow_ir })
-      .expect(400);
+    const workflow_ir = ir([codeNode('boom', { code: 'throw new Error("intentional");' })], []);
+    const res = await runIr(workflow_ir).expect(400);
     expect(JSON.stringify(res.body)).toContain('intentional');
   });
 
