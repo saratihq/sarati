@@ -8,6 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -134,6 +135,8 @@ describe('a branch test under an environment takes the right to promote there (e
               (gen_random_uuid(), $1, $4, 'admin', now()), (gen_random_uuid(), $5, $2, 'owner', now())`,
       [orgId, owner, member, admin, personalOrgId],
     );
+    await seedDefaultEnvironments(db, orgId);
+    await seedDefaultEnvironments(db, personalOrgId);
     for (const [user, org, key, scopes] of [
       [member, orgId, keys.member, ['run:execute', 'workflow:read', 'workflow:deploy']],
       [owner, orgId, keys.ownerNoDeploy, ['run:execute', 'workflow:read']],

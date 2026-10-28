@@ -10,6 +10,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
@@ -119,6 +120,8 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
               (gen_random_uuid(), $3, $4, 'owner', now())`,
       [personalA, userA, personalB, userB],
     );
+    await seedDefaultEnvironments(db, personalA);
+    await seedDefaultEnvironments(db, personalB);
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
        VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
@@ -213,7 +216,29 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     return res.body.environments as Array<Record<string, unknown>>;
   }
 
-  it('lazy defaults: the first list ensures prod (is_prod anchor) + staging + uat; members may read', async () => {
+  type Env = { id: string; name: string };
+  const envsIn = async (org: string, as = asA): Promise<Env[]> =>
+    (await as(http().get('/api/environments').set('X-Org-Id', org)).expect(200)).body.environments as Env[];
+  const envNames = async (org: string, as = asA): Promise<string[]> =>
+    (await envsIn(org, as)).map((e) => e.name);
+  const stagingOf = async (org: string): Promise<string> =>
+    (await envsIn(org)).find((e) => e.name === 'staging')!.id;
+  const newOrg = async (name: string): Promise<string> =>
+    (await asA(http().post('/api/orgs').send({ name })).expect(201)).body.id as string;
+
+  it('a new org starts with production (is_prod anchor) + staging + uat before anything lists them', async () => {
+    const rows = await db.query<{ name: string; is_prod: boolean }>(
+      `SELECT name, is_prod FROM environments WHERE org_id = $1 ORDER BY name`,
+      [orgId],
+    );
+    expect(rows.rows).toEqual([
+      { name: 'production', is_prod: true },
+      { name: 'staging', is_prod: false },
+      { name: 'uat', is_prod: false },
+    ]);
+  });
+
+  it('the environment list shows them, production first; members may read', async () => {
     const envs = await listEnvs();
     expect(envs.map((e) => [e.name, e.is_prod])).toEqual([
       ['production', true], // is_prod first
@@ -232,6 +257,48 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     await asB(http().get('/api/environments').set('X-Org-Id', orgId)).expect(200);
     // …and a non-member org id is a 403 at the guard.
     await asB(http().get('/api/environments').set('X-Org-Id', randomUUID())).expect(403);
+  });
+
+  it('a deleted staging stays deleted for every reader, and its name is free again', async () => {
+    const org = await newOrg('Deletes Staging');
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'member', now())`,
+      [org, userB],
+    );
+    const staging = await stagingOf(org);
+    await asA(http().delete(`/api/environments/${staging}`).set('X-Org-Id', org)).expect(200);
+
+    expect(await envNames(org)).toEqual(['production', 'uat']);
+    expect(await envNames(org, asB)).toEqual(['production', 'uat']);
+    const left = await db.query<{ staging: number; created: number }>(
+      `SELECT (SELECT count(*)::int FROM environments WHERE org_id = $1 AND lower(name) = 'staging') AS staging,
+              (SELECT count(*)::int FROM domain_events WHERE org_id = $1 AND type = 'environment.created') AS created`,
+      [org],
+    );
+    expect(left.rows[0]).toEqual({ staging: 0, created: 0 });
+
+    const again = await asA(
+      http().post('/api/environments').set('X-Org-Id', org).send({ name: 'staging' }),
+    ).expect(201);
+    expect(again.body.id).not.toBe(staging);
+    expect(await envNames(org)).toEqual(['production', 'staging', 'uat']);
+  });
+
+  it('a renamed staging leaves no second staging, and renames back to staging', async () => {
+    const org = await newOrg('Renames Staging');
+    const staging = await stagingOf(org);
+    const renamed = await asA(
+      http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'preview' }),
+    ).expect(200);
+    expect(renamed.body).toEqual({ id: staging, name: 'preview' });
+
+    expect(await envNames(org)).toEqual(['production', 'preview', 'uat']);
+    const back = await asA(
+      http().patch(`/api/environments/${staging}`).set('X-Org-Id', org).send({ name: 'staging' }),
+    ).expect(200);
+    expect(back.body).toEqual({ id: staging, name: 'staging' });
+    expect(await envNames(org)).toEqual(['production', 'staging', 'uat']);
   });
 
   it('personal workspaces get the identical surface (no X-Org-Id → the personal org)', async () => {
@@ -258,7 +325,21 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     // Case-insensitive uniqueness, reserved + malformed names.
     await asA(http().post('/api/environments').set('X-Org-Id', orgId).send({ name: 'qa' })).expect(409);
     await asA(http().post('/api/environments').set('X-Org-Id', orgId).send({ name: 'Qa' })).expect(409);
-    await asA(http().post('/api/environments').set('X-Org-Id', orgId).send({ name: 'default' })).expect(400);
+    const pool = await asA(
+      http().post('/api/environments').set('X-Org-Id', orgId).send({ name: 'default' }),
+    ).expect(400);
+    expect(pool.body.detail).toBe("'default' is reserved — it names the connection pool");
+    for (const name of ['prod', 'PROD']) {
+      const prod = await asA(http().post('/api/environments').set('X-Org-Id', orgId).send({ name })).expect(
+        400,
+      );
+      expect(prod.body.detail).toBe("'prod' is reserved — it is another name for 'production'");
+    }
+    const toProd = await asA(
+      http().patch(`/api/environments/${qaId}`).set('X-Org-Id', orgId).send({ name: 'prod' }),
+    ).expect(400);
+    expect(toProd.body.detail).toBe("'prod' is reserved — it is another name for 'production'");
+    expect((await listEnvs()).find((e) => e.id === qaId)?.name).toBe('qa');
     await asA(http().post('/api/environments').set('X-Org-Id', orgId).send({ name: 'bad.env' })).expect(400);
 
     // Rename: is_prod is non-renamable; duplicates refused; a clean rename lands.
@@ -382,6 +463,11 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
         .set('X-Org-Id', orgId)
         .send({ connection_id: zoho }),
     ).expect(200);
+    expect((await listEnvs()).find((e) => e.id === stagingId)!.slots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ app: 'zoho-crm', connection_id: zoho, account_label: 'zoho' }),
+      ]),
+    );
     await asA(http().delete(`/api/environments/${stagingId}/slots/zoho-crm`).set('X-Org-Id', orgId)).expect(
       200,
     );

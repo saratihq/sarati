@@ -6,9 +6,11 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client as PgClient } from 'pg';
+import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -55,6 +57,7 @@ describe('Platform MCP (e2e, real client, isolated DB)', () => {
        VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
       [orgId, userId],
     );
+    await seedDefaultEnvironments(db, orgId);
     await db.query(
       `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'full',  $3, 'ork_mcp_full', NULL, now()),
@@ -108,10 +111,36 @@ describe('Platform MCP (e2e, real client, isolated DB)', () => {
     expect(structured.org).toMatchObject({ id: orgId, name: 'MCP Workspace', pinned: true });
     expect(structured.user).toMatchObject({ id: userId, email: 'mcp@e2e.local' });
     expect(structured.capabilities).toContain('orchestr_context');
-    // Environments are seeded on first read; production is one of them.
     const environments = structured.environments as { name: string; is_prod: boolean }[];
-    expect(environments.some((env) => env.is_prod)).toBe(true);
+    expect(environments.map((env) => [env.name, env.is_prod])).toEqual([
+      ['production', true],
+      ['staging', false],
+      ['uat', false],
+    ]);
     await client.close();
+  });
+
+  it('orchestr_context only reads: a deleted staging stays deleted', async () => {
+    const before = await connect(readKey);
+    const listed = (await before.callTool({ name: 'orchestr_context', arguments: {} })).structuredContent as {
+      environments: { id: string; name: string }[];
+    };
+    await before.close();
+    const staging = listed.environments.find((env) => env.name === 'staging')!;
+    await request(app.getHttpServer())
+      .delete(`/api/environments/${staging.id}`)
+      .set('Authorization', `Bearer ${fullKey}`)
+      .expect(200);
+
+    const after = await connect(readKey);
+    const result = await after.callTool({ name: 'orchestr_context', arguments: {} });
+    await after.close();
+    const environments = (result.structuredContent as { environments: { name: string }[] }).environments;
+    expect(environments.map((env) => env.name)).toEqual(['production', 'uat']);
+    const rows = await db.query(`SELECT 1 FROM environments WHERE org_id = $1 AND lower(name) = 'staging'`, [
+      orgId,
+    ]);
+    expect(rows.rowCount).toBe(0);
   });
 
   it('the mirrored text block carries the untrusted-content envelope', async () => {

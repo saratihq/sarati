@@ -258,7 +258,6 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
   async function workspace(name: string): Promise<{ org: string; production: string }> {
     const created = await asA(http().post('/api/orgs').send({ name })).expect(201);
     const org = created.body.id as string;
-    await asA(http().get('/api/environments').set('X-Org-Id', org)).expect(200);
     const env = await db.query<{ id: string }>(
       `SELECT id FROM environments WHERE org_id = $1 AND lower(name) = 'production'`,
       [org],

@@ -18,6 +18,7 @@ import {
 import { rawQuery } from '../database/raw-query';
 import { EventsService } from '../events/events.service';
 import { isUniqueViolation } from '../database/pg-errors';
+import { insertOrg } from './insert-org';
 import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
 
 const INVITE_TTL_DAYS = 14;
@@ -66,21 +67,7 @@ export class OrgManagementService {
 
   async createOrg(actorId: string, name: string): Promise<OrgSummary> {
     return this.dataSource.transaction(async (em) => {
-      const org = em.create(OrganizationEntity, {
-        id: newId(),
-        name,
-        isPersonal: false,
-        createdAt: now(),
-        updatedAt: now(),
-      });
-      await em.insert(OrganizationEntity, org);
-      await em.insert(OrgMemberEntity, {
-        id: newId(),
-        orgId: org.id,
-        userId: actorId,
-        role: 'owner',
-        createdAt: now(),
-      });
+      const org = await insertOrg(em, { name, isPersonal: false, ownerId: actorId });
       await this.events.emit(em, {
         orgId: org.id,
         actorUserId: actorId,
