@@ -1,12 +1,9 @@
 /** The pluggable-auth seam: each verifier turns a bearer token into an identity claim, tried in order. */
 export interface VerifiedIdentity {
-  /** External auth subject (Clerk `sub`, or an OIDC `sub`) → users.clerk_user_id. */
+  /** Clerk's `sub` → users.clerk_user_id. */
   clerkUserId?: string;
   /** A pre-resolved local user id (e.g. an API key already identifies its owner). */
   userId?: string;
-  /** Token-carried profile claims; when present the user is provisioned from them, with no profile fetch. */
-  email?: string;
-  name?: string;
   /** Set only by the API-key verifier — its presence marks the caller as a key, not a session. */
   apiKey?: { scopes: string[] | null; orgId: string | null };
 }

@@ -23,16 +23,25 @@ export function clearLocalSession(): void {
   document.cookie = `${LOCAL_SESSION_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
 }
 
-/** The signed-in user id, read (not trusted) off the session token — the service verifies every call. */
-export function localSessionUserId(): string | null {
+function sessionClaim(name: "sub" | "method"): string | null {
   const token = readLocalSession();
   if (!token) return null;
   try {
     const b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     const payload: unknown = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
-    const sub = (payload as { sub?: unknown }).sub;
-    return typeof sub === "string" ? sub : null;
+    const value = (payload as Record<string, unknown>)[name];
+    return typeof value === "string" ? value : null;
   } catch {
     return null;
   }
+}
+
+/** The signed-in user id, read (not trusted) off the session token — the service verifies every call. */
+export function localSessionUserId(): string | null {
+  return sessionClaim("sub");
+}
+
+/** How the session was signed in — `oidc` for single sign-on — read for display only. */
+export function localSessionMethod(): string | null {
+  return sessionClaim("method");
 }

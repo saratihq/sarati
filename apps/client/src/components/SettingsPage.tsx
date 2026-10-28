@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 import ApiKeysSettings from "./ApiKeysSettings";
 import PlatformKeysSettings from "./PlatformKeysSettings";
+import SignInSettings from "./SignInSettings";
 import { ThemePicker } from "./ThemePicker";
 
 export default function SettingsPage() {
@@ -98,6 +99,7 @@ export default function SettingsPage() {
               Open
             </Button>
           </div>
+          <SignInSettings />
         </section>
 
         {/* Appearance */}

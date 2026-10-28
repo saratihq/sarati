@@ -49,7 +49,11 @@ These strings are written into saved data, issued tokens, live cookies or the da
 
 - Node types (`orchestr:agent`, `orchestr:code`, `orchestr:if`, …) and the `orchestr_actions`
   catalog — in every saved workflow document.
-- The `orchestr:local` session issuer — in every issued local-session token.
+- The `orchestr:local` session issuer — in every issued local-session token — and its `method`
+  (`password` | `oidc`) and `idp` claims, which decide whether a session still works after the
+  sign-in configuration changes.
+- The single sign-on callback path `/auth/oidc/callback` — registered as the redirect URI in every
+  operator's identity provider; renaming it breaks sign-in on every install.
 - The `orchestr_local_session` cookie and the `orchestr-oauth` `postMessage` type — renaming either
   signs users out or breaks the connect popup mid-flight.
 - The `--orchestr-*` CSS custom properties — the client's token names.

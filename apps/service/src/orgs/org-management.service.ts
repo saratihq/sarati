@@ -7,6 +7,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { DomainError } from '../common/domain-error';
 import { isIdShape, newId, now } from '../database/ids';
 import { OrgInviteEntity } from '../database/entities/org-invite.entity';
+import { UserEntity } from '../database/entities/user.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -311,7 +312,7 @@ export class OrgManagementService {
         orgId: org.id,
         email,
         role,
-        // 48 hex chars of CSPRNG output — the token IS the credential.
+        // 48 hex chars of CSPRNG output, so no link can be guessed.
         token: randomBytes(24).toString('hex'),
         createdBy: actorId,
         createdAt: now(),
@@ -367,23 +368,22 @@ export class OrgManagementService {
     if (!invite || !org || !(await this.isRedeemable(em, invite))) {
       throw new DomainError('Invite not found or expired', 404);
     }
-    // No invitee email: the token is link-bound, so the holder must not learn who it was addressed to.
+    // No invitee email: whoever holds the link must not learn who it was addressed to.
     return { org_id: org.id, org_name: org.name, role: invite.role };
   }
 
-  /** Token-bound accept: the link's holder joins with the invited role; already-a-member is a no-op. */
+  /** The account the invite was sent to joins with the invited role; already-a-member is a no-op. */
   async acceptInvite(userId: string, token: string): Promise<{ org_id: string; name: string }> {
+    const joined = await this.joinByInvite(userId, token);
+    if (!joined) throw new DomainError('Invite not found or expired', 404);
+    return joined;
+  }
+
+  /** {@link acceptInvite} in a transaction of its own, answering null for a token that can no longer be redeemed. */
+  async joinByInvite(userId: string, token: string): Promise<{ org_id: string; name: string } | null> {
     try {
       return await this.dataSource.transaction(async (em) => {
-        const spent = new DomainError('Invite not found or expired', 404);
-        const claimed = await this.claimInvite(em, token, spent);
-        const { org } = claimed;
-
-        const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
-        if (existing) return { org_id: org.id, name: org.name };
-
-        if (!claimed.redeemable) throw spent;
-        return this.redeemInvite(em, userId, claimed);
+        return this.acceptInviteWith(em, userId, token);
       });
     } catch (err) {
       // Double-submit race: the membership unique constraint makes the loser idempotent.
@@ -396,6 +396,30 @@ export class OrgManagementService {
       }
       throw err;
     }
+  }
+
+  /** {@link acceptInvite} inside the caller's transaction, so joining commits with what the caller writes beside it; null for a token that can no longer be redeemed. */
+  async acceptInviteWith(
+    em: EntityManager,
+    userId: string,
+    token: string,
+  ): Promise<{ org_id: string; name: string } | null> {
+    const spent = new DomainError('Invite not found or expired', 404);
+    let claimed: ClaimedInvite;
+    try {
+      claimed = await this.claimInvite(em, token, spent);
+    } catch (err) {
+      if (err === spent) return null;
+      throw err;
+    }
+    const { invite, org } = claimed;
+
+    const existing = await em.findOne(OrgMemberEntity, { where: { orgId: org.id, userId } });
+    if (existing) return { org_id: org.id, name: org.name };
+
+    if (!claimed.redeemable) return null;
+    await this.assertInvitee(em, userId, invite);
+    return this.redeemInvite(em, userId, claimed);
   }
 
   /** Holds the invite `token` names for an accept or a registration against it: its org row FOR KEY SHARE, then the invite FOR UPDATE (constitution row 20); throws `refused` once either is gone. */
@@ -432,6 +456,25 @@ export class OrgManagementService {
       payload: { role: invite.role, invite_id: invite.id },
     });
     return { org_id: org.id, name: org.name };
+  }
+
+  /** An invite admits only the account at the address it was sent to, and only while the account can vouch for that address. */
+  private async assertInvitee(em: EntityManager, userId: string, invite: OrgInviteEntity): Promise<void> {
+    const user = await em.findOneByOrFail(UserEntity, { id: userId });
+    if (user.email.trim().toLowerCase() !== invite.email.trim().toLowerCase()) {
+      throw new DomainError(
+        `This invite was sent to a different email address than ${user.email}. Ask whoever invited you to invite that address, or sign in with the account the invite was sent to.`,
+        403,
+        { code: 'invite_email_mismatch' },
+      );
+    }
+    if (!user.emailVerified) {
+      throw new DomainError(
+        `Your identity provider did not confirm ${user.email} (the email_verified claim), so this invite cannot be matched to you.`,
+        403,
+        { code: 'invite_email_unverified' },
+      );
+    }
   }
 
   async orgById(orgId: string): Promise<OrganizationEntity> {

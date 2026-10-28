@@ -47,7 +47,7 @@ describe('local email + password auth (e2e, isolated DB)', () => {
 
   it('reports that a fresh instance is waiting for its first account', async () => {
     const res = await http().get('/api/auth/local/status').expect(200);
-    expect(res.body).toEqual({ enabled: true, awaiting_bootstrap: true });
+    expect(res.body).toEqual({ enabled: true, awaiting_bootstrap: true, oidc: false });
   });
 
   it('creates the first account and returns a session that works immediately', async () => {

@@ -5,28 +5,29 @@ import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../../common/domain-error';
 import type { EnvConfig } from '../../config/env.config';
-import { REGISTRATION_LOCK_SPACE } from '../../database/advisory-lock-spaces';
-import { newId, now } from '../../database/ids';
 import { UserEntity } from '../../database/entities/user.entity';
-import { rawQuery } from '../../database/raw-query';
 import { OrgManagementService, type RedeemableInvite } from '../../orgs/org-management.service';
-import { OrgsService } from '../../orgs/orgs.service';
+import { AdmissionService } from './admission.service';
 import { MIN_PASSWORD_LENGTH, hashPassword, verifyPassword } from './password';
-import { mintSession } from './local-session';
+import { mintSession, type SessionMethod } from './local-session';
 
 /** A password never verified against a real hash still costs time, so login cannot be an account oracle. */
 const DUMMY_HASH =
   'scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
-const signupClosed = (): DomainError =>
-  new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
-    code: 'signup_closed',
-  });
-
 export interface SessionGrant {
   token: string;
   expires_at: string;
   user: { id: string; email: string; name: string };
+  /** The org an invite carried through sign-in just joined, so the client can open it. */
+  joined_org_id?: string;
+}
+
+/** The refusal for a sign-up the instance does not admit — one answer, whatever the reason. */
+export function signupClosed(): DomainError {
+  return new DomainError('This instance is not open for signup — ask an owner for an invite link.', 403, {
+    code: 'signup_closed',
+  });
 }
 
 /** Email + password for self-host: bootstrap-or-invite registration, then signed sessions. */
@@ -37,8 +38,8 @@ export class LocalAuthService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
-    private readonly orgs: OrgsService,
     private readonly orgManagement: OrgManagementService,
+    private readonly admission: AdmissionService,
   ) {}
 
   /** Whether this instance offers local login at all — the client asks before drawing a form. */
@@ -46,9 +47,15 @@ export class LocalAuthService {
     return this.config.get('env', { infer: true }).localAuthEnabled;
   }
 
-  /** True while the instance has no users: the first-run window in which an owner account is made. */
+  /** Whether browser single sign-on is configured. */
+  get ssoEnabled(): boolean {
+    return this.config.get('env', { infer: true }).oidcSignInEnabled;
+  }
+
+  /** True while the instance has no users and a first-party sign-in can make its first account. */
   async awaitingBootstrap(): Promise<boolean> {
-    if (!this.enabled) return false;
+    const env = this.config.get('env', { infer: true });
+    if (!env.localAuthEnabled && !env.oidcSignInEnabled) return false;
     return (await this.dataSource.manager.count(UserEntity)) === 0;
   }
 
@@ -63,37 +70,38 @@ export class LocalAuthService {
     this.assertPasswordUsable(input.password);
     const hashedPassword = await hashPassword(input.password);
 
-    return this.dataSource.transaction(async (em) => {
-      // Registrations take turns, so each counts accounts and looks up its email after the last one committed.
-      await rawQuery(em, 'SELECT pg_advisory_xact_lock($1, 0)', [REGISTRATION_LOCK_SPACE]);
+    return this.admission.admitting(async (em) => {
       const invite = await this.admit(em, email, input.inviteToken?.trim());
-      if (await em.findOne(UserEntity, { where: { email } })) {
+      if (await this.admission.addressHeld(em, email)) {
         throw new DomainError('An account with that email already exists — sign in instead.', 409, {
           code: 'email_taken',
         });
       }
 
-      const user = em.create(UserEntity, {
-        id: newId(),
+      const user = await this.admission.createAccount(em, {
         email,
-        name: input.name?.trim() || email.split('@')[0] || 'Owner',
+        name: cleanName(input.name ?? '') || email.split('@')[0] || 'Owner',
         hashedPassword,
-        createdAt: now(),
-        updatedAt: now(),
+        emailVerified: true,
+        identity: null,
       });
-      await em.save(UserEntity, user);
-      await this.orgs.ensurePersonalOrg(em, user);
-      if (invite) await this.orgManagement.redeemInvite(em, user.id, invite);
+      const joined = invite ? await this.orgManagement.redeemInvite(em, user.id, invite) : null;
       this.logger.log(`local account created for ${email}`);
-      return this.grant(user);
+      return grantSession(
+        user,
+        this.config.get('env', { infer: true }).secretKey,
+        { method: 'password' },
+        joined,
+      );
     });
   }
 
   async login(email: string, password: string): Promise<SessionGrant> {
     this.assertEnabled();
-    const user = await this.dataSource.manager.findOne(UserEntity, {
-      where: { email: normalizeEmail(email) },
-    });
+    const user = await this.dataSource.manager
+      .createQueryBuilder(UserEntity, 'u')
+      .where('lower(u.email) = :email AND u.email_verified', { email: normalizeEmail(email) })
+      .getOne();
     // Hash even when the account is unknown, so the response time reveals nothing.
     const ok = await verifyPassword(password, user?.hashedPassword ?? DUMMY_HASH);
     if (!user || !ok) {
@@ -101,26 +109,22 @@ export class LocalAuthService {
         code: 'invalid_credentials',
       });
     }
-    return this.grant(user);
+    return grantSession(
+      user,
+      this.config.get('env', { infer: true }).secretKey,
+      { method: 'password' },
+      null,
+    );
   }
 
-  private async grant(user: UserEntity): Promise<SessionGrant> {
-    const { secretKey } = this.config.get('env', { infer: true });
-    const { token, expiresAt } = await mintSession(user.id, secretKey);
-    return {
-      token,
-      expires_at: expiresAt,
-      user: { id: user.id, email: user.email ?? '', name: user.name ?? '' },
-    };
-  }
-
+  /** Registration is never open: the FIRST account on an empty instance, or one an invite to its email admits, judged on the invite held under its locks. */
   private async admit(
     em: EntityManager,
     email: string,
     token: string | undefined,
   ): Promise<RedeemableInvite | null> {
     if (!token) {
-      if ((await em.count(UserEntity)) > 0) throw signupClosed();
+      if (!(await this.admission.isFirstAccount(em))) throw signupClosed();
       return null;
     }
     const claimed = await this.orgManagement.claimInvite(em, token, signupClosed());
@@ -147,6 +151,27 @@ export class LocalAuthService {
   }
 }
 
-function normalizeEmail(email: string): string {
+/** A fresh session for `user`, minted for the method they signed in with. */
+export async function grantSession(
+  user: UserEntity,
+  secret: string,
+  via: SessionMethod,
+  joined: { org_id: string } | null,
+): Promise<SessionGrant> {
+  const { token, expiresAt } = await mintSession(user.id, secret, via);
+  return {
+    token,
+    expires_at: expiresAt,
+    user: { id: user.id, email: user.email ?? '', name: user.name ?? '' },
+    ...(joined ? { joined_org_id: joined.org_id } : {}),
+  };
+}
+
+export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/** A display name without control or format characters, which would garble or reverse it wherever it is shown. */
+export function cleanName(raw: string): string {
+  return raw.replace(/[\p{Cc}\p{Cf}]/gu, '').trim();
 }

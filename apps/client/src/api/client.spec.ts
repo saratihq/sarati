@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, absoluteApiUrl, asBranchMoved, getActiveOrgId, request, setActiveOrgId } from "@/api/client";
+import {
+  ApiError,
+  absoluteApiUrl,
+  asBranchMoved,
+  completeOidcSignIn,
+  getActiveOrgId,
+  request,
+  setActiveOrgId,
+  signOut,
+  startOidcSignIn,
+} from "@/api/client";
 import { LOCAL_SESSION_COOKIE } from "@/lib/localSession";
 
 // The base the module resolved at load: no NEXT_PUBLIC_API_URL under test ⇒ the dev fallback.
@@ -250,6 +260,51 @@ describe("request: 401 handling", () => {
     await expect(request("/x")).rejects.toThrow("User provisioning failed");
     expect(document.cookie).toContain("live");
     expect(navigatedTo).toEqual([]);
+  });
+});
+
+/** A JWT-shaped token whose payload is `claims` — only the middle segment is ever read client-side. */
+function sessionToken(claims: Record<string, unknown>): string {
+  return `h.${btoa(JSON.stringify(claims)).replace(/=+$/, "")}.s`;
+}
+
+describe("signOut", () => {
+  it("tells a single sign-on user the identity provider may still be signed in", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=${sessionToken({ sub: "u1", method: "oidc" })}; Path=/`;
+    await signOut();
+    expect(document.cookie).not.toContain(LOCAL_SESSION_COOKIE);
+    expect(navigatedTo).toEqual(["/login?signed_out=1"]);
+  });
+
+  it("sends a password user straight to /login", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=${sessionToken({ sub: "u1", method: "password" })}; Path=/`;
+    await signOut();
+    expect(navigatedTo).toEqual(["/login"]);
+  });
+});
+
+describe("single sign-on calls", () => {
+  it("never bounce on a 401 — the refusal IS the answer the callback shows", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    mockFetch(jsonResponse(401, { detail: "not verified", code: "oidc_token_rejected" }));
+    await expect(completeOidcSignIn({ code: "c", state: "s", binding: "b" })).rejects.toMatchObject({
+      status: 401,
+      code: "oidc_token_rejected",
+    });
+    expect(navigatedTo).toEqual([]);
+    expect(document.cookie).toContain("live");
+  });
+
+  it("stores the session a completed sign-in grants", async () => {
+    mockFetch(jsonResponse(200, { token: "tok-1", expires_at: new Date(Date.now() + 60_000).toISOString(), user: {} }));
+    await completeOidcSignIn({ code: "c", state: "s", binding: "b" });
+    expect(document.cookie).toContain(`${LOCAL_SESSION_COOKIE}=tok-1`);
+  });
+
+  it("carries the invite token to /start only when there is one", async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { authorize_url: "https://idp/a", state: "s" }));
+    await startOidcSignIn("h".repeat(43));
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ binding_hash: "h".repeat(43) });
   });
 });
 

@@ -406,6 +406,78 @@ arriving from one address and sharing one limit.
   `SARATI_TRUSTED_PROXIES`, as [Behind another proxy](/operate/configuration/#behind-another-proxy)
   shows.
 
+## Single sign-on: "This sign-in didn't start in this tab"
+
+Single sign-on finishes only in the browser tab that started it, so a callback link opened anywhere
+else stops here without sending anything. If it happens to everyone, Sarati is being opened at an
+address other than `SARATI_URL`: the provider sends people back to `SARATI_URL`, a different origin
+to the tab they started in. Open Sarati at `SARATI_URL`, or set it to the address people use.
+
+## Single sign-on: "The identity provider could not be reached — try again."
+
+Or **Can't reach your identity provider** after signing in there. The service log says why, on a
+line starting `Single sign-on unavailable:`:
+
+```
+Single sign-on unavailable: https://idp.example.com/.well-known/openid-configuration could not be reached: connect ECONNREFUSED 10.0.0.5:443
+```
+
+```
+Single sign-on unavailable: https://idp.example.com/.well-known/openid-configuration could not be reached: unable to verify the first certificate
+```
+
+```
+Single sign-on unavailable: the discovery document names issuer "https://login.example.com/", not OIDC_ISSUER "https://login.example.com" — they must match exactly, trailing slash included
+```
+
+The second is a provider behind a private certificate authority:
+[trust it](/operate/configuration/#a-provider-behind-a-private-certificate-authority) with
+`NODE_EXTRA_CA_CERTS`. For the third, copy the `issuer` from the provider's discovery document into
+`OIDC_ISSUER` as it is.
+
+## Single sign-on: "Sign-in couldn't be verified"
+
+The provider's answer failed one of Sarati's checks. The service log names which, on a line starting
+`Single sign-on refused:`. One that says to check this machine's clock means the server's clock and
+the provider's disagree by more than a minute — turn on time sync.
+
+## Single sign-on: "This instance can't admit you"
+
+With `OIDC_ALLOWED_DOMAINS` set, the page gives the reason:
+
+> Your identity provider did not confirm your email address (the email_verified claim), so this instance cannot check its domain.
+
+> Your email address's domain is not one this instance admits.
+
+The first means the provider sent no `email_verified: true` for the address; have the provider
+verify it, or release that claim. The second is working as intended. Without an email at all, a new
+account cannot be made:
+
+> Your identity provider did not send a usable email address (the email claim) — ask your operator to release it.
+
+## Single sign-on: "You already have an account"
+
+Another account already holds that email, confirmed, and an email never connects anyone to it. If
+it has a password, sign in with it and connect single sign-on in **Settings → Profile**. If it has
+none — an account made through Clerk, or by the retired token sign-in — or password sign-in is off,
+an operator connects it from the server with `sarati-link-sso` — see
+[Connecting accounts from the server](/operate/users/#connecting-accounts-from-the-server).
+
+## Single sign-on: "This invite can't be matched to you"
+
+The provider did not confirm the address on your account (no `email_verified: true`), so no invite is
+matched to it. Have the provider verify the address, or release that claim. Microsoft Entra ID sends
+no `email_verified` at all, so it cannot be used for invites yet.
+
+## Connecting single sign-on: "Your identity provider did not ask you to sign in again"
+
+**Connect** asks the provider to sign you in afresh (`max_age=0`) and checks the ID token's
+`auth_time` to be sure it did, so the identity connected is the one that just signed in. The service
+log says which check failed, on a line starting `Single sign-on refused:`. One that says the provider
+signed the person in before the connection began means it reused a session: sign out at the
+provider and connect again. One that says the ID token carries no `auth_time` means the provider
+does not support `max_age`; an operator connects the account with `sarati-link-sso` instead.
+
 ## A setting is not taking effect
 
 ```bash

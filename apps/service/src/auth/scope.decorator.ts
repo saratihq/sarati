@@ -11,3 +11,6 @@ export const SCOPE_METADATA = 'orchestr:required-scope';
  */
 export const Scope = (...scopes: [ApiScope, ...ApiScope[]]): MethodDecorator & ClassDecorator =>
   SetMetadata(SCOPE_METADATA, scopes);
+
+/** A route only a signed-in person may call: it declares no scope, so every API key is refused. */
+export const SessionOnly = (): MethodDecorator & ClassDecorator => SetMetadata(SCOPE_METADATA, []);

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Connect accounts to their single sign-on identities from inside the container; with no arguments it prints its usage:
+#   docker exec -it sarati sarati-link-sso --list
+# `docker exec` starts from the IMAGE environment, not the boot process's, so the one-container
+# image leaves what it computed in /data/runtime.env; under compose it is already in the environment.
+if [ -z "$DATABASE_URL" ] && [ -f /data/runtime.env ]; then
+  . /data/runtime.env
+  export DATABASE_URL
+fi
+exec node "${SARATI_SERVICE_DIR:-/app}/dist/scripts/link-sso.cli.js" "$@"

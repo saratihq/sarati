@@ -8,6 +8,7 @@ import type { OrgRole } from "@/api/client";
 import { useOrgs } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 import { LocalAuthForm } from "@/components/LocalAuthForm";
+import { SsoButton } from "@/components/SsoButton";
 import { clerkEnabled } from "@/lib/config";
 import { readLocalSession } from "@/lib/localSession";
 import { toast } from "@/lib/toast";
@@ -26,7 +27,8 @@ const CARD_STYLE = {
  * no org-scoped caches to drop yet, and SPA nav lets the "Joined" toast survive.
  *
  * On a self-hosted instance the invitee may have no account at all, in which case the page registers
- * them against the invite instead — the service accepts it as part of registration.
+ * them against the invite instead, or signs them in through single sign-on carrying it — either way the
+ * service accepts it as part of the sign-in.
  */
 export default function JoinPage() {
   useDocumentTitle("Join organization");
@@ -41,6 +43,8 @@ export default function JoinPage() {
   const [error, setError] = useState<string | null>(() =>
     token ? null : "This invite link is missing its token.",
   );
+  // An invite for another address is not spent: the message says what to do instead of asking for a fresh link.
+  const [notYours, setNotYours] = useState(false);
   const [joining, setJoining] = useState(false);
   // StrictMode double-mounts in dev; the GET is idempotent, so this only avoids a duplicate request.
   const previewed = useRef(false);
@@ -48,7 +52,11 @@ export default function JoinPage() {
   // A Clerk build gates this route in middleware, so the visitor always has a session there. Until the
   // status lands we cannot tell "accept" from "register", so neither card may render yet.
   const resolving = !clerkEnabled && !status && !statusError;
-  const needsAccount = !clerkEnabled && status?.enabled === true && !signedIn;
+  const password = status?.enabled === true;
+  const sso = status?.oidc === true;
+  const needsAccount = !clerkEnabled && (password || sso) && !signedIn;
+  const [method, setMethod] = useState<"sso" | "password">("sso");
+  const showPassword = password && (!sso || method === "password");
 
   // Unauthenticated by design, so this runs even for an invitee with no account yet.
   useEffect(() => {
@@ -73,6 +81,7 @@ export default function JoinPage() {
       toast.success(`Joined ${name}`, "You're now working in this organization.");
       router.replace("/");
     } catch (e) {
+      setNotYours(e instanceof api.ApiError && (e.code?.startsWith("invite_email_") ?? false));
       setError(e instanceof Error ? e.message : "This invite link is invalid or has expired.");
       setJoining(false);
     }
@@ -100,12 +109,14 @@ export default function JoinPage() {
             <AlertTriangle size={18} />
           </div>
           <h1 className="text-[16px] font-semibold m-0 mb-1.5">This invite can&apos;t be used</h1>
-          <p className="text-[13px] m-0 mb-2 leading-relaxed" style={{ color: "var(--orchestr-ink-muted)" }}>
+          <p className={`text-[13px] m-0 leading-relaxed ${notYours ? "mb-6" : "mb-2"}`} style={{ color: "var(--orchestr-ink-muted)" }}>
             {error}
           </p>
-          <p className="text-[13px] m-0 mb-6 leading-relaxed" style={{ color: "var(--orchestr-ink-subtle)" }}>
-            Ask whoever invited you for a fresh link — invites expire and can only be used once.
-          </p>
+          {!notYours && (
+            <p className="text-[13px] m-0 mb-6 leading-relaxed" style={{ color: "var(--orchestr-ink-subtle)" }}>
+              Ask whoever invited you for a fresh link — invites expire and can only be used once.
+            </p>
+          )}
           <Button variant="secondary" onClick={() => router.push("/")}>
             Go to dashboard
           </Button>
@@ -129,19 +140,38 @@ export default function JoinPage() {
                   <span className="capitalize" style={{ color: "var(--orchestr-ink)" }}>
                     {preview.role}
                   </span>
-                  . Create your account using the email address the invite was sent to.
+                  .{" "}
+                  {showPassword
+                    ? "Create your account using the email address the invite was sent to."
+                    : "Continue with single sign-on. The invite is for the account at the email address it was sent to."}
                 </>
-              ) : (
+              ) : showPassword ? (
                 "Create your account to join the team. Use the email address the invite was sent to."
+              ) : (
+                "Continue with single sign-on. The invite is for the account at the email address it was sent to."
               )}
             </p>
           </div>
-          <LocalAuthForm
-            kind="register"
-            inviteToken={token}
-            submitLabel="Create account & join"
-            onDone={enterAsNewMember}
-          />
+          {showPassword ? (
+            <LocalAuthForm
+              kind="register"
+              inviteToken={token}
+              submitLabel="Create account & join"
+              onDone={enterAsNewMember}
+            />
+          ) : (
+            <SsoButton returnTo={`/join/${encodeURIComponent(token)}`} inviteToken={token} />
+          )}
+          {password && sso && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full mt-3"
+              onClick={() => setMethod(method === "sso" ? "password" : "sso")}
+            >
+              {method === "sso" ? "Create an account with email instead" : "Use single sign-on instead"}
+            </Button>
+          )}
         </div>
       ) : preview && !resolving ? (
         <div className="rounded-2xl p-8 max-w-[420px] w-full text-center" style={CARD_STYLE}>

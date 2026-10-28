@@ -6,10 +6,10 @@ import { LOCAL_ISSUER } from '../composer/composer-auth.guard';
 export async function mintLocalSession(
   secret: string,
   sub: string,
-  over: { issuer?: string; lifetime?: number } = {},
+  over: { issuer?: string; lifetime?: number; claims?: Record<string, unknown> } = {},
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({})
+  return new SignJWT(over.claims ?? {})
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuer(over.issuer ?? LOCAL_ISSUER)
     .setSubject(sub)

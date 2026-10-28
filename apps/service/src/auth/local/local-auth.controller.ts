@@ -44,10 +44,14 @@ class LoginDto {
 export class LocalAuthController {
   constructor(private readonly local: LocalAuthService) {}
 
-  /** What sign-in this instance offers, so the client knows whether to draw a form or a redirect. */
+  /** What sign-in this instance offers, so the client knows whether to draw a form, a single sign-on button, or both. */
   @Get('status')
-  async status(): Promise<{ enabled: boolean; awaiting_bootstrap: boolean }> {
-    return { enabled: this.local.enabled, awaiting_bootstrap: await this.local.awaitingBootstrap() };
+  async status(): Promise<{ enabled: boolean; awaiting_bootstrap: boolean; oidc: boolean }> {
+    return {
+      enabled: this.local.enabled,
+      awaiting_bootstrap: await this.local.awaitingBootstrap(),
+      oidc: this.local.ssoEnabled,
+    };
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })

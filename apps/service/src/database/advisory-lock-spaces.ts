@@ -3,5 +3,5 @@
 /** The trigger activation lock's space: one key per activation. */
 export const ACTIVATION_LOCK_SPACE = 7301;
 
-/** The local registration lock's space: one key, so registrations take turns. */
-export const REGISTRATION_LOCK_SPACE = 7302;
+/** The account admission lock's space: one key, so every admission — a password sign-up, a single sign-on account's first sign-in, an identity link, an address taken — takes its turn. */
+export const ADMISSION_LOCK_SPACE = 7302;

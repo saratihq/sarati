@@ -1,5 +1,5 @@
 import { apiBaseUrl, clerkEnabled } from "@/lib/config";
-import { clearLocalSession, readLocalSession, writeLocalSession } from "@/lib/localSession";
+import { clearLocalSession, localSessionMethod, readLocalSession, writeLocalSession } from "@/lib/localSession";
 
 // Resolved in @/lib/config, which fails a production build when NEXT_PUBLIC_API_URL is unset.
 const API_BASE = apiBaseUrl + "/api";
@@ -66,9 +66,10 @@ export async function getAuthToken(): Promise<string | null> {
 export async function signOut(): Promise<void> {
   if (typeof window === "undefined") return;
   if (readLocalSession()) {
+    const viaSso = localSessionMethod() === "oidc";
     clearLocalSession();
     setActiveOrgId(null); // the next account on this browser must not inherit an org it can't read
-    window.location.assign("/login");
+    window.location.assign(viaSso ? "/login?signed_out=1" : "/login");
     return;
   }
   const clerk = clerkEnabled ? await clerkWhenLoaded() : null;
@@ -200,8 +201,15 @@ export interface AuthUser {
   name: string;
 }
 
+/** How this account can sign in. `sso` is null when the instance has no single sign-on. */
+export interface SignInMethods {
+  password: boolean;
+  sso: { connected: boolean; email: string | null } | null;
+}
+
 export interface MeResponse {
   user: AuthUser;
+  sign_in: SignInMethods;
 }
 
 // ─── Auth API Functions ───
@@ -222,12 +230,16 @@ export interface LocalAuthStatus {
   enabled: boolean;
   /** True only while the instance has zero users — the first-run window. */
   awaiting_bootstrap: boolean;
+  /** This instance offers single sign-on through its own identity provider. */
+  oidc: boolean;
 }
 
 export interface LocalSessionGrant {
   token: string;
   expires_at: string;
   user: AuthUser;
+  /** Set when the sign-in also accepted an org invite. */
+  joined_org_id?: string;
 }
 
 /** Unauthenticated: what sign-in this instance offers. */
@@ -265,6 +277,71 @@ export async function localRegister(body: {
 function persistGrant(grant: LocalSessionGrant): LocalSessionGrant {
   writeLocalSession(grant.token, grant.expires_at);
   return grant;
+}
+
+// ─── Single sign-on (OIDC) ───
+// The browser only carries the provider's answer back; the service holds the state, nonce and verifier.
+
+export interface OidcFlowStart {
+  authorize_url: string;
+  state: string;
+}
+
+/** The provider's answer at the callback, plus the binding only the tab that started the flow holds. */
+export interface OidcAnswer {
+  code: string;
+  state: string;
+  binding: string;
+  iss?: string;
+}
+
+export async function startOidcSignIn(bindingHash: string, inviteToken?: string): Promise<OidcFlowStart> {
+  return request(
+    "/auth/oidc/start",
+    {
+      method: "POST",
+      body: JSON.stringify({ binding_hash: bindingHash, ...(inviteToken ? { invite_token: inviteToken } : {}) }),
+    },
+    { redirectOn401: false },
+  );
+}
+
+/** Finish signing in. Persists the session on success. */
+export async function completeOidcSignIn(answer: OidcAnswer): Promise<LocalSessionGrant> {
+  return persistGrant(
+    await request<LocalSessionGrant>(
+      "/auth/oidc/complete",
+      { method: "POST", body: JSON.stringify(answer) },
+      { redirectOn401: false },
+    ),
+  );
+}
+
+/** Connect single sign-on to the signed-in account; its current password when it has one. */
+export async function startOidcLink(bindingHash: string, currentPassword?: string): Promise<OidcFlowStart> {
+  return request(
+    "/auth/oidc/link/start",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        binding_hash: bindingHash,
+        ...(currentPassword ? { current_password: currentPassword } : {}),
+      }),
+    },
+    { redirectOn401: false },
+  );
+}
+
+export async function completeOidcLink(answer: OidcAnswer): Promise<{ connected: true; email: string | null }> {
+  return request(
+    "/auth/oidc/link/complete",
+    { method: "POST", body: JSON.stringify(answer) },
+    { redirectOn401: false },
+  );
+}
+
+export async function unlinkOidc(): Promise<void> {
+  await request("/auth/oidc/link", { method: "DELETE" });
 }
 
 // ─── Organizations (tenancy) ───
