@@ -102,7 +102,31 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
-### v0.2.27: webhooks take form fields and text
+### v0.2.27
+
+#### A TypeScript Code step may await and return
+
+A **Code** step written in TypeScript runs as the async function body its editor describes, so one
+snippet may both `await` and `return`. Earlier versions refused such a step with
+`Top-level return cannot be used inside an ECMAScript module`, both when a run started and when a
+version with it was saved. TypeScript is still type-stripped, not type-checked: a type error runs as
+JavaScript, and only a syntax error is refused.
+
+What a caller of the API sees change:
+
+- **A TypeScript Code step is read as a function body, so what only a module's top level allows is
+  refused** where it used to run, as a run starts, with `400` and the code `compile_failed`, and as a
+  version with it is saved: a `namespace` or `module` block, `declare module`, `import x = N.y`,
+  and, in a step with no `return`, an `import type`, `export type` or `export interface` line.
+  Write a namespace's contents as plain declarations, and drop type-only imports and exports. A step
+  whose first line starts with `#!`, which always failed as it ran, is refused the same way.
+- **A TypeScript syntax error names the line and column in the step's own code**, both counted from
+  1, as in `Code node "calc" has a TypeScript syntax error at line 2, column 28: Unexpected "="`, and
+  says `at the end of the snippet` for one left unclosed. It used to read
+  `has a TypeScript error: Error: Transform failed with 1 error: <stdin>:2:29: ERROR: Unexpected "="`,
+  its column counted from 0 and in bytes.
+
+#### Webhooks take form fields and text
 
 A webhook, a test-event catch and a chat now read the body by its `Content-Type`, so form fields and
 text reach the run, and a signature is checked over the body's bytes whatever its type. See
