@@ -102,7 +102,9 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ## Notes for specific versions
 
-### v0.2.27: signing up with an invite makes an account only by joining
+### v0.2.27
+
+#### Signing up with an invite makes an account only by joining
 
 There is nothing to change on upgrade. What a caller of `POST /api/auth/local/register` sees
 change:
@@ -120,6 +122,61 @@ change:
   other is refused with `403` `signup_closed`; both could get in before. Two sign-ups of one email at
   once make one account, and the other answers `409` `email_taken`, or `403` `signup_closed` on an
   empty instance, which the first account closes; it used to answer `500`.
+
+#### A TypeScript Code step may await and return
+
+A **Code** step written in TypeScript runs as the async function body its editor describes, so one
+snippet may both `await` and `return`. Earlier versions refused such a step with
+`Top-level return cannot be used inside an ECMAScript module`, both when a run started and when a
+version with it was saved. TypeScript is still type-stripped, not type-checked: a type error runs as
+JavaScript, and only a syntax error is refused.
+
+What a caller of the API sees change:
+
+- **A TypeScript Code step is read as a function body, so what only a module's top level allows is
+  refused** where it used to run, as a run starts, with `400` and the code `compile_failed`, and as a
+  version with it is saved: a `namespace` or `module` block, `declare module`, `import x = N.y`,
+  and, in a step with no `return`, an `import type`, `export type` or `export interface` line.
+  Write a namespace's contents as plain declarations, and drop type-only imports and exports. A step
+  whose first line starts with `#!`, which always failed as it ran, is refused the same way.
+- **A TypeScript syntax error names the line and column in the step's own code**, both counted from
+  1, as in `Code node "calc" has a TypeScript syntax error at line 2, column 28: Unexpected "="`, and
+  says `at the end of the snippet` for one left unclosed. It used to read
+  `has a TypeScript error: Error: Transform failed with 1 error: <stdin>:2:29: ERROR: Unexpected "="`,
+  its column counted from 0 and in bytes.
+
+#### Webhooks take form fields and text
+
+A webhook, a test-event catch and a chat now read the body by its `Content-Type`, so form fields and
+text reach the run, and a signature is checked over the body's bytes whatever its type. See
+[What the run receives](/build/triggers/#what-the-run-receives).
+
+What a caller of the API sees change:
+
+- **Form fields, text and any JSON value reach `{{trigger.body}}`.** A body sent as
+  `application/x-www-form-urlencoded`, `text/*`, XML or a `+json` type used to start a run with
+  nothing in `{{trigger.body}}`, and a bare JSON value such as `42` or `"ping"` was refused with
+  `400`. A body with no `Content-Type` is read as UTF-8 text, where it was dropped too. A chat takes
+  `chatInput` and `sessionId` as form fields, or the message as text.
+- **A correctly signed form or text delivery is accepted.** It used to be refused with `401`,
+  because its signature was checked over no bytes. An empty signed JSON body is now checked over no
+  bytes, where it was checked over `{}`.
+- **A body Sarati can't read is refused with `415`, and nothing runs**, where it used to start a run
+  with nothing in `{{trigger.body}}`: `application/octet-stream`, `multipart/form-data` and any other
+  type not listed, a `charset` it doesn't know, and a body with no `Content-Type` that isn't UTF-8.
+  A sender that can only post `multipart/form-data`, such as an inbound-email service, can't start a
+  run. See [A webhook returns 415](/operate/troubleshooting/#a-webhook-returns-415).
+- **A request whose body can't be read answers with what went wrong, on every route,** where it
+  used to answer `500`: a `Content-Encoding` other than `gzip`, `deflate` or `br`, for one, answers
+  `415 unsupported content encoding "…"`.
+- **Invalid JSON sent to a webhook or chat answers `400`** and says the body is not valid JSON,
+  where the detail used to be the parser's message.
+- **An empty body leaves `{{trigger.body}}` empty**, where an empty `application/json` body made it
+  `{}`.
+- **A GitHub delivery sent as form fields is its event:** `{{trigger.body}}` is the event, as when it
+  is sent as JSON, where it used to be empty.
+- **A caught test event is the trigger as a run sees it.** `GET /api/catch/:id` returns `payload` with
+  the body at `body` and an object's fields beside it, where it returned the body alone.
 
 ### v0.2.26: the service opens no port but its own
 

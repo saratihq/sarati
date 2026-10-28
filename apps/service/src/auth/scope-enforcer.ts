@@ -2,6 +2,7 @@ import { ExecutionContext, ForbiddenException, Injectable, Logger } from '@nestj
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 
+import { loggedUrl } from '../common/request-log-redaction';
 import type { Principal } from './principal';
 import { SCOPE_METADATA } from './scope.decorator';
 import { type ApiScope, NON_GRANTABLE_SCOPE, scopeSatisfied } from './scopes';
@@ -27,7 +28,7 @@ export class ScopeEnforcer {
 
     if (required.length === 0) {
       const req = context.switchToHttp().getRequest<Request>();
-      this.logger.warn(`API-key request denied: ${req.method} ${req.path} declares no scope`);
+      this.logger.warn(`API-key request denied: ${req.method} ${loggedUrl(req.path)} declares no scope`);
       throw new ForbiddenException({
         detail: 'This endpoint is not available to API keys. Use a signed-in session.',
       });

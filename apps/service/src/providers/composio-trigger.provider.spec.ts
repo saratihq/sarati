@@ -299,7 +299,7 @@ describe('ComposioTriggerProvider', () => {
       const raw = JSON.stringify({ metadata: { trigger_id: 'ti_1' } });
       const ts = String(Math.floor(Date.now() / 1000));
       const sig = 'v1,' + createHmac('sha256', secret).update(`id1.${ts}.${raw}`).digest('base64');
-      const ok = await provider.verifyWebhook(SCOPE, raw, {
+      const ok = await provider.verifyWebhook(SCOPE, Buffer.from(raw), {
         'webhook-id': 'id1',
         'webhook-timestamp': ts,
         'webhook-signature': sig,
@@ -309,7 +309,7 @@ describe('ComposioTriggerProvider', () => {
 
     it('fails closed when the scope has no secret stored', async () => {
       const { provider } = makeProvider({ secret: '' });
-      expect((await provider.verifyWebhook(SCOPE, '{}', {})).ok).toBe(false);
+      expect((await provider.verifyWebhook(SCOPE, Buffer.from('{}'), {})).ok).toBe(false);
     });
   });
 });
