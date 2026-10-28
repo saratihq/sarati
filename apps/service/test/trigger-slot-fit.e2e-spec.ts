@@ -1738,6 +1738,9 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       const meanwhile = await activation(wf, production);
       expect(meanwhile).toMatchObject({ last_error: null });
       expect(meanwhile.last_polled_at).not.toBeNull();
+      // The parked delivery stamps its fire after release: past the first fire's millisecond, it is strictly later.
+      while (Date.now() <= meanwhile.last_polled_at!.getTime())
+        await new Promise((tick) => setTimeout(tick, 1));
       parked.release();
       expect((await failed).body).toMatchObject({ fired: 0 });
       const recorded = await activation(wf, production);
