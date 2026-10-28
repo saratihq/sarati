@@ -9,6 +9,7 @@ import { AppModule } from '../src/app.module';
 import { ApiKeysService } from '../src/api-keys/api-keys.service';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A NON-mock app — MOCK_AUTH is read once at boot, so the `ork_` key is the only credential here. */
@@ -58,15 +59,19 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
     process.env.DATABASE_URL = ADMIN_URL;
   });
 
-  it('a new key must name its scopes — a stored null means full authority', async () => {
+  it('a new key must name its scopes — a stored null means full authority — and is pinned to its holder’s personal workspace, refused while there is none', async () => {
     const keys = app.get(ApiKeysService);
-    await expect(keys.issue(userId, null, 'no scopes', null)).rejects.toThrow(/must name its scopes/);
-    await expect(keys.issue(userId, null, 'empty scopes', [])).rejects.toThrow(/must name its scopes/);
+    await expect(keys.issue(userId, 'no scopes', null)).rejects.toThrow(/must name its scopes/);
+    await expect(keys.issue(userId, 'empty scopes', [])).rejects.toThrow(/must name its scopes/);
+    await expect(keys.issue(userId, 'homeless', ['workflow:read'])).rejects.toMatchObject({ status: 409 });
+    expect((await db.query(`SELECT 1 FROM api_keys WHERE name = 'homeless'`)).rows).toEqual([]);
 
-    const issued = await keys.issue(userId, null, 'scoped', ['workflow:read']);
+    const personal = randomUUID();
+    await insertPersonalOrgs(db, { id: personal, userId, name: 'Key Owner' });
+    const issued = await keys.issue(userId, 'scoped', ['workflow:read']);
     expect(issued.key).toMatch(/^ork_/);
-    const row = await db.query(`SELECT scopes FROM api_keys WHERE prefix = $1`, [issued.prefix]);
-    expect(row.rows[0].scopes).toEqual(['workflow:read']);
+    const row = await db.query(`SELECT scopes, org_id FROM api_keys WHERE prefix = $1`, [issued.prefix]);
+    expect(row.rows[0]).toEqual({ scopes: ['workflow:read'], org_id: personal });
   });
 
   it('a valid ork_ key resolves to its owner + updates last_used_at', async () => {

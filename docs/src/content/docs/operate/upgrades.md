@@ -104,6 +104,12 @@ environment's account again when it starts, without waiting for a sweep: one who
 active is held, one held whose account is active again listens again, and one held back for an
 account that is active again is set up with that account.
 
+**Personal workspaces, going back to v0.2.26 or earlier.** Accounts are made there as here, each with
+a personal workspace of its own, and the database still holds each to one member, its owner. Those
+versions still let an owner invite someone into it through the API, but nobody joins: accepting the
+invite answers `500`, and a sign-up with it makes the account and then answers `500` without
+joining. Coming back, the upgrade deletes each such invite (`044 deleted the pending invite …`).
+
 **Going back to v0.2.25 or earlier** also undoes everything else
 [v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own). Above all, with durable runs on, the
 images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
@@ -188,6 +194,62 @@ change:
   other is refused with `403` `signup_closed`; both could get in before. Two sign-ups of one email at
   once make one account, and the other answers `409` `email_taken`, or `403` `signup_closed` on an
   empty instance, which the first account closes; it used to answer `500`.
+
+#### A personal workspace has one member: its owner
+
+Earlier versions let the owner of a personal workspace invite people into it through the API, though
+the app never offered it, and the invite joined them to it. A personal workspace is now its owner's
+alone, and the database refuses a second member. The upgrade sets right one someone else joined.
+Each thing it does is a warning in the upgrade log, on a line starting `044`:
+
+- **It keeps only the owner, as owner.** Every other member is removed (`044 removed …`). The
+  workflows they created there, with their runs and any approvals still waiting, stay in the
+  workspace with its owner. The removed member can no longer open any of them, and nothing moves a
+  workflow from one workspace to another. Each `044 removed …` line gives the number of workflows
+  that member created there. An earlier version could file a member's work under "Personal" in this
+  workspace without their choosing, so a non-zero count is worth raising with them. An owner a
+  member had demoted gets the role back (`044 gave … back the owner role …`), and one a member had
+  removed is added back (`044 added … back …`). The owner is the account the workspace was made for,
+  worked out from its records, never someone an invite let in.
+- **It empties each environment slot there filled with a removed member's connection**
+  (`044 emptied the <app> slot of environment <name> in personal workspace <id>: it held connection
+  <id> of <email>, …`). A step or trigger that ran as that account in that environment stops until
+  the owner assigns an account of their own to the slot.
+- **It revokes each API key a removed member had pinned to it** (`044 revoked API key …`). A key
+  they make now acts in their own workspace.
+- **It deletes the pending invites into it** (`044 deleted the pending invite …`).
+
+Two rarer cases: a personal workspace no account can be shown to own, or a second one an account came
+to own, becomes a shared organization and keeps its members (`044 made personal workspace … a shared
+organization …`), and every API key pinned to it is revoked (`044 revoked API key … that is now a
+shared organization`): a new key is pinned only to its holder's personal workspace, so its members
+reach the organization by signing in. And an account left with no personal workspace gets one, with
+production, staging and uat (`044 gave … a personal workspace of its own …`).
+
+To find what it emptied, revoked and removed after upgrading:
+
+```bash
+cd sarati && docker compose logs sarati | grep '044 '
+```
+
+On a five-container install it is `docker compose logs service`; running it by hand,
+`docker logs sarati`. A second boot changes nothing and logs none of these.
+
+What a caller of the API sees change:
+
+- **An invite into a personal workspace is refused**, for every role, with `400` and
+  `The personal organization has no other members`, as transferring its ownership already was. So
+  are changing a role there, removing someone and leaving.
+- **An invite into a personal workspace an earlier version made answers as a spent one** wherever it
+  is still held: a preview or an accept `404`, a sign-up with it `403` `signup_closed`, and a first
+  single sign-on with it makes the account and joins nothing.
+- **`GET /api/orgs` marks only your own personal workspace `is_personal`**, and lists it first. A
+  request with no `X-Org-Id` acts in it, with the role your membership holds.
+- **A new API key is pinned to your own personal workspace.** An account with none is refused one
+  with `409`.
+
+Going back to v0.2.26 or earlier still makes accounts there; what else changes for personal
+workspaces is under [Going back](#going-back).
 
 #### A TypeScript Code step may await and return
 

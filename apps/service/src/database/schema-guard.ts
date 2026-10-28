@@ -192,6 +192,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='email_verified' AND to_regclass('public.user_identities') IS NOT NULL AND to_regclass('public.ix_oidc_login_states_expires_at') IS NOT NULL AND to_regclass('public.ix_users_confirmed_email') IS NOT NULL AND to_regclass('public.ix_users_email') IS NULL",
   },
+  {
+    migration: '044_personal_org_single_member.sql',
+    probe:
+      "SELECT 1 FROM pg_constraint WHERE conname='organizations_personal_owner_member_fkey' AND to_regclass('public.uq_org_members_personal_org') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname='organizations_personal_owner_check' AND contype='t') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='org_members_claim_personal_org')",
+  },
 ];
 
 /**

@@ -14,6 +14,7 @@ import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { fernetEncrypt } from '../src/common/crypto/fernet';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -143,20 +144,21 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
               ($2, 'member-b@mcp.local', 'Member B', NULL, now(), now())`,
       [userA, userB],
     );
+    await insertPersonalOrgs(
+      db,
+      { id: personalA, userId: userA, name: 'Owner A' },
+      { id: personalB, userId: userB, name: 'Member B' },
+    );
     await db.query(
       `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Owner A', true, now(), now()),
-              ($2, 'Member B', true, now(), now()),
-              ($3, 'MCP Runs Workspace', false, now(), now())`,
-      [personalA, personalB, orgId],
+       VALUES ($1, 'MCP Runs Workspace', false, now(), now())`,
+      [orgId],
     );
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()),
-              (gen_random_uuid(), $3, $4, 'owner', now()),
-              (gen_random_uuid(), $5, $2, 'owner', now()),
-              (gen_random_uuid(), $5, $4, 'member', now())`,
-      [personalA, userA, personalB, userB, orgId],
+              (gen_random_uuid(), $1, $3, 'member', now())`,
+      [orgId, userA, userB],
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)

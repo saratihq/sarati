@@ -44,6 +44,40 @@ CREATE TYPE public.reviewstatus AS ENUM (
 
 
 
+--
+-- Name: check_personal_owner(); Type: FUNCTION; Schema: public; Owner: orchestr
+--
+
+CREATE FUNCTION public.check_personal_owner() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM public.organizations o
+              WHERE o.id = NEW.id AND o.is_personal <> (o.personal_owner_id IS NOT NULL)) THEN
+    RAISE EXCEPTION 'organization % violates organizations_personal_owner_check: an organization names an owner exactly when it is personal', NEW.id
+      USING ERRCODE = 'check_violation', TABLE = 'organizations', CONSTRAINT = 'organizations_personal_owner_check';
+  END IF;
+  RETURN NULL;
+END
+$$;
+
+
+--
+-- Name: claim_personal_org(); Type: FUNCTION; Schema: public; Owner: orchestr
+--
+
+CREATE FUNCTION public.claim_personal_org() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  UPDATE public.organizations SET personal_owner_id = NEW.user_id
+   WHERE id = NEW.org_id AND is_personal AND personal_owner_id IS NULL;
+  NEW.is_personal := FOUND;
+  RETURN NEW;
+END
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -255,7 +289,9 @@ CREATE TABLE public.org_members (
     org_id uuid NOT NULL,
     user_id uuid NOT NULL,
     role character varying(20) NOT NULL,
-    created_at timestamp with time zone DEFAULT now()
+    created_at timestamp with time zone DEFAULT now(),
+    is_personal boolean DEFAULT false NOT NULL,
+    CONSTRAINT org_members_personal_role_check CHECK (((NOT is_personal) OR ((role)::text = 'owner'::text)))
 );
 
 
@@ -270,7 +306,8 @@ CREATE TABLE public.organizations (
     is_personal boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
-    environments_seeded_at timestamp with time zone
+    environments_seeded_at timestamp with time zone,
+    personal_owner_id uuid
 );
 
 
@@ -737,6 +774,22 @@ ALTER TABLE ONLY public.organizations
 
 
 --
+-- Name: organizations organizations_id_is_personal_key; Type: CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_id_is_personal_key UNIQUE (id, is_personal);
+
+
+--
+-- Name: organizations organizations_personal_owner_id_key; Type: CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_personal_owner_id_key UNIQUE (personal_owner_id);
+
+
+--
 -- Name: review_approvals review_approvals_pkey; Type: CONSTRAINT; Schema: public; Owner: orchestr
 --
 
@@ -1065,6 +1118,13 @@ CREATE INDEX ix_org_members_user_id ON public.org_members USING btree (user_id);
 
 
 --
+-- Name: uq_org_members_personal_org; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE UNIQUE INDEX uq_org_members_personal_org ON public.org_members USING btree (org_id) WHERE is_personal;
+
+
+--
 -- Name: ix_review_approvals_review; Type: INDEX; Schema: public; Owner: orchestr
 --
 
@@ -1240,6 +1300,20 @@ CREATE UNIQUE INDEX uq_workflow_env_pointers_workflow_env ON public.workflow_env
 
 
 --
+-- Name: org_members org_members_claim_personal_org; Type: TRIGGER; Schema: public; Owner: orchestr
+--
+
+CREATE TRIGGER org_members_claim_personal_org BEFORE INSERT ON public.org_members FOR EACH ROW WHEN ((NOT new.is_personal)) EXECUTE FUNCTION public.claim_personal_org();
+
+
+--
+-- Name: organizations organizations_personal_owner_check; Type: TRIGGER; Schema: public; Owner: orchestr
+--
+
+CREATE CONSTRAINT TRIGGER organizations_personal_owner_check AFTER INSERT OR UPDATE OF id, is_personal, personal_owner_id ON public.organizations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.check_personal_owner();
+
+
+--
 -- Name: api_keys api_keys_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
 --
 
@@ -1384,11 +1458,35 @@ ALTER TABLE ONLY public.org_members
 
 
 --
+-- Name: org_members org_members_org_id_is_personal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.org_members
+    ADD CONSTRAINT org_members_org_id_is_personal_fkey FOREIGN KEY (org_id, is_personal) REFERENCES public.organizations(id, is_personal) ON DELETE CASCADE;
+
+
+--
 -- Name: org_members org_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
 --
 
 ALTER TABLE ONLY public.org_members
     ADD CONSTRAINT org_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: organizations organizations_personal_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_personal_owner_id_fkey FOREIGN KEY (personal_owner_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: organizations organizations_personal_owner_member_fkey; Type: FK CONSTRAINT; Schema: public; Owner: orchestr
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_personal_owner_member_fkey FOREIGN KEY (id, personal_owner_id) REFERENCES public.org_members(org_id, user_id) DEFERRABLE INITIALLY DEFERRED;
 
 
 --

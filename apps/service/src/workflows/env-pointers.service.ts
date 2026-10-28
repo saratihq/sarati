@@ -342,7 +342,7 @@ export class EnvPointersService {
     );
   }
 
-  /** What this caller lacks to change what runs in this org: a key needs `workflow:deploy`, and in a shared org the person an owner or admin. */
+  /** What this caller lacks to change what runs in this org: a key needs `workflow:deploy`, and anywhere but its owner's personal workspace the person an owner or admin. */
   async promoteRightMissing(
     em: EntityManager,
     orgId: string | null,
@@ -351,7 +351,7 @@ export class EnvPointersService {
     if (!scopeSatisfied(principalScopes(actor), 'workflow:deploy')) return 'scope';
     if (!orgId) return null;
     const org = await em.findOne(OrganizationEntity, { where: { id: orgId } });
-    if (!org || org.isPersonal) return null;
+    if (!org || org.personalOwnerId === actor.user.id) return null;
     const role = await this.orgs.roleOf(em, actor.user.id, orgId);
     return role === 'owner' || role === 'admin' ? null : 'role';
   }

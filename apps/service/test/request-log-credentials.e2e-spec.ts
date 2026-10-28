@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { bootService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 interface LogLine {
@@ -90,15 +91,10 @@ describe('the service log never prints a credential a request carried in its URL
        VALUES ($1, 'owner@log-e2e.local', 'Owner', now(), now()), ($2, 'joiner@log-e2e.local', 'Joiner', now(), now())`,
       [owner, joiner],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Owner', true, now(), now()), ($2, 'Joiner', true, now(), now())`,
-      [personalOwner, personalJoiner],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $3, $4, 'owner', now())`,
-      [personalOwner, owner, personalJoiner, joiner],
+    await insertPersonalOrgs(
+      db,
+      { id: personalOwner, userId: owner, name: 'Owner' },
+      { id: personalJoiner, userId: joiner, name: 'Joiner' },
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)

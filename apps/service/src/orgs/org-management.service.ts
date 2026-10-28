@@ -21,8 +21,11 @@ import { EventsService } from '../events/events.service';
 import { isUniqueViolation } from '../database/pg-errors';
 import { insertOrg } from './insert-org';
 import { lockInvite, lockOrgForDelete, lockOrgForWrite } from './org-row-lock';
+import { OrgsService } from './orgs.service';
 
 const INVITE_TTL_DAYS = 14;
+
+const noOtherMembers = (): DomainError => new DomainError('The personal organization has no other members');
 
 declare const held: unique symbol;
 
@@ -50,20 +53,23 @@ export class OrgManagementService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly events: EventsService,
     private readonly connections: ConnectionsService,
+    private readonly orgs: OrgsService,
   ) {}
 
-  /** The caller's memberships, personal org first (client contract). */
+  /** The caller's memberships, their own personal org first and the only one marked personal (client contract). */
   async listOrgs(userId: string): Promise<OrgSummary[]> {
-    const rows = await rawQuery<{ id: string; name: string; is_personal: boolean; role: OrgRole }>(
-      this.dataSource.manager,
-      `SELECT o.id, o.name, o.is_personal, m.role
+    const em = this.dataSource.manager;
+    const personal = await this.orgs.personalOrgOf(em, userId);
+    const rows = await rawQuery<{ id: string; name: string; role: OrgRole }>(
+      em,
+      `SELECT o.id, o.name, m.role
          FROM organizations o
          JOIN org_members m ON m.org_id = o.id
         WHERE m.user_id = $1
-        ORDER BY o.is_personal DESC, o.created_at ASC`,
-      [userId],
+        ORDER BY o.id = $2 DESC, o.created_at ASC`,
+      [userId, personal?.id ?? null],
     );
-    return rows.map((r) => ({ id: r.id, name: r.name, is_personal: r.is_personal, role: r.role }));
+    return rows.map((r) => ({ id: r.id, name: r.name, is_personal: r.id === personal?.id, role: r.role }));
   }
 
   async createOrg(actorId: string, name: string): Promise<OrgSummary> {
@@ -161,11 +167,13 @@ export class OrgManagementService {
   }
 
   async changeRole(
-    orgId: string,
+    org: OrganizationEntity,
     actorId: string,
     targetUserId: string,
     role: AssignableOrgRole,
   ): Promise<Record<string, unknown>> {
+    if (org.isPersonal) throw noOtherMembers();
+    const orgId = org.id;
     return this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, orgId);
       const target = await this.memberForUpdate(em, orgId, targetUserId);
@@ -198,13 +206,13 @@ export class OrgManagementService {
     });
   }
 
-  /** The ONLY way ownership moves: target → owner, actor → admin in one transaction (role edits never mint an owner). */
+  /** Hands ownership over: target → owner, actor → admin in one transaction, so the org never has no owner. */
   async transferOwnership(
     org: OrganizationEntity,
     actorId: string,
     targetUserId: string,
   ): Promise<OrgSummary> {
-    if (org.isPersonal) throw new DomainError('The personal organization has no other members');
+    if (org.isPersonal) throw noOtherMembers();
     if (actorId === targetUserId) throw new DomainError('You are already the owner');
     return this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, org.id);
@@ -233,7 +241,9 @@ export class OrgManagementService {
   }
 
   /** `isSelf` = leave (any role may, except the last owner); otherwise a removal by owner/admin. */
-  async removeMember(orgId: string, actorId: string, targetUserId: string): Promise<void> {
+  async removeMember(org: OrganizationEntity, actorId: string, targetUserId: string): Promise<void> {
+    if (org.isPersonal) throw noOtherMembers();
+    const orgId = org.id;
     const isSelf = actorId === targetUserId;
     await this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, orgId);
@@ -295,6 +305,7 @@ export class OrgManagementService {
     emailRaw: string,
     role: AssignableOrgRole,
   ): Promise<OrgInviteEntity> {
+    if (org.isPersonal) throw noOtherMembers();
     const email = emailRaw.trim().toLowerCase();
     return this.dataSource.transaction(async (em) => {
       await lockOrgForWrite(em, org.id);
@@ -350,9 +361,13 @@ export class OrgManagementService {
     });
   }
 
-  /** Whether an invite can still be redeemed: unused, unexpired, and an owner invite only while its creator is an owner. */
-  private async isRedeemable(em: EntityManager, invite: OrgInviteEntity): Promise<boolean> {
-    if (invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) return false;
+  /** Whether an invite can still be redeemed: unused, unexpired, into an org that is not personal (constitution row 22), and an owner invite only while its creator is an owner. */
+  private async isRedeemable(
+    em: EntityManager,
+    invite: OrgInviteEntity,
+    org: OrganizationEntity,
+  ): Promise<boolean> {
+    if (org.isPersonal || invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) return false;
     if (invite.role !== 'owner') return true;
     const creator = invite.createdBy
       ? await em.findOne(OrgMemberEntity, { where: { orgId: invite.orgId, userId: invite.createdBy } })
@@ -365,7 +380,7 @@ export class OrgManagementService {
     const em = this.dataSource.manager;
     const invite = await em.findOne(OrgInviteEntity, { where: { token } });
     const org = invite ? await em.findOne(OrganizationEntity, { where: { id: invite.orgId } }) : null;
-    if (!invite || !org || !(await this.isRedeemable(em, invite))) {
+    if (!invite || !org || !(await this.isRedeemable(em, invite, org))) {
       throw new DomainError('Invite not found or expired', 404);
     }
     // No invitee email: whoever holds the link must not learn who it was addressed to.
@@ -430,7 +445,7 @@ export class OrgManagementService {
     const invite = await lockInvite(em, { id: sought.id });
     if (!invite) throw refused;
     const org = await em.findOneByOrFail(OrganizationEntity, { id: invite.orgId });
-    return { invite, org, redeemable: await this.isRedeemable(em, invite) } as ClaimedInvite;
+    return { invite, org, redeemable: await this.isRedeemable(em, invite, org) } as ClaimedInvite;
   }
 
   /** Spends a claimed, redeemable invite on `userId`, who joins its org with its role: the one write every accept of an invite makes. */

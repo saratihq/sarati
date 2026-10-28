@@ -638,9 +638,8 @@ describe('the run-as rule, dry, answers what the run does — for every state', 
 
   it("the review card's readiness names your accounts only to a credential that may read them", async () => {
     const keys = app.get(ApiKeysService);
-    const workflowOnly = (await keys.issue(me, null, 'workflow only', ['workflow:read'])).key;
-    const both = (await keys.issue(me, null, 'workflow and accounts', ['workflow:read', 'connection:read']))
-      .key;
+    const workflowOnly = (await keys.issue(me, 'workflow only', ['workflow:read'])).key;
+    const both = (await keys.issue(me, 'workflow and accounts', ['workflow:read', 'connection:read'])).key;
     const readiness = `/api/workflows/${wf}/reviews/${review}/test/readiness`;
 
     const refused = await as(workflowOnly).get(readiness).expect(403);

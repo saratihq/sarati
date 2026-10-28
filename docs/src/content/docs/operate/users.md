@@ -20,8 +20,9 @@ Either way, an organization is joined only by an invite sent to your email addre
 
 ## Personal and organization
 
-Every account has a **personal** workspace of its own. Work you want to share lives in an
-organization, which you create from the user menu.
+Every account has a **personal** workspace of its own, with one member: its owner. Nobody can be
+invited into it, and its owner cannot leave it. Work you want to share lives in an organization,
+which you create from the user menu.
 
 The organization switcher decides which workspace you are looking at, and workflows do not move
 between them.
@@ -55,8 +56,10 @@ that signs in only through single sign-on, that is the confirmed address its pro
 kept up to date at each sign-in. An account with a password keeps the address it was made with,
 even once single sign-on is connected to it, so it can differ from the provider's.
 
-A first single sign-on that carries an invite it cannot accept makes no account; signing in from the
-sign-in screen still makes one.
+A first single sign-on carrying an invite that can still be used, but that was sent to another
+address or to one your provider did not confirm, is refused and makes no account. One carrying an
+invite that can no longer be used (accepted, revoked, expired, or into a personal workspace) makes
+the account and joins nothing, as signing in from the sign-in screen does.
 
 An invite admits one account: once someone has accepted it, the link is spent. A revoke and an
 accept that cross, or two accepts by accounts not yet in the organization, take turns, and whichever

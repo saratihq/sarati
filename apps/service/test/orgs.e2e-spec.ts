@@ -12,6 +12,7 @@ import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 // Gmail answering the identity probe a new connection runs; any other SDK request is a test bug.
@@ -171,17 +172,10 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
               ($2, 'member-b@e2e.local', 'Member B', now(), now())`,
       [userA, userB],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Owner A', true, now(), now()),
-              ($2, 'Member B', true, now(), now())`,
-      [personalA, personalB],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now()),
-              (gen_random_uuid(), $3, $4, 'owner', now())`,
-      [personalA, userA, personalB, userB],
+    await insertPersonalOrgs(
+      db,
+      { id: personalA, userId: userA, name: 'Owner A' },
+      { id: personalB, userId: userB, name: 'Member B' },
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)

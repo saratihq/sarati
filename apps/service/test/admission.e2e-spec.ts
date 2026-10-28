@@ -1,15 +1,18 @@
 import { execFile } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import type { INestApplication } from '@nestjs/common';
 import { Client } from 'pg';
 import type request from 'supertest';
 
+import { mintSession } from '../src/auth/local/local-session';
 import { ADMISSION_LOCK_SPACE } from '../src/database/advisory-lock-spaces';
 import { HostileIdp } from './support/hostile-idp';
 import { lockProbes, pause } from './support/lock-probes';
+import { insertPersonalOrgs } from './support/personal-org';
 import { THIS_SERVICE } from './support/service-process';
-import { bootSsoApp, clientAddress, from, newBinding, snapshotEnv } from './support/sso-app';
+import { SSO_SECRET_KEY, bootSsoApp, clientAddress, from, newBinding, snapshotEnv } from './support/sso-app';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const PASSWORD = 'a-long-enough-passphrase';
@@ -304,6 +307,188 @@ describe('account admission takes turns (e2e, isolated DB)', () => {
         ).toBe(0);
       }, 60_000);
     }
+  });
+
+  describe('an invite into a personal workspace, as an earlier version could make one', () => {
+    let ownerId = '';
+    let personal = '';
+    let team = '';
+
+    /** A pending invite to `email` into `orgId`, written as the earlier version wrote one. */
+    async function seededInvite(orgId: string, email: string): Promise<string> {
+      const token = randomBytes(24).toString('hex');
+      await db.query(
+        `INSERT INTO org_invites (id, org_id, email, role, token, created_by, created_at, expires_at)
+         VALUES (gen_random_uuid(), $1, $2, 'member', $3, $4, now(), now() + interval '14 days')`,
+        [orgId, email, token, ownerId],
+      );
+      return token;
+    }
+
+    const membershipsOf = async (userId: string): Promise<Array<{ org_id: string; role: string }>> =>
+      (
+        await db.query<{ org_id: string; role: string }>(
+          `SELECT org_id, role FROM org_members WHERE user_id = $1 ORDER BY created_at`,
+          [userId],
+        )
+      ).rows;
+    const ownWorkspaceOf = async (userId: string): Promise<string> =>
+      (await db.query<{ id: string }>(`SELECT id FROM organizations WHERE personal_owner_id = $1`, [userId]))
+        .rows[0]!.id;
+    const ownerOnly = async (): Promise<void> => {
+      expect(await count(`SELECT 1 FROM org_members WHERE org_id = $1`, [personal])).toBe(1);
+      expect(
+        await count(`SELECT 1 FROM org_invites WHERE org_id = $1 AND accepted_at IS NOT NULL`, [personal]),
+      ).toBe(0);
+    };
+
+    /** An account that already exists at `email`, with its own workspace, signed in. */
+    async function existingAccount(email: string): Promise<{ id: string; session: string }> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, $2, now(), now())`,
+        [id, email],
+      );
+      await insertPersonalOrgs(db, { id: randomUUID(), userId: id, name: email });
+      return { id, session: (await mintSession(id, SSO_SECRET_KEY)).token };
+    }
+
+    /** A first sign-in of `sub` carrying `token`, whose account another admission makes while it waits for the admission lock. */
+    async function racedSignIn(
+      sub: string,
+      email: string,
+      token: string,
+    ): Promise<{ res: request.Response; id: string }> {
+      const flow = await startSso('/api/auth/oidc/start', { invite_token: token });
+      answerFlows([{ code: sub, flow, sub, email }]);
+      const id = randomUUID();
+      await side.query('SELECT pg_advisory_lock($1, 0)', [ADMISSION_LOCK_SPACE]);
+      let signingIn: Promise<request.Response>;
+      try {
+        signingIn = completeSso(flow, sub).then((res) => res);
+        await waitersOnAdmission(1);
+        await side.query(
+          `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, $2, now(), now())`,
+          [id, email],
+        );
+        await insertPersonalOrgs(side, { id: randomUUID(), userId: id, name: email });
+        await side.query(
+          `INSERT INTO user_identities (id, user_id, issuer, subject, email_at_link) VALUES ($1, $2, $3, $4, $5)`,
+          [randomUUID(), id, idp.issuer, sub, email],
+        );
+      } finally {
+        await side.query('SELECT pg_advisory_unlock($1, 0)', [ADMISSION_LOCK_SPACE]);
+      }
+      return { res: await signingIn, id };
+    }
+
+    beforeAll(async () => {
+      await freshInstance({ ...ssoEnv(), LOCAL_AUTH_ENABLED: 'true' });
+      const owner = await from(app)
+        .post('/api/auth/local/register')
+        .send({ email: 'owner@example.com', password: PASSWORD })
+        .expect(201);
+      ownerId = owner.body.user.id as string;
+      personal = await ownWorkspaceOf(ownerId);
+      team = (
+        await from(app)
+          .post('/api/orgs')
+          .set('Authorization', `Bearer ${owner.body.token as string}`)
+          .send({ name: 'Team' })
+          .expect(201)
+      ).body.id as string;
+    }, 60_000);
+
+    it('previews and accepts it as a spent invite, and the account at its address joins nothing, while one into a shared organization joins it', async () => {
+      const reader = await existingAccount('reader@example.com');
+      const token = await seededInvite(personal, 'reader@example.com');
+      const shared = await seededInvite(team, 'reader@example.com');
+
+      await from(app).get(`/api/orgs/invites/${token}`).expect(404);
+      const refused = await from(app)
+        .post(`/api/orgs/invites/${token}/accept`)
+        .set('Authorization', `Bearer ${reader.session}`)
+        .expect(404);
+      expect(refused.body.detail).toBe('Invite not found or expired');
+      await ownerOnly();
+
+      expect((await from(app).get(`/api/orgs/invites/${shared}`).expect(200)).body.org_id).toBe(team);
+      const joined = await from(app)
+        .post(`/api/orgs/invites/${shared}/accept`)
+        .set('Authorization', `Bearer ${reader.session}`)
+        .expect(200);
+      expect(joined.body.org_id).toBe(team);
+    }, 60_000);
+
+    it('refuses a password sign-up carrying it as signup_closed, making no account, while one into a shared organization makes the account and joins it', async () => {
+      const token = await seededInvite(personal, 'signup@example.com');
+      const shared = await seededInvite(team, 'signup@example.com');
+      const register = (invite: string) =>
+        from(app)
+          .post('/api/auth/local/register')
+          .send({ email: 'signup@example.com', password: PASSWORD, invite_token: invite });
+
+      const refused = await register(token);
+      expect({ status: refused.status, code: refused.body.code }).toEqual({
+        status: 403,
+        code: 'signup_closed',
+      });
+      expect(await count(`SELECT 1 FROM users WHERE email = 'signup@example.com'`)).toBe(0);
+      await ownerOnly();
+
+      const joined = await register(shared).expect(201);
+      expect(joined.body.joined_org_id).toBe(team);
+    }, 60_000);
+
+    it('still makes the single sign-on account carrying it on a first sign-in, and signs it in again with it, joining nothing either time, while one into a shared organization joins it', async () => {
+      const token = await seededInvite(personal, 'sso@example.com');
+      const shared = await seededInvite(team, 'sso@example.com');
+      const signIn = async (code: string, invite: string): Promise<request.Response> => {
+        const flow = await startSso('/api/auth/oidc/start', { invite_token: invite });
+        answerFlows([{ code, flow, sub: 'sub-sso', email: 'sso@example.com' }]);
+        return completeSso(flow, code);
+      };
+
+      const first = await signIn('first', token);
+      expect({ status: first.status, joined: first.body.joined_org_id }).toEqual({
+        status: 200,
+        joined: undefined,
+      });
+      const id = first.body.user.id as string;
+      const own = [{ org_id: await ownWorkspaceOf(id), role: 'owner' }];
+      expect(await membershipsOf(id)).toEqual(own);
+
+      const known = await signIn('known', token);
+      expect({ status: known.status, user: known.body.user.id, joined: known.body.joined_org_id }).toEqual({
+        status: 200,
+        user: id,
+        joined: undefined,
+      });
+      expect(await membershipsOf(id)).toEqual(own);
+      await ownerOnly();
+
+      const joined = await signIn('shared', shared);
+      expect(joined.body.joined_org_id).toBe(team);
+    }, 60_000);
+
+    it('joins nothing through it when the account appears while the first sign-in waits for the admission lock, while one into a shared organization joins it', async () => {
+      const token = await seededInvite(personal, 'raced@example.com');
+      const { res, id } = await racedSignIn('sub-raced', 'raced@example.com', token);
+      expect({ status: res.status, user: res.body.user?.id, joined: res.body.joined_org_id }).toEqual({
+        status: 200,
+        user: id,
+        joined: undefined,
+      });
+      expect(await membershipsOf(id)).toEqual([{ org_id: await ownWorkspaceOf(id), role: 'owner' }]);
+      await ownerOnly();
+
+      const shared = await seededInvite(team, 'raced.too@example.com');
+      const control = await racedSignIn('sub-raced-too', 'raced.too@example.com', shared);
+      expect({ status: control.res.status, joined: control.res.body.joined_org_id }).toEqual({
+        status: 200,
+        joined: team,
+      });
+    }, 60_000);
   });
 
   it('makes the operator CLI take its turn too, so a first sign-in it races lands in the account it links', async () => {

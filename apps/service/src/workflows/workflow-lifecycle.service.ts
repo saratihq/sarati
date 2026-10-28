@@ -285,16 +285,4 @@ export class WorkflowLifecycleService {
     const updated = await this.dataSource.manager.update(WorkflowEntity, { id: workflowId }, changes);
     if (!updated.affected) throw new DomainError(`Workflow ${workflowId} not found`, 404);
   }
-
-  /** The caller's personal-org id (tenancy attribution for new workflows). */
-  async personalOrgIdOf(userId: string): Promise<string | null> {
-    const rows = await rawQuery<{ id: string }>(
-      this.dataSource.manager,
-      `SELECT o.id FROM organizations o
-         JOIN org_members m ON m.org_id = o.id
-        WHERE m.user_id = $1 AND o.is_personal = true LIMIT 1`,
-      [userId],
-    );
-    return rows[0]?.id ?? null;
-  }
 }

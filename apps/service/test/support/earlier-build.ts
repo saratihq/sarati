@@ -14,15 +14,24 @@ export interface Release {
 const git = (...args: string[]): string =>
   execFileSync('git', ['-C', REPO, ...args], { encoding: 'utf8' }).trim();
 
-/** The release going back from this build lands on: the newest `v*` tag in this clone's history, one on this build itself left out. */
-export function lastRelease(): Release {
+function newestRelease(fits: (tag: string) => boolean): Release {
   const onHead = new Set(git('tag', '--points-at', 'HEAD').split('\n'));
   const tag = git('tag', '--merged', 'HEAD', '--list', 'v*', '--sort=-v:refname')
     .split('\n')
-    .find((name) => name !== '' && !onHead.has(name));
+    .find((name) => name !== '' && !onHead.has(name) && fits(name));
   if (!tag)
     throw new Error('No v* release tag before this build in this clone: fetch the tags (git fetch --tags)');
   return { tag, sha: git('rev-parse', `${tag}^{commit}`) };
+}
+
+/** The release going back from this build lands on: the newest `v*` tag in this clone's history, one on this build itself left out. */
+export function lastRelease(): Release {
+  return newestRelease(() => true);
+}
+
+/** The newest release before this build without `path` (from the repo root): the last one before the change that added it. */
+export function lastReleaseWithout(path: string): Release {
+  return newestRelease((tag) => git('ls-tree', '--name-only', tag, '--', path) === '');
 }
 
 /** An earlier build of the service, unpacked beside this one. */

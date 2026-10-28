@@ -17,6 +17,7 @@ import {
 } from '../src/platform/internal-token';
 import { PLATFORM_KEY_NAMES, PlatformKeysService } from '../src/platform/platform-keys.service';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /**
@@ -61,23 +62,22 @@ describe('platform keys (e2e, isolated DB)', () => {
       [owner, admin, member],
     );
     await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Acme', false, now(), now()),
-              ($2, 'Owner', true, now(), now()),
-              ($3, 'Admin', true, now(), now()),
-              ($4, 'Member', true, now(), now())`,
-      [orgId, personalOwner, personalAdmin, personalMember],
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Acme', false, now(), now())`,
+      [orgId],
     );
-    // Everyone OWNS their personal org — the reason an active-org role check grants everyone.
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()),
               (gen_random_uuid(), $1, $3, 'admin', now()),
-              (gen_random_uuid(), $1, $4, 'member', now()),
-              (gen_random_uuid(), $5, $2, 'owner', now()),
-              (gen_random_uuid(), $6, $3, 'owner', now()),
-              (gen_random_uuid(), $7, $4, 'owner', now())`,
-      [orgId, owner, admin, member, personalOwner, personalAdmin, personalMember],
+              (gen_random_uuid(), $1, $4, 'member', now())`,
+      [orgId, owner, admin, member],
+    );
+    // Everyone OWNS their personal org — the reason an active-org role check grants everyone.
+    await insertPersonalOrgs(
+      db,
+      { id: personalOwner, userId: owner, name: 'Owner' },
+      { id: personalAdmin, userId: admin, name: 'Admin' },
+      { id: personalMember, userId: member, name: 'Member' },
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)

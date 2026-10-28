@@ -5,7 +5,7 @@ import type { PolicyService } from '../policy/policy.service';
 export interface RunAccess {
   /** The runs' owner id (`runtime_runs.user_id`). */
   userId: string;
-  /** The request's tenancy context; null = personal scope. */
+  /** The request's active org: its X-Org-Id or key pin, else the caller's personal org; null only for an account with none. */
   activeOrgId: string | null;
   /** Whether the caller inherits the org-wide approvals reach over other members' runs. */
   orgWide: boolean;

@@ -19,6 +19,7 @@ import {
   newBinding,
   snapshotEnv,
 } from './support/sso-app';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const PASSWORD = 'a-long-enough-passphrase';
@@ -189,14 +190,7 @@ describe('single sign-on through a real OpenID provider (e2e, isolated DB)', () 
       `INSERT INTO users (id, email, name, hashed_password, created_at, updated_at) VALUES ($1, $2, $2, $3, now(), now())`,
       [id, email, await hashPassword(PASSWORD)],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, $2, true, now(), now())`,
-      [org, email],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-      [org, id],
-    );
+    await insertPersonalOrgs(db, { id: org, userId: id, name: email });
     return id;
   }
 

@@ -5,7 +5,6 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { GRANTABLE_SCOPES } from '../auth/scopes';
-import { WorkflowLifecycleService } from '../workflows/workflow-lifecycle.service';
 import { ApiKeysService, type IssuedKey } from './api-keys.service';
 import { Scope } from '../auth/scope.decorator';
 
@@ -25,10 +24,7 @@ class CreateKeyDto {
 @Controller('api/api-keys')
 @UseGuards(AuthGuard)
 export class ApiKeysController {
-  constructor(
-    private readonly apiKeys: ApiKeysService,
-    private readonly lifecycle: WorkflowLifecycleService,
-  ) {}
+  constructor(private readonly apiKeys: ApiKeysService) {}
 
   @Scope('key:manage')
   @Get()
@@ -45,10 +41,8 @@ export class ApiKeysController {
   @Scope('key:manage')
   @Post()
   async create(@Req() req: Request, @Body() body: CreateKeyDto): Promise<IssuedKey> {
-    const userId = requirePrincipal(req).user.id;
-    const org = await this.lifecycle.personalOrgIdOf(userId);
     // The plaintext `key` is returned ONCE here and never again.
-    return this.apiKeys.issue(userId, org, body.name, body.scopes ?? null);
+    return this.apiKeys.issue(requirePrincipal(req).user.id, body.name, body.scopes ?? null);
   }
 
   @Scope('key:manage')
