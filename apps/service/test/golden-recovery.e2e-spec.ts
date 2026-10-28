@@ -6,7 +6,7 @@ import { Client } from 'pg';
 import { NOT_RESUMABLE } from '../src/dbos/recovery-guard';
 import {
   GOLDEN_DIR,
-  PREVIOUS_BUILD,
+  LEGACY_BUILD,
   goldenShapes,
   restoreGoldenHistory,
   type GoldenHistory,
@@ -22,8 +22,7 @@ const REFUSED = SHAPES.filter((shape) => !DRIVES[shape]);
 
 const ATTACHED = ['attach-async', 'attach-sync'];
 
-const raw = (shape: string): string =>
-  readFileSync(join(GOLDEN_DIR, PREVIOUS_BUILD, `${shape}.json`), 'utf8');
+const raw = (shape: string): string => readFileSync(join(GOLDEN_DIR, LEGACY_BUILD, `${shape}.json`), 'utf8');
 
 // A legacy fan-out issues its ops in whatever order they come, which is what row 19 ends for runs on v2.
 const FANS_OUT_AFTER_RECOVERY = new Set(['parked-before-fan-out', 'shared-receive-before-fan-out']);
@@ -56,10 +55,10 @@ describe('legacy runs recovered on this build (e2e)', () => {
     }
     await service.crash();
     for (const shape of SHAPES) {
-      await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/${shape}`, shape, replace[shape]);
+      await restoreGoldenHistory(db, dbos, `${LEGACY_BUILD}/${shape}`, shape, replace[shape]);
     }
     for (const runId of ATTACHED) {
-      await restoreGoldenHistory(db, dbos, `${PREVIOUS_BUILD}/linear-parked`, runId);
+      await restoreGoldenHistory(db, dbos, `${LEGACY_BUILD}/linear-parked`, runId);
     }
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
   }, 120_000);

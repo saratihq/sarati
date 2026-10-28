@@ -6,11 +6,7 @@ const MAX_LENGTH = 1000;
 /** `String(err)` on a thrown Error glues its class name on: "TypeError: Invalid URL". */
 const ERROR_CLASS_PREFIX = /^[A-Z]\w*Error:\s*/;
 
-/**
- * A failed activation's `last_error`. This string is PRODUCT COPY: it is shown on the workflow
- * overview and returned by `POST /api/deploy`, so it must never carry a JS error class.
- * The one definition site — every writer of `last_error` goes through here.
- */
+/** A thrown failure as an activation's `last_error`: product copy, never a JS error class; a trigger its slot holds back carries the slot rule's message instead. */
 export function activationError(err: unknown): string {
   const unreachable = unreachableTarget(err);
   const message = unreachable

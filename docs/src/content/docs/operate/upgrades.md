@@ -50,45 +50,66 @@ restart, so each is judged again as it resumes. On a five-container install it i
 
 ### Going back
 
-Set `SARATI_VERSION` to the earlier version and upgrade again.
+Set `SARATI_VERSION` to the earlier version and upgrade again. What carries on there depends on the
+version you go back to.
 
-A run this version started doesn't carry on on v0.2.24, which logs at boot that it can't recover it.
-It stays in flight there: its approvals stay listed, and a decision made there is taken when you come
-back to this version, which picks the run up where it was. Three things end it there in an error,
-and coming back leaves it that way, running nothing more: an approval whose window passes, a **Wait**
-step still parked `RUN_MAX_DURATION_SECONDS` after its time is up, and a step it was running when you
-went back, once the run has been in flight for `RUN_MAX_DURATION_SECONDS`. Come back before any of
-them to keep such runs: a **Wait** step whose time came while you were away then wakes.
+**To v0.2.26 or v0.2.25**, runs carry on as they do here: both resume a run this version started, on
+the same engine. Its approvals stay listed and answerable there, a **Wait** step wakes there, a step
+it was running when you went back runs again there, and coming back to this version picks it up
+where it was.
 
-A run an earlier version started carries on there, and keeps its waits only if none of them runs
-beside another step: approvals that come one after another, even on the same topic, and a wait inside
-a loop. Let any such run with parallel branches, or with steps that start side by side, finish before
-going back, even when only one of its approvals shows in the inbox. There it can lose that approval, put a decision on the wrong
-wait, or end in an error. So can a run with two approvals on one topic, neither waiting for the other,
-when the **If** and **Switch** steps before either of them have more than 4096 combinations of routes,
-even if the two never wait at the same time.
+**To v0.2.24**, a run v0.2.25 or later started doesn't carry on: v0.2.24 logs at boot that it can't
+recover it. It stays in flight there: its approvals stay listed, and a decision made there is taken
+when you come back to this version, which picks the run up where it was. Three things end it there in
+an error, and coming back leaves it that way, running nothing more: an approval whose window passes, a
+**Wait** step still parked `RUN_MAX_DURATION_SECONDS` after its time is up, and a step it was running
+when you went back, once the run has been in flight for `RUN_MAX_DURATION_SECONDS`. Come back before
+any of them to keep such runs: a **Wait** step whose time came while you were away then wakes.
 
-For a run that keeps its waits:
+**To v0.2.23 or earlier**, a run v0.2.25 or later started doesn't carry on either: let those runs
+finish before going back that far. A run v0.2.24 or earlier started carries on there, and keeps its
+waits only if none of them runs beside another step: approvals that come one after another, even on
+the same topic, and a wait inside a loop. Let any such run with parallel branches, or with steps that
+start side by side, finish before going back, even when only one of its approvals shows in the inbox.
+There it can lose that approval, put a decision on the wrong wait, or end in an error. So can a run
+with two approvals on one topic, neither waiting for the other, when the **If** and **Switch** steps
+before either of them have more than 4096 combinations of routes, even if the two never wait at the
+same time.
 
-- Its approval stays listed and answerable on the earlier version, and a **Wait** step still wakes.
-- A decision made here that the run had not taken yet is applied there, but the earlier version does
-  not record who made it. If it had not even gone out, because the service stopped as it was made,
-  its wait is listed there to decide again.
-- The earlier version shows one decider per run: whoever answered its last approval. A run with
-  several approvals shows only that one there, and coming back to this version shows each on its own
-  step again.
-- Coming back to this version picks it up where the earlier version left it.
+For a run that keeps its waits there:
 
-The earlier version counts the time a run spent parked against `RUN_MAX_DURATION_SECONDS`, so it may
-end a run that resumed from a long wait in an error.
+- Its approval stays listed and answerable, and a **Wait** step still wakes.
+- A decision made here that the run had not taken yet is applied there, but is not recorded with who
+  made it. If it had not even gone out, because the service stopped as it was made, its wait is
+  listed there to decide again.
+- It shows one decider per run: whoever answered its last approval. A run with several approvals
+  shows only that one there, and coming back to this version shows each on its own step again.
+- The time it spent parked counts against `RUN_MAX_DURATION_SECONDS` there, so a run that resumed
+  from a long wait may end in an error.
+- Coming back to this version picks it up where it was left.
 
-For a step with no account chosen:
+A step with no account chosen fails there: those versions need an app step to name an account, even
+under an environment, where the environment's account is still the one it runs as. A run on Default
+and **Test this branch** fail the same way. Pick an account on the step, and promote that version
+again for an environment to run it. An AI Agent step is the exception under an environment: there it
+runs as the environment's account with or without one.
 
-- It fails on the earlier version, which needs an app step to name an account even under an
-  environment, where the environment's account is still the one it runs as. A run on Default and
-  **Test this branch** fail the same way. Pick an account on the step, and promote that version
-  again for an environment to run it. An AI Agent step is the exception under an environment: there
-  it runs as the environment's account with or without one.
+**Triggers, going back to v0.2.25 or earlier.** None of them holds a trigger whose environment's
+account isn't active: there such a trigger is polled as that account, and a change a promote left
+waiting for it is tried at its app as that account. A webhook delete waiting for its account to be
+active again is tried there with that account from v0.2.23 to v0.2.25, which give up one the app
+refuses that account for: the log names the webhook at warn level, so you can delete it in the app.
+Earlier versions never try it. Coming back, this version judges every app trigger by its
+environment's account again when it starts, without waiting for a sweep: one whose account isn't
+active is held, one held whose account is active again listens again, and one held back for an
+account that is active again is set up with that account.
+
+**Going back to v0.2.25 or earlier** also undoes everything else
+[v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own). Above all, with durable runs on, the
+images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
+answers without signing in, and can cancel, resume or fork any run. Neither stack file nor the
+one-container image publishes that port, but any container on the same Docker network can reach it,
+and so can anything that reaches the machine when the service runs outside Docker.
 
 Running it by hand, without the installer:
 

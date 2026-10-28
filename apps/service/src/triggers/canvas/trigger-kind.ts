@@ -108,10 +108,15 @@ export function firesWhileHeld(kind: ActivationKind): boolean {
   return kind === 'registered_webhook' || kind === 'composio_subscription';
 }
 
+/** Whether an activation listens as its environment's slot, so whether it listens, and as whom, rests on that slot's account. */
+export function listensAsSlot(activation: Pick<MaterializedActivation, 'kind' | 'triggerType'>): boolean {
+  return slotOf(activation.kind, activation.triggerType) !== null;
+}
+
 /** Whether an activation is held back by its slot, so nothing is stood up, polled or changed at its app for it: it listens as one that serves it no account, or it is `held` — kept, while the account it was stood up with isn't active. */
 export function heldBackBySlot(
   activation: Pick<MaterializedActivation, 'kind' | 'triggerType' | 'connection'> & { held?: boolean },
 ): boolean {
   if (activation.held === true) return true;
-  return activation.connection === null && slotOf(activation.kind, activation.triggerType) !== null;
+  return activation.connection === null && listensAsSlot(activation);
 }

@@ -341,6 +341,13 @@ async function boot(pgBoss: boolean): Promise<void> {
   process.env.CLERK_ISSUER = '';
   process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
+  await start();
+  // A one-click account's health check asks Composio with its owner's key.
+  await setPlatformKey(app, { kind: 'user', userId: userA }, 'composio_api_key', 'ck_e2e_fake_key');
+}
+
+// Starts the service on the suite's database, its providers faked before it boots, once every reconcile its boot queued has settled.
+async function start(): Promise<void> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(SDK_POLLING_FETCH)
     .useValue(pollingFetch)
@@ -352,14 +359,8 @@ async function boot(pgBoss: boolean): Promise<void> {
         Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
     })
     .compile();
-  app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
-  configureApp(app);
-  await app.init();
-  await listenOnLoopback(app);
-  // A one-click account's health check asks Composio with its owner's key.
-  await setPlatformKey(app, { kind: 'user', userId: userA }, 'composio_api_key', 'ck_e2e_fake_key');
 
-  const composio = app.get(ComposioTriggerProvider);
+  const composio = moduleRef.get(ComposioTriggerProvider);
   subscribed = jest.spyOn(composio, 'createTriggerInstance').mockImplementation(() => {
     instanceSeq += 1;
     return Promise.resolve(`ti_slotfit_${instanceSeq}`);
@@ -367,10 +368,35 @@ async function boot(pgBoss: boolean): Promise<void> {
   unsubscribed = jest.spyOn(composio, 'deleteTriggerInstance').mockResolvedValue();
   jest.spyOn(composio, 'listActiveInstances').mockResolvedValue([]);
   jest.spyOn(composio, 'verifyWebhook').mockResolvedValue({ ok: true });
-  accountStatus = jest.spyOn(app.get(ComposioProvider), 'getAccountStatus').mockResolvedValue('active');
-  jest.spyOn(app.get(ComposioProvider), 'accountDeleter').mockResolvedValue(() => Promise.resolve());
-  seeded = jest.spyOn(app.get(SdkPollingProvider), 'enable');
-  registered = jest.spyOn(app.get(SdkWebhookProvider), 'enable');
+  accountStatus = jest.spyOn(moduleRef.get(ComposioProvider), 'getAccountStatus').mockResolvedValue('active');
+  jest.spyOn(moduleRef.get(ComposioProvider), 'accountDeleter').mockResolvedValue(() => Promise.resolve());
+  seeded = jest.spyOn(moduleRef.get(SdkPollingProvider), 'enable');
+  registered = jest.spyOn(moduleRef.get(SdkWebhookProvider), 'enable');
+  const booted = jest.spyOn(moduleRef.get(TriggerReconcilerService), 'reconcile');
+
+  app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
+  configureApp(app);
+  await app.init();
+  await listenOnLoopback(app);
+  await settled(booted);
+  booted.mockRestore();
+}
+
+// Settles once every call `spy` has had, and every call made as those settle, has settled.
+async function settled(spy: jest.SpyInstance): Promise<void> {
+  for (let seen = -1; seen !== spy.mock.results.length;) {
+    seen = spy.mock.results.length;
+    await Promise.allSettled(spy.mock.results.map((result) => result.value as unknown));
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+// Stops the service, runs `whileDown` on its database as another build or a crash would leave it, and starts it again.
+async function restart(whileDown: () => Promise<unknown>): Promise<void> {
+  jest.restoreAllMocks();
+  await app.close();
+  await whileDown();
+  await start();
 }
 
 async function shutdown(): Promise<void> {
@@ -3102,4 +3128,63 @@ describe('a change to an account reconciles the triggers listening as it through
       parked.restore();
     }
   }, 60_000);
+});
+
+// Constitution #11: an account's status can change while no build of this one runs — on an earlier release, which never holds a trigger, or between a status write and its reconcile, at a crash.
+describe('a service that starts judges each trigger listening as a slot by its account again (e2e, isolated DB, fake providers, pg-boss off)', () => {
+  beforeAll(() => boot(false), 30_000);
+  afterAll(shutdown);
+
+  it.each(RAILS)(
+    'a live %s trigger whose account stopped being active while the service was down is held as it starts, with no sweep to wait for, and listens again as it next starts once the account is active again',
+    async (rail) => {
+      const { production, account, wf, live } = await liveTrigger(rail, 'boot held');
+      const store = await storeOf(live.id);
+      const listsAs = (): number => channelLists.filter((headers) => headers.includes(account)).length;
+      const [lists, deletes] = [listsAs(), stripeDeletes.length];
+
+      await restart(() => setStatus(account, 'expired'));
+
+      expect(await activation(wf, production)).toEqual({
+        ...live,
+        held: true,
+        last_error: HELD('production', rail),
+      });
+      expect(await storeOf(live.id)).toEqual(store);
+      expect([standUps(), teardowns()]).toEqual([0, deletes]);
+      await poll();
+      expect(listsAs()).toBe(lists);
+
+      await restart(() => setStatus(account, 'active'));
+
+      expect(await activation(wf, production)).toEqual(live);
+      expect(await storeOf(live.id)).toMatchObject(store);
+      expect([standUps(), teardowns()]).toEqual([0, deletes]);
+    },
+    60_000,
+  );
+
+  it.each(RAILS)(
+    'a %s trigger held back by an account that is not active stands up as that account as the service starts, once it became active while the service was down',
+    async (rail) => {
+      const { app: appSlug, name, nodeType, props } = TRIGGERS[rail];
+      const { org, production } = await workspace(`boot stands up ${rail}`);
+      const account = await breakSlot(rail, 'inactive', [production]);
+      const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
+      expect(await activation(wf, production)).toMatchObject({
+        connection_id: null,
+        last_error: LAST_ERROR.inactive('production', appSlug, name, ''),
+      });
+
+      await restart(() => setStatus(account!, 'active'));
+
+      expect(await activation(wf, production)).toMatchObject({
+        connection_id: account,
+        held: false,
+        last_error: null,
+      });
+      expect(await standUpsAs(rail, account)).toBe(1);
+    },
+    60_000,
+  );
 });

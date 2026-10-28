@@ -29,18 +29,18 @@ export interface GoldenHistory {
   outcome?: GoldenOutcome;
 }
 
-/** The build before this one — v0.2.24, the release that added the recovery guard — as the short sha its histories are kept under: record them again when it changes. */
-export const PREVIOUS_BUILD = 'bdf9cd7';
+/** v0.2.24, the last release whose runs start on `orchestr.runPlan`, as the short sha its histories are kept under. */
+export const LEGACY_BUILD = 'bdf9cd7';
 
 /** The shapes recorded from `build`, each restored as `<build>/<shape>`. */
-export function goldenShapes(build = PREVIOUS_BUILD): string[] {
+export function goldenShapes(build = LEGACY_BUILD): string[] {
   return readdirSync(join(GOLDEN_DIR, build))
     .filter((file) => file.endsWith('.json'))
     .map((file) => file.slice(0, -'.json'.length));
 }
 
 /** The full sha of the build every history under `build` came from. */
-export function goldenBuild(build = PREVIOUS_BUILD): string {
+export function goldenBuild(build = LEGACY_BUILD): string {
   const builds = new Set(
     goldenShapes(build).map(
       (shape) =>

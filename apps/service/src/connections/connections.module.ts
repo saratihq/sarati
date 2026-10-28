@@ -17,7 +17,7 @@ import { OAuthService } from './oauth.service';
 
 /**
  * Managed-integration connections. `OAuthProvidersService` is built ONCE at boot from env + the endpoint catalog;
- * the Composio (managed-row) half is inert without COMPOSIO_API_KEY and the BYO token/oauth2 paths never touch it.
+ * the Composio (managed-row) half is inert for a scope with no Composio key stored, and the BYO token/oauth2 paths never touch it.
  */
 @Module({
   // EnvironmentsModule: the delete endpoint consults slot references. TriggerSignalsModule: an account's change reconciles the triggers listening as it.
