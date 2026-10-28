@@ -2,7 +2,7 @@ import { Column, Entity, PrimaryColumn } from 'typeorm';
 
 import type { OrgRole } from './organization.entity';
 
-/** Pending org membership offers. The token IS the credential — accept binds by token, not email. */
+/** Pending org membership offers: the token finds one, and only the account at its email may accept it. */
 @Entity('org_invites')
 export class OrgInviteEntity {
   @PrimaryColumn('uuid')

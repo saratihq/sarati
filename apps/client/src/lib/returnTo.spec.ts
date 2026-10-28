@@ -105,4 +105,12 @@ describe("safeReturnTo", () => {
   it("falls back to the dashboard with no redirect_url", () => {
     expect(landsOn("")).toBe("/");
   });
+
+  it("checks a path it is handed the same way, and an explicit null returns nowhere", () => {
+    window.history.replaceState(null, "", "/login?redirect_url=%2Fworkflows%2F42");
+    expect(safeReturnTo("/join/abc123")).toBe("/join/abc123");
+    expect(safeReturnTo("/\\evil.com")).toBe("/");
+    expect(safeReturnTo("/.//evil.com")).toBe("/");
+    expect(safeReturnTo(null)).toBe("/");
+  });
 });

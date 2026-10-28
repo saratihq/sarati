@@ -159,6 +159,8 @@ const OPAQUE_READS: Record<string, string> = {
     "sends readResumability's reads of a run's history, every one a SELECT",
   'service:scripts/legacy-report.cli.ts#report':
     "sends readResumability's reads of a run's history, every one a SELECT",
+  'service:scripts/link-sso.cli.ts#list': 'sends UNCONNECTED_ACCOUNTS_SQL, a SELECT',
+  'service:scripts/link-sso.cli.ts#linkAll': 'sends UNCONNECTED_ACCOUNTS_SQL, a SELECT',
 };
 
 /** Where each workflow-row lock is defined, so a look-alike of the same name is not taken for it. */

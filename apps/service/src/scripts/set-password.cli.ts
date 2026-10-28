@@ -21,11 +21,16 @@ async function main(): Promise<void> {
   const db = new Client({ connectionString: url });
   await db.connect();
   try {
-    const found = await db.query<{ id: string; name: string }>(
-      `SELECT id, name FROM users WHERE lower(email) = $1`,
+    const found = await db.query<{ id: string; email_verified: boolean }>(
+      `SELECT id, email_verified FROM users WHERE lower(email) = $1`,
       [email],
     );
-    const user = found.rows[0];
+    const user = found.rows.find((row) => row.email_verified);
+    if (!user && found.rows.length > 0) {
+      fail(
+        `No account holds ${email}: the only ones using it have an address their identity provider never confirmed.`,
+      );
+    }
     if (!user) fail(`No account with the email ${email}.`);
 
     const password = await promptHidden(`New password for ${email} (min ${MIN_PASSWORD_LENGTH} chars): `);

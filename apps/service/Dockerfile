@@ -33,7 +33,8 @@ COPY --from=build --chown=node:node /out ./
 COPY apps/service/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY apps/service/docker/sarati-set-password /usr/local/bin/sarati-set-password
 COPY apps/service/docker/sarati-legacy-report /usr/local/bin/sarati-legacy-report
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/sarati-set-password /usr/local/bin/sarati-legacy-report
+COPY apps/service/docker/sarati-link-sso /usr/local/bin/sarati-link-sso
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/sarati-set-password /usr/local/bin/sarati-legacy-report /usr/local/bin/sarati-link-sso
 
 # Secrets are generated on first boot and persisted here, so the volume must outlive the container.
 RUN mkdir -p /data && chown node:node /data

@@ -125,6 +125,51 @@ docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
 
 ### v0.2.27
 
+#### Sign in through your own identity provider, and invites for one address
+
+People can now sign in through your own OpenID Connect provider — see
+[Single sign-on](/operate/configuration/#single-sign-on).
+
+What changes for every instance:
+
+- **An invite admits only the account at the address it was sent to.** Earlier versions let any
+  signed-in account holding the link join. Another account is now refused with `403` and the code
+  `invite_email_mismatch`, and the invite stays pending; a pending invite still works for its own
+  address. Someone whose account has another email needs an invite to that one —
+  [Users](/operate/users/#invite-someone).
+- **One account holds each email, in any letter case.** Earlier versions kept two accounts apart
+  when their emails differed only in letter case, as Clerk or an identity-provider token could make
+  them. The upgrade leaves the address to the one already in lower case, or else the older, and the
+  upgrade log names the other on a line ending `an invite to it goes to the other`; that account
+  keeps everything else. Password sign-in finds an account by its email in any letter case.
+
+What changes for an instance that had `OIDC_*` set:
+
+- **An identity provider's token is no longer an API credential.** Earlier versions accepted one
+  sent as `Authorization: Bearer`, made an account for any subject it named, and needed only
+  `OIDC_ISSUER`. It is now refused with `401` and the code `token_rejected`. Scripts and integrations
+  that sent one switch to [API keys](/agents/api-keys/).
+- **`OIDC_JWKS_URL` and `OIDC_AUDIENCE` are no longer read:** the boot log warns about each until
+  you remove it. `OIDC_ISSUER` on its own does nothing, and the boot log says so until you add
+  `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`.
+- **Accounts that path made are not connected for you.** Connect them before their owners sign in:
+  `sarati-link-sso --list` names each one with the subject the old path stored, and
+  `sarati-link-sso --all` connects every one to it
+  ([Connecting accounts from the server](/operate/users/#connecting-accounts-from-the-server)). The
+  boot log counts the accounts still waiting. Otherwise a first sign-in is refused as "You already
+  have an account", or, for an account the old path gave an `@oidc.local` address, makes a second,
+  empty account — which `sarati-link-sso <email> --move` sets right.
+
+What changes once you set the three `OIDC_*` values:
+
+- **Email and password turns off,** and password sessions already issued stop working at the
+  restart. Set `LOCAL_AUTH_ENABLED=true` to keep passwords while people
+  [move over](/operate/users/#single-sign-on).
+- **The redirect URI is fixed:** `<SARATI_URL>/auth/oidc/callback`, registered at your provider.
+- **Clerk and your own provider cannot both be set:** `CLERK_ISSUER` with `OIDC_CLIENT_ID` stops
+  the service at boot. Moving from Clerk means connecting each account to its subject at the new
+  provider — [Switching from Clerk](/operate/users/#switching-from-clerk).
+
 #### Signing up with an invite makes an account only by joining
 
 There is nothing to change on upgrade. What a caller of `POST /api/auth/local/register` sees

@@ -186,6 +186,130 @@ describe('env config', () => {
     }
   });
 
+  describe('single sign-on (OIDC)', () => {
+    const SSO = {
+      OIDC_ISSUER: 'https://login.example.com/',
+      OIDC_CLIENT_ID: 'sarati',
+      OIDC_CLIENT_SECRET: 'client-secret-value',
+    };
+    let warn: jest.SpyInstance;
+    const warned = (): string[] => warn.mock.calls.map((call) => String(call[0]));
+    beforeEach(() => {
+      warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    });
+    afterEach(() => warn.mockRestore());
+
+    it('is on with all three set, keeps the issuer verbatim, trailing slash included', () => {
+      const cfg = validateEnv({ ...SSO, OIDC_ISSUER: ' https://login.example.com/ ' });
+      expect(cfg.oidcSignInEnabled).toBe(true);
+      expect(cfg.oidcIssuer).toBe('https://login.example.com/');
+      expect(validateEnv({}).oidcSignInEnabled).toBe(false);
+    });
+
+    it('refuses a client id or secret without the other two, naming what is missing and never the secret', () => {
+      expect(() => validateEnv({ OIDC_CLIENT_ID: 'sarati' })).toThrow(
+        'OIDC sign-in needs OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET together — missing: OIDC_ISSUER, OIDC_CLIENT_SECRET',
+      );
+      expect(() => validateEnv({ ...SSO, OIDC_CLIENT_ID: '' })).toThrow(/missing: OIDC_CLIENT_ID$/);
+      expect(() => validateEnv({ ...SSO, OIDC_ISSUER: '' })).toThrow(/missing: OIDC_ISSUER$/);
+      expect(() => validateEnv({ ...SSO, OIDC_ISSUER: '' })).not.toThrow(/client-secret-value/);
+    });
+
+    it('refuses Clerk and OIDC together — one external sign-in', () => {
+      expect(() => validateEnv({ ...SSO, CLERK_ISSUER: 'https://clerk.example.com' })).toThrow(
+        /Configure one external sign-in: Clerk or OIDC/,
+      );
+    });
+
+    it('turns password sign-in off by default, and an explicit LOCAL_AUTH_ENABLED=true keeps it', () => {
+      expect(validateEnv(SSO).localAuthEnabled).toBe(false);
+      expect(validateEnv({ ...SSO, LOCAL_AUTH_ENABLED: 'true' }).localAuthEnabled).toBe(true);
+      expect(validateEnv({ OIDC_ISSUER: SSO.OIDC_ISSUER }).localAuthEnabled).toBe(true);
+      expect(validateEnv({}).localAuthEnabled).toBe(true);
+      expect(validateEnv({ CLERK_ISSUER: 'https://clerk.example.com' }).localAuthEnabled).toBe(false);
+    });
+
+    it('refuses an issuer that is not a bare http(s) URL', () => {
+      for (const bad of ['login.example.com', 'ftp://login.example.com']) {
+        expect(() => validateEnv({ ...SSO, OIDC_ISSUER: bad })).toThrow(/Invalid OIDC_ISSUER/);
+      }
+      for (const bad of ['https://login.example.com/?tenant=1', 'https://u:p@login.example.com/']) {
+        expect(() => validateEnv({ ...SSO, OIDC_ISSUER: bad })).toThrow(
+          /must not carry a username, password, query string or fragment/,
+        );
+      }
+    });
+
+    it('needs FRONTEND_URL to be a bare origin, since the redirect URI is derived from it', () => {
+      expect(() => validateEnv({ ...SSO, FRONTEND_URL: 'https://sarati.example.com/app' })).toThrow(
+        /FRONTEND_URL .* must be the bare http\(s\) origin/,
+      );
+      expect(() => validateEnv({ ...SSO, FRONTEND_URL: 'https://sarati.example.com/' })).not.toThrow();
+      expect(() => validateEnv({ FRONTEND_URL: 'https://sarati.example.com/app' })).not.toThrow();
+    });
+
+    it('in production, keeps the issuer and the frontend off plaintext except to this machine', () => {
+      const prod = { ...PROD, ...SSO, FRONTEND_URL: 'https://sarati.example.com' };
+      expect(() => validateEnv(prod)).not.toThrow();
+      expect(() => validateEnv({ ...prod, OIDC_ISSUER: 'http://idp.internal/' })).toThrow(
+        /OIDC_ISSUER must be https in production/,
+      );
+      expect(() => validateEnv({ ...prod, FRONTEND_URL: 'http://sarati.example.com' })).toThrow(
+        /FRONTEND_URL must be https in production/,
+      );
+      expect(() =>
+        validateEnv({
+          ...prod,
+          OIDC_ISSUER: 'http://127.0.0.1:9000/',
+          FRONTEND_URL: 'http://localhost:8080',
+        }),
+      ).not.toThrow();
+    });
+
+    it('parses OIDC_ALLOWED_DOMAINS, lowercased, and refuses anything but bare domains', () => {
+      expect(
+        validateEnv({ ...SSO, OIDC_ALLOWED_DOMAINS: ' Acme.com, acme.io ,' }).oidcAllowedDomainList,
+      ).toEqual(['acme.com', 'acme.io']);
+      expect(validateEnv(SSO).oidcAllowedDomainList).toEqual([]);
+      for (const bad of ['@acme.com', 'https://acme.com', 'acme .com']) {
+        expect(() => validateEnv({ ...SSO, OIDC_ALLOWED_DOMAINS: bad })).toThrow(/OIDC_ALLOWED_DOMAINS/);
+      }
+    });
+
+    it('warns in production when passwords stay on beside it, or a public issuer admits anyone', () => {
+      const prod = { ...PROD, ...SSO, FRONTEND_URL: 'https://sarati.example.com' };
+      validateEnv(prod);
+      expect(warned()).toEqual([]);
+
+      validateEnv({ ...prod, LOCAL_AUTH_ENABLED: 'true' });
+      expect(warned()).toEqual([expect.stringMatching(/^Password sign-in is on beside single sign-on/)]);
+      warn.mockClear();
+
+      validateEnv({ ...prod, OIDC_ISSUER: 'https://accounts.google.com' });
+      expect(warned()).toEqual([expect.stringMatching(/anyone can create an account here/)]);
+      warn.mockClear();
+
+      validateEnv({ ...prod, OIDC_ISSUER: 'https://accounts.google.com', OIDC_ALLOWED_DOMAINS: 'acme.com' });
+      expect(warned()).toEqual([]);
+    });
+
+    it('warns that the bearer-door variables and an issuer on its own no longer do anything', () => {
+      warnRetiredEnv({
+        OIDC_JWKS_URL: 'https://idp/jwks',
+        OIDC_AUDIENCE: 'api',
+        OIDC_ISSUER: SSO.OIDC_ISSUER,
+      });
+      expect(warned()).toEqual([
+        expect.stringMatching(/^OIDC_JWKS_URL is no longer read/),
+        expect.stringMatching(/^OIDC_AUDIENCE is no longer read/),
+        expect.stringMatching(/^OIDC_ISSUER alone no longer does anything/),
+      ]);
+      warn.mockClear();
+      warnRetiredEnv(SSO);
+      expect(warned()).toEqual([]);
+    });
+  });
+
   it('refuses to run dev-mode against a non-local database (prod DB, insecure defaults)', () => {
     expect(() => validateEnv({ DATABASE_URL: 'postgresql://u:p@db.example.com:5432/orchestr' })).toThrow(
       /non-local host/,

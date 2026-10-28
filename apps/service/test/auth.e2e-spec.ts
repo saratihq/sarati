@@ -33,6 +33,18 @@ const CLERK_PROFILES: Record<string, unknown> = {
     first_name: 'Clerk',
     last_name: 'Name',
   },
+  user_adopt_held: {
+    primary_email_address_id: 'e1',
+    email_addresses: [{ id: 'e1', email_address: 'held@e2e.local' }],
+    first_name: 'Clerk',
+    last_name: 'Held',
+  },
+  user_adopt_loose: {
+    primary_email_address_id: 'e1',
+    email_addresses: [{ id: 'e1', email_address: 'loose@e2e.local' }],
+    first_name: 'Clerk',
+    last_name: 'Loose',
+  },
 };
 
 describe('auth slice (e2e, isolated DB)', () => {
@@ -229,6 +241,31 @@ describe('auth slice (e2e, isolated DB)', () => {
 
     const rows = await query(`SELECT clerk_user_id FROM users WHERE email = 'legacy@e2e.local'`);
     expect(rows).toEqual([{ clerk_user_id: 'user_adopt_real' }]);
+  });
+
+  it('adopts only the account that holds the address, never one using it unconfirmed', async () => {
+    await query(
+      `INSERT INTO users (id, email, name, email_verified, created_at, updated_at) VALUES
+         ('00000000-0000-4000-8000-00000000a001', 'held@e2e.local', 'Unconfirmed', false, now(), now()),
+         ('ffffffff-0000-4000-8000-00000000a001', 'held@e2e.local', 'Holder', true, now(), now()),
+         (gen_random_uuid(), 'loose@e2e.local', 'Loose', false, now(), now())`,
+    );
+    const me = async (sub: string) =>
+      request(app.getHttpServer())
+        .get('/api/auth/me')
+        .set('Authorization', `Bearer ${await signToken({ sub, azp: 'http://localhost:5173' })}`)
+        .expect(200);
+    expect((await me('user_adopt_held')).body.user.name).toBe('Holder');
+    expect((await me('user_adopt_loose')).body.user.name).toBe('Clerk Loose');
+    const rows = await query(
+      `SELECT name, clerk_user_id FROM users WHERE email IN ('held@e2e.local', 'loose@e2e.local') ORDER BY name`,
+    );
+    expect(rows).toEqual([
+      { name: 'Clerk Loose', clerk_user_id: 'user_adopt_loose' },
+      { name: 'Holder', clerk_user_id: 'user_adopt_held' },
+      { name: 'Loose', clerk_user_id: null },
+      { name: 'Unconfirmed', clerk_user_id: null },
+    ]);
   });
 });
 

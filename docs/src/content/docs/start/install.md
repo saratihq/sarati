@@ -12,7 +12,7 @@ curl -fsSL https://get.sarati.io | sh
 That checks Docker is running, refuses a port that is already taken, writes a `sarati` directory to
 configure and upgrade from, starts the product, and waits until it answers. Open
 <http://localhost:8080> and create the owner account — the first account is yours, everyone after
-joins by invite.
+joins by invite ([single sign-on](/operate/users/#single-sign-on) admits people differently).
 
 Prefer to read it first? It only fetches
 [`install.sh`](https://github.com/saratihq/sarati/blob/main/install.sh) and
@@ -117,8 +117,9 @@ v0.2.12, the composer's Claude Agent SDK could send Anthropic usage and error re
 set.) The
 installer fetches its stack definition from GitHub and pulls the image from the registry, and after
 that the instance only contacts what you connect — the accounts you link, Composio if you add a key,
-Clerk if you configure cloud sign-in, and the model provider behind the composer. The pages your
-browser loads come from your instance too, fonts included.
+Clerk if you configure cloud sign-in, your identity provider if you configure single sign-on, and the
+model provider behind the composer. The pages your browser loads come from your instance too, fonts
+included.
 
 ## Run it from source
 

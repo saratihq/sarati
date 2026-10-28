@@ -30,6 +30,35 @@ describe('local session auth derivation', () => {
   });
 });
 
+describe('single sign-on sessions', () => {
+  const SSO = { SECRET_KEY: 's', OIDC_ISSUER: ' https://login.example.com/ ', OIDC_CLIENT_ID: 'sarati' };
+
+  it('accepts them from the issuer kept verbatim, and turns password sessions off — the service default', () => {
+    const cfg = env(SSO);
+    expect(cfg.oidcSessionIssuer).toBe('https://login.example.com/');
+    expect(cfg.passwordSessions).toBe(false);
+    expect(cfg.localSessionSecret).toBe('s');
+    expect(cfg.callerAuthConfigured).toBe(true);
+  });
+
+  it('keeps password sessions beside them when LOCAL_AUTH_ENABLED=true', () => {
+    expect(env({ ...SSO, LOCAL_AUTH_ENABLED: 'true' }).passwordSessions).toBe(true);
+  });
+
+  it('needs OIDC_CLIENT_ID as well as the issuer, as the service does', () => {
+    const cfg = env({ SECRET_KEY: 's', OIDC_ISSUER: 'https://login.example.com/' });
+    expect(cfg.oidcSessionIssuer).toBeNull();
+    expect(cfg.passwordSessions).toBe(true);
+    const off = env({
+      SECRET_KEY: 's',
+      OIDC_ISSUER: 'https://login.example.com/',
+      LOCAL_AUTH_ENABLED: 'false',
+    });
+    expect(off.localSessionSecret).toBeNull();
+    expect(off.callerAuthConfigured).toBe(false);
+  });
+});
+
 describe('callerAuthConfigured', () => {
   it('is false when no caller path is configured', () => {
     expect(env({}).callerAuthConfigured).toBe(false);

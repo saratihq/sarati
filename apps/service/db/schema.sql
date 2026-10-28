@@ -455,7 +455,8 @@ CREATE TABLE public.users (
     name character varying(255) NOT NULL,
     created_at timestamp with time zone,
     updated_at timestamp with time zone,
-    clerk_user_id character varying(64)
+    clerk_user_id character varying(64),
+    email_verified boolean DEFAULT true NOT NULL
 );
 
 
@@ -1127,10 +1128,10 @@ CREATE UNIQUE INDEX ix_users_clerk_user_id ON public.users USING btree (clerk_us
 
 
 --
--- Name: ix_users_email; Type: INDEX; Schema: public; Owner: orchestr
+-- Name: ix_users_confirmed_email; Type: INDEX; Schema: public; Owner: orchestr
 --
 
-CREATE UNIQUE INDEX ix_users_email ON public.users USING btree (email);
+CREATE UNIQUE INDEX ix_users_confirmed_email ON public.users USING btree (lower((email)::text)) WHERE email_verified;
 
 
 --
@@ -1716,6 +1717,45 @@ CREATE TABLE public.runtime_sub_workflow_charges (
     CONSTRAINT runtime_sub_workflow_charges_pkey PRIMARY KEY (root_run_id, call_key),
     CONSTRAINT runtime_sub_workflow_charges_root_run_id_fkey FOREIGN KEY (root_run_id) REFERENCES public.runtime_runs(id) ON DELETE CASCADE
 );
+
+--
+-- Name: user_identities; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.user_identities (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    issuer character varying(512) NOT NULL,
+    subject character varying(255) NOT NULL,
+    email_at_link character varying(255),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_login_at timestamp with time zone,
+    CONSTRAINT user_identities_pkey PRIMARY KEY (id),
+    CONSTRAINT user_identities_issuer_subject_key UNIQUE (issuer, subject),
+    CONSTRAINT user_identities_user_issuer_key UNIQUE (user_id, issuer),
+    CONSTRAINT user_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
+);
+
+--
+-- Name: oidc_login_states; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.oidc_login_states (
+    state_hash character varying(64) NOT NULL,
+    nonce character varying(64) NOT NULL,
+    code_verifier character varying(128) NOT NULL,
+    binding_hash character varying(64) NOT NULL,
+    purpose character varying(16) NOT NULL,
+    user_id uuid,
+    invite_token character varying(80),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT oidc_login_states_pkey PRIMARY KEY (state_hash),
+    CONSTRAINT oidc_login_states_purpose_check CHECK (purpose IN ('sign_in', 'link')),
+    CONSTRAINT oidc_login_states_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_oidc_login_states_expires_at ON public.oidc_login_states USING btree (expires_at);
 
 
 --

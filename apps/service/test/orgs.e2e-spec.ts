@@ -276,6 +276,33 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     expect(msUntilExpiry).toBeGreaterThan(13 * 24 * 60 * 60 * 1000);
   });
 
+  it('accept: only the account at the invited address joins, and only while it can vouch for that address', async () => {
+    const elsewhere = await asA(
+      http().post(`/api/orgs/${orgId}/invites`).send({ email: 'someone-else@e2e.local' }),
+    ).expect(201);
+    try {
+      const forwarded = await asB(http().post(`/api/orgs/invites/${elsewhere.body.token}/accept`)).expect(
+        403,
+      );
+      expect(forwarded.body.code).toBe('invite_email_mismatch');
+      expect(forwarded.body.detail).toContain('member-b@e2e.local');
+      expect(forwarded.body.detail).not.toContain('someone-else@e2e.local');
+
+      await db.query(`UPDATE users SET email_verified = false WHERE id = $1`, [userB]);
+      const unconfirmed = await asB(http().post(`/api/orgs/invites/${inviteToken}/accept`)).expect(403);
+      expect(unconfirmed.body.code).toBe('invite_email_unverified');
+    } finally {
+      await db.query(`UPDATE users SET email_verified = true WHERE id = $1`, [userB]);
+      await asA(http().delete(`/api/orgs/${orgId}/invites/${elsewhere.body.id as string}`)).expect(200);
+    }
+    const left = await db.query(
+      `SELECT (SELECT count(*)::int FROM org_members WHERE org_id = $1 AND user_id = $2) AS joined,
+              (SELECT accepted_by FROM org_invites WHERE token = $3) AS accepted_by`,
+      [orgId, userB, inviteToken],
+    );
+    expect(left.rows).toEqual([{ joined: 0, accepted_by: null }]);
+  });
+
   it('accept: second user joins by token; idempotent re-accept; unknown token 404', async () => {
     await asB(http().post(`/api/orgs/invites/${'0'.repeat(48)}/accept`)).expect(404);
 

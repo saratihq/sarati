@@ -29,7 +29,7 @@ async function bootstrap(): Promise<void> {
   // NOT checked here: it is set from Settings at runtime, so its absence is not a boot fact.
   if (!env.callerAuthConfigured || !env.serviceSharedSecret) {
     logger.warn(
-      'The AI composer is DISABLED (caller_auth_unconfigured) — /api/composer/* answers 503 and /api/composer/status reports why. Set SECRET_KEY (or CLERK_ISSUER) and restart.',
+      'The AI composer is DISABLED (caller_auth_unconfigured) — /api/composer/* answers 503 and /api/composer/status reports why. Set SECRET_KEY (with CLERK_ISSUER for Clerk, or OIDC_ISSUER and OIDC_CLIENT_ID for single sign-on) and restart.',
       'Bootstrap',
     );
   }

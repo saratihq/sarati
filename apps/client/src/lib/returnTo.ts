@@ -15,9 +15,12 @@ export function sameOriginPath(raw: string | null | undefined, origin: string): 
   return url.origin === origin && isRootedPath(path) ? path : null;
 }
 
-/** Where to land after sign-in: the `redirect_url` query parameter when it stays on this origin, else the dashboard. */
-export function safeReturnTo(): string {
+/** Where to land after sign-in: `raw` (by default the `redirect_url` query parameter) when it stays on this origin, else the dashboard. */
+export function safeReturnTo(
+  raw: string | null = typeof window === "undefined"
+    ? null
+    : new URLSearchParams(window.location.search).get("redirect_url"),
+): string {
   if (typeof window === "undefined") return "/";
-  const raw = new URLSearchParams(window.location.search).get("redirect_url");
   return sameOriginPath(raw, window.location.origin) ?? "/";
 }

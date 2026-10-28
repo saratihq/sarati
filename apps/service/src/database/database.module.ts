@@ -17,6 +17,7 @@ import { ReviewApprovalEntity, ReviewCommentEntity, WorkflowReviewEntity } from 
 import { ReviewTestResultEntity } from './entities/review-test-result.entity';
 import { NodeIconEntity } from './entities/node-icon.entity';
 import { OAuthStateEntity } from './entities/oauth-state.entity';
+import { OidcLoginStateEntity } from './entities/oidc-login-state.entity';
 import { IdempotencyKeyEntity } from './entities/idempotency-key.entity';
 import { RuntimeBlobEntity } from './entities/runtime-blob.entity';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from './entities/runtime-run.entity';
@@ -27,6 +28,7 @@ import {
 import { TriggerRetiredWebhookEntity } from './entities/trigger-retired-webhook.entity';
 import { UserSettingsEntity } from './entities/user-settings.entity';
 import { UserEntity } from './entities/user.entity';
+import { UserIdentityEntity } from './entities/user-identity.entity';
 import { WorkflowBranchEntity } from './entities/workflow-branch.entity';
 import { WorkflowEntity } from './entities/workflow.entity';
 import { WorkflowEnvPointerEntity } from './entities/workflow-env-pointer.entity';
@@ -41,6 +43,8 @@ export { PG_POOL };
 export const ENTITIES = [
   UserEntity,
   UserSettingsEntity,
+  UserIdentityEntity,
+  OidcLoginStateEntity,
   OrganizationEntity,
   OrgMemberEntity,
   OrgInviteEntity,

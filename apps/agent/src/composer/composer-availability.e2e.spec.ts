@@ -99,7 +99,13 @@ const BASE_ENV = {
 };
 
 const localToken = (
-  over: { secret?: string; sub?: string; issuer?: string; lifetime?: number } = {},
+  over: {
+    secret?: string;
+    sub?: string;
+    issuer?: string;
+    lifetime?: number;
+    claims?: Record<string, unknown>;
+  } = {},
 ): Promise<string> => mintLocalSession(over.secret ?? SECRET, over.sub ?? 'user_selfhost_1', over);
 
 async function boot(overrides: Record<string, string>): Promise<INestApplication> {
@@ -420,6 +426,12 @@ describe('composer availability', () => {
       expect(res.body.message).toContain('CLERK_ISSUER');
     });
 
+    it('refuses a session naming a sign-in method it does not know', async () => {
+      app = await boot(SELF_HOST);
+
+      await callToken(await localToken({ claims: { method: 'magic-link' } })).expect(401);
+    });
+
     it('LOCAL_AUTH_ENABLED=false opts out even with the secret present', async () => {
       storedKey = 'sk-test';
       app = await boot({ ...SELF_HOST, LOCAL_AUTH_ENABLED: 'false' });
@@ -427,6 +439,65 @@ describe('composer availability', () => {
       const res = await asCaller(request(app.getHttpServer()).get('/api/composer/status')).expect(200);
 
       expect(res.body).toMatchObject({ status: 'disabled', reason: 'caller_auth_unconfigured' });
+    });
+  });
+
+  describe('single sign-on sessions (self-host with an identity provider)', () => {
+    const ISSUER = 'https://login.example.com/';
+    const SSO = { SECRET_KEY: SECRET, OIDC_ISSUER: ISSUER, OIDC_CLIENT_ID: 'sarati' };
+    const ssoSession = (idp = ISSUER): Promise<string> => localToken({ claims: { method: 'oidc', idp } });
+    const passwordSession = (): Promise<string> => localToken({ claims: { method: 'password' } });
+
+    beforeEach(() => {
+      storedKey = 'sk-test';
+    });
+
+    function callToken(token?: string): request.Test {
+      const req = request(app!.getHttpServer()).post('/api/composer/token');
+      if (token) req.set('Authorization', `Bearer ${token}`);
+      return req.send({ session_id: randomUUID() });
+    }
+
+    it('lets a single sign-on session through, and no password session — passwords default off', async () => {
+      app = await boot(SSO);
+
+      await asCaller(request(app.getHttpServer()).get('/api/composer/status')).expect(200);
+      await callToken(await ssoSession()).expect(404);
+      await callToken(await passwordSession()).expect(401);
+      await callToken(await localToken()).expect(401);
+    });
+
+    it('refuses a single sign-on session minted under another issuer, even a trailing slash apart', async () => {
+      app = await boot(SSO);
+
+      await callToken(await ssoSession('https://other.example.com/')).expect(401);
+      await callToken(await ssoSession('https://login.example.com')).expect(401);
+    });
+
+    it('refuses one signed with another secret', async () => {
+      app = await boot(SSO);
+
+      await callToken(
+        await localToken({ secret: 'not-the-shared-secret', claims: { method: 'oidc', idp: ISSUER } }),
+      ).expect(401);
+    });
+
+    it('takes both kinds while LOCAL_AUTH_ENABLED=true keeps passwords beside it', async () => {
+      app = await boot({ ...SSO, LOCAL_AUTH_ENABLED: 'true' });
+
+      await callToken(await ssoSession()).expect(404);
+      await callToken(await passwordSession()).expect(404);
+    });
+
+    it('refuses single sign-on sessions once single sign-on is off, and names the variables when nothing is left', async () => {
+      app = await boot({ SECRET_KEY: SECRET, OIDC_ISSUER: ISSUER });
+      await callToken(await ssoSession()).expect(401);
+      await app.close();
+
+      app = await boot({ SECRET_KEY: SECRET, OIDC_ISSUER: ISSUER, LOCAL_AUTH_ENABLED: 'false' });
+      const res = await asCaller(request(app.getHttpServer()).get('/api/composer/status')).expect(200);
+      expect(res.body.reason).toBe('caller_auth_unconfigured');
+      expect(res.body.message).toContain('OIDC_CLIENT_ID');
     });
   });
 });

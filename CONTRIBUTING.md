@@ -87,6 +87,9 @@ afternoon.
 
 Then open <http://localhost:3100> and create the first account.
 
+For single sign-on work, `apps/service/test/support/oidc-idp/provider.mjs` runs a real OpenID provider
+on loopback — its header says how to start it and which `OIDC_*` values point the service at it.
+
 ### Containers
 
 Every image builds from the **workspace root**, because the lockfile lives there and a package cannot

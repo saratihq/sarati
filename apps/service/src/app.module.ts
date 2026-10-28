@@ -7,6 +7,7 @@ import { LoggerModule } from 'nestjs-pino';
 
 import { AuthModule } from './auth/auth.module';
 import { LocalAuthModule } from './auth/local/local-auth.module';
+import { OidcSignInModule } from './auth/oidc/oidc-sign-in.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { genRequestId } from './common/request-id';
 import { REQUEST_LOG_SERIALIZERS } from './common/request-log-redaction';
@@ -75,6 +76,7 @@ import { rateLimitKey } from './common/rate-limit-key';
     JobsModule,
     AuthModule,
     LocalAuthModule,
+    OidcSignInModule,
     OrgsModule,
     WorkflowsModule,
     ReviewsModule,

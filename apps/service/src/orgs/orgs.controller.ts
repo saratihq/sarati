@@ -97,7 +97,7 @@ export class OrgsController {
     return this.mgmt.createOrg(principal.user.id, body.name);
   }
 
-  /** Accept is token-bound (not email-bound) — any logged-in account holding the link joins. */
+  /** The link finds the invite; only the account at the address it was sent to joins. */
   @HttpCode(200)
   @Scope('org:manage')
   @CapabilityPath()
