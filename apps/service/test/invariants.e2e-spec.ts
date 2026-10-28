@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
@@ -18,6 +20,7 @@ import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -1112,6 +1115,106 @@ describe('domain invariants (the constitution)', () => {
       );
     }
   }, 30_000);
+
+  it('invariant 22: a personal workspace has exactly one member, its owner — no invite reaches it, and the database refuses a second member, a change of its role, its removal and a second one', async () => {
+    await http().get('/api/orgs').expect(200);
+    const me = '00000000-0000-0000-0000-000000000001';
+    const mine = (await db.query(`SELECT id FROM organizations WHERE personal_owner_id = $1`, [me])).rows[0]!
+      .id as string;
+    const refused = await http()
+      .post(`/api/orgs/${mine}/invites`)
+      .send({ email: 'someone@e2e.local', role: 'member' })
+      .expect(400);
+    expect(refused.body.detail).toBe('The personal organization has no other members');
+
+    const other = randomUUID();
+    const theirs = randomUUID();
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'other@e2e.local', 'Other', now(), now())`,
+      [other],
+    );
+    await insertPersonalOrgs(db, { id: theirs, userId: other, name: 'Other' });
+    const join = (role: string, personal: boolean) =>
+      db.query(
+        `INSERT INTO org_members (id, org_id, user_id, role, is_personal, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
+        [mine, other, role, personal],
+      );
+    await expect(join('member', false)).rejects.toThrow(/org_members_org_id_is_personal_fkey/);
+    await expect(join('owner', true)).rejects.toThrow(/uq_org_members_personal_org/);
+    await expect(
+      db.query(`UPDATE org_members SET role = 'admin' WHERE org_id = $1 AND user_id = $2`, [mine, me]),
+    ).rejects.toThrow(/org_members_personal_role_check/);
+    await expect(
+      db.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`, [mine, me]),
+    ).rejects.toThrow(/organizations_personal_owner_member_fkey/);
+    await expect(
+      db.query(`UPDATE organizations SET is_personal = false, personal_owner_id = NULL WHERE id = $1`, [
+        mine,
+      ]),
+    ).rejects.toThrow(/org_members_org_id_is_personal_fkey/);
+    await expect(insertPersonalOrgs(db, { id: randomUUID(), userId: me, name: 'Again' })).rejects.toThrow(
+      /organizations_personal_owner_id_key/,
+    );
+    await expect(
+      db.query(
+        `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Nobody', true, now(), now())`,
+        [randomUUID()],
+      ),
+    ).rejects.toThrow(/organizations_personal_owner_check/);
+
+    const loner = randomUUID();
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'loner@e2e.local', 'Loner', now(), now())`,
+      [loner],
+    );
+    const committed = async (...statements: Array<[string, unknown[]]>): Promise<void> => {
+      await db.query('BEGIN');
+      try {
+        for (const [text, values] of statements) await db.query(text, values);
+        await db.query('COMMIT');
+      } catch (err) {
+        await db.query('ROLLBACK');
+        throw err;
+      }
+    };
+    const moved = randomUUID();
+    const renumber = `UPDATE organizations SET id = $2 WHERE id = $1`;
+    await expect(
+      committed(
+        [
+          `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Moved', true, now(), now())`,
+          [moved],
+        ],
+        [renumber, [moved, randomUUID()]],
+      ),
+    ).rejects.toThrow(/organizations_personal_owner_check/);
+    const named = randomUUID();
+    const renamed = randomUUID();
+    await expect(
+      committed(
+        [
+          `INSERT INTO organizations (id, name, is_personal, personal_owner_id, created_at, updated_at) VALUES ($1, 'Named', false, $2, now(), now())`,
+          [named, loner],
+        ],
+        [renumber, [named, renamed]],
+        [
+          `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
+          [renamed, loner],
+        ],
+      ),
+    ).rejects.toThrow(/organizations_personal_owner_check/);
+
+    const members = await db.query(
+      `SELECT user_id, role FROM org_members WHERE org_id = ANY($1) ORDER BY user_id`,
+      [[mine, theirs]],
+    );
+    expect(members.rows).toEqual(
+      [
+        { user_id: me, role: 'owner' },
+        { user_id: other, role: 'owner' },
+      ].sort((x, y) => (x.user_id < y.user_id ? -1 : 1)),
+    );
+  });
 
   it('invariant 14: a tool edge binds a tool, distinct from a main edge, never collapses', () => {
     const node = (id: string, node_type: string, parameters: Record<string, unknown> = {}) => ({

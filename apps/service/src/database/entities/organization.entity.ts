@@ -13,6 +13,10 @@ export class OrganizationEntity {
   @Column({ name: 'is_personal', type: 'boolean', default: false })
   isPersonal!: boolean;
 
+  /** The account a personal org belongs to, its one member (constitution row 22); null for a shared org. */
+  @Column({ name: 'personal_owner_id', type: 'uuid', nullable: true })
+  personalOwnerId!: string | null;
+
   @Column({ name: 'created_at', type: 'timestamptz', nullable: true })
   createdAt!: Date | null;
 
@@ -41,6 +45,10 @@ export class OrgMemberEntity {
 
   @Column({ type: 'varchar', length: 20 })
   role!: OrgRole;
+
+  /** Its org's own `is_personal`, which the database holds it to, so a personal org takes one member, as owner (constitution row 22). */
+  @Column({ name: 'is_personal', type: 'boolean', default: false })
+  isPersonal!: boolean;
 
   @Column({ name: 'created_at', type: 'timestamptz', nullable: true })
   createdAt!: Date | null;

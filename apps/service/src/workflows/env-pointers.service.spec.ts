@@ -17,7 +17,7 @@ interface FakeState {
   wf?: WorkflowEntity | null;
   versions?: Array<{ id: string; workflowId: string; versionNumber: number; branchId?: string | null }>;
   pointers?: Array<{ workflowId: string; environment: string; versionId: string }>;
-  org?: { id: string; isPersonal: boolean } | null;
+  org?: { id: string; isPersonal: boolean; personalOwnerId: string | null } | null;
 }
 
 const WORKFLOW_LOCK = /FROM workflows WHERE id = \$1 FOR (?:KEY SHARE|NO KEY UPDATE)/;
@@ -235,7 +235,7 @@ describe('EnvPointersService.promote', () => {
 
   it(' mirror + B3: a non-personal-org env pointer move needs owner/admin — for EVERY env incl. prod', async () => {
     const orgWf = wf({ orgId: 'org-1' });
-    const org = { id: 'org-1', isPersonal: false };
+    const org = { id: 'org-1', isPersonal: false, personalOwnerId: null };
     const member = build({ wf: orgWf, versions, org }, { role: 'member' });
     await expect(member.svc.promote(WF, 'staging', V2, USER)).rejects.toMatchObject({ status: 403 });
 
@@ -255,11 +255,16 @@ describe('EnvPointersService.promote', () => {
       status: 'promoted',
     });
 
-    // A personal org passes without a role check (its envs can't be trigger-fired).
-    const personal = build({ wf: orgWf, versions, org: { id: 'org-1', isPersonal: true } }, { role: null });
-    await expect(personal.svc.promote(WF, 'production', V2, USER)).resolves.toMatchObject({
+    // Its owner's personal workspace asks no role; anyone else there is asked it, as in a shared org.
+    const personal = { id: 'org-1', isPersonal: true, personalOwnerId: 'user-1' };
+    const own = build({ wf: orgWf, versions, org: personal }, { role: 'owner' });
+    await expect(own.svc.promote(WF, 'production', V2, USER)).resolves.toMatchObject({
       status: 'promoted',
     });
+    expect(own.roleOf).not.toHaveBeenCalled();
+    const elsewhere = { ...personal, personalOwnerId: 'user-2' };
+    const stray = build({ wf: orgWf, versions, org: elsewhere }, { role: 'member' });
+    await expect(stray.svc.promote(WF, 'production', V2, USER)).rejects.toMatchObject({ status: 403 });
   });
 
   it('404s a missing workflow', async () => {

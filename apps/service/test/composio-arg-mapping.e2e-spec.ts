@@ -12,6 +12,7 @@ import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -50,16 +51,7 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
        VALUES ($1, 'argmap-a@e2e.local', 'Argmap A', now(), now())`,
       [userA],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Argmap A', true, now(), now())`,
-      [personalA],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-      [personalA, userA],
-    );
+    await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Argmap A' });
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
        VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,

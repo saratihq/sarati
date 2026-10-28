@@ -155,7 +155,7 @@ export class OrgsController {
     const principal = requirePrincipal(req);
     const { org, role } = await this.requireMember(orgId, principal);
     if (role !== 'owner') throw new DomainError('Only owners can change member roles', 403);
-    return this.mgmt.changeRole(org.id, principal.user.id, userId, body.role);
+    return this.mgmt.changeRole(org, principal.user.id, userId, body.role);
   }
 
   /** Hand off ownership: caller (an owner) steps down to admin, target becomes owner. */
@@ -182,9 +182,10 @@ export class OrgsController {
     const principal = requirePrincipal(req);
     const isSelf = userId === principal.user.id;
     // Anyone may remove THEMSELVES (leave); removing others is owner/admin.
-    if (isSelf) await this.requireMember(orgId, principal);
-    else await this.requireManager(orgId, principal);
-    await this.mgmt.removeMember(orgId, principal.user.id, userId);
+    const { org } = isSelf
+      ? await this.requireMember(orgId, principal)
+      : await this.requireManager(orgId, principal);
+    await this.mgmt.removeMember(org, principal.user.id, userId);
     return { status: isSelf ? 'left' : 'removed' };
   }
 

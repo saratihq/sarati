@@ -8,6 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ir = (name: string): Record<string, unknown> => ({
@@ -66,22 +67,22 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
               ($3, 'sa-solo@e2e.local', 'Solo', now(), now())`,
       [owner, member, soloUser],
     );
+    await insertPersonalOrgs(
+      db,
+      { id: personalOwner, userId: owner, name: 'Owner' },
+      { id: personalMember, userId: member, name: 'Member' },
+      { id: personalSolo, userId: soloUser, name: 'Solo' },
+    );
     await db.query(
       `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Owner', true, now(), now()),
-              ($2, 'Member', true, now(), now()),
-              ($3, 'Solo', true, now(), now()),
-              ($4, 'Acme', false, now(), now())`,
-      [personalOwner, personalMember, personalSolo, orgId],
+       VALUES ($1, 'Acme', false, now(), now())`,
+      [orgId],
     );
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()),
-              (gen_random_uuid(), $3, $4, 'owner', now()),
-              (gen_random_uuid(), $5, $6, 'owner', now()),
-              (gen_random_uuid(), $7, $2, 'owner', now()),
-              (gen_random_uuid(), $7, $4, 'member', now())`,
-      [personalOwner, owner, personalMember, member, personalSolo, soloUser, orgId],
+              (gen_random_uuid(), $1, $3, 'member', now())`,
+      [orgId, owner, member],
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)

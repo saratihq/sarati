@@ -30,6 +30,12 @@ export const ir = (nodes: unknown[], edges: unknown[]) => ({
   metadata: {},
 });
 
+/** A one-step workflow document named `name`, enough to create a workflow from. */
+export const webhookDoc = (name: string) => ({
+  ...ir([irNode('trigger', 'orchestr:webhook', {})], []),
+  name,
+});
+
 const callableTrigger = irNode('trigger', 'orchestr:tool_trigger', {
   tool_name: 'echo',
   description: 'Echoes its input',

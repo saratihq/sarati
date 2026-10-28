@@ -14,6 +14,7 @@ import {
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A canvas-node polling workflow — the kind whose activation records poll health. */
@@ -96,14 +97,7 @@ describe('trigger activation health (e2e, mocked provider)', () => {
         `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, 'Health', now(), now())`,
         [userId, email],
       );
-      await db.query(
-        `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Health Org', true, now(), now())`,
-        [personalOrgId],
-      );
-      await db.query(
-        `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-        [personalOrgId, userId],
-      );
+      await insertPersonalOrgs(db, { id: personalOrgId, userId: userId, name: 'Health Org' });
       await db.query(
         `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
         [userId, hash(key), key.slice(0, 12)],

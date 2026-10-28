@@ -4,7 +4,7 @@ import { newId, now } from '../database/ids';
 import { OrgMemberEntity, OrganizationEntity } from '../database/entities/organization.entity';
 import { seedDefaultEnvironments } from '../environments/default-environments';
 
-/** Insert an org with its owner and its default environments, in the caller's transaction. */
+/** Insert an org with its owner and its default environments, in the caller's transaction; a personal org records its owner as the account it belongs to. */
 export async function insertOrg(
   em: EntityManager,
   input: { name: string; isPersonal: boolean; ownerId: string },
@@ -13,6 +13,7 @@ export async function insertOrg(
     id: newId(),
     name: input.name,
     isPersonal: input.isPersonal,
+    personalOwnerId: input.isPersonal ? input.ownerId : null,
     createdAt: now(),
     updatedAt: now(),
   });
@@ -22,6 +23,7 @@ export async function insertOrg(
     orgId: org.id,
     userId: input.ownerId,
     role: 'owner',
+    isPersonal: input.isPersonal,
     createdAt: now(),
   });
   await seedDefaultEnvironments(em, org.id);

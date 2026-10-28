@@ -9,6 +9,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /**
@@ -109,14 +110,7 @@ describe('env slot preflight (e2e, isolated DB)', () => {
       [userId],
     );
     const personal = randomUUID();
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Personal', true, now(), now())`,
-      [personal],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-      [personal, userId],
-    );
+    await insertPersonalOrgs(db, { id: personal, userId: userId, name: 'Personal' });
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
       [userId, hash(key), key.slice(0, 12)],

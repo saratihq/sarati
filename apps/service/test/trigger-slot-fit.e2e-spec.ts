@@ -35,6 +35,7 @@ import { EnvPointersService } from '../src/workflows/env-pointers.service';
 import { listenOnLoopback } from './support/listen';
 import { deferred, lockProbes } from './support/lock-probes';
 import { setPlatformKey } from './support/platform-keys';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 function json(status: number, body: unknown): FetchLikeResponse {
@@ -321,14 +322,7 @@ async function boot(pgBoss: boolean): Promise<void> {
     `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'slotfit@e2e.local', 'Slot Fit', now(), now())`,
     [userA],
   );
-  await db.query(
-    `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Slot Fit', true, now(), now())`,
-    [personalA],
-  );
-  await db.query(
-    `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-    [personalA, userA],
-  );
+  await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Slot Fit' });
   await db.query(
     `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
     [userA, hash(keyA), keyA.slice(0, 12)],

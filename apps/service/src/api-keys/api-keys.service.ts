@@ -8,6 +8,7 @@ import { DomainError } from '../common/domain-error';
 import { GRANTABLE_SCOPES, NON_GRANTABLE_SCOPE, isApiScope } from '../auth/scopes';
 import { newId, now } from '../database/ids';
 import { ApiKeyEntity } from '../database/entities/api-key.entity';
+import { OrgsService } from '../orgs/orgs.service';
 
 const PREFIX = 'ork_'; // Sarati key
 
@@ -28,14 +29,13 @@ function hashKey(plaintext: string): string {
 /** Programmatic access: only the hash is stored — the plaintext exists once. */
 @Injectable()
 export class ApiKeysService {
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly orgs: OrgsService,
+  ) {}
 
-  async issue(
-    userId: string,
-    orgId: string | null,
-    name: string,
-    scopes: string[] | null,
-  ): Promise<IssuedKey> {
+  /** A key acts only in its holder's personal workspace, so one is refused to an account that has none. */
+  async issue(userId: string, name: string, scopes: string[] | null): Promise<IssuedKey> {
     // A stored `null` means full authority; only legacy rows carry it and no new key may.
     const requested = scopes && scopes.length > 0 ? [...new Set(scopes)] : null;
     if (!requested) {
@@ -58,6 +58,14 @@ export class ApiKeysService {
       );
     }
 
+    const personal = await this.orgs.personalOrgOf(this.dataSource.manager, userId);
+    if (!personal) {
+      throw new DomainError(
+        'This account has no personal workspace, so no API key can be issued for it.',
+        409,
+      );
+    }
+
     const secret = randomBytes(24).toString('base64url');
     const plaintext = `${PREFIX}${secret}`;
     const prefix = plaintext.slice(0, 12);
@@ -65,7 +73,7 @@ export class ApiKeysService {
     const row = this.dataSource.manager.create(ApiKeyEntity, {
       id: newId(),
       userId,
-      orgId,
+      orgId: personal.id,
       name,
       keyHash: hashKey(plaintext),
       prefix,

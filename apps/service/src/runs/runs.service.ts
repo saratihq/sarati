@@ -945,8 +945,7 @@ export class RunsService {
   /** One entry per parked wait-for-event (approvals inbox), or per topic for waits sharing one receive; a decided or lapsed wait is left out. */
   async listWaitingRuns(access: RunAccess, workflowId?: string): Promise<Array<Record<string, unknown>>> {
     if (!this.dataSource) return [];
-    // Org-wide approvals: own runs plus every run parked in the ACTIVE org. A non-interactive
-    // caller (and a personal scope, where `w.org_id = $2` is a NULL compare) sees only its own.
+    // Org-wide approvals: own runs plus every run parked in the ACTIVE org. A non-interactive caller sees only its own.
     const params: unknown[] = [
       access.userId,
       access.orgWide ? access.activeOrgId : null,

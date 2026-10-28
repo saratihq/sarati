@@ -16,6 +16,7 @@ import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { gmailFake } from './support/gmail-fake';
 import { listenOnLoopback } from './support/listen';
 import { bounded, lockProbes, pause, type Hold } from './support/lock-probes';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 interface Team {
@@ -387,17 +388,12 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       [owner, member, joiner, rival],
     );
     const personal = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Owner', true, now(), now()), ($2, 'Member', true, now(), now()),
-              ($3, 'Joiner', true, now(), now()), ($4, 'Rival', true, now(), now())`,
-      personal,
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $3, $4, 'owner', now()),
-              (gen_random_uuid(), $5, $6, 'owner', now()), (gen_random_uuid(), $7, $8, 'owner', now())`,
-      [personal[0], owner, personal[1], member, personal[2], joiner, personal[3], rival],
+    await insertPersonalOrgs(
+      db,
+      { id: personal[0]!, userId: owner, name: 'Owner' },
+      { id: personal[1]!, userId: member, name: 'Member' },
+      { id: personal[2]!, userId: joiner, name: 'Joiner' },
+      { id: personal[3]!, userId: rival, name: 'Rival' },
     );
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)

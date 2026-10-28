@@ -16,6 +16,7 @@ import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconci
 import { TriggersService } from '../src/triggers/triggers.service';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const SITE = 'https://acme.atlassian.net';
@@ -211,14 +212,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'jira@e2e.local', 'Jira', now(), now())`,
       [userA],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Jira', true, now(), now())`,
-      [personalA],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-      [personalA, userA],
-    );
+    await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Jira' });
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
       [userA, hash(keyA), keyA.slice(0, 12)],

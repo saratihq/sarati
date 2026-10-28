@@ -77,7 +77,8 @@ const QUERY_CALLS = new Set([
 const SQL_STATEMENT =
   /\bselect\b[\s\S]*\bfrom\b|\bupdate\s+\S+[\s\S]*\bset\b|\bdelete\s+from\b|\binsert\s+into\b/i;
 // The column bare, quoted or behind an alias, in any case; never a quoted value ('held') or a longer name.
-const HELD_COLUMN = /(?<![\w$'])(?:"?\w+"?\.)?"?held"?(?![\w$'])/i;
+const columnPattern = (column: string): RegExp =>
+  new RegExp(`(?<![\\w$'])(?:"?\\w+"?\\.)?"?${column}"?(?![\\w$'])`, 'i');
 
 function callName(call: ts.CallExpression): string {
   const callee = call.expression;
@@ -122,7 +123,7 @@ function handsOn(node: ts.Node, from: ts.Node): boolean {
   );
 }
 
-// Whether a `held` key sits in query criteria: under a `where`, or in an object handed to a criteria call, through whatever hands it on.
+// Whether a key sits in query criteria: under a `where`, or in an object handed to a criteria call, through whatever hands it on.
 function inCriteria(key: ts.Node): boolean {
   for (let at: ts.Node = key; at.parent; at = at.parent) {
     const up = at.parent;
@@ -136,12 +137,11 @@ function inCriteria(key: ts.Node): boolean {
   return false;
 }
 
-// Where a source's SQL or query criteria names an activation's `held` column, as `line: text`.
-function heldInQueries(text: string): string[] {
+// The SQL texts and criteria keys of a source that name `column`, or the entity's `property` as a criteria key.
+function nodesNaming(text: string, column: string, property = column): ts.Node[] {
+  const named = columnPattern(column);
   const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
-  const found: string[] = [];
-  const at = (node: ts.Node): string =>
-    `${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}: ${node.getText().slice(0, 80)}`;
+  const found: ts.Node[] = [];
   const visit = (node: ts.Node): void => {
     const isPart =
       ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.PlusToken;
@@ -150,20 +150,45 @@ function heldInQueries(text: string): string[] {
       ts.isCallExpression(node.parent) &&
       node.parent.arguments.some((a) => a === node) &&
       QUERY_CALLS.has(callName(node.parent));
-    if (sql !== undefined && (handed || SQL_STATEMENT.test(sql)) && HELD_COLUMN.test(sql))
-      found.push(at(node));
+    if (sql !== undefined && (handed || SQL_STATEMENT.test(sql)) && named.test(sql)) found.push(node);
     if (
       (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) &&
-      keyName(node.name) === 'held' &&
+      keyName(node.name) === property &&
       inCriteria(node)
     ) {
-      found.push(at(node));
+      found.push(node);
     }
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(file, visit);
   return found;
 }
+
+// Where a source's SQL or query criteria names an activation's `held` column, as `line: text`.
+const heldInQueries = (text: string): string[] =>
+  nodesNaming(text, 'held').map(
+    (node) =>
+      `${node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1}: ${node.getText().slice(0, 80)}`,
+  );
+
+// The whole query `node` is part of: up through its SQL text, criteria and call chain, never out of a callback.
+function enclosingQuery(node: ts.Node): ts.Node {
+  let at = node;
+  for (let up = at.parent; up; up = up.parent) {
+    const joined = ts.isBinaryExpression(up) && up.operatorToken.kind === ts.SyntaxKind.PlusToken;
+    const chained = ts.isCallExpression(up) || ts.isPropertyAccessExpression(up);
+    if (!joined && !chained && !ts.isTemplateSpan(up) && !ts.isTemplateExpression(up) && !handsOn(up, at))
+      break;
+    at = up;
+  }
+  return at;
+}
+
+// Whether one query of a source asks for a personal org through a membership in it.
+const asksPersonalByMembership = (text: string): boolean =>
+  nodesNaming(text, 'is_personal', 'isPersonal').some((node) =>
+    /\borg_members\b|\bOrgMemberEntity\b/.test(enclosingQuery(node).getText()),
+  );
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -336,6 +361,19 @@ describe('vault: one definition site per load-bearing question', () => {
     ]);
     expect(callers('sameWebhookIntake')).toEqual(['triggers/canvas/activation-row.ts']);
     expect(readers).toEqual(['config/env.config.ts', 'triggers/canvas/webhook-url.ts']);
+  });
+
+  /** Constitution #22: which org is a user's personal one is answered by `OrgsService.personalOrgOf`, by the account it belongs to, never by a membership in a personal org. */
+  it("only personalOrgOf asks which org is a user's personal one", () => {
+    const byOwner = sources()
+      .filter((f) => nodesNaming(f.text, 'personal_owner_id', 'personalOwnerId').length > 0)
+      .map((f) => f.rel);
+    const byMembership = sources()
+      .filter((f) => asksPersonalByMembership(f.text))
+      .map((f) => f.rel);
+
+    expect(byOwner).toEqual(['orgs/orgs.service.ts']);
+    expect(byMembership).toEqual([]);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

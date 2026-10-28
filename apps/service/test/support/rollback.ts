@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import { createServer, type RequestListener } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { promisify } from 'node:util';
 
 import { Client } from 'pg';
 
@@ -23,6 +25,8 @@ export interface RunRow {
 export interface RollbackSuite {
   /** Boot this build, or the earlier one, as the suite's service. */
   boot: (build: 'this' | 'earlier', env?: Record<string, string>) => Promise<ServiceProcess>;
+  /** Run this build's or the earlier one's `db:migrate` on the database, as its image does before it starts, answering with what it printed. */
+  migrate: (build: 'this' | 'earlier') => Promise<string>;
   /** The app database. */
   db: () => Client;
   /** The fixture's address for `path`. */
@@ -89,6 +93,13 @@ export function rollbackSuite(sha: string, onRequest: RequestListener): Rollback
       service = await bootService({ ...which, databaseUrl, env });
       dbos ??= await connectSystemDatabase(databaseUrl);
       return service;
+    },
+    migrate: async (build) => {
+      const { stdout, stderr } = await promisify(execFile)(process.execPath, ['scripts/migrate-db.mjs'], {
+        cwd: build === 'this' ? THIS_SERVICE : earlier!.service,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+      });
+      return `${stdout}${stderr}`;
     },
     db: () => db!,
     fixtureUrl: (path) => `http://127.0.0.1:${(fixture.address() as AddressInfo).port}${path}`,

@@ -14,6 +14,7 @@ import { seedDefaultEnvironments } from '../src/environments/default-environment
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -108,17 +109,10 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
               ($2, 'env-member-b@e2e.local', 'Env Member B', now(), now())`,
       [userA, userB],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Env Owner A', true, now(), now()),
-              ($2, 'Env Member B', true, now(), now())`,
-      [personalA, personalB],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'owner', now()),
-              (gen_random_uuid(), $3, $4, 'owner', now())`,
-      [personalA, userA, personalB, userB],
+    await insertPersonalOrgs(
+      db,
+      { id: personalA, userId: userA, name: 'Env Owner A' },
+      { id: personalB, userId: userB, name: 'Env Member B' },
     );
     await seedDefaultEnvironments(db, personalA);
     await seedDefaultEnvironments(db, personalB);

@@ -10,6 +10,7 @@ import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const SECRET = 'branch-test-env-rights-secret';
@@ -125,16 +126,16 @@ describe('a branch test under an environment takes the right to promote there (e
       [owner, member, admin],
     );
     await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
-       VALUES ($1, 'Acme', false, now(), now()), ($2, 'Owner', true, now(), now())`,
-      [orgId, personalOrgId],
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Acme', false, now(), now())`,
+      [orgId],
     );
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now()),
-              (gen_random_uuid(), $1, $4, 'admin', now()), (gen_random_uuid(), $5, $2, 'owner', now())`,
-      [orgId, owner, member, admin, personalOrgId],
+              (gen_random_uuid(), $1, $4, 'admin', now())`,
+      [orgId, owner, member, admin],
     );
+    await insertPersonalOrgs(db, { id: personalOrgId, userId: owner, name: 'Owner' });
     await seedDefaultEnvironments(db, orgId);
     await seedDefaultEnvironments(db, personalOrgId);
     for (const [user, org, key, scopes] of [
@@ -455,6 +456,40 @@ describe('a branch test under an environment takes the right to promote there (e
         { environment_id: mineProduction },
         { environment_id: mineProduction },
       ]);
+    }, 30_000);
+
+    it('anyone else in it — slipped in past the database — is asked the role there: refused under its production on a branch test and a promote, and runs on Default', async () => {
+      await db.query('BEGIN');
+      await db.query('SET LOCAL session_replication_role = replica');
+      await db.query(
+        `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'member', now())`,
+        [personalOrgId, member],
+      );
+      await db.query('COMMIT');
+      try {
+        const ran = (await reviewRuns(mineReview)).length;
+        const refused = await testMine(asMember, mineProduction).expect(403);
+        expect(refused.body).toMatchObject({
+          detail: ROLE_REFUSAL('production'),
+          code: 'promote_not_permitted',
+        });
+        const head = await mine(http().get(`/api/workflows/${mineWf}/branches/main/head`), asMember).expect(
+          200,
+        );
+        const promote = await mine(http().post(`/api/workflows/${mineWf}/promote`), asMember)
+          .send({ environment: 'production', version_id: head.body.head.version_id })
+          .expect(403);
+        expect(promote.body).toMatchObject({
+          detail: expect.stringContaining(MOVE_REFUSAL('production')),
+          code: 'promote_not_permitted',
+        });
+        expect(await reviewRuns(mineReview)).toHaveLength(ran);
+
+        const res = await testMine(asMember).expect(201);
+        expect(res.body).toMatchObject({ verdict: 'green', environment_id: null });
+      } finally {
+        await db.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`, [personalOrgId, member]);
+      }
     }, 30_000);
   });
 

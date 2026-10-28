@@ -22,6 +22,7 @@ import { VersionsWriteService } from '../src/workflows/versions-write.service';
 import { WorkflowLifecycleService } from '../src/workflows/workflow-lifecycle.service';
 import { listenOnLoopback } from './support/listen';
 import { deferred, lockProbes, pause } from './support/lock-probes';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ROUNDS = 30;
@@ -232,14 +233,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'lock-order@e2e.local', 'Lock Order', now(), now())`,
       [user],
     );
-    await db.query(
-      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Lock Order', true, now(), now())`,
-      [personal],
-    );
-    await db.query(
-      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
-      [personal, user],
-    );
+    await insertPersonalOrgs(db, { id: personal, userId: user, name: 'Lock Order' });
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
       [user, hash(key), key.slice(0, 12)],
