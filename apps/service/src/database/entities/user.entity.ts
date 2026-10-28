@@ -15,7 +15,7 @@ export class UserEntity {
   @Column({ name: 'clerk_user_id', type: 'varchar', length: 64, unique: true, nullable: true })
   clerkUserId!: string | null;
 
-  /** Legacy — retained for pre-Clerk rows; no code path writes it anymore. */
+  /** scrypt hash of the account's password; null when it has none. */
   @Column({ name: 'hashed_password', type: 'varchar', length: 255, nullable: true })
   hashedPassword!: string | null;
 

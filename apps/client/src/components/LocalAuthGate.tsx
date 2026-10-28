@@ -15,7 +15,7 @@ import { useLocalAuthStatus } from "@/lib/useLocalAuthStatus";
 export type LocalAuthVariant = "signin" | "signup" | "reset";
 
 // The title is set here, not in the gate: the gate also renders the Clerk pages, which set their own.
-function AuthShell({ title, children }: { title: string; children: ReactNode }) {
+export function AuthShell({ title, children }: { title: string; children: ReactNode }) {
   useDocumentTitle(title);
   return (
     <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "var(--orchestr-surface)" }}>
@@ -29,7 +29,7 @@ function AuthShell({ title, children }: { title: string; children: ReactNode }) 
   );
 }
 
-function AuthHeading({ title, subtitle }: { title: string; subtitle: string }) {
+export function AuthHeading({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div className="mb-8 text-center">
       <div className="flex items-center justify-center mb-4">

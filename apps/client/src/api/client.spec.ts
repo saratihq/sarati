@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, absoluteApiUrl, asBranchMoved, getActiveOrgId, request, setActiveOrgId } from "@/api/client";
+import {
+  ApiError,
+  absoluteApiUrl,
+  asBranchMoved,
+  getActiveOrgId,
+  linkClerkAccount,
+  request,
+  setActiveOrgId,
+} from "@/api/client";
 import { LOCAL_SESSION_COOKIE } from "@/lib/localSession";
+import { useAccountProblem } from "@/store/useAccountProblem";
 
 // The base the module resolved at load: no NEXT_PUBLIC_API_URL under test ⇒ the dev fallback.
 const API = "http://localhost:8001/api";
@@ -244,12 +253,45 @@ describe("request: 401 handling", () => {
     expect(navigatedTo).toEqual(["/login"]);
   });
 
-  it("keeps the session when the SERVER failed, not the credential", async () => {
+  it("keeps the session when the SERVER failed, not the credential, and puts the reason on screen", async () => {
+    useAccountProblem.getState().clear();
     document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
     mockFetch(jsonResponse(401, { detail: "User provisioning failed", code: "provisioning_failed" }));
     await expect(request("/x")).rejects.toThrow("User provisioning failed");
     expect(document.cookie).toContain("live");
     expect(navigatedTo).toEqual([]);
+    expect(useAccountProblem.getState().problem).toEqual({
+      code: "provisioning_failed",
+      detail: "User provisioning failed",
+    });
+  });
+
+  it("offers the link when an existing account holds the session's verified email, and keeps the session", async () => {
+    useAccountProblem.getState().clear();
+    mockFetch(
+      jsonResponse(401, { detail: "An account for a@b.co already exists here.", code: "account_link_required", email: "a@b.co" }),
+    );
+    await expect(request("/x")).rejects.toThrow("already exists here");
+    expect(navigatedTo).toEqual([]);
+    expect(useAccountProblem.getState().problem).toEqual({
+      code: "account_link_required",
+      detail: "An account for a@b.co already exists here.",
+      email: "a@b.co",
+    });
+  });
+});
+
+describe("linkClerkAccount", () => {
+  it("posts the password, and a wrong one is the answer, not a dead session", async () => {
+    useAccountProblem.getState().report({ code: "account_link_required", detail: "exists", email: "a@b.co" });
+    const fetchMock = mockFetch(
+      jsonResponse(401, { detail: "That password does not match the account for a@b.co.", code: "invalid_credentials" }),
+    );
+    await expect(linkClerkAccount("guess")).rejects.toThrow("does not match");
+    expect(requestedUrl(fetchMock)).toBe(`${API}/auth/clerk/link`);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", body: JSON.stringify({ password: "guess" }) });
+    expect(navigatedTo).toEqual([]);
+    expect(useAccountProblem.getState().problem?.code).toBe("account_link_required");
   });
 });
 

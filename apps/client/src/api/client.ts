@@ -1,5 +1,6 @@
 import { apiBaseUrl, clerkEnabled } from "@/lib/config";
 import { clearLocalSession, readLocalSession, writeLocalSession } from "@/lib/localSession";
+import { useAccountProblem } from "@/store/useAccountProblem";
 
 // Resolved in @/lib/config, which fails a production build when NEXT_PUBLIC_API_URL is unset.
 const API_BASE = apiBaseUrl + "/api";
@@ -122,12 +123,19 @@ export class ApiError extends Error {
  * When the credential IS dead the session is dropped BEFORE the redirect, or /login re-authenticates
  * with the dead token and bounces straight back; Clerk's own state decides that for the Clerk path.
  */
-function handleUnauthorized(code: string | undefined): void {
+function handleUnauthorized(code: string | undefined, body: unknown): void {
   // `no_credentials` with a session in hand means we failed to attach it — our bug, not their
   // session's. With no session in hand the user simply is not signed in, so /login is the answer.
   if (code === "no_credentials") {
     if (readLocalSession()) return;
-  } else if (code === "provisioning_failed") {
+  } else if (code === "account_link_required" || code === "provisioning_failed") {
+    // The session is good but has no account to open, so the app says why instead of failing every call.
+    const email = body && typeof body === "object" ? (body as { email?: unknown }).email : undefined;
+    useAccountProblem.getState().report({
+      code,
+      detail: extractErrorMessage(body, "This sign-in has no account here."),
+      ...(typeof email === "string" ? { email } : {}),
+    });
     return;
   }
   clearLocalSession();
@@ -178,7 +186,7 @@ export async function request<T>(
         : undefined;
     const code = typeof rawCode === "string" ? rawCode : undefined;
     if (res.status === 401 && config?.redirectOn401 !== false) {
-      handleUnauthorized(code);
+      handleUnauthorized(code, body);
     }
     throw new ApiError(
       extractErrorMessage(body, `API error ${res.status}`),
@@ -209,6 +217,15 @@ export interface MeResponse {
 
 export async function authMe(): Promise<MeResponse> {
   return request("/auth/me");
+}
+
+/** Link this Clerk sign-in to the account its verified email already names, by that account's password. */
+export async function linkClerkAccount(password: string): Promise<MeResponse> {
+  return request(
+    "/auth/clerk/link",
+    { method: "POST", body: JSON.stringify({ password }) },
+    { redirectOn401: false },
+  );
 }
 
 // ─── Local email + password auth ───

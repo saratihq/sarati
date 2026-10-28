@@ -10,10 +10,11 @@ import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 
 import { DomainError } from '../common/domain-error';
+import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import type { UserEntity } from '../database/entities/user.entity';
 import { OrgsService } from '../orgs/orgs.service';
-import { InvalidTokenError, TokenExpiredError } from './auth.errors';
+import { InvalidTokenError, tokenRejection } from './auth.errors';
 import { ScopeEnforcer } from './scope-enforcer';
 import { attachPrincipal, KEY_SCOPED_TO_OTHER_ORG, type Principal } from './principal';
 import { TOKEN_VERIFIERS, type TokenVerifier } from './token-verifier';
@@ -73,17 +74,10 @@ export class AuthGuard implements CanActivate {
       }
       throw new InvalidTokenError('No verifier accepted the token');
     } catch (err) {
-      if (err instanceof TokenExpiredError || err instanceof InvalidTokenError) {
-        // Operator-only: the 401 body stays generic so it tells an attacker nothing about the token.
-        this.logger.warn(`Token rejected: ${err.message}`);
-      }
-      if (err instanceof TokenExpiredError) {
-        throw new UnauthorizedException({ detail: 'Token expired', code: 'token_expired' });
-      }
-      if (err instanceof InvalidTokenError) {
-        throw new UnauthorizedException({ detail: 'Invalid token', code: 'token_rejected' });
-      }
-      throw err;
+      const rejection = tokenRejection(err);
+      if (!rejection) throw err;
+      this.logger.warn(`Token rejected: ${errorMessage(err)}`);
+      throw rejection;
     }
   }
 

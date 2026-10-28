@@ -11,6 +11,8 @@ const SRC_ROOT = join(__dirname, '..');
 
 /** Controllers deliberately reachable without a principal — each carries its own signature/verification suite. */
 const PUBLIC_CONTROLLERS = [
+  // A Clerk session with no account yet: it checks the Clerk token itself, is rate-limited, links by password.
+  'auth/clerk-link.controller.ts',
   // Login and registration are how a caller GETS a session, so they cannot require one. Both are
   // rate-limited, and registration is bootstrap-or-invite only.
   'auth/local/local-auth.controller.ts',
