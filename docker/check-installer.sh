@@ -256,4 +256,16 @@ says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading an install from be
 [ "$(recorded plain)" = sarati ] || fail 'the upgraded install did not record its name'
 answers 8191
 
+echo '--- an install from before, moved by the command a refusal printed while it runs'
+on plain down -v
+before_installer source 8191
+refused mover -
+says "To move it here with its settings, copy its .env into $work/mover, then:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/mover sh -c" 'the refusal does not say how to move the install here'
+[ -d "$work/mover" ] || fail 'the refusal removed the directory it said to copy into'
+cp "$work/source/.env" "$work/mover/.env"
+run_installer mover - COMPOSE_PROJECT_NAME=sarati
+[ "$(label "$(container mover)" project.working_dir)" = "$work/mover" ] || fail 'the printed command did not move the install'
+[ "$(recorded mover)" = sarati ] || fail 'the moved install did not record its name'
+answers 8191
+
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'
