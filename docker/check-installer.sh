@@ -144,7 +144,7 @@ moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ "$(label "$moved" project.working_dir)" = "$work/moved" ] || fail 'the installer from before did not move the first install'
 
 echo '--- moving it back onto a port something else holds'
-python3 -m http.server 8191 >/dev/null 2>&1 &
+python3 -m http.server 8191 --bind 127.0.0.1 --directory "$(mktemp -d)" >/dev/null 2>&1 &
 listener=$!
 i=0
 until curl -fsS http://localhost:8191/ >/dev/null 2>&1; do
@@ -164,6 +164,7 @@ says "$work/first/.env names no install, and it could belong to sarati (runs fro
 
 echo '--- the first directory, named'
 run_installer first - COMPOSE_PROJECT_NAME=sarati
+says "$work/moved still has a docker-compose.yaml, and docker compose there would act on this install." 'the move back did not warn about the directory it left'
 first=$(container first)
 [ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
 [ "$(recorded first)" = sarati ] || fail 'the first install did not record its name'
@@ -214,7 +215,8 @@ echo '--- ...while the first install is removed, its data kept'
 on first down
 refused stray 8193
 says 'The install named sarati is not running, but its data is kept — installing it here would take it over.' 'a removed install was not protected'
-says "To move it here:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to move the removed install here'
+says "To move it here, move its directory to $work/stray, then:  SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to move the removed install here'
+says "If its directory is gone:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to start the removed install from here'
 [ ! -e "$work/stray" ] || fail 'the refused install left its directory behind'
 on first up -d
 answers 8191
@@ -267,5 +269,9 @@ run_installer mover - COMPOSE_PROJECT_NAME=sarati
 [ "$(label "$(container mover)" project.working_dir)" = "$work/mover" ] || fail 'the printed command did not move the install'
 [ "$(recorded mover)" = sarati ] || fail 'the moved install did not record its name'
 answers 8191
+says "Remove it:  rm $work/source/docker-compose.yaml" 'the move did not say how to stop the old directory acting on the install'
+rm "$work/source/docker-compose.yaml"
+! on source ps -q >/dev/null 2>&1 || fail 'docker compose in the old directory still acts on the moved install'
+[ -n "$(container mover)" ] || fail 'the moved install stopped'
 
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'

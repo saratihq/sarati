@@ -91,12 +91,12 @@ found_here() {
   echo "$started"
 }
 
-# Prints another install started from here whose running container publishes port $PORT.
+# Prints another install started from here whose running container publishes port $port.
 holder() {
   for other in $(started_here); do
     [ "$other" != "$project" ] || continue
     for id in $(docker ps -q --filter "label=com.docker.compose.project=$other"); do
-      case " $(echo $(docker port "$id" 2>/dev/null)) " in *:"$PORT "*) echo "$other" && return ;; esac
+      case " $(echo $(docker port "$id" 2>/dev/null)) " in *:"$port "*) echo "$other" && return ;; esac
     done
   done
 }
@@ -163,10 +163,17 @@ again() { printf "%s sh -c 'curl -fsSL https://get.sarati.io | sh'" "$*"; }
 
 listed() { echo "$1" | sed 's/ /, /g'; }
 
+warn_left() {
+  [ -z "$left" ] || printf '%s\n' "$left" | while read -r dir; do
+    warn "$dir still has a docker-compose.yaml, and docker compose there would act on this install. Remove it:  rm $(shq "$dir/docker-compose.yaml")"
+  done
+}
+
 # Succeeds when a plain run in directory $1 would upgrade $project there.
 passes() {
   (
     cd "$1" 2>/dev/null || exit 1
+    [ ! -e .env ] || [ -r .env ] || exit 1
     named=""
     recorded=$(setting COMPOSE_PROJECT_NAME)
     from=${recorded:+.env}
@@ -189,7 +196,17 @@ refuse() {
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
     move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
-    if [ ! -f .env ] && [ -n "$1" ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
+    if [ -z "$1" ]; then
+      ways="$ways
+  To move it here, move its directory to $here, then:  $(again SARATI_DIR="$here")"
+      if has_database "$project"; then
+        ways="$ways
+  If its directory is gone, put its .env in $here, then:  $move"
+      else
+        ways="$ways
+  If its directory is gone:  $move"
+      fi
+    elif [ ! -f .env ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
       top=""
       ways="$ways
   To move it here with its settings, copy $(shq "$1/.env") into $here, then:  $move"
@@ -250,10 +267,16 @@ mkdir -p "$DIR"
 cd "$DIR"
 made=$(pwd -P)
 [ "$made" != "$top" ] || top=""
+[ ! -e .env ] || [ -r .env ] || die "Cannot read $(pwd)/.env, which holds this install's settings. Re-run this as the user that owns it."
 parent=$(dirname "$(pwd)")
 
 PORT=${SARATI_PORT:-$(setting SARATI_PORT)}
 PORT=${PORT:-8080}
+port=${PORT##*:}
+bind=${PORT%"$port"}
+bind=${bind%:}
+case "$port" in "" | *[!$digits]*) die "SARATI_PORT takes a port, optionally after an address like 127.0.0.1:, not '$PORT'." ;; esac
+case "$bind" in "" | 0.0.0.0 | "[::]") host=localhost ;; *) host=$bind ;; esac
 
 # The compose files pin `name: sarati`; COMPOSE_PROJECT_NAME in .env overrides it for docker compose here.
 named=${COMPOSE_PROJECT_NAME:-}
@@ -280,7 +303,8 @@ export COMPOSE_PROJECT_NAME="$project"
 here=$(shq "$(pwd)")
 if [ -z "$named$recorded" ] && [ -f .env ]; then
   maybe=$(candidates)
-  if [ "$maybe" != sarati ] && [ -n "$maybe" ] || [ -n "$(elsewhere)" ]; then
+  (named=$project && [ -z "$(blocker)" ]) || maybe=$(printf '%s\n' "$maybe" | sed '/^sarati$/d')
+  if [ -n "$maybe" ] && { [ "$maybe" != sarati ] || [ -n "$(elsewhere)" ]; }; then
     list=""
     for name in $maybe; do
       dir=$(printf '%s\n' "$listing" | sed -n "s/^$name //p" | head -1)
@@ -295,6 +319,10 @@ fi
 held=$(blocker)
 [ -z "$held" ] || refuse "$held"
 [ -n "$named$recorded" ] || [ -f .env ] || ! has_data "$project" || refuse ""
+left=""
+[ "$project" != sarati ] || left=$(elsewhere | while read -r dir; do
+  if [ -f "$dir/docker-compose.yaml" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$dir")" ]; then printf '%s\n' "$dir"; fi
+done)
 
 # A fresh machine gets the one-container product. An install that already exists keeps the shape it
 # was built with — the two store their data differently, so switching underneath it would look
@@ -314,9 +342,10 @@ own=$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter
   die "Docker could not list its containers, so this cannot tell which install runs from where."
 published=$(for id in $own; do docker port "$id" 8080 2>/dev/null || true; done)
 case " $(echo $published) " in
-  *:"$PORT "*) ;;
+  *:"$port "*) ;;
   *)
-    if command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
+    probe=${host#[}
+    if command -v nc >/dev/null 2>&1 && nc -z "${probe%]}" "$port" 2>/dev/null; then
       held=$(holder)
       [ -z "$held" ] || die "Port $PORT is held by the install named $held, which was also started from $(pwd).
   Run this for that install's own directory first, with COMPOSE_PROJECT_NAME=$held, then re-run this."
@@ -327,15 +356,29 @@ case " $(echo $published) " in
 esac
 
 if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
+  top=""
+  kept=$(elsewhere | while read -r dir; do
+    if [ -r "$dir/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$dir")" ]; then printf '%s\n' "$dir" && break; fi
+  done)
+  [ -z "$kept" ] || die "The install named $project runs from $kept, and the keys to its database are in its .env, not here.
+  To move it here, copy $(shq "$kept/.env") into $here, then re-run this."
   name=$(free_name "$project")
-  erase="docker volume rm ${project}_db-data"
-  ! printf '%s\n' "$listing" | grep -q "^$project " ||
-    erase="docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=$project) && $erase"
+  erase="
+  To erase that database and start over:  docker volume rm ${project}_db-data"
+  if printf '%s\n' "$listing" | grep -q "^$project "; then
+    erase=""
+    case " $(started_here) " in
+      *" $project "*) erase="
+  To erase that database and start over:  docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=$project) && docker volume rm ${project}_db-data" ;;
+    esac
+  fi
   die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
-  Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
-  To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")
-  To erase that database and start over:  $erase"
+  Restore that .env into $here if you have it, then re-run this: a new FERNET_KEY cannot decrypt credentials the old one stored.
+  To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")$erase"
 fi
+
+[ ! -f .env ] || [ -n "$(setting COMPOSE_PROJECT_NAME)" ] || [ -w .env ] ||
+  die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  chmod u+w $(shq "$(pwd)/.env")"
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"
@@ -362,7 +405,7 @@ elif [ "$stack" = single ]; then
   cat > .env <<EOF
 SARATI_STACK=single
 COMPOSE_PROJECT_NAME=${project}
-SARATI_URL=http://localhost:${PORT}
+SARATI_URL=http://${host}:${port}
 SARATI_PORT=${PORT}
 SARATI_VERSION=${SARATI_VERSION:-latest}
 EOF
@@ -377,7 +420,7 @@ COMPOSE_PROJECT_NAME=${project}
 SECRET_KEY=$(rand 48)
 FERNET_KEY=$(rand 43)=
 POSTGRES_PASSWORD=$(rand 32)
-SARATI_URL=http://localhost:${PORT}
+SARATI_URL=http://${host}:${port}
 SARATI_PORT=${PORT}
 SARATI_VERSION=${SARATI_VERSION:-latest}
 EOF
@@ -402,9 +445,9 @@ fi
 printf '\nWaiting for it to come up'
 i=0
 while [ "$i" -lt 90 ]; do
-  if curl -fsS "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+  if curl -fsS "http://${host}:${port}/api/health" >/dev/null 2>&1; then
     printf '\n\n'
-    say "Sarati is running at http://localhost:${PORT}"
+    say "Sarati is running at http://${host}:${port}"
     echo "Open it and create the owner account — the first account is yours, everyone after joins by invite."
     echo
     if [ "$stack" = single ]; then
@@ -413,6 +456,7 @@ while [ "$i" -lt 90 ]; do
     printf '  logs:  cd %s && docker compose logs -f\n' "$(shq "$DIR")"
     printf '  stop:  cd %s && docker compose down\n' "$(shq "$DIR")"
     warn_if_unsafe
+    warn_left
     exit 0
   fi
   printf '.'
@@ -422,4 +466,5 @@ done
 
 printf '\n'
 warn_if_unsafe
+warn_left
 die "It did not answer within 3 minutes. Check: cd $(shq "$DIR") && docker compose logs"
