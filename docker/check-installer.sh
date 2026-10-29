@@ -18,23 +18,29 @@ work=$(mktemp -d)
 made=''
 hosts_changed=''
 unblock() { sudo sed -i '/# sarati-check-installer$/d' /etc/hosts; hosts_changed=''; }
+# on <name> <compose args...> runs docker compose against that install's own project.
+on() {
+  project=$1
+  shift
+  (cd "$work/$project" && COMPOSE_PROJECT_NAME="check-$project" docker compose "$@")
+}
 cleanup() {
   [ -z "$hosts_changed" ] || unblock
-  for d in $made; do (cd "$d" && docker compose down -v >/dev/null 2>&1) || true; done
+  for name in $made; do on "$name" down -v >/dev/null 2>&1 || true; done
 }
 trap cleanup EXIT
 
-fail() { echo "::error::$1"; exit 1; }
+fail() { echo "::error::$1" >&2; exit 1; }
 
 # run_installer <name> <port> [VAR=value ...] runs the installer and keeps what it printed in $out.
 run_installer() {
-  dir=$work/$1 port=$2
+  name=$1 port=$2
   shift 2
-  made="$made $dir"
-  if ! out=$(env SARATI_DIR="$dir" SARATI_PORT="$port" COMPOSE_PROJECT_NAME="check-$(basename "$dir")" "$@" \
+  made="$made $name"
+  if ! out=$(env SARATI_DIR="$work/$name" SARATI_PORT="$port" COMPOSE_PROJECT_NAME="check-$name" "$@" \
     sh "$root/install.sh" 2>&1); then
     printf '%s\n' "$out"
-    (cd "$dir" && docker compose logs --no-color | tail -60) || true
+    on "$name" logs --no-color | tail -60 || true
     fail "the installer failed"
   fi
   printf '%s\n' "$out"
@@ -43,8 +49,9 @@ run_installer() {
 says() { printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
 never() { ! printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
 running() {
-  (cd "$work/$1" && docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
-    "$(docker compose ps -q "$2")")
+  id=$(on "$1" ps -q "$2")
+  [ -n "$id" ] || fail "$1 has no running $2 container"
+  docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$id"
 }
 
 echo "--- pinned to $old"
@@ -60,7 +67,7 @@ run_installer pinned 8181
 never 'warning:' 'the upgraded install still warned'
 now=$(running pinned sarati)
 [ -n "$now" ] && [ "$now" != "$old" ] || fail "the upgrade left '$now' running"
-(cd "$work/pinned" && docker compose down -v >/dev/null)
+on pinned down -v >/dev/null
 
 echo "--- left on $old by a failed download"
 docker tag "ghcr.io/saratihq/sarati:$old" ghcr.io/saratihq/sarati:latest
@@ -71,7 +78,7 @@ unblock
 says "this install runs Sarati $old" "left on $old by a failed download, the installer did not warn"
 says 'could not be downloaded' 'the warning does not say the download failed'
 [ "$(running offline sarati)" = "$old" ] || fail "the offline install is not running $old"
-(cd "$work/offline" && docker compose down -v >/dev/null)
+on offline down -v >/dev/null
 
 echo "--- five containers, pinned to $old"
 run_installer five 8184 SARATI_STACK=compose SARATI_VERSION=$old
