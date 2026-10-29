@@ -138,9 +138,10 @@ free_name() {
 # Succeeds when port $1 is listened on, or bound by a container, stopped or not, that free_port saw.
 busy() {
   case " $(echo $bound) " in *" $1 "*) return 0 ;; esac
-  command -v nc >/dev/null 2>&1 && nc -z localhost "$1" 2>/dev/null
+  command -v nc >/dev/null 2>&1 && nc -z "$probe" "$1" 2>/dev/null
 }
 
+# Prints a SARATI_PORT on the address asked for whose port nothing holds.
 free_port() {
   ids=$(docker ps -aq) || ids=""
   bound=""
@@ -148,7 +149,7 @@ free_port() {
   [ -z "$ids" ] || bound=$(docker inspect --format '{{ range $p, $b := .HostConfig.PortBindings }}{{ range $b }} {{ .HostPort }}{{ end }}{{ end }}' $ids 2>/dev/null) || bound=""
   p=9090
   while busy "$p"; do p=$((p + 1)); done
-  echo "$p"
+  echo "${bind:+$bind:}$p"
 }
 
 # Prints $1 quoted for pasting into a shell, when it needs quoting.
@@ -163,13 +164,21 @@ again() { printf "%s sh -c 'curl -fsSL https://get.sarati.io | sh'" "$*"; }
 
 listed() { echo "$1" | sed 's/ /, /g'; }
 
+# Prints the command that copies the .env in directory $1 here, as private and writable as one this writes.
+copy() { printf 'cp %s %s/.env && chmod 600 %s/.env && ' "$(shq "$1/.env")" "$here" "$here"; }
+
 warn_left() {
   [ -z "$left" ] || printf '%s\n' "$left" | while read -r dir; do
     warn "$dir still has a docker-compose.yaml, and docker compose there would act on this install. Remove it:  rm $(shq "$dir/docker-compose.yaml")"
   done
 }
 
-# Succeeds when a plain run in directory $1 would upgrade $project there.
+# Prints the chmod a run in directory $1 needs first, to save the name in its read-only .env.
+unlock() {
+  [ ! -f "$1/.env" ] || [ -n "$(setting COMPOSE_PROJECT_NAME "$1")" ] || [ -w "$1/.env" ] || printf 'chmod u+w %s && ' "$(shq "$1/.env")"
+}
+
+# Succeeds when a plain run in directory $1, after unlock, would upgrade $project there.
 passes() {
   (
     cd "$1" 2>/dev/null || exit 1
@@ -192,16 +201,16 @@ refuse() {
     lead="The install named $project runs from $1"
     ways=""
     ! passes "$1" || ways="
-  To upgrade it there:  $(again SARATI_DIR="$(shq "$1")")"
+  To upgrade it there:  $(unlock "$1")$(again SARATI_DIR="$(shq "$1")")"
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
-    move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
     if [ -z "$1" ]; then
+      top=""
       ways="$ways
-  To move it here, move its directory to $here, then:  $(again SARATI_DIR="$here")"
+  To move it here, move the .env and docker-compose.yaml from its directory into $here, then:  $move"
       if has_database "$project"; then
         ways="$ways
-  If its directory is gone, put its .env in $here, then:  $move"
+  If its directory is gone, restore its .env into $here, then:  $move"
       else
         ways="$ways
   If its directory is gone:  $move"
@@ -209,7 +218,7 @@ refuse() {
     elif [ ! -f .env ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
       top=""
       ways="$ways
-  To move it here with its settings, copy $(shq "$1/.env") into $here, then:  $move"
+  To move it here with its settings:  $(copy "$1")$move"
     elif [ ! -f .env ] && has_database "$project"; then
       top=""
       ways="$ways
@@ -277,6 +286,8 @@ bind=${PORT%"$port"}
 bind=${bind%:}
 case "$port" in "" | *[!$digits]*) die "SARATI_PORT takes a port, optionally after an address like 127.0.0.1:, not '$PORT'." ;; esac
 case "$bind" in "" | 0.0.0.0 | "[::]") host=localhost ;; *) host=$bind ;; esac
+probe=${host#\[}
+probe=${probe%\]}
 
 # The compose files pin `name: sarati`; COMPOSE_PROJECT_NAME in .env overrides it for docker compose here.
 named=${COMPOSE_PROJECT_NAME:-}
@@ -301,6 +312,7 @@ valid "$project" ||
 export COMPOSE_PROJECT_NAME="$project"
 
 here=$(shq "$(pwd)")
+move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
 if [ -z "$named$recorded" ] && [ -f .env ]; then
   maybe=$(candidates)
   (named=$project && [ -z "$(blocker)" ]) || maybe=$(printf '%s\n' "$maybe" | sed '/^sarati$/d')
@@ -344,8 +356,7 @@ published=$(for id in $own; do docker port "$id" 8080 2>/dev/null || true; done)
 case " $(echo $published) " in
   *:"$port "*) ;;
   *)
-    probe=${host#[}
-    if command -v nc >/dev/null 2>&1 && nc -z "${probe%]}" "$port" 2>/dev/null; then
+    if command -v nc >/dev/null 2>&1 && nc -z "$probe" "$port" 2>/dev/null; then
       held=$(holder)
       [ -z "$held" ] || die "Port $PORT is held by the install named $held, which was also started from $(pwd).
   Run this for that install's own directory first, with COMPOSE_PROJECT_NAME=$held, then re-run this."
@@ -361,7 +372,7 @@ if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
     if [ -r "$dir/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$dir")" ]; then printf '%s\n' "$dir" && break; fi
   done)
   [ -z "$kept" ] || die "The install named $project runs from $kept, and the keys to its database are in its .env, not here.
-  To move it here, copy $(shq "$kept/.env") into $here, then re-run this."
+  To move it here:  $(copy "$kept")$move"
   name=$(free_name "$project")
   erase="
   To erase that database and start over:  docker volume rm ${project}_db-data"
@@ -377,7 +388,7 @@ if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
   To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")$erase"
 fi
 
-[ ! -f .env ] || [ -n "$(setting COMPOSE_PROJECT_NAME)" ] || [ -w .env ] ||
+[ -z "$(unlock "$(pwd)")" ] ||
   die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  chmod u+w $(shq "$(pwd)/.env")"
 
 say "Fetching the stack definition…"

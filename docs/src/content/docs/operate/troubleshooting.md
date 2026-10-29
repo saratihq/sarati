@@ -14,7 +14,8 @@ error: Port 8080 is already in use. Re-run with SARATI_PORT=9090 (or any free po
 Something else holds the port: another program, or another install. The install being upgraded
 never counts, because its own container publishing the port is not a conflict. Pick another port
 with `SARATI_PORT`. For an install that already has a `.env`, the message says to set `SARATI_PORT`
-there instead, with `SARATI_URL` to match, so later upgrades keep the port.
+there instead, with `SARATI_URL` to match, so later upgrades keep the port. A port given on an
+address, like `127.0.0.1:8080`, gets a suggestion on the same address.
 
 ## The installer refuses because the database outlived its `.env`
 
@@ -27,8 +28,8 @@ old database give Postgres a password it never had, and a new `FERNET_KEY` canno
 old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
-Restore that install's `.env` into its directory if you have it, then re-run the installer. To
-leave that database alone and run a separate install beside it:
+Restore that install's `.env` into the directory you are installing to if you have it, then re-run
+the installer. To leave that database alone and run a separate install beside it:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
@@ -40,7 +41,9 @@ To erase the old database and start over:
 docker volume rm sarati_db-data
 ```
 
-While that install's containers still exist, the message gives the command that removes them first.
+When that install's containers were started from the directory you are installing to, the message
+gives the command that removes them first. When they run from another directory, it gives none:
+take that install down from its own directory first.
 
 ## The installer refuses to take over another install
 
@@ -53,7 +56,7 @@ the installer from a second directory under the same name would move that instal
 under the new directory's settings. The message gives the command that installs a separate one
 under a name and port nothing else uses, and the one that upgrades it from its own directory when
 that would work. When that directory names no install, it also gives the command that moves it
-here, after copying its `.env` across when it has one, so it keeps its port and settings. After a
+here, copying its `.env` across first when it has one, so it keeps its port and settings. After a
 move, it says to remove the old directory's `docker-compose.yaml`, because `docker compose` there
 would still act on the install.
 
@@ -62,9 +65,9 @@ error: The install named sarati is not running, but its data is kept — install
 ```
 
 The same guard, for an install removed with `docker compose down`: its containers are gone, its data
-is not. Start it again from its own directory, or move that directory here as the message shows. If
-the directory is gone, the message gives the command that starts the install from here; a
-five-container install needs its `.env` put back first, because it holds the keys to its database.
+is not. Start it again from its own directory, or move its `.env` and `docker-compose.yaml` here and
+run the command the message gives. If the directory is gone, that same command starts it from here;
+a five-container install needs its `.env` put back first, because it holds the keys to its database.
 
 ```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.

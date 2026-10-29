@@ -26,10 +26,13 @@ on() {
 cleanup() {
   [ -z "$hosts_changed" ] || unblock
   [ -z "$listener" ] || kill "$listener" 2>/dev/null || true
-  docker ps -a --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
+  used=$(docker ps -a --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
     sort -u | while read -r project dir; do
-      case "$dir" in "$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true ;; esac
-    done
+      case "$dir" in ("$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true && echo "$project" ;; esac
+    done)
+  for project in sarati $used $(cat "$work"/*/.env 2>/dev/null | sed -n 's/^COMPOSE_PROJECT_NAME=//p'); do
+    for volume in $(docker volume ls -q --filter "label=com.docker.compose.project=$project"); do docker volume rm "$volume" >/dev/null 2>&1 || true; done
+  done
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -58,6 +61,15 @@ run_installer() {
   }
 }
 refused() { ! attempt "$@" || fail 'the installer went ahead'; }
+# follow <text before the command> runs the command the last refusal printed after that text, with $script for get.sarati.io.
+follow() {
+  cmd=$(printf '%s\n' "$out" | sed -n "s|^  $1  ||p")
+  case "$cmd" in *"sh -c 'curl -fsSL https://get.sarati.io | sh'") ;; *) fail "the refusal printed no command after: $1" ;; esac
+  status=0
+  out=$(eval "${cmd%"sh -c 'curl -fsSL https://get.sarati.io | sh'"}sh '$script'" 2>&1) || status=$?
+  printf '%s\n' "$out"
+  [ "$status" = 0 ] || fail "the printed command failed: $cmd"
+}
 before_installer() {
   script=$work/before.sh
   run_installer "$@"
@@ -144,7 +156,7 @@ moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ "$(label "$moved" project.working_dir)" = "$work/moved" ] || fail 'the installer from before did not move the first install'
 
 echo '--- moving it back onto a port something else holds'
-python3 -m http.server 8191 --bind 127.0.0.1 --directory "$(mktemp -d)" >/dev/null 2>&1 &
+python3 -m http.server 8191 --bind 127.0.0.1 --directory "$(mktemp -d "$work/served.XXXXXX")" >/dev/null 2>&1 &
 listener=$!
 i=0
 until curl -fsS http://localhost:8191/ >/dev/null 2>&1; do
@@ -215,9 +227,14 @@ echo '--- ...while the first install is removed, its data kept'
 on first down
 refused stray 8193
 says 'The install named sarati is not running, but its data is kept — installing it here would take it over.' 'a removed install was not protected'
-says "To move it here, move its directory to $work/stray, then:  SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to move the removed install here'
 says "If its directory is gone:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to start the removed install from here'
-[ ! -e "$work/stray" ] || fail 'the refused install left its directory behind'
+[ -d "$work/stray" ] || fail 'the refusal removed the directory it said to move the install into'
+mv "$work/first/.env" "$work/first/docker-compose.yaml" "$work/stray/"
+follow "To move it here, move the .env and docker-compose.yaml from its directory into $work/stray, then:"
+[ "$(label "$(container stray)" project.working_dir)" = "$work/stray" ] || fail 'the printed command did not move the removed install'
+answers 8191
+on stray down
+mv "$work/stray/.env" "$work/stray/docker-compose.yaml" "$work/first/"
 on first up -d
 answers 8191
 first=$(container first)
@@ -261,11 +278,11 @@ answers 8191
 echo '--- an install from before, moved by the command a refusal printed while it runs'
 on plain down -v
 before_installer source 8191
+chmod 400 "$work/source/.env"
 refused mover -
-says "To move it here with its settings, copy $work/source/.env into $work/mover, then:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/mover sh -c" 'the refusal does not say how to move the install here'
+says "To upgrade it there:  chmod u+w $work/source/.env && SARATI_DIR=$work/source sh -c" 'the refusal does not say how to upgrade an install whose .env is read-only'
 [ -d "$work/mover" ] || fail 'the refusal removed the directory it said to copy into'
-cp "$work/source/.env" "$work/mover/.env"
-run_installer mover - COMPOSE_PROJECT_NAME=sarati
+follow 'To move it here with its settings:'
 [ "$(label "$(container mover)" project.working_dir)" = "$work/mover" ] || fail 'the printed command did not move the install'
 [ "$(recorded mover)" = sarati ] || fail 'the moved install did not record its name'
 answers 8191
