@@ -30,7 +30,7 @@ cleanup() {
     sort -u | while read -r project dir; do
       case "$dir" in ("$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true && echo "$project" ;; esac
     done)
-  for project in sarati $used $(cat "$work"/*/.env 2>/dev/null | sed -n 's/^COMPOSE_PROJECT_NAME=//p'); do
+  for project in sarati unrelated $used $(cat "$work"/*/.env 2>/dev/null | sed -n 's/^COMPOSE_PROJECT_NAME=//p'); do
     for volume in $(docker volume ls -q --filter "label=com.docker.compose.project=$project"); do docker volume rm "$volume" >/dev/null 2>&1 || true; done
   done
   rm -rf "$work"
@@ -278,11 +278,14 @@ first=$(container first)
 answers 8191
 [ "$(container twin)" = "$twin" ] || fail 'moving the first install back touched the second'
 
-echo '--- an install from before, upgraded by this one with neither name nor port'
+echo '--- an install from before, removed, upgraded by this one with neither name nor port, beside an unrelated lone data volume'
 on first down -v
 before_installer plain 8191
 [ -z "$(recorded plain)" ] || fail 'the installer from before saved a name'
+on plain down
+docker volume create --label com.docker.compose.project=unrelated --label com.docker.compose.volume=data unrelated_data >/dev/null
 run_installer plain -
+docker volume rm unrelated_data >/dev/null
 says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading an install from before did not save its name'
 [ "$(recorded plain)" = sarati ] || fail 'the upgraded install did not record its name'
 answers 8191
@@ -292,7 +295,9 @@ on plain down -v
 before_installer source 8191
 chmod 400 "$work/source/.env"
 refused mover -
-says "To upgrade it there:  chmod u+w $work/source/.env && SARATI_DIR=$work/source sh -c" 'the refusal does not say how to upgrade an install whose .env is read-only'
+ro=''
+[ -w "$work/source/.env" ] || ro="chmod u+w $work/source/.env && "
+says "To upgrade it there:  ${ro}SARATI_DIR=$work/source sh -c" 'the refusal does not say how to upgrade an install whose .env is read-only'
 [ -d "$work/mover" ] || fail 'the refusal removed the directory it said to copy into'
 follow 'To move it here with its settings:'
 [ "$(label "$(container mover)" project.working_dir)" = "$work/mover" ] || fail 'the printed command did not move the install'

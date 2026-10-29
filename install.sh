@@ -80,13 +80,18 @@ started_here() {
   printf '%s\n' "$listing" | while read -r name dir; do if is_here "$dir"; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -
 }
 
-# Prints the installs started from here, and this directory's own name beside one when only its data is left.
+# Prints the installs started from here, and beside one the installs this directory's .env may have held instead.
 found_here() {
   started=$(started_here)
   own=$(basename "$(pwd)")
   case "$started" in
     "" | *" "* | "$own") ;;
-    *) if valid "$own" && has_data "$own" && ! printf '%s\n' "$listing" | grep -q "^$own "; then started="$started $own"; fi ;;
+    *)
+      extra=""
+      if valid "$own" && has_data "$own" && ! printf '%s\n' "$listing" | grep -q "^$own "; then extra=$own; fi
+      [ "$started" != sarati ] || extra="$extra $unclaimed"
+      for name in $(printf '%s\n' $extra | sort -u); do [ "$name" = "$started" ] || started="$started $name"; done
+      ;;
   esac
   echo "$started"
 }
@@ -248,7 +253,7 @@ refuse() {
 candidates() {
   if printf '%s\n' "$listing" | grep -q '^sarati ' || has_data sarati; then echo sarati; fi
   {
-    printf '%s\n' "$volumes" | awk 'NF == 2 { v[$1] = v[$1] " " $2 } END { for (p in v) if (v[p] == " data" || (v[p] ~ / db-data( |$)/ && v[p] ~ / service-data( |$)/)) print p }'
+    for name in $unclaimed; do printf '%s\n' "$name"; done
     printf '%s\n' "$volumes" | sed -n 's/^\(sarati-[0-9][0-9]*\) data$/\1/p; s/^\(sarati-[0-9][0-9]*\) db-data$/\1/p'
     own=$(basename "$(pwd)")
     ! valid "$own" || ! has_data "$own" || echo "$own"
@@ -277,6 +282,22 @@ listing=$(docker ps -a --filter label=com.docker.compose.project \
 stored=$(docker volume ls --format '{{ .Name }} {{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.volume" }}') ||
   die "Docker could not list its volumes, so this cannot tell which install keeps which data."
 volumes=$(printf '%s\n' "$stored" | awk 'NF == 3 { print $2, $3 }')
+images=$(docker image ls -q ghcr.io/saratihq/sarati) || die "Docker could not list its images."
+lens=$(printf '%s\n' "$images" | head -1)
+# Each project nothing runs whose volumes are an install's: db-data with service-data, or a data volume holding its secrets.
+unclaimed=""
+while read -r name vol; do
+  [ -n "$name" ] && [ "$name" != sarati ] && ! printf '%s\n' "$listing" | grep -q "^$name " || continue
+  if [ "$vol" != - ] && [ -n "$lens" ]; then
+    status=0
+    docker run --rm --pull never --network none --entrypoint /bin/sh -v "$vol:/data:ro" "$lens" -c 'test -f /data/secrets.env' >/dev/null 2>&1 || status=$?
+    [ "$status" = 0 ] || [ "$status" = 1 ] || die "Docker could not look inside the $vol volume, so this cannot tell whether it holds an install."
+    [ "$status" = 0 ] || continue
+  fi
+  unclaimed="$unclaimed $name"
+done <<EOF
+$(printf '%s\n' "$stored" | awk 'NF == 3 { v[$2] = v[$2] " " $3; n[$2] = $1 } END { for (p in v) if (v[p] ~ / db-data( |$)/ && v[p] ~ / service-data( |$)/) print p, "-"; else if (v[p] == " data") print p, n[p] }')
+EOF
 
 existing=$DIR
 while [ ! -e "$existing" ]; do existing=$(dirname "$existing"); done
@@ -361,6 +382,11 @@ case "$stack" in
   *) die "SARATI_STACK must be 'single' or 'compose', not '$stack'." ;;
 esac
 
+kept_port=$(setting SARATI_PORT)
+[ -z "${SARATI_PORT:-}" ] || [ -z "$kept_port" ] || [ "$SARATI_PORT" = "$kept_port" ] ||
+  die "$(pwd)/.env sets SARATI_PORT=$kept_port, and SARATI_PORT=$SARATI_PORT would override it while SARATI_URL stays as it is.
+  To change the port, set SARATI_PORT in that .env to $SARATI_PORT, and SARATI_URL to match, then re-run this without SARATI_PORT."
+
 # This install's own container publishing the port is an upgrade, not a conflict.
 if [ "$stack" = single ]; then front=sarati; else front=proxy; fi
 own=$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$front") ||
@@ -373,7 +399,7 @@ case " $(echo $published) " in
       held=$(holder)
       [ -z "$held" ] || die "Port $PORT is held by the install named $held, which was also started from $(pwd).
   Run this for that install's own directory first, with COMPOSE_PROJECT_NAME=$held, then re-run this."
-      [ ! -f .env ] || die "Port $PORT is already in use. Set SARATI_PORT in $(pwd)/.env to a free port, $(free_port) for example, and SARATI_URL to match, then re-run this."
+      [ ! -f .env ] || die "Port $PORT is already in use. Set SARATI_PORT in $(pwd)/.env to a free port, $(free_port) for example, and SARATI_URL to match, then re-run this${SARATI_PORT:+ without SARATI_PORT}."
       die "Port $PORT is already in use. Re-run with SARATI_PORT=$(free_port) (or any free port)."
     fi
     ;;

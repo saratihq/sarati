@@ -17,6 +17,14 @@ with `SARATI_PORT`. For an install that already has a `.env`, the message says t
 there instead, with `SARATI_URL` to match, so later upgrades keep the port. A port given on an
 address, like `127.0.0.1:8080`, gets a suggestion on the same address.
 
+```
+error: /home/you/sarati/.env sets SARATI_PORT=8080, and SARATI_PORT=9090 would override it while SARATI_URL stays as it is.
+```
+
+An install's port is its `.env`'s. A different `SARATI_PORT` on the command line would publish the
+new port while sign-in and webhook URLs still name the old one, so change it in the `.env`, with
+`SARATI_URL` to match, and re-run without it.
+
 ## The installer refuses because the database outlived its `.env`
 
 ```
