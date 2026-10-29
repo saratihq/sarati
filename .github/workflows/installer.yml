@@ -1,0 +1,39 @@
+name: installer
+
+# Not a required check, so filtering it never leaves a PR waiting on a check that cannot report.
+on:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - docker-compose.yaml
+      - docker-compose.single.yaml
+      - docker/Caddyfile
+      - docker/check-installer.sh
+      - .github/workflows/installer.yml
+  pull_request:
+    paths:
+      - install.sh
+      - docker-compose.yaml
+      - docker-compose.single.yaml
+      - docker/Caddyfile
+      - docker/check-installer.sh
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: The installer warns on a version with a published advisory, and only on one
+        run: SARATI_CHECK_THROWAWAY=1 sh docker/check-installer.sh
+        env:
+          SARATI_REF: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -25,6 +25,10 @@ Keep the `-v` — that volume holds your data and the keys that decrypt your cre
 outlive the container. From there, [docs.sarati.io](https://docs.sarati.io) walks the first workflow
 end to end.
 
+**Run 0.2.26 or later.** Every earlier version has a
+[published security advisory](https://github.com/saratihq/sarati/security/advisories), and
+[upgrading](https://docs.sarati.io/operate/upgrades/) keeps your data.
+
 ## Why
 
 Visual builders are quick to start and impossible to govern: one shared canvas, edited live, no diff, no
