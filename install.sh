@@ -45,12 +45,60 @@ warn_if_unsafe() {
   echo "  Fix that and re-run this, with SARATI_VERSION in $(pwd)/.env set to latest, or to $SAFE_VERSION or later." >&2
 }
 
+# Prints the compose project and start directory of every container, or of project $1's.
+containers() {
+  docker ps -a --filter "label=com.docker.compose.project${1:+=$1}" \
+    --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' 2>/dev/null || true
+}
+
+is_here() { [ -d "$1" ] && [ "$(cd "$1" && pwd -P)" = "$(pwd -P)" ]; }
+
+name_in() { sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$1/.env" 2>/dev/null | tail -1; }
+
+# Succeeds when $1 is another directory whose .env does not give its install a different name.
+claims() {
+  [ -d "$1" ] && ! is_here "$1" || return 1
+  claimed=$(name_in "$1")
+  [ -z "$claimed" ] || [ "$claimed" = "$project" ]
+}
+
+listed() { echo "$1" | sed 's/ /, /g'; }
+
 command -v docker >/dev/null 2>&1 || die "Docker is required — install it from https://docs.docker.com/get-docker/ and re-run this."
 docker compose version >/dev/null 2>&1 || die "This needs Docker Compose v2 (bundled with modern Docker Desktop and docker-ce)."
 docker info >/dev/null 2>&1 || die "Docker is installed but not running — start it and re-run this."
 
 mkdir -p "$DIR"
 cd "$DIR"
+
+# The compose files pin `name: sarati`; COMPOSE_PROJECT_NAME in .env overrides it for docker compose here.
+recorded=$(name_in .)
+if [ -z "$recorded" ]; then
+  recorded=$(containers | while read -r name dir; do if is_here "$dir"; then echo "$name"; fi; done | sort -u | paste -sd ' ' -)
+fi
+if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+  case " $recorded " in
+    "  " | *" $COMPOSE_PROJECT_NAME "*) ;;
+    *) die "$(pwd) holds the install named $(listed "$recorded"), not $COMPOSE_PROJECT_NAME.
+  To upgrade it, re-run this without COMPOSE_PROJECT_NAME. For a separate install, give it its own SARATI_DIR too." ;;
+  esac
+  project=$COMPOSE_PROJECT_NAME
+else
+  case "$recorded" in
+    *" "*) die "More than one install ($(listed "$recorded")) was started from $(pwd).
+  Re-run this with COMPOSE_PROJECT_NAME set to the one that belongs here." ;;
+  esac
+  project=${recorded:-sarati}
+fi
+case "$project" in
+  [!a-z0-9]* | *[!a-z0-9_-]*) die "COMPOSE_PROJECT_NAME takes lowercase letters, digits, dashes and underscores, starting with a letter or digit — not '$project'." ;;
+esac
+export COMPOSE_PROJECT_NAME="$project"
+
+taken=$(containers "$project" | while read -r _ dir; do if claims "$dir"; then echo "$dir"; fi; done | head -1)
+[ -z "$taken" ] || die "The install named $project runs from $taken — installing it here would take it over.
+  To upgrade it, re-run this with SARATI_DIR=$taken.
+  To install a second one here:  COMPOSE_PROJECT_NAME=$project-2 SARATI_DIR=$(pwd) SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'"
 
 # A port already in use is the single most common failure, and it is nicer to say so up front —
 # but this install's OWN container holding it is an upgrade, not a conflict.
@@ -65,7 +113,6 @@ fi
 # A fresh machine gets the one-container product. An install that already exists keeps the shape it
 # was built with — the two store their data differently, so switching underneath it would look
 # exactly like data loss. Anything installed before this existed is compose.
-project="${COMPOSE_PROJECT_NAME:-sarati}"
 if [ -n "${SARATI_STACK:-}" ]; then
   stack="$SARATI_STACK"
 elif [ -f .env ] && grep -q '^SARATI_STACK=' .env; then
@@ -94,11 +141,17 @@ fi
 
 if [ -f .env ]; then
   say "Keeping the existing .env — your keys and data are untouched."
+  if [ "$project" != sarati ] && [ -z "$(name_in .)" ]; then
+    [ -z "$(tail -c 1 .env)" ] || echo >> .env
+    echo "COMPOSE_PROJECT_NAME=$project" >> .env
+    say "Saved COMPOSE_PROJECT_NAME=$project into .env, so docker compose here acts on this install alone."
+  fi
 elif [ "$stack" = single ]; then
   # No secrets are generated here: the container writes its own into the data volume, beside the
   # database they decrypt, so there is nothing that can be lost separately from the data.
   cat > .env <<EOF
 SARATI_STACK=single
+COMPOSE_PROJECT_NAME=${project}
 SARATI_URL=http://localhost:${PORT}
 SARATI_PORT=${PORT}
 SARATI_VERSION=${SARATI_VERSION:-latest}
@@ -122,6 +175,7 @@ else
   rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"; }
   cat > .env <<EOF
 SARATI_STACK=compose
+COMPOSE_PROJECT_NAME=${project}
 SECRET_KEY=$(rand 48)
 FERNET_KEY=$(rand 43)=
 POSTGRES_PASSWORD=$(rand 32)

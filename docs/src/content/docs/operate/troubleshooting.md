@@ -38,6 +38,38 @@ To erase the old database and start over:
 docker volume rm sarati_db-data
 ```
 
+## The installer refuses to take over another install
+
+```
+error: The install named sarati runs from /home/you/sarati — installing it here would take it over.
+```
+
+Every install has a name, `sarati` unless you gave it another, and runs from one directory. Running
+the installer from a second directory under the same name would move that install, data and all,
+under the new directory's settings. Upgrade it from its own directory with `SARATI_DIR`, or give the
+new one a name of its own:
+
+```bash
+COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
+
+```
+error: /home/you/sarati-2 holds the install named sarati-2, not other.
+```
+
+A directory keeps the name it was installed with. Re-run without `COMPOSE_PROJECT_NAME` to upgrade it.
+
+```
+error: More than one install (sarati, sarati-2) was started from /home/you/sarati-2.
+```
+
+The installer used not to save a second install's name, so `docker compose` in its directory acted
+on the first install instead: `down` stopped the first, and `up -d` restarted it with the second
+directory's settings. Re-run the installer there with `COMPOSE_PROJECT_NAME` set to the
+install that belongs there, `sarati-2` in the example, then re-run it in the first install's own
+directory to move that one back. Every later `docker compose` in each directory acts on that install
+alone.
+
 ## A webhook returns 404
 
 ```json

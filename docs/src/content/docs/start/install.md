@@ -72,11 +72,15 @@ container leaves the volume alone — that is how you [upgrade](/operate/upgrade
 
 ## Run a second instance
 
-One machine can hold several installs, each with its own database:
+One machine can hold several installs, each with its own name, directory and database:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
+
+The installer saves the name in `sarati-2/.env`, so `docker compose` run there acts on that install
+alone, and re-running the installer there upgrades it without the name. Given no name, the installer
+refuses rather than take over an install that runs from another directory.
 
 ## The pieces apart
 
