@@ -236,7 +236,7 @@ hijacked=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ "$(label "$hijacked" project.working_dir)" = "$work/twin" ] || fail 'docker compose up -d in the second directory did not take the first install'
 [ -z "$(docker ps -q --filter label=com.docker.compose.project=sarati)" ] || fail 'the taken first install is still running'
 refused twin -
-says "More than one install (sarati, sarati-5) was started from $work/twin." 'a directory holding two installs was not refused'
+says "$work/twin could hold more than one install: sarati, sarati-5." 'a directory holding two installs was not refused'
 run_installer twin - COMPOSE_PROJECT_NAME=sarati-5
 [ "$(recorded twin)" = sarati-5 ] || fail 'naming the second install did not record it'
 twin=$(container twin)
@@ -260,7 +260,7 @@ echo '--- an install from before, moved by the command a refusal printed while i
 on plain down -v
 before_installer source 8191
 refused mover -
-says "To move it here with its settings, copy its .env into $work/mover, then:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/mover sh -c" 'the refusal does not say how to move the install here'
+says "To move it here with its settings, copy $work/source/.env into $work/mover, then:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/mover sh -c" 'the refusal does not say how to move the install here'
 [ -d "$work/mover" ] || fail 'the refusal removed the directory it said to copy into'
 cp "$work/source/.env" "$work/mover/.env"
 run_installer mover - COMPOSE_PROJECT_NAME=sarati

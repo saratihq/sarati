@@ -4,6 +4,7 @@
 # Fetches the stack definition, then starts it. Re-running is safe: an existing install keeps its
 # shape, its keys and its data.
 set -eu
+unset CDPATH
 
 REPO="${SARATI_REPO:-saratihq/sarati}"
 REF="${SARATI_REF:-main}"
@@ -16,10 +17,7 @@ say() { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() {
   printf '\033[31merror:\033[0m %s\n' "$*" >&2
-  while [ "${fresh:-0}" -gt 0 ] && rmdir "$made" 2>/dev/null; do
-    made=$(dirname "$made")
-    fresh=$((fresh - 1))
-  done
+  while [ -n "${top:-}" ] && [ "$made" != "$top" ] && rmdir "$made" 2>/dev/null; do made=$(dirname "$made"); done
   exit 1
 }
 
@@ -42,13 +40,13 @@ warn_if_unsafe() {
   before "$running" "$SAFE_VERSION" || return 0
   printf '\n' >&2
   warn "this install runs Sarati $running. Every version before $SAFE_VERSION has a published security advisory:"
-  echo "  $ADVISORIES" >&2
+  printf '  %s\n' "$ADVISORIES" >&2
   if [ -n "$pulled" ]; then
-    echo "  To upgrade, set SARATI_VERSION in $(pwd)/.env to latest, or to $SAFE_VERSION or later, and re-run this." >&2
+    printf '  To upgrade, set SARATI_VERSION in %s/.env to latest, or to %s or later, and re-run this.\n' "$(pwd)" "$SAFE_VERSION" >&2
     return 0
   fi
-  echo "  Downloading the images failed this time${pull_error:+: $pull_error}" >&2
-  echo "  Fix that and re-run this, with SARATI_VERSION in $(pwd)/.env set to latest, or to $SAFE_VERSION or later." >&2
+  printf '  Downloading the images failed this time%s\n' "${pull_error:+: $pull_error}" >&2
+  printf '  Fix that and re-run this, with SARATI_VERSION in %s/.env set to latest, or to %s or later.\n' "$(pwd)" "$SAFE_VERSION" >&2
 }
 
 lower=abcdefghijklmnopqrstuvwxyz
@@ -64,6 +62,8 @@ setting() {
 
 is_here() { [ "$1" -ef . ]; }
 
+valid() { case "$1" in [!$lower$digits]* | *[!$lower${digits}_-]*) return 1 ;; esac; }
+
 # Succeeds only when $1 provably does not exist: its nearest existing parent can be searched.
 gone() {
   [ ! -e "$1" ] || return 1
@@ -78,6 +78,27 @@ has_database() { printf '%s\n' "$stored" | awk -v v="${1}_db-data" '$1 == v { fo
 
 started_here() {
   printf '%s\n' "$listing" | while read -r name dir; do if is_here "$dir"; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -
+}
+
+# Prints the installs started from here, and this directory's own name beside one when only its data is left.
+found_here() {
+  started=$(started_here)
+  own=$(basename "$(pwd)")
+  case "$started" in
+    "" | *" "* | "$own") ;;
+    *) if valid "$own" && has_data "$own" && ! printf '%s\n' "$listing" | grep -q "^$own "; then started="$started $own"; fi ;;
+  esac
+  echo "$started"
+}
+
+# Prints another install started from here whose running container publishes port $PORT.
+holder() {
+  for other in $(started_here); do
+    [ "$other" != "$project" ] || continue
+    for id in $(docker ps -q --filter "label=com.docker.compose.project=$other"); do
+      case " $(echo $(docker port "$id" 2>/dev/null)) " in *:"$PORT "*) echo "$other" && return ;; esac
+    done
+  done
 }
 
 elsewhere() {
@@ -103,12 +124,11 @@ blocker() {
   done
 }
 
-# Prints the first <base>-N, from N=2, that no container, volume or directory beside this one uses; <base> is $1
-# without its own -N. With $2 = here, this directory itself may be the one.
+# Prints the first <base>-N from N=2 that nothing uses; <base> is $1 less its -N, and $2 = here allows this directory.
 free_name() {
   case ${1##*-} in "" | *[!$digits]*) base=$1 ;; *) base=${1%-*} ;; esac
   n=2
-  while printf '%s\n' "$listing" "$volumes" | grep -q "^$base-$n " ||
+  while printf '%s\n' "$listing" "$volumes" | grep -q "^$base-$n " || printf '%s\n' "$stored" | grep -q "^$base-${n}_" ||
     { [ -e "$parent/$base-$n" ] && ! { [ "${2:-}" = here ] && is_here "$parent/$base-$n"; }; }; do
     n=$((n + 1))
   done
@@ -150,8 +170,8 @@ passes() {
     named=""
     recorded=$(setting COMPOSE_PROJECT_NAME)
     from=${recorded:+.env}
-    [ -n "$recorded" ] || recorded=$(started_here)
-    [ "$recorded" = "$project" ] && [ -z "$(blocker)" ]
+    [ -n "$recorded" ] || recorded=$(found_here)
+    [ "$recorded" = "$project" ] && [ -z "$(blocker)" ] && { [ -f .env ] || ! has_database "$project"; }
   )
 }
 
@@ -169,13 +189,17 @@ refuse() {
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
     move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
-    if [ -f .env ]; then
+    if [ ! -f .env ] && [ -n "$1" ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
+      top=""
+      ways="$ways
+  To move it here with its settings, copy $(shq "$1/.env") into $here, then:  $move"
+    elif [ ! -f .env ] && has_database "$project"; then
+      top=""
+      ways="$ways
+  To move it here, restore its .env into $here, then:  $move"
+    else
       ways="$ways
   To move it here:  $move"
-    else
-      fresh=0
-      ways="$ways
-  To move it here with its settings, copy its .env into $(pwd), then:  $move"
     fi
   fi
   if [ ! -f .env ] && [ -z "$recorded" ]; then
@@ -189,14 +213,13 @@ refuse() {
   To install a separate one:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$into" SARATI_PORT="$(free_port)")"
 }
 
-# Prints the installs a .env that names none may belong to: sarati, and sarati-N or this directory's name when
-# nothing runs its data.
+# Prints the installs a .env naming none may be: sarati, and sarati-N or this directory's name whose data nothing runs.
 candidates() {
   if printf '%s\n' "$listing" | grep -q '^sarati ' || has_data sarati; then echo sarati; fi
   {
     printf '%s\n' "$volumes" | sed -n 's/^\(sarati-[0-9][0-9]*\) data$/\1/p; s/^\(sarati-[0-9][0-9]*\) db-data$/\1/p'
     own=$(basename "$(pwd)")
-    case "$own" in [!$lower$digits]* | *[!$lower${digits}_-]* | sarati) ;; *) ! has_data "$own" || echo "$own" ;; esac
+    [ "$own" = sarati ] || ! valid "$own" || ! has_data "$own" || echo "$own"
   } | sort -u | while read -r name; do
     printf '%s\n' "$listing" | grep -q "^$name " || printf '%s\n' "$name"
   done
@@ -220,17 +243,14 @@ stored=$(docker volume ls --format '{{ .Name }} {{ .Label "com.docker.compose.pr
   die "Docker could not list its volumes, so this cannot tell which install keeps which data."
 volumes=$(printf '%s\n' "$stored" | awk 'NF == 3 { print $2, $3 }')
 
-levels=0
-missing=$DIR
-while [ ! -e "$missing" ]; do
-  levels=$((levels + 1))
-  missing=$(dirname "$missing")
-done
+existing=$DIR
+while [ ! -e "$existing" ]; do existing=$(dirname "$existing"); done
+top=$(cd "$existing" && pwd -P) || die "Cannot reach $existing to make $DIR."
 mkdir -p "$DIR"
 cd "$DIR"
-made=$(pwd)
-fresh=$levels
-parent=$(dirname "$made")
+made=$(pwd -P)
+[ "$made" != "$top" ] || top=""
+parent=$(dirname "$(pwd)")
 
 PORT=${SARATI_PORT:-$(setting SARATI_PORT)}
 PORT=${PORT:-8080}
@@ -239,11 +259,11 @@ PORT=${PORT:-8080}
 named=${COMPOSE_PROJECT_NAME:-}
 recorded=$(setting COMPOSE_PROJECT_NAME)
 from=${recorded:+$(pwd)/.env}
-[ -n "$recorded" ] || recorded=$(started_here)
+[ -n "$recorded" ] || recorded=$(found_here)
 if [ -z "$from" ] && [ "${recorded#* }" != "$recorded" ]; then
   case " $recorded " in
     *" $named "*) ;;
-    *) die "More than one install ($(listed "$recorded")) was started from $(pwd).
+    *) die "$(pwd) could hold more than one install: $(listed "$recorded").
   Re-run this with COMPOSE_PROJECT_NAME set to the one that belongs here." ;;
   esac
 elif [ -n "$recorded" ] && [ -n "$named" ] && [ "$named" != "$recorded" ]; then
@@ -253,10 +273,8 @@ elif [ -n "$recorded" ] && [ -n "$named" ] && [ "$named" != "$recorded" ]; then
   To upgrade it, re-run this without COMPOSE_PROJECT_NAME. If it belongs in another directory, re-run this there with COMPOSE_PROJECT_NAME=$recorded first."
 fi
 project=${named:-${recorded:-sarati}}
-case "$project" in
-  [!$lower$digits]* | *[!$lower${digits}_-]*)
-    die "COMPOSE_PROJECT_NAME${from:+ in $from} takes lowercase letters, digits, dashes and underscores, starting with a letter or digit — not '$project'." ;;
-esac
+valid "$project" ||
+  die "COMPOSE_PROJECT_NAME${from:+ in $from} takes lowercase letters, digits, dashes and underscores, starting with a letter or digit — not '$project'."
 export COMPOSE_PROJECT_NAME="$project"
 
 here=$(shq "$(pwd)")
@@ -290,8 +308,7 @@ case "$stack" in
   *) die "SARATI_STACK must be 'single' or 'compose', not '$stack'." ;;
 esac
 
-# A port already in use is the single most common failure, and it is nicer to say so up front —
-# but this install's OWN container publishing it is an upgrade, not a conflict.
+# This install's own container publishing the port is an upgrade, not a conflict.
 if [ "$stack" = single ]; then front=sarati; else front=proxy; fi
 own=$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$front") ||
   die "Docker could not list its containers, so this cannot tell which install runs from where."
@@ -300,21 +317,24 @@ case " $(echo $published) " in
   *:"$PORT "*) ;;
   *)
     if command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
+      held=$(holder)
+      [ -z "$held" ] || die "Port $PORT is held by the install named $held, which was also started from $(pwd).
+  Run this for that install's own directory first, with COMPOSE_PROJECT_NAME=$held, then re-run this."
       [ ! -f .env ] || die "Port $PORT is already in use. Set SARATI_PORT in $(pwd)/.env to a free port, $(free_port) for example, and SARATI_URL to match, then re-run this."
       die "Port $PORT is already in use. Re-run with SARATI_PORT=$(free_port) (or any free port)."
     fi
     ;;
 esac
 
-# The compose file pins one project name, so its volumes are shared by every install on this machine unless
-# COMPOSE_PROJECT_NAME says otherwise. Writing fresh secrets against an existing database gives Postgres a
-# password it never had (crash loop) and a FERNET_KEY that cannot decrypt what the old one stored.
 if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
   name=$(free_name "$project")
+  erase="docker volume rm ${project}_db-data"
+  ! printf '%s\n' "$listing" | grep -q "^$project " ||
+    erase="docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=$project) && $erase"
   die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
   Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
   To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")
-  To erase that database and start over:  docker volume rm ${project}_db-data"
+  To erase that database and start over:  $erase"
 fi
 
 say "Fetching the stack definition…"

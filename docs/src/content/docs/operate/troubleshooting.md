@@ -39,6 +39,8 @@ To erase the old database and start over:
 docker volume rm sarati_db-data
 ```
 
+While that install's containers still exist, the message gives the command that removes them first.
+
 ## The installer refuses to take over another install
 
 ```
@@ -49,15 +51,16 @@ Every install has a name, `sarati` unless you gave it another, and runs from one
 the installer from a second directory under the same name would move that install, data and all,
 under the new directory's settings. The message gives the command that installs a separate one
 under a name and port nothing else uses, and the one that upgrades it from its own directory when
-that would work. When the install's own directory names no install, it also says how to move it
-here: copy its `.env` across first, so it keeps its port and settings.
+that would work. When that directory names no install, it also gives the command that moves it
+here, after copying its `.env` across when it has one, so it keeps its port and settings.
 
 ```
 error: The install named sarati is not running, but its data is kept — installing it here would take it over.
 ```
 
 The same guard, for an install removed with `docker compose down`: its containers are gone, its data
-is not. Start it again from its own directory, or follow the message to move it here.
+is not. Start it again from its own directory, or follow the message to move it here. A
+five-container install moves only with its `.env`, which holds the keys to its database.
 
 ```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.
@@ -91,14 +94,19 @@ COMPOSE_PROJECT_NAME=sarati SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https:
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
-Starting from the second directory instead gives:
+Starting from the second directory instead can give:
 
 ```
-error: More than one install (sarati, sarati-2) was started from /home/you/sarati-2.
+error: /home/you/sarati-2 could hold more than one install: sarati, sarati-2.
 ```
 
-Name the install that belongs there with the second command above, then run the installer for the
-first install's own directory, naming it if it asks, which moves that one back.
+or, when the first install holds the second's port:
+
+```
+error: Port 9090 is held by the install named sarati, which was also started from /home/you/sarati-2.
+```
+
+Either way, run the first command above, which moves the first install back, then the second.
 
 ## A webhook returns 404
 
