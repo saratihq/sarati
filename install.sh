@@ -94,17 +94,21 @@ setting() {
     LC_ALL=C sed -e 's/^"\([^"]*\)".*/\1/' -e t -e "s/^'\([^']*\)'.*/\1/" -e t -e 's/[[:space:]]#.*//' -e 's/[[:space:]]*$//'
 }
 
-is_here() { [ "$1" -ef . ]; }
+is_here() { ! gone "$1" && [ "$1" -ef . ]; }
 
 valid() { case "$1" in [!$lower$digits]* | *[!$lower${digits}_-]*) return 1 ;; esac; }
 
-# Succeeds only when $1 provably does not exist: its nearest existing parent can be searched.
-gone() {
+# Succeeds only when $1 provably does not exist: an absolute path whose nearest existing parent can be searched.
+absent() {
+  case "$1" in /*) ;; *) return 1 ;; esac
   [ ! -e "$1" ] || return 1
   up=$(dirname "$1")
   while [ ! -e "$up" ]; do up=$(dirname "$up"); done
   [ -x "$up" ]
 }
+
+# Succeeds when the containers' directory $1 did not exist as this run began, so no install runs from it, whatever this run makes.
+gone() { [ -n "$1" ] && printf '%s\n' "$missing" | grep -qxF -- "$1"; }
 
 has_data() { printf '%s\n' "$volumes" | grep -qx -e "$1 data" -e "$1 db-data"; }
 
@@ -233,18 +237,29 @@ free_name() {
   echo "$base-$n"
 }
 
+# Succeeds when something listens on port $1: from Linux's socket table on any address, unless nc can probe the one asked for.
+listening() {
+  tables=""
+  for table in /proc/net/tcp /proc/net/tcp6; do [ ! -r "$table" ] || tables="$tables $table"; done
+  if [ -n "$tables" ] && { [ "$probe" = localhost ] || ! command -v nc >/dev/null 2>&1; }; then
+    LC_ALL=C awk -v port="$(printf '%04X' "$1")" '$4 == "0A" { n = split($2, a, ":"); if (a[n] == port) found = 1 } END { exit !found }' $tables
+  else
+    command -v nc >/dev/null 2>&1 && nc -z "$probe" "$1" 2>/dev/null
+  fi
+}
+
 # Succeeds when port $1 is listened on, or bound by a container, stopped or not, that free_port saw.
 busy() {
   case " $(echo $bound) " in *" $1 "*) return 0 ;; esac
-  command -v nc >/dev/null 2>&1 && nc -z "$probe" "$1" 2>/dev/null
+  listening "$1"
 }
 
 # Prints a SARATI_PORT on the address asked for whose port nothing holds.
 free_port() {
   ids=$(docker ps -aq) || ids=""
   bound=""
-  # A hint only: a port missed here is still checked before anything starts.
-  [ -z "$ids" ] || bound=$(docker inspect --format '{{ range $p, $b := .HostConfig.PortBindings }}{{ range $b }} {{ .HostPort }}{{ end }}{{ end }}' $ids 2>/dev/null) || bound=""
+  # A hint only: a container removed meanwhile fails the inspect, and the port this run uses is probed again before anything starts.
+  [ -z "$ids" ] || bound=$(docker inspect --format '{{ range $p, $b := .HostConfig.PortBindings }}{{ range $b }} {{ .HostPort }}{{ end }}{{ end }}' $ids 2>/dev/null) || true
   p=9090
   while busy "$p"; do p=$((p + 1)); done
   echo "${bind:+$bind:}$p"
@@ -311,9 +326,14 @@ refuse() {
   else
     lead="The install named $project runs from $1"
     ways=""
+    if gone "$1"; then
+      lead="The install named $project was started from $1, which no longer exists"
+      [ -f .env ] || ways="
+  If you moved its directory, re-run this in the one you moved it to."
+    fi
     fix=$(unlock "$1")
     ! (cd "$1" 2>/dev/null && [ -z "$(setting COMPOSE_PROJECT_NAME)" ] && weighs && may_be_single) || look
-    ! passes "$1" || ways="
+    ! passes "$1" || ways="$ways
   To upgrade it there:  ${fix:+$fix && }$(again SARATI_DIR="$(shq "$1")")"
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
@@ -379,6 +399,14 @@ docker info >/dev/null 2>&1 || die "Docker is installed but not running — star
 listing=$(docker ps -a --filter label=com.docker.compose.project \
   --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}') ||
   die "Docker could not list its containers, so this cannot tell which install runs from where."
+# Docker Desktop labels a project started on Windows with its Windows path, which WSL reads through wslpath.
+if command -v wslpath >/dev/null 2>&1; then
+  listing=$(printf '%s\n' "$listing" | while read -r name dir; do
+    case "$dir" in ([A-Za-z]:[\\/]*) if unix=$(wslpath -u "$dir" 2>/dev/null); then dir=$unix; fi ;; esac
+    [ -z "$name" ] || printf '%s %s\n' "$name" "$dir"
+  done)
+fi
+missing=$(printf '%s\n' "$listing" | while read -r name dir; do if absent "$dir"; then printf '%s\n' "$dir"; fi; done | sort -u)
 stored=$(docker volume ls --format '{{ .Name }} {{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.volume" }}') ||
   die "Docker could not list its volumes, so this cannot tell which install keeps which data."
 volumes=$(printf '%s\n' "$stored" | awk 'NF == 3 { print $2, $3 }')
@@ -423,6 +451,15 @@ probe=${probe%\]}
 
 # The compose files pin `name: sarati`; COMPOSE_PROJECT_NAME in .env overrides it for docker compose here.
 named=${COMPOSE_PROJECT_NAME:-}
+revived=$(printf '%s\n' "$listing" | while read -r name dir; do if gone "$dir" && [ "$dir" -ef . ]; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -)
+if [ -n "$revived" ] && [ -z "$named" ]; then
+  case "$revived" in
+    *" "*) who="the installs named $(listed "$revived") were" how="COMPOSE_PROJECT_NAME set to the one that belongs here" ;;
+    *) who="the install named $revived was" how="COMPOSE_PROJECT_NAME=$revived" ;;
+  esac
+  die "$(pwd) did not exist until this run made it, but $who started there.
+  If you moved that directory, re-run this in the one you moved it to. To start it from here instead, re-run this with $how."
+fi
 recorded=$(setting COMPOSE_PROJECT_NAME)
 from=${recorded:+$(pwd)/.env}
 if [ -z "$recorded" ]; then
@@ -520,7 +557,7 @@ published=$(for id in $own; do docker port "$id" 8080 2>/dev/null || true; done)
 case " $(echo $published) " in
   *:"$port "*) ;;
   *)
-    if command -v nc >/dev/null 2>&1 && nc -z "$probe" "$port" 2>/dev/null; then
+    if listening "$port"; then
       held=$(holder)
       [ -z "$held" ] || die "Port $PORT is held by the install named $held, which was also started from $(pwd).
   Run this for that install's own directory first, with COMPOSE_PROJECT_NAME=$held, then re-run this."

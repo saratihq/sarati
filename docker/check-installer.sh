@@ -26,12 +26,13 @@ on() {
 cleanup() {
   [ -z "$hosts_changed" ] || unblock
   [ -z "$listener" ] || kill "$listener" 2>/dev/null || true
-  used=$(docker ps -a --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
-    sort -u | while read -r project dir; do
-      case "$dir" in ("$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true && echo "$project" ;; esac
-    done)
+  used=$(docker ps -a --format '{{ .ID }} {{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
+    while read -r id project dir; do
+      case "$dir" in ("$work"/*) docker rm -f -v "$id" >/dev/null 2>&1 || true && echo "$project" ;; esac
+    done | sort -u)
   for project in sarati unrelated $used $(cat "$work"/*/.env 2>/dev/null | sed -n 's/^COMPOSE_PROJECT_NAME=//p'); do
     for volume in $(docker volume ls -q --filter "label=com.docker.compose.project=$project"); do docker volume rm "$volume" >/dev/null 2>&1 || true; done
+    for network in $(docker network ls -q --filter "label=com.docker.compose.project=$project"); do docker network rm "$network" >/dev/null 2>&1 || true; done
   done
   rm -rf "$work"
 }
@@ -345,17 +346,20 @@ for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati); do
 done
 answers 8191
 
-echo '--- a second install by the installer from before, its directory moved while it runs'
-before_installer apart 8198 COMPOSE_PROJECT_NAME=sarati-6
+echo '--- a five-container second install by the installer from before, its directory moved while it runs'
+before_installer apart 8198 COMPOSE_PROJECT_NAME=sarati-6 SARATI_STACK=compose
 mkdir "$work/apps"
 mv "$work/apart" "$work/apps/apart"
+refused apart -
+says "$work/apart did not exist until this run made it, but the install named sarati-6 was started there." 'the old directory of a moved install was taken for it'
+[ ! -e "$work/apart" ] || fail 'the refusal left behind the directory it made'
 refused apps/apart -
 says "$work/apps/apart/.env names no install, and it could belong to sarati-6 (started from $work/apart, which no longer exists)." 'a moved install was not asked about'
-never 'already in use' 'the moved install was refused over the port it holds itself'
 run_installer apps/apart - COMPOSE_PROJECT_NAME=sarati-6
 [ "$(recorded apps/apart)" = sarati-6 ] || fail 'the moved install did not record its name'
+[ "$(docker ps -q --filter label=com.docker.compose.project=sarati-6 | wc -l)" -eq 5 ] || fail 'the moved install is not five running containers'
 for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati-6); do
-  [ "$(label "$id" project.working_dir)" = "$work/apps/apart" ] || fail 'the moved install is still labelled with the directory it left'
+  [ "$(label "$id" project.working_dir)" = "$work/apps/apart" ] || fail "the move left $(label "$id" service) labelled with the directory it left"
 done
 answers 8198
 

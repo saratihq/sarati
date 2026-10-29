@@ -94,6 +94,22 @@ starts it from here, on the port you asked for; a five-container install needs i
 first, because it holds the keys to its database.
 
 ```
+error: The install named sarati was started from /home/you/sarati, which no longer exists — installing it here would take it over.
+```
+
+The same guard, for an install whose directory was moved or deleted while its containers kept
+running. If you moved it, run the installer in its new place; the message also gives the command
+that moves the install here instead.
+
+```
+error: /home/you/sarati did not exist until this run made it, but the install named sarati was started there.
+```
+
+The installer was pointed at the directory an install was moved away from. Nothing is written, and
+the directory the run made is removed. Run it in the directory the install was moved to, or, to
+start the install from the old place again, re-run it with `COMPOSE_PROJECT_NAME` set to its name.
+
+```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.
 ```
 
