@@ -15,6 +15,7 @@ safe=$(sed -n 's/^SAFE_VERSION=//p' "$root/install.sh")
 work=$(mktemp -d)
 script=$root/install.sh
 hosts_changed=''
+listener=''
 unblock() { sudo sed -i '/# sarati-check-installer$/d' /etc/hosts; hosts_changed=''; }
 # on <name> <compose args...> runs plain docker compose in that install's directory, as its owner would.
 on() {
@@ -24,6 +25,7 @@ on() {
 }
 cleanup() {
   [ -z "$hosts_changed" ] || unblock
+  [ -z "$listener" ] || kill "$listener" 2>/dev/null || true
   docker ps -a --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
     sort -u | while read -r project dir; do
       case "$dir" in "$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true ;; esac
@@ -136,22 +138,35 @@ echo '--- a first install, by the installer from before names were saved'
 before_installer first 8191
 [ -z "$(recorded first)" ] || fail 'the installer from before saved a name'
 
-echo '--- that install upgraded by this one, given neither name nor port'
-run_installer first -
-says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading the first install did not save its name'
-[ "$(recorded first)" = sarati ] || fail 'the first install did not record its name'
-answers 8191
-
 echo '--- a second directory, given no name, by the installer from before'
 before_installer moved 8196
 moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ "$(label "$moved" project.working_dir)" = "$work/moved" ] || fail 'the installer from before did not move the first install'
+
+echo '--- moving it back onto a port something else holds'
+python3 -m http.server 8191 >/dev/null 2>&1 &
+listener=$!
+i=0
+until curl -fsS http://localhost:8191/ >/dev/null 2>&1; do
+  i=$((i + 1))
+  [ "$i" -lt 30 ] || fail 'the listener on 8191 never came up'
+  sleep 1
+done
+refused first - COMPOSE_PROJECT_NAME=sarati
+kill "$listener"
+listener=''
+says "Port 8191 is already in use. Set SARATI_PORT in $work/first/.env to a free port" 'a move onto a held port was not refused'
+[ "$(docker ps -q --filter label=com.docker.compose.project=sarati)" = "$moved" ] || fail 'the refused move took down the running install'
+
+echo '--- the first directory, given no name'
 refused first -
-says "The install named sarati runs from $work/moved — installing it here would take it over." 'the moved first install was not refused'
-says "If it belongs here, move it back:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/first sh -c" 'the refusal does not offer to move it back'
+says "$work/first/.env names no install, and it could belong to sarati (runs from $work/moved)." 'a .env that names no install was not asked about'
+
+echo '--- the first directory, named'
 run_installer first - COMPOSE_PROJECT_NAME=sarati
 first=$(container first)
 [ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
+[ "$(recorded first)" = sarati ] || fail 'the first install did not record its name'
 answers 8191
 run_installer moved - COMPOSE_PROJECT_NAME=sarati-4
 [ "$(recorded moved)" = sarati-4 ] || fail 'the second directory did not record the name it was given'
@@ -183,8 +198,9 @@ echo '--- a third directory, given no name'
 refused stray 8193
 says "The install named sarati runs from $work/first — installing it here would take it over." 'a stray install was not refused'
 says "To upgrade it there:  SARATI_DIR=$work/first sh -c" 'the refusal does not say how to upgrade the first install'
-says "To install a separate one here:  COMPOSE_PROJECT_NAME=sarati-3 SARATI_DIR=$work/stray SARATI_PORT=9090 sh -c" 'the refusal does not suggest a free name and port'
-[ ! -e "$work/stray/.env" ] || fail 'the refused install wrote a .env'
+says "To install a separate one:  COMPOSE_PROJECT_NAME=sarati-3 SARATI_DIR=$work/stray SARATI_PORT=9090 sh -c" 'the refusal does not suggest a free name and port'
+never 'To move it here' 'the refusal offered to move an install whose directory names it'
+[ ! -e "$work/stray" ] || fail 'the refused install left its directory behind'
 [ "$(container first)" = "$first" ] || fail 'the refused install touched the first'
 
 echo '--- ...while the first install is stopped'
@@ -197,8 +213,9 @@ on first start
 echo '--- ...while the first install is removed, its data kept'
 on first down
 refused stray 8193
-says 'The install named sarati keeps its data in the sarati_data volume, but nothing runs it' 'a removed install was not protected'
-[ ! -e "$work/stray/.env" ] || fail 'the refused install wrote a .env'
+says 'The install named sarati is not running, but its data is kept — installing it here would take it over.' 'a removed install was not protected'
+says "To move it here:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to move the removed install here'
+[ ! -e "$work/stray" ] || fail 'the refused install left its directory behind'
 on first up -d
 answers 8191
 first=$(container first)
@@ -226,8 +243,17 @@ twin=$(container twin)
 [ "$(label "$twin" project)" = sarati-5 ] || fail 'docker compose in the second directory does not act on its own install'
 run_installer first -
 first=$(container first)
-[ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
+[ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install, which names itself, was not moved back to its own directory'
 answers 8191
 [ "$(container twin)" = "$twin" ] || fail 'moving the first install back touched the second'
+
+echo '--- an install from before, upgraded by this one with neither name nor port'
+on first down -v
+before_installer plain 8191
+[ -z "$(recorded plain)" ] || fail 'the installer from before saved a name'
+run_installer plain -
+says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading an install from before did not save its name'
+[ "$(recorded plain)" = sarati ] || fail 'the upgraded install did not record its name'
+answers 8191
 
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'

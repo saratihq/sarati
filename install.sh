@@ -14,7 +14,11 @@ ADVISORIES=https://github.com/saratihq/sarati/security/advisories
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+die() {
+  printf '\033[31merror:\033[0m %s\n' "$*" >&2
+  [ -z "${made:-}" ] || rmdir "$made" 2>/dev/null || true
+  exit 1
+}
 
 # Succeeds only when $1 is a release (MAJOR.MINOR.PATCH) before $2.
 before() {
@@ -47,11 +51,12 @@ warn_if_unsafe() {
 lower=abcdefghijklmnopqrstuvwxyz
 digits=0123456789
 
-# Prints KEY $1's value from the .env in directory $2 (default .), read the way docker compose reads it.
+# Prints KEY $1 from the .env in directory $2 (default .), read the way docker compose reads it.
 setting() {
-  tr -d '\r' 2>/dev/null < "${2:-.}/.env" |
-    sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$1[[:space:]]*=[[:space:]]*//p" | tail -1 |
-    sed -e 's/^"\([^"]*\)".*/\1/' -e t -e "s/^'\([^']*\)'.*/\1/" -e t -e 's/[[:space:]]#.*//' -e 's/[[:space:]]*$//'
+  [ -r "${2:-.}/.env" ] || return 0
+  LC_ALL=C tr -d '\r' < "${2:-.}/.env" |
+    LC_ALL=C sed -n "s/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$1[[:space:]]*=[[:space:]]*//p" | tail -1 |
+    LC_ALL=C sed -e 's/^"\([^"]*\)".*/\1/' -e t -e "s/^'\([^']*\)'.*/\1/" -e t -e 's/[[:space:]]#.*//' -e 's/[[:space:]]*$//'
 }
 
 is_here() { [ "$1" -ef . ]; }
@@ -64,33 +69,56 @@ gone() {
   [ -x "$up" ]
 }
 
-# Succeeds when $1 is another directory that may hold the install named $project.
-claims() {
-  ! is_here "$1" && ! gone "$1" || return 1
-  claimed=$(setting COMPOSE_PROJECT_NAME "$1")
-  [ -z "$claimed" ] || [ "$claimed" = "$project" ]
+has_data() { printf '%s\n' "$volumes" | grep -qx -e "$1 data" -e "$1 db-data"; }
+
+has_database() { printf '%s\n' "$volumes" | grep -qx "$1 db-data"; }
+
+elsewhere() {
+  printf '%s\n' "$listing" | while read -r name dir; do
+    if [ "$name" = "$project" ] && [ -n "$dir" ] && ! is_here "$dir"; then printf '%s\n' "$dir"; fi
+  done | sort -u
 }
 
-# Succeeds when $taken's install may move back here: this directory has a .env, and $taken's names no install.
-movable() { [ -f .env ] && [ -r "$taken/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$taken")" ]; }
+# Succeeds when a run told the name may take $project over from directory $1, which does not name it itself.
+yields() {
+  [ -n "$named$from" ] || return 1
+  ! gone "$1" || return 0
+  [ -x "$1" ] && { [ -r "$1/.env" ] || [ ! -e "$1/.env" ]; } || return 1
+  [ "$(setting COMPOSE_PROJECT_NAME "$1")" != "$project" ]
+}
 
-# Prints the first $1-N, from N=2, that no container or volume on this machine uses.
+blocker() {
+  elsewhere | while read -r dir; do
+    if ! yields "$dir"; then
+      printf '%s\n' "$dir"
+      break
+    fi
+  done
+}
+
+# Prints the first <base>-N, from N=2, that no container, volume or sibling directory uses; <base> is $1 without its own -N.
 free_name() {
-  base=${1%-[0-9]*}
+  case ${1##*-} in "" | *[!$digits]*) base=$1 ;; *) base=${1%-*} ;; esac
   n=2
-  while printf '%s\n' "$listing" | grep -q "^$base-$n " ||
-    docker volume inspect "$base-${n}_data" >/dev/null 2>&1 || docker volume inspect "$base-${n}_db-data" >/dev/null 2>&1; do
+  while printf '%s\n' "$listing" "$volumes" | grep -q "^$base-$n " || { [ -e "../$base-$n" ] && ! is_here "../$base-$n"; }; do
     n=$((n + 1))
   done
   echo "$base-$n"
 }
 
-# Prints the first port from 9090 that nothing answers on, as far as nc can tell.
+# Succeeds when port $1 is listened on, or bound by a container, stopped or not, that free_port saw.
+busy() {
+  case " $(echo $bound) " in *" $1 "*) return 0 ;; esac
+  command -v nc >/dev/null 2>&1 && nc -z localhost "$1" 2>/dev/null
+}
+
 free_port() {
+  ids=$(docker ps -aq) || ids=""
+  bound=""
+  # A hint only: a port missed here is still checked before anything starts.
+  [ -z "$ids" ] || bound=$(docker inspect --format '{{ range $p, $b := .HostConfig.PortBindings }}{{ range $b }} {{ .HostPort }}{{ end }}{{ end }}' $ids 2>/dev/null) || bound=""
   p=9090
-  if command -v nc >/dev/null 2>&1; then
-    while nc -z localhost "$p" 2>/dev/null; do p=$((p + 1)); done
-  fi
+  while busy "$p"; do p=$((p + 1)); done
   echo "$p"
 }
 
@@ -102,9 +130,46 @@ shq() {
   esac
 }
 
+again() { printf "%s sh -c 'curl -fsSL https://get.sarati.io | sh'" "$*"; }
+
 listed() { echo "$1" | sed 's/ /, /g'; }
 
-again() { printf "%s sh -c 'curl -fsSL https://get.sarati.io | sh'" "$*"; }
+# Refuses to take over $project, which runs from directory $1 or, with $1 empty, only keeps its data; says what would work.
+refuse() {
+  if [ -z "$1" ]; then
+    lead="The install named $project is not running, but its data is kept"
+    ways="
+  To start it again, run docker compose up -d in its own directory."
+  else
+    lead="The install named $project runs from $1"
+    ways=""
+    gone "$1" || ways="
+  To upgrade it there:  $(again SARATI_DIR="$(shq "$1")")"
+  fi
+  if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
+    if [ ! -f .env ] && has_database "$project"; then
+      ways="$ways
+  To move it here, copy its .env into $(pwd), then:  $(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")"
+    else
+      ways="$ways
+  To move it here:  $(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")"
+    fi
+  fi
+  name=$(free_name "$project")
+  into=$here
+  [ ! -f .env ] || into=$(shq "$(dirname "$(pwd)")/$name")
+  die "$lead — installing it here would take it over.$ways
+  To install a separate one:  $(again COMPOSE_PROJECT_NAME="$name" SARATI_DIR="$into" SARATI_PORT="$(free_port)")"
+}
+
+# Prints the installs a .env that names none may belong to: sarati, and sarati-N data that nothing runs.
+candidates() {
+  if printf '%s\n' "$listing" | grep -q '^sarati ' || has_data sarati; then echo sarati; fi
+  printf '%s\n' "$volumes" | sed -n 's/^\(sarati-[0-9][0-9]*\) data$/\1/p; s/^\(sarati-[0-9][0-9]*\) db-data$/\1/p' | sort -u |
+    while read -r name; do
+      printf '%s\n' "$listing" | grep -q "^$name " || printf '%s\n' "$name"
+    done
+}
 
 command -v docker >/dev/null 2>&1 || die "Docker is required — install it from https://docs.docker.com/get-docker/ and re-run this."
 docker compose version >/dev/null 2>&1 || die "This needs Docker Compose v2 (bundled with modern Docker Desktop and docker-ce)."
@@ -112,9 +177,15 @@ docker info >/dev/null 2>&1 || die "Docker is installed but not running — star
 listing=$(docker ps -a --filter label=com.docker.compose.project \
   --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}') ||
   die "Docker could not list its containers, so this cannot tell which install runs from where."
+volumes=$(docker volume ls --filter label=com.docker.compose.project \
+  --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.volume" }}') ||
+  die "Docker could not list its volumes, so this cannot tell which install keeps which data."
 
+fresh=""
+[ -e "$DIR" ] || fresh=yes
 mkdir -p "$DIR"
 cd "$DIR"
+[ -z "$fresh" ] || made=$(pwd)
 
 PORT=${SARATI_PORT:-$(setting SARATI_PORT)}
 PORT=${PORT:-8080}
@@ -146,53 +217,49 @@ esac
 export COMPOSE_PROJECT_NAME="$project"
 
 here=$(shq "$(pwd)")
-taken=$(printf '%s\n' "$listing" | while read -r name dir; do if [ "$name" = "$project" ] && claims "$dir"; then echo "$dir"; fi; done | head -1)
-if [ -n "$taken" ] && ! { [ -n "$named" ] && movable; }; then
-  if movable; then
-    instead="If it belongs here, move it back:  $(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")"
-  else
-    instead="To install a separate one here:  $(again COMPOSE_PROJECT_NAME="$(free_name "$project")" SARATI_DIR="$here" SARATI_PORT="$(free_port)")"
+if [ -z "$named$recorded" ] && [ -f .env ]; then
+  maybe=$(candidates)
+  if [ "$maybe" != sarati ] && [ -n "$maybe" ] || [ -n "$(elsewhere)" ]; then
+    list=""
+    for name in $maybe; do
+      dir=$(printf '%s\n' "$listing" | sed -n "s/^$name //p" | head -1)
+      where="not running"
+      [ -z "$dir" ] || where="runs from $dir"
+      list="${list:+$list, }$name ($where)"
+    done
+    die "$(pwd)/.env names no install, and it could belong to $list.
+  Re-run this with COMPOSE_PROJECT_NAME set to the one that belongs here, or to a new name for a separate install."
   fi
-  die "The install named $project runs from $taken — installing it here would take it over.
-  To upgrade it there:  $(again SARATI_DIR="$(shq "$taken")")
-  $instead"
 fi
-
-if [ -z "$named$recorded" ] && [ ! -f .env ] && ! printf '%s\n' "$listing" | grep -q "^$project "; then
-  for volume in "${project}_data" "${project}_db-data"; do
-    docker volume inspect "$volume" >/dev/null 2>&1 || continue
-    die "The install named $project keeps its data in the $volume volume, but nothing runs it, and $(pwd) has no .env.
-  To upgrade it, re-run this with SARATI_DIR set to its own directory.
-  To run it from here:  $(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
-  To install a separate one here:  $(again COMPOSE_PROJECT_NAME="$(free_name "$project")" SARATI_DIR="$here" SARATI_PORT="$(free_port)")"
-  done
-fi
-
-# A port already in use is the single most common failure, and it is nicer to say so up front —
-# but this install's OWN container holding it is an upgrade, not a conflict.
-ours=""
-if [ -f docker-compose.yaml ]; then
-  ours=$(docker compose ps --quiet 2>/dev/null | head -1)
-fi
-if [ -z "$ours" ] && command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
-  die "Port $PORT is already in use. Re-run with SARATI_PORT=$(free_port) (or any free port)."
-fi
+held=$(blocker)
+[ -z "$held" ] || refuse "$held"
+[ -n "$named$recorded" ] || [ -f .env ] || ! has_data "$project" || refuse ""
 
 # A fresh machine gets the one-container product. An install that already exists keeps the shape it
 # was built with — the two store their data differently, so switching underneath it would look
 # exactly like data loss. Anything installed before this existed is compose.
-if [ -n "${SARATI_STACK:-}" ]; then
-  stack="$SARATI_STACK"
-elif [ -f .env ] && grep -q '^SARATI_STACK=' .env; then
-  stack=$(sed -n 's/^SARATI_STACK=//p' .env | head -1)
-elif [ -f .env ] || docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
-  stack=compose
-else
-  stack=single
+stack=${SARATI_STACK:-$(setting SARATI_STACK)}
+if [ -z "$stack" ]; then
+  if [ -f .env ] || has_database "$project"; then stack=compose; else stack=single; fi
 fi
 case "$stack" in
   single | compose) ;;
   *) die "SARATI_STACK must be 'single' or 'compose', not '$stack'." ;;
+esac
+
+# A port already in use is the single most common failure, and it is nicer to say so up front —
+# but this install's OWN container publishing it is an upgrade, not a conflict.
+if [ "$stack" = single ]; then front=sarati; else front=proxy; fi
+published=""
+[ ! -f docker-compose.yaml ] || published=$(docker compose port "$front" 8080 2>/dev/null) || published=""
+case "$published" in
+  *:"$PORT") ;;
+  *)
+    if command -v nc >/dev/null 2>&1 && nc -z localhost "$PORT" 2>/dev/null; then
+      [ ! -f .env ] || die "Port $PORT is already in use. Set SARATI_PORT in $(pwd)/.env to a free port, $(free_port) for example, and SARATI_URL to match, then re-run this."
+      die "Port $PORT is already in use. Re-run with SARATI_PORT=$(free_port) (or any free port)."
+    fi
+    ;;
 esac
 
 say "Fetching the stack definition…"
@@ -230,11 +297,11 @@ else
   # machine unless COMPOSE_PROJECT_NAME says otherwise. Writing fresh secrets against an existing
   # database gives Postgres a password it never had (crash loop) and a FERNET_KEY that cannot
   # decrypt what the old one stored.
-  if docker volume inspect "${project}_db-data" >/dev/null 2>&1; then
+  if has_database "$project"; then
     beside=$(free_name "$project")
     die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
   Restore that .env if you have it: a new FERNET_KEY cannot decrypt credentials the old one stored.
-  To leave it alone and run a separate install beside it:  $(again COMPOSE_PROJECT_NAME="$beside" SARATI_DIR="$beside" SARATI_PORT="$(free_port)")
+  To leave it alone and run a separate install beside it:  $(again COMPOSE_PROJECT_NAME="$beside" SARATI_DIR="$(shq "$(dirname "$(pwd)")/$beside")" SARATI_PORT="$(free_port)")
   To erase that database and start over:  docker volume rm ${project}_db-data"
   fi
 
@@ -280,8 +347,8 @@ while [ "$i" -lt 90 ]; do
     if [ "$stack" = single ]; then
       echo "  back up:  the ${project}_data volume — it holds your workflows AND the keys that decrypt your credentials."
     fi
-    echo "  logs:  cd $(shq "$DIR") && docker compose logs -f"
-    echo "  stop:  cd $(shq "$DIR") && docker compose down"
+    printf '  logs:  cd %s && docker compose logs -f\n' "$(shq "$DIR")"
+    printf '  stop:  cd %s && docker compose down\n' "$(shq "$DIR")"
     warn_if_unsafe
     exit 0
   fi

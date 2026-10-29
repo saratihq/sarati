@@ -12,7 +12,9 @@ error: Port 8080 is already in use. Re-run with SARATI_PORT=9090 (or any free po
 ```
 
 Either Sarati is already running — stop it before [upgrading](/operate/upgrades/) — or something
-else owns the port. Pick another with `SARATI_PORT`.
+else owns the port. Pick another with `SARATI_PORT`. For an install that already has a `.env`, the
+message says to set `SARATI_PORT` there instead, with `SARATI_URL` to match, so later upgrades keep
+the port.
 
 ## The installer refuses because the database outlived its `.env`
 
@@ -28,7 +30,7 @@ separated in the first place.
 Restore the `.env` if you have it. To leave that database alone and run a separate install beside it:
 
 ```bash
-COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
+COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
 To erase the old database and start over:
@@ -46,15 +48,15 @@ error: The install named sarati runs from /home/you/sarati — installing it her
 Every install has a name, `sarati` unless you gave it another, and runs from one directory. Running
 the installer from a second directory under the same name would move that install, data and all,
 under the new directory's settings. The message gives the command that upgrades it from its own
-directory, and one that installs a separate one here under a name and port nothing else uses.
+directory, and one that installs a separate one under a name and port nothing else uses. When the
+install's own directory names no install, it also gives the command that moves it here.
 
 ```
-error: The install named sarati keeps its data in the sarati_data volume, but nothing runs it, and /home/you/elsewhere has no .env.
+error: The install named sarati is not running, but its data is kept — installing it here would take it over.
 ```
 
-The same guard, for an install stopped with `docker compose down`: its containers are gone, its data
-is not. Start it again from its own directory, or follow the message to run that data from here
-instead, or to install a separate one.
+The same guard, for an install removed with `docker compose down`: its containers are gone, its data
+is not. Start it again from its own directory, or follow the message to move it here.
 
 ```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.
@@ -66,25 +68,23 @@ A directory keeps the name it was installed with. Re-run without `COMPOSE_PROJEC
 
 The installer used not to save a second install's name, so `docker compose` in its directory acted
 on the first install instead: `down` stopped the first, and `up -d` restarted it from the second
-directory. Re-running the installer in each directory puts that right, and it says how when it
-cannot tell on its own.
+directory. Re-run the installer in the first install's own directory first, then in each of the
+others. It saves each install's name as it goes, and asks when it cannot tell:
+
+```
+error: /home/you/sarati/.env names no install, and it could belong to sarati (runs from /home/you/sarati-2).
+```
+
+Re-run it there with `COMPOSE_PROJECT_NAME=sarati`, which moves the first install back. Then re-run
+it in the second directory with the name that install was meant to have, `sarati-2` in the example.
 
 ```
 error: More than one install (sarati, sarati-2) was started from /home/you/sarati-2.
 ```
 
 Re-run it there with `COMPOSE_PROJECT_NAME` set to the install that belongs there, `sarati-2` in the
-example, then re-run it in the first install's own directory, which moves that one back.
-
-```
-error: The install named sarati runs from /home/you/sarati-2 — installing it here would take it over.
-  To upgrade it there:  SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
-  If it belongs here, move it back:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
-```
-
-Neither directory says which one the install belongs to. If it is the first install, move it back
-with the second command, then give the other directory a name of its own when you next install
-there.
+example. Then re-run it in the first install's own directory, with `COMPOSE_PROJECT_NAME=sarati` if
+it asks, which moves that one back.
 
 ## A webhook returns 404
 

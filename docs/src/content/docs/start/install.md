@@ -80,7 +80,7 @@ COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -
 
 The installer saves the name in `sarati-2/.env`, so `docker compose` run there acts on that install
 alone, and re-running the installer there upgrades it without the name. Given no name, the installer
-refuses rather than take over an install that runs from another directory.
+refuses rather than take over another install, running or not.
 
 ## The pieces apart
 
