@@ -27,7 +27,6 @@ before() {
   }'
 }
 
-# The version the running container was built as, read from its image label.
 running_version() {
   id=$(docker compose ps -q "$1" 2>/dev/null | head -1)
   [ -z "$id" ] || docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$id" 2>/dev/null || true
@@ -38,10 +37,12 @@ warn_if_unsafe() {
   printf '\n' >&2
   warn "this install runs Sarati $running. Every version before $SAFE_VERSION has a published security advisory:"
   echo "  $ADVISORIES" >&2
-  if [ -z "$pulled" ]; then
-    echo "  The images could not be downloaded this time: check this machine can reach ghcr.io." >&2
+  if [ -n "$pulled" ]; then
+    echo "  To upgrade, set SARATI_VERSION in $(pwd)/.env to latest, or to $SAFE_VERSION or later, and re-run this." >&2
+    return 0
   fi
-  echo "  To upgrade, set SARATI_VERSION in $(pwd)/.env to latest, or to $SAFE_VERSION or later, and re-run this." >&2
+  echo "  Downloading the images failed this time${pull_error:+: $pull_error}" >&2
+  echo "  Fix that and re-run this, with SARATI_VERSION in $(pwd)/.env set to latest, or to $SAFE_VERSION or later." >&2
 }
 
 command -v docker >/dev/null 2>&1 || die "Docker is required — install it from https://docs.docker.com/get-docker/ and re-run this."
@@ -134,7 +135,11 @@ fi
 
 say "Starting Sarati…"
 pulled=yes
-docker compose pull --quiet 2>/dev/null || pulled=""
+pull_error=""
+if ! pull_output=$(docker compose pull --quiet 2>&1); then
+  pulled=""
+  pull_error=$(printf '%s\n' "$pull_output" | sed '/^[[:space:]]*$/d' | tail -1)
+fi
 docker compose up -d
 if [ "$stack" = single ]; then
   running=$(running_version sarati)

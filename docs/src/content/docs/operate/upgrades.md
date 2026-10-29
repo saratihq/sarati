@@ -19,6 +19,16 @@ file changed:
 cd sarati && docker compose pull && docker compose up -d
 ```
 
+Running it by hand, without the installer:
+
+```bash
+docker pull sarati/sarati && docker rm -f sarati
+```
+
+```bash
+docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
+```
+
 Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`. Pin 0.2.26 or
 later: every earlier version has a published
 [security advisory](https://github.com/saratihq/sarati/security/advisories), and the installer warns
@@ -53,8 +63,9 @@ restart, so each is judged again as it resumes. On a five-container install it i
 
 ### Going back
 
-Set `SARATI_VERSION` to the earlier version and upgrade again. What carries on there depends on the
-version you go back to.
+Set `SARATI_VERSION` to the earlier version and upgrade again. Running it by hand, name the version
+on the image in both commands, `sarati/sarati:0.2.25` for example. What carries on there depends on
+the version you go back to.
 
 **To v0.2.26 or v0.2.25**, runs carry on as they do here: both resume a run this version started, on
 the same engine. Its approvals stay listed and answerable there, a **Wait** step wakes there, a step
@@ -121,16 +132,6 @@ one-container image publishes that port, but any container on the same Docker ne
 and so can anything that reaches the machine when the service runs outside Docker. That is the flaw
 [GHSA-33cr-cppq-j5hp](https://github.com/saratihq/sarati/security/advisories/GHSA-33cr-cppq-j5hp)
 describes, and the installer warns when it starts such a version.
-
-Running it by hand, without the installer:
-
-```bash
-docker pull sarati/sarati && docker rm -f sarati
-```
-
-```bash
-docker run -d --name sarati -p 8080:8080 -v sarati:/data sarati/sarati
-```
 
 ## Notes for specific versions
 

@@ -26,7 +26,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # get.sarati.io serves install.sh from main, so a change to it is live the moment it merges.
   installer:
     runs-on: ubuntu-latest
     timeout-minutes: 25

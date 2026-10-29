@@ -1,19 +1,15 @@
 #!/bin/sh
-# The installer warns when the version it starts has a published security advisory, and only then:
-# pinned to one, upgraded past it, left on one by a failed download, and on five containers.
-# FOR CI OR A THROWAWAY LINUX MACHINE ONLY: it installs throwaway instances, re-tags an image and
-# points ghcr.io nowhere in /etc/hosts while it runs. Needs Docker, sudo, and
-# SARATI_CHECK_THROWAWAY=1 to say so:
-#   SARATI_CHECK_THROWAWAY=1 SARATI_REF=<commit> sh docker/check-installer.sh
+# SARATI_CHECK_THROWAWAY=1 SARATI_REF=<commit> sh docker/check-installer.sh   (Linux, Docker, sudo)
 set -eu
 
 [ "${SARATI_CHECK_THROWAWAY:-}" = 1 ] || {
-  echo 'This check installs throwaway instances, re-tags an image and edits /etc/hosts: run it only on a throwaway machine, with SARATI_CHECK_THROWAWAY=1.' >&2
+  echo 'This check installs throwaway instances, re-tags an image and points ghcr.io nowhere in /etc/hosts: run it only on a throwaway Linux machine, with SARATI_CHECK_THROWAWAY=1.' >&2
   exit 2
 }
 
 old=0.2.25
 root=$(cd "$(dirname "$0")/.." && pwd)
+safe=$(sed -n 's/^SAFE_VERSION=//p' "$root/install.sh")
 work=$(mktemp -d)
 made=''
 hosts_changed=''
@@ -31,6 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { echo "::error::$1" >&2; exit 1; }
+[ -n "$safe" ] || fail 'install.sh no longer sets SAFE_VERSION'
 
 # run_installer <name> <port> [VAR=value ...] runs the installer and keeps what it printed in $out.
 run_installer() {
@@ -59,7 +56,7 @@ run_installer pinned 8181 SARATI_VERSION=$old
 says "this install runs Sarati $old" "pinned to $old, the installer did not warn"
 says 'https://github.com/saratihq/sarati/security/advisories' 'the warning does not link the advisories'
 says "set SARATI_VERSION in $work/pinned/.env to latest" 'the warning does not say how to upgrade'
-never 'could not be downloaded' 'the warning blamed a download that worked'
+never 'Downloading the images failed' 'the warning blamed a download that worked'
 
 echo '--- upgraded the way the warning says'
 sed -i 's/^SARATI_VERSION=.*/SARATI_VERSION=latest/' "$work/pinned/.env"
@@ -76,9 +73,21 @@ hosts_changed=1
 run_installer offline 8183
 unblock
 says "this install runs Sarati $old" "left on $old by a failed download, the installer did not warn"
-says 'could not be downloaded' 'the warning does not say the download failed'
+says 'Downloading the images failed this time: ' 'the warning does not say the download failed'
+printf '%s\n' "$out" | grep -F 'Downloading the images failed' | grep -qF ghcr.io || fail 'the warning does not carry the error the download gave'
 [ "$(running offline sarati)" = "$old" ] || fail "the offline install is not running $old"
 on offline down -v >/dev/null
+
+echo "--- pinned to $safe, the first version with no advisory"
+run_installer safe 8185 SARATI_VERSION=$safe
+never 'warning:' "pinned to $safe, the installer warned"
+[ "$(running safe sarati)" = "$safe" ] || fail "the install pinned to $safe is not running it"
+on safe down -v >/dev/null
+
+echo '--- pinned to 0.2.9, which sorts after 0.2.26 as text'
+run_installer nine 8186 SARATI_VERSION=0.2.9
+says 'this install runs Sarati 0.2.9' 'pinned to 0.2.9, the installer did not warn'
+on nine down -v >/dev/null
 
 echo "--- five containers, pinned to $old"
 run_installer five 8184 SARATI_STACK=compose SARATI_VERSION=$old
