@@ -8,10 +8,12 @@ set -eu
 }
 
 old=0.2.25
+# The last installer that did not save an install's name.
+before=387f56bb1272c871f6df05744e0b87f38fb4f063
 root=$(cd "$(dirname "$0")/.." && pwd)
 safe=$(sed -n 's/^SAFE_VERSION=//p' "$root/install.sh")
 work=$(mktemp -d)
-made=''
+script=$root/install.sh
 hosts_changed=''
 unblock() { sudo sed -i '/# sarati-check-installer$/d' /etc/hosts; hosts_changed=''; }
 # on <name> <compose args...> runs plain docker compose in that install's directory, as its owner would.
@@ -22,30 +24,43 @@ on() {
 }
 cleanup() {
   [ -z "$hosts_changed" ] || unblock
-  for name in $made; do on "$name" down -v >/dev/null 2>&1 || true; done
+  docker ps -a --format '{{ .Label "com.docker.compose.project" }} {{ .Label "com.docker.compose.project.working_dir" }}' |
+    sort -u | while read -r project dir; do
+      case "$dir" in "$work"/*) (cd "$dir" && docker compose -p "$project" down -v) >/dev/null 2>&1 || true ;; esac
+    done
+  rm -rf "$work"
 }
 trap cleanup EXIT
 
 fail() { echo "::error::$1" >&2; exit 1; }
 [ -n "$safe" ] || fail 'install.sh no longer sets SAFE_VERSION'
+curl -fsSL "https://raw.githubusercontent.com/saratihq/sarati/$before/install.sh" -o "$work/before.sh"
 
-# attempt <name> <port> [VAR=value ...] runs the installer and keeps what it printed in $out.
+# attempt <name> <port|-> [VAR=value ...] runs $script for that install, keeping what it printed in $out.
 attempt() {
   name=$1 port=$2
   shift 2
-  made="$made $name"
+  [ "$port" = - ] || set -- SARATI_PORT="$port" "$@"
   status=0
-  out=$(env SARATI_DIR="$work/$name" SARATI_PORT="$port" "$@" sh "$root/install.sh" 2>&1) || status=$?
+  out=$(env SARATI_DIR="$work/$name" "$@" sh "$script" 2>&1) || status=$?
   printf '%s\n' "$out"
   return $status
 }
 run_installer() {
   attempt "$@" || {
-    on "$1" logs --no-color | tail -60 || true
+    docker ps -a --format '{{ .Names }} {{ .Status }} {{ .Label "com.docker.compose.project.working_dir" }}' || true
+    for id in $(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$work/$1"); do
+      docker logs --tail 60 "$id" 2>&1 || true
+    done
     fail 'the installer failed'
   }
 }
 refused() { ! attempt "$@" || fail 'the installer went ahead'; }
+before_installer() {
+  script=$work/before.sh
+  run_installer "$@"
+  script=$root/install.sh
+}
 
 says() { printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
 never() { ! printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
@@ -56,6 +71,19 @@ running() {
 }
 label() { docker inspect --format "{{ index .Config.Labels \"com.docker.compose.$2\" }}" "$1"; }
 recorded() { sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$work/$1/.env" | tail -1; }
+container() {
+  id=$(on "$1" ps -q sarati)
+  [ -n "$id" ] || fail "docker compose in $1 finds no running container"
+  echo "$id"
+}
+answers() {
+  i=0
+  until curl -fsS "http://localhost:$1/api/health" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 90 ] || fail "nothing answers on port $1"
+    sleep 2
+  done
+}
 
 echo "--- pinned to $old"
 run_installer pinned 8181 COMPOSE_PROJECT_NAME=check-pinned SARATI_VERSION=$old
@@ -82,6 +110,7 @@ says "this install runs Sarati $old" "left on $old by a failed download, the ins
 says 'Downloading the images failed this time: ' 'the warning does not say the download failed'
 printf '%s\n' "$out" | grep -F 'Downloading the images failed this time: ' | grep -qF '0.0.0.0' || fail 'the warning does not carry the error the download gave'
 [ "$(running offline sarati)" = "$old" ] || fail "the offline install is not running $old"
+[ "$(recorded offline)" = check-offline ] || fail 'the offline install did not record its name'
 on offline down -v >/dev/null
 
 echo "--- pinned to $safe, the first version with no advisory"
@@ -93,6 +122,7 @@ on safe down -v >/dev/null
 echo '--- pinned to 0.2.9, which sorts after 0.2.26 as text'
 run_installer nine 8186 COMPOSE_PROJECT_NAME=check-nine SARATI_VERSION=0.2.9
 says 'this install runs Sarati 0.2.9' 'pinned to 0.2.9, the installer did not warn'
+[ "$(running nine sarati)" = 0.2.9 ] || fail 'the install pinned to 0.2.9 is not running it'
 on nine down -v >/dev/null
 
 echo "--- five containers, pinned to $old"
@@ -102,62 +132,102 @@ says "this install runs Sarati $old" "five containers pinned to $old, the instal
 [ "$(recorded five)" = check-five ] || fail 'the five-container install did not record its name'
 on five down -v >/dev/null
 
-echo '--- a first install, given no name'
-run_installer first 8191
+echo '--- a first install, by the installer from before names were saved'
+before_installer first 8191
+[ -z "$(recorded first)" ] || fail 'the installer from before saved a name'
+
+echo '--- that install upgraded by this one, given neither name nor port'
+run_installer first -
+says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading the first install did not save its name'
 [ "$(recorded first)" = sarati ] || fail 'the first install did not record its name'
-first=$(on first ps -q sarati)
-[ -n "$first" ] || fail 'docker compose in the first install found nothing'
+answers 8191
+
+echo '--- a second directory, given no name, by the installer from before'
+before_installer moved 8196
+moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
+[ "$(label "$moved" project.working_dir)" = "$work/moved" ] || fail 'the installer from before did not move the first install'
+refused first -
+says "The install named sarati runs from $work/moved — installing it here would take it over." 'the moved first install was not refused'
+says "If it belongs here, move it back:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/first sh -c" 'the refusal does not offer to move it back'
+run_installer first - COMPOSE_PROJECT_NAME=sarati
+first=$(container first)
+[ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
+answers 8191
+run_installer moved - COMPOSE_PROJECT_NAME=sarati-4
+[ "$(recorded moved)" = sarati-4 ] || fail 'the second directory did not record the name it was given'
+[ "$(label "$(container moved)" project)" = sarati-4 ] || fail 'the second directory is not the install it was named'
+[ "$(container first)" = "$first" ] || fail 'naming the second directory touched the first install'
 
 echo '--- a second install, named'
 run_installer second 8192 COMPOSE_PROJECT_NAME=sarati-2
 [ "$(recorded second)" = sarati-2 ] || fail 'the second install did not record its name'
-second=$(on second ps -q sarati)
-[ -n "$second" ] && [ "$second" != "$first" ] || fail 'docker compose in the second install acted on the first'
+second=$(container second)
+[ "$second" != "$first" ] || fail 'docker compose in the second install acted on the first'
 [ "$(label "$second" project)" = sarati-2 ] || fail 'the second install is not the project it was named'
 on second down
-[ "$(on first ps -q sarati)" = "$first" ] || fail 'docker compose down in the second install stopped the first'
-curl -fsS http://localhost:8191/api/health >/dev/null || fail 'the first install stopped answering'
+[ "$(container first)" = "$first" ] || fail 'docker compose down in the second install stopped the first'
+answers 8191
 
-echo '--- the second install upgraded in place, given no name'
-run_installer second 8192
-[ "$(label "$(on second ps -q sarati)" project)" = sarati-2 ] || fail 're-running the second install changed its name'
-[ "$(on first ps -q sarati)" = "$first" ] || fail 're-running the second install touched the first'
+echo '--- the second install upgraded in place, given neither name nor port'
+run_installer second -
+says 'Sarati is running at http://localhost:8192' 'the upgrade did not check the port the second install runs on'
+[ "$(label "$(container second)" project)" = sarati-2 ] || fail 're-running the second install changed its name'
+[ "$(container first)" = "$first" ] || fail 're-running the second install touched the first'
 
 echo '--- the second install, given another name'
-refused second 8192 COMPOSE_PROJECT_NAME=other
-says "$work/second holds the install named sarati-2, not other." 'a different name was not refused'
+refused second - COMPOSE_PROJECT_NAME=other
+says "$work/second/.env names this install sarati-2, not other." 'a different name was not refused'
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=other)" ] || fail 'the refused name started containers'
 
 echo '--- a third directory, given no name'
 refused stray 8193
 says "The install named sarati runs from $work/first — installing it here would take it over." 'a stray install was not refused'
-says "SARATI_DIR=$work/first." 'the refusal does not say how to upgrade the first install'
+says "To upgrade it there:  SARATI_DIR=$work/first sh -c" 'the refusal does not say how to upgrade the first install'
+says "To install a separate one here:  COMPOSE_PROJECT_NAME=sarati-3 SARATI_DIR=$work/stray SARATI_PORT=9090 sh -c" 'the refusal does not suggest a free name and port'
 [ ! -e "$work/stray/.env" ] || fail 'the refused install wrote a .env'
-[ "$(on first ps -q sarati)" = "$first" ] || fail 'the refused install touched the first'
+[ "$(container first)" = "$first" ] || fail 'the refused install touched the first'
 
-echo '--- a second install from before installs recorded their name'
-run_installer legacy 8194 COMPOSE_PROJECT_NAME=sarati-3
-sed -i '/^COMPOSE_PROJECT_NAME=/d' "$work/legacy/.env"
-[ "$(on legacy ps -q sarati)" = "$first" ] || fail 'without its name, docker compose in a second install did not act on the first'
-run_installer legacy 8194
+echo '--- ...while the first install is stopped'
+on first stop
+refused stray 8193
+says "The install named sarati runs from $work/first — installing it here would take it over." 'a stopped install was not protected'
+on first start
+[ "$(container first)" = "$first" ] || fail 'the refused install touched the stopped first install'
+
+echo '--- ...while the first install is removed, its data kept'
+on first down
+refused stray 8193
+says 'The install named sarati keeps its data in the sarati_data volume, but nothing runs it' 'a removed install was not protected'
+[ ! -e "$work/stray/.env" ] || fail 'the refused install wrote a .env'
+on first up -d
+answers 8191
+first=$(container first)
+
+echo '--- a second install by the installer from before, given a name'
+before_installer legacy 8194 COMPOSE_PROJECT_NAME=sarati-3
+[ "$(container legacy)" = "$first" ] || fail 'docker compose in the second install from before did not act on the first, so this does not reproduce the bug'
+run_installer legacy -
 says 'Saved COMPOSE_PROJECT_NAME=sarati-3 into .env' 'the installer did not save the name it recovered'
 [ "$(recorded legacy)" = sarati-3 ] || fail 'the installer did not recover the name from its containers'
-[ "$(label "$(on legacy ps -q sarati)" project)" = sarati-3 ] || fail 'docker compose in the recovered install does not act on it'
-[ "$(on first ps -q sarati)" = "$first" ] || fail 'recovering the second install touched the first'
+[ "$(label "$(container legacy)" project)" = sarati-3 ] || fail 'docker compose in the recovered install does not act on it'
+[ "$(container first)" = "$first" ] || fail 'recovering the second install touched the first'
 
-echo '--- the first install, restarted from that directory the way the old instructions allowed'
-sed -i '/^COMPOSE_PROJECT_NAME=/d' "$work/legacy/.env"
-(cd "$work/legacy" && SARATI_PORT=8195 docker compose up -d)
-moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
-[ "$(label "$moved" project.working_dir)" = "$work/legacy" ] || fail 'the first install was not moved under the second directory'
-refused legacy 8194
-says "More than one install (sarati, sarati-3) was started from $work/legacy." 'a directory holding two installs was not refused'
-run_installer legacy 8194 COMPOSE_PROJECT_NAME=sarati-3
-[ "$(recorded legacy)" = sarati-3 ] || fail 'naming the second install did not record it'
-run_installer first 8191
-back=$(on first ps -q sarati)
-[ "$(label "$back" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
-curl -fsS http://localhost:8191/api/health >/dev/null || fail 'the first install does not answer on its own port'
-[ "$(label "$(on legacy ps -q sarati)" project)" = sarati-3 ] || fail 'moving the first install back touched the second'
+echo '--- the first install restarted from a second directory, as the old instructions allowed'
+before_installer twin 8197 COMPOSE_PROJECT_NAME=sarati-5
+! (cd "$work/twin" && docker compose up -d) || fail 'docker compose up -d in the second directory did not collide with the port its install holds'
+hijacked=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
+[ "$(label "$hijacked" project.working_dir)" = "$work/twin" ] || fail 'docker compose up -d in the second directory did not take the first install'
+[ -z "$(docker ps -q --filter label=com.docker.compose.project=sarati)" ] || fail 'the taken first install is still running'
+refused twin -
+says "More than one install (sarati, sarati-5) was started from $work/twin." 'a directory holding two installs was not refused'
+run_installer twin - COMPOSE_PROJECT_NAME=sarati-5
+[ "$(recorded twin)" = sarati-5 ] || fail 'naming the second install did not record it'
+twin=$(container twin)
+[ "$(label "$twin" project)" = sarati-5 ] || fail 'docker compose in the second directory does not act on its own install'
+run_installer first -
+first=$(container first)
+[ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install was not moved back to its own directory'
+answers 8191
+[ "$(container twin)" = "$twin" ] || fail 'moving the first install back touched the second'
 
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'

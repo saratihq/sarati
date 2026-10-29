@@ -17,8 +17,7 @@ else owns the port. Pick another with `SARATI_PORT`.
 ## The installer refuses because the database outlived its `.env`
 
 ```
-error: A Sarati database already exists on this machine, but its .env is gone — these new
-secrets would not match it.
+error: A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
 ```
 
 This is a guard, not a bug, and only a five-container install can reach it: fresh secrets against an
@@ -26,7 +25,7 @@ old database give Postgres a password it never had, and a new `FERNET_KEY` canno
 old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
-Restore the `.env` if you have it. To run a **second** instance alongside the first:
+Restore the `.env` if you have it. To leave that database alone and run a separate install beside it:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
@@ -46,29 +45,46 @@ error: The install named sarati runs from /home/you/sarati — installing it her
 
 Every install has a name, `sarati` unless you gave it another, and runs from one directory. Running
 the installer from a second directory under the same name would move that install, data and all,
-under the new directory's settings. Upgrade it from its own directory with `SARATI_DIR`, or give the
-new one a name of its own:
-
-```bash
-COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
-```
+under the new directory's settings. The message gives the command that upgrades it from its own
+directory, and one that installs a separate one here under a name and port nothing else uses.
 
 ```
-error: /home/you/sarati-2 holds the install named sarati-2, not other.
+error: The install named sarati keeps its data in the sarati_data volume, but nothing runs it, and /home/you/elsewhere has no .env.
+```
+
+The same guard, for an install stopped with `docker compose down`: its containers are gone, its data
+is not. Start it again from its own directory, or follow the message to run that data from here
+instead, or to install a separate one.
+
+```
+error: /home/you/sarati-2/.env names this install sarati-2, not other.
 ```
 
 A directory keeps the name it was installed with. Re-run without `COMPOSE_PROJECT_NAME` to upgrade it.
+
+### After the old second-instance instructions
+
+The installer used not to save a second install's name, so `docker compose` in its directory acted
+on the first install instead: `down` stopped the first, and `up -d` restarted it from the second
+directory. Re-running the installer in each directory puts that right, and it says how when it
+cannot tell on its own.
 
 ```
 error: More than one install (sarati, sarati-2) was started from /home/you/sarati-2.
 ```
 
-The installer used not to save a second install's name, so `docker compose` in its directory acted
-on the first install instead: `down` stopped the first, and `up -d` restarted it with the second
-directory's settings. Re-run the installer there with `COMPOSE_PROJECT_NAME` set to the
-install that belongs there, `sarati-2` in the example, then re-run it in the first install's own
-directory to move that one back. Every later `docker compose` in each directory acts on that install
-alone.
+Re-run it there with `COMPOSE_PROJECT_NAME` set to the install that belongs there, `sarati-2` in the
+example, then re-run it in the first install's own directory, which moves that one back.
+
+```
+error: The install named sarati runs from /home/you/sarati-2 — installing it here would take it over.
+  To upgrade it there:  SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
+  If it belongs here, move it back:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
+
+Neither directory says which one the install belongs to. If it is the first install, move it back
+with the second command, then give the other directory a name of its own when you next install
+there.
 
 ## A webhook returns 404
 
