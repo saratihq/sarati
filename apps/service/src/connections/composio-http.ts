@@ -1,3 +1,5 @@
+import { isNativeError } from 'node:util/types';
+
 import { ActionError, type FetchLike, type FetchLikeResponse } from '@sarati/actions-sdk';
 import { fetch } from 'undici';
 
@@ -33,7 +35,7 @@ async function send(
     });
   } catch (err) {
     // fetch reports every network failure as "fetch failed"; its cause says what broke.
-    if (err instanceof TypeError && err.cause instanceof Error) throw err.cause;
+    if (err instanceof TypeError && isNativeError(err.cause)) throw err.cause;
     // With no cause, fetch refused its own arguments, and its message repeats the URL or the header value.
     if (err instanceof TypeError) {
       throw new ActionError({

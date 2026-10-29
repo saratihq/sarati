@@ -8,12 +8,15 @@ import { join } from 'node:path';
 import { Logger, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ThrottlerStorage } from '@nestjs/throttler';
+import { createAuth, DEFAULT_RETRY_POLICY, type FetchLike, HttpClient } from '@sarati/actions-sdk';
 import request from 'supertest';
+import { fetch } from 'undici';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { ComposioProxyTransport } from '../src/providers/composio-proxy-transport';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -136,6 +139,7 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
   let arrivals: Arrival[] = [];
   let redirects: Redirect[] = [];
   let dropped: RegExp | null = null;
+  let cut: RegExp | null = null;
 
   const fromElsewhere = (): Arrival[] => arrivals.filter((a) => a.at === 'elsewhere');
   const toComposio = (): Array<Pick<Arrival, 'call' | 'key'>> =>
@@ -163,6 +167,11 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
         });
         if (at === 'composio' && dropped?.test(call)) {
           req.socket.destroy();
+          return;
+        }
+        if (at === 'composio' && cut?.test(call)) {
+          res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+          res.write('{"data":', () => req.socket.destroy());
           return;
         }
         const redirect = at === 'composio' ? redirects.find((r) => r.call.test(call)) : undefined;
@@ -216,6 +225,7 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
     arrivals = [];
     redirects = [];
     dropped = null;
+    cut = null;
   });
 
   async function managedSlack(): Promise<string> {
@@ -241,18 +251,14 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
     return request(app.getHttpServer()).post('/api/connections/managed/link').send({ app: 'slack' });
   }
 
-  function runSlackStep(connectionId: string): Promise<request.Response> {
+  function runSlackStep(
+    connectionId: string,
+    actionId = 'slack.send_channel_message',
+    props: Record<string, unknown> = { channel: 'C1', text: 'hi' },
+  ): Promise<request.Response> {
     const plan = {
       id: 'composio-key-origin',
-      nodes: [
-        {
-          kind: 'action',
-          id: 'step',
-          actionId: 'slack.send_channel_message',
-          props: { channel: 'C1', text: 'hi' },
-          auth: { connectionId },
-        },
-      ],
+      nodes: [{ kind: 'action', id: 'step', actionId, props, auth: { connectionId } }],
     };
     return request(app.getHttpServer()).post('/api/runs').send({ plan });
   }
@@ -459,6 +465,74 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
       expect(toComposio().filter((a) => PROXY.test(a.call))).toEqual([
         { call: 'POST /api/v3/tools/execute/proxy', key: KEY },
       ]);
+    });
+
+    it('a connection lost once Composio has the request fails the step, and the message is not sent again', async () => {
+      const conn = await managedSlack();
+      dropped = PROXY;
+      const run = await runSlackStep(conn);
+      expect(toComposio().filter((a) => PROXY.test(a.call))).toEqual([
+        { call: 'POST /api/v3/tools/execute/proxy', key: KEY },
+      ]);
+      expect(run.status).toBe(422);
+      expect(run.body.detail).toBe(
+        `slack.send_channel_message failed: the connection to ${composioOrigin} broke possibly after the request was sent: other side closed`,
+      );
+      expect(run.body.steps).toMatchObject([{ status: 'error', attempts: 1 }]);
+    });
+
+    it('a reply cut off while it is read fails the step, and the message is not sent again', async () => {
+      const conn = await managedSlack();
+      cut = PROXY;
+      const run = await runSlackStep(conn);
+      expect(toComposio().filter((a) => PROXY.test(a.call))).toEqual([
+        { call: 'POST /api/v3/tools/execute/proxy', key: KEY },
+      ]);
+      expect(run.status).toBe(422);
+      expect(run.body.detail).toBe(
+        `slack.send_channel_message failed: the connection to ${composioOrigin} broke while reading the response: other side closed`,
+      );
+      expect(run.body.steps).toMatchObject([{ status: 'error', attempts: 1 }]);
+    });
+
+    it('a read that loses its connection is sent again, since repeating it changes nothing', async () => {
+      const conn = await managedSlack();
+      dropped = PROXY;
+      const run = await runSlackStep(conn, 'slack.list_channels', {});
+      expect(run.status).toBe(422);
+      expect(run.body.detail).toBe(
+        `slack.list_channels failed: the connection to ${composioOrigin} broke possibly after the request was sent: other side closed`,
+      );
+      expect(toComposio().filter((a) => PROXY.test(a.call))).toHaveLength(1 + DEFAULT_RETRY_POLICY.retries);
+    });
+  });
+
+  describe('the managed transport under the SDK’s HTTP client', () => {
+    it('sends a write again when Composio refuses the connection, since nothing was sent', async () => {
+      const closed = `http://127.0.0.1:${await freePort()}`;
+      const dialled: string[] = [];
+      const counting: FetchLike = (input, init) => {
+        dialled.push(String(input));
+        return (fetch as FetchLike)(input, init);
+      };
+      const transport = new ComposioProxyTransport({
+        apiKey: KEY,
+        connectedAccountId: ACCOUNT_ID,
+        baseUrl: closed,
+        fetchImpl: counting,
+      });
+      const reason = `connect ECONNREFUSED ${new URL(closed).host}`;
+      await expect(
+        new HttpClient().post('https://slack.com/api/chat.postMessage', {
+          auth: createAuth({ type: 'none' }, transport),
+          body: { channel: 'C1', text: 'hi' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'transport_unreachable',
+        message: `could not reach ${closed}: ${reason}`,
+        detail: { origin: closed, reason },
+      });
+      expect(dialled).toHaveLength(1 + DEFAULT_RETRY_POLICY.retries);
     });
   });
 

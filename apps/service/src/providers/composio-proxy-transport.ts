@@ -1,3 +1,5 @@
+import { isNativeError } from 'node:util/types';
+
 import {
   ActionError,
   type FetchLike,
@@ -8,9 +10,9 @@ import {
   type NormalizedResponse,
   type RequestBody,
   type Transport,
+  transportFailure,
 } from '@sarati/actions-sdk';
 
-import { errorMessage } from '../common/error-message';
 import { composioFetch } from '../connections/composio-http';
 
 /** Headers that must not ride to the proxy — it issues its own request and attaches the real credential itself. */
@@ -46,6 +48,13 @@ interface ProxyEnvelope {
   headers?: Record<string, unknown>;
 }
 
+// fetch reports a broken connection as a TypeError whose cause says what broke.
+function brokenBy(err: unknown): Error {
+  const cause = (err as { cause?: unknown } | null)?.cause;
+  if (isNativeError(err) && err.name === 'TypeError' && isNativeError(cause)) return cause;
+  return isNativeError(err) ? err : new Error(String(err));
+}
+
 /**
  * The managed transport: rewrites an action's request into Composio's raw HTTP proxy, which attaches the real token
  * server-side, so we hold no provider credential. Proxy contract — `endpoint` is a full URL, forwarded headers ride
@@ -56,6 +65,7 @@ export class ComposioProxyTransport implements Transport {
   private readonly apiKey: string;
   private readonly connectedAccountId: string;
   private readonly baseUrl: string;
+  private readonly origin: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike | undefined;
 
@@ -77,6 +87,7 @@ export class ComposioProxyTransport implements Transport {
     this.apiKey = options.apiKey;
     this.connectedAccountId = options.connectedAccountId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.origin = new URL(this.baseUrl).origin;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl;
   }
@@ -107,18 +118,12 @@ export class ComposioProxyTransport implements Transport {
           signal: controller.signal,
         },
         this.fetchImpl,
-      );
+      ).catch((err: unknown) => {
+        throw this.broken(err, 'request');
+      });
       status = res.status;
-      text = await res.text();
-    } catch (err) {
-      if (err instanceof ActionError) throw err;
-      // A failure reaching Composio is a gateway problem — retryable, and carries the real message.
-      throw new ActionError({
-        code: 'transport_unreachable',
-        message: `Composio proxy unreachable: ${errorMessage(err)}`,
-        status: 0,
-        retryable: true,
-        cause: err,
+      text = await res.text().catch((err: unknown) => {
+        throw this.broken(err, 'response');
       });
     } finally {
       clearTimeout(timer);
@@ -157,6 +162,12 @@ export class ComposioProxyTransport implements Transport {
       headers,
       data: envelope.data,
     };
+  }
+
+  // Classified as the direct rail's hop is, so a write that may have reached Composio is never sent again.
+  private broken(err: unknown, stage: 'request' | 'response'): ActionError {
+    if (err instanceof ActionError) return err;
+    return transportFailure(this.origin, brokenBy(err), stage);
   }
 
   /** The proxy carries JSON only, so multipart/form/binary is rejected loudly here rather than silently corrupted. */
