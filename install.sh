@@ -52,6 +52,40 @@ warn_if_unsafe() {
 lower=abcdefghijklmnopqrstuvwxyz
 digits=0123456789
 
+# Succeeds when $1 is an IP address Docker takes: dotted IPv4, or IPv6, bracketed or not, that may end in IPv4.
+is_ip() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    function v4(s,   o, i) {
+      if (split(s, o, ".") != 4) return 0
+      for (i = 1; i <= 4; i++) if (o[i] !~ /^(0|[1-9][0-9]?[0-9]?)$/ || o[i] + 0 > 255) return 0
+      return 1
+    }
+    function groups(s, last,   g, k, i, c) {
+      if (s == "") return 0
+      k = split(s, g, ":")
+      for (i = 1; i <= k; i++) {
+        if (last && i == k && g[i] ~ /\./) { if (!v4(g[i])) return -9; c += 2 }
+        else if (g[i] ~ /^[0-9a-fA-F]+$/ && length(g[i]) <= 4) c++
+        else return -9
+      }
+      return c
+    }
+    { s = $0 }
+    END {
+      if (NR != 1) exit 1
+      if (s ~ /^\[.*\]$/) s = substr(s, 2, length(s) - 2)
+      else if (index(s, ":") == 0) exit (!v4(s))
+      if (index(s, "[") || index(s, "]") || index(s, ":") == 0) exit 1
+      e = index(s, "::")
+      if (e == 0) exit (groups(s, 1) != 8)
+      tail = substr(s, e + 2)
+      if (index(tail, "::")) exit 1
+      h = groups(substr(s, 1, e - 1), 0)
+      t = groups(tail, 1)
+      exit (!(h >= 0 && t >= 0 && h + t <= 7))
+    }'
+}
+
 # Prints KEY $1 from the .env in directory $2 (default .), read the way docker compose reads it.
 setting() {
   [ -r "${2:-.}/.env" ] || return 0
@@ -88,7 +122,7 @@ found_here() {
     "" | *" "* | "$own") ;;
     *)
       if [ "$own" = sarati ]; then
-        if has_data sarati && ! printf '%s\n' "$listing" | grep -q '^sarati '; then started="$started sarati"; fi
+        if has_data sarati && homeless sarati; then started="$started sarati"; fi
       else
         for name in $(unclaimed . | tr ' ' '\n' | sort -u); do
           if [ "$name" != "$started" ] && { [ "$started" = sarati ] || [ "$name" = "$own" ]; }; then started="$started $name"; fi
@@ -105,18 +139,32 @@ weighs() {
   [ "$(basename "$(pwd)")" != sarati ]
 }
 
-# Succeeds when the .env here, if any, records a one-container install.
-single_shaped() { [ ! -f .env ] || [ "$(setting SARATI_STACK)" = single ]; }
+# Prints the shape the .env in directory $1 records; with none, a database password means five containers.
+recorded_shape() {
+  kind=$(setting SARATI_STACK "$1")
+  [ -n "$kind" ] || [ -z "$(setting POSTGRES_PASSWORD "$1")" ] || kind=compose
+  echo "$kind"
+}
 
-# Prints the installs nothing runs that the .env in directory $1 may be, by the shape it records; none recorded means five containers.
+# Succeeds unless the .env here records a five-container install.
+may_be_single() { [ "$(recorded_shape .)" != compose ]; }
+
+# Prints the installs nothing runs that the .env in directory $1 may be, by the shape it records.
 unclaimed() {
-  if [ ! -f "$1/.env" ]; then
-    echo $single_unclaimed $compose_unclaimed
-  elif [ "$(setting SARATI_STACK "$1")" = single ]; then
-    echo $single_unclaimed
-  else
-    echo $compose_unclaimed
-  fi
+  case "$(recorded_shape "$1")" in
+    single) echo $single_unclaimed ;;
+    compose) echo $compose_unclaimed ;;
+    *) echo $single_unclaimed $compose_unclaimed ;;
+  esac
+}
+
+# Succeeds when nothing of install $1 runs from a directory that still exists.
+homeless() {
+  while read -r owner path; do
+    [ "$owner" != "$1" ] || gone "$path" || return 1
+  done <<EOF
+$listing
+EOF
 }
 
 # Looks once, in this shell so a failure stops the run, for one-container installs nothing runs: a lone data volume holding an install's secrets.
@@ -126,12 +174,12 @@ look() {
   lens=$(docker image ls -q ghcr.io/saratihq/sarati) || die "Docker could not list its images."
   lens=$(printf '%s\n' "$lens" | head -1)
   while read -r shape name vol; do
-    if [ "$shape" = single ] && [ "$name" != sarati ] && ! printf '%s\n' "$listing" | grep -q "^$name "; then
+    if [ "$shape" = single ] && [ "$name" != sarati ] && homeless "$name"; then
       status=1
       if [ "$vol" = - ] || [ -z "$lens" ]; then
         status=0
       else
-        docker run --rm --pull never --network none --entrypoint /bin/sh -v "$vol:/data:ro" "$lens" -c 'test -f /data/secrets.env' >/dev/null 2>&1 && status=0 || status=$?
+        docker run --rm --pull never --network none --entrypoint /bin/sh -v "$vol:/data:ro,nocopy" "$lens" -c 'test -f /data/secrets.env' >/dev/null 2>&1 && status=0 || status=$?
       fi
       [ "$status" = 0 ] || [ "$status" = 1 ] || die "Docker could not look inside the $vol volume, so this cannot tell whether it holds an install."
       [ "$status" = 1 ] || single_unclaimed="$single_unclaimed $name"
@@ -264,7 +312,7 @@ refuse() {
     lead="The install named $project runs from $1"
     ways=""
     fix=$(unlock "$1")
-    ! (cd "$1" 2>/dev/null && [ -z "$(setting COMPOSE_PROJECT_NAME)" ] && weighs && single_shaped) || look
+    ! (cd "$1" 2>/dev/null && [ -z "$(setting COMPOSE_PROJECT_NAME)" ] && weighs && may_be_single) || look
     ! passes "$1" || ways="
   To upgrade it there:  ${fix:+$fix && }$(again SARATI_DIR="$(shq "$1")")"
   fi
@@ -345,7 +393,7 @@ shapes=$(printf '%s\n' "$stored" | awk 'NF == 3 { v[$2] = v[$2] " " $3; n[$2] = 
 }')
 compose_unclaimed=""
 for name in $(printf '%s\n' "$shapes" | awk '$1 == "compose" { print $2 }'); do
-  if [ "$name" != sarati ] && ! printf '%s\n' "$listing" | grep -q "^$name "; then compose_unclaimed="$compose_unclaimed $name"; fi
+  if [ "$name" != sarati ] && homeless "$name"; then compose_unclaimed="$compose_unclaimed $name"; fi
 done
 single_unclaimed=""
 looked=""
@@ -366,16 +414,9 @@ port=${PORT##*:}
 bind=${PORT%"$port"}
 bind=${bind%:}
 badport() { die "SARATI_PORT$( [ -n "${SARATI_PORT:-}" ] || printf ' in %s/.env' "$(pwd)") takes a port, optionally after an IP address like 127.0.0.1: or [::1]:, not '$PORT'."; }
-case "$port" in "" | *[!$digits]*) badport ;; esac
-case "$bind" in
-  "") ;;
-  \[*:*\]) v6=${bind#\[}; case "${v6%\]}" in *[!0-9a-fA-F:.]*) badport ;; esac ;;
-  *\[* | *\]*) badport ;;
-  *:*) case "$bind" in *[!0-9a-fA-F:.]*) badport ;; esac ;;
-  *[!0-9.]* | .* | *. | *..* | *.*.*.*.*) badport ;;
-  *.*.*.*) printf '%s\n' "$bind" | awk -F. '{ for (i = 1; i <= 4; i++) if ($i > 255) exit 1 }' || badport ;;
-  *) badport ;;
-esac
+case "$port" in "" | 0* | *[!$digits]* | ??????*) badport ;; esac
+[ "$port" -le 65535 ] || badport
+[ -z "$bind" ] || is_ip "$bind" || badport
 case "$bind" in "" | 0.0.0.0 | :: | "[::]") host=localhost ;; \[*) host=$bind ;; *:*) host="[$bind]" ;; *) host=$bind ;; esac
 probe=${host#\[}
 probe=${probe%\]}
@@ -385,7 +426,7 @@ named=${COMPOSE_PROJECT_NAME:-}
 recorded=$(setting COMPOSE_PROJECT_NAME)
 from=${recorded:+$(pwd)/.env}
 if [ -z "$recorded" ]; then
-  ! weighs || ! single_shaped || look
+  ! weighs || ! may_be_single || look
   recorded=$(found_here)
 fi
 if [ -z "$from" ] && [ "${recorded#* }" != "$recorded" ]; then
@@ -410,15 +451,20 @@ move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
 fresh=$(again "${given}COMPOSE_PROJECT_NAME=$project" SARATI_DIR="$here")
 private="chmod 600 $here/.env && "
 if [ -z "$named$recorded" ] && [ -f .env ]; then
-  ! single_shaped || look
+  ! may_be_single || look
   maybe=$(candidates)
   (named=$project && [ -z "$(blocker)" ]) || maybe=$(printf '%s\n' "$maybe" | sed '/^sarati$/d')
   if [ -n "$maybe" ] && { [ "$maybe" != sarati ] || [ -n "$(elsewhere)" ]; }; then
     list=""
     for name in $maybe; do
       dir=$(printf '%s\n' "$listing" | sed -n "s/^$name //p" | head -1)
-      where="not running"
-      [ -z "$dir" ] || where="runs from $dir"
+      if [ -z "$dir" ]; then
+        where="not running"
+      elif gone "$dir"; then
+        where="started from $dir, which no longer exists"
+      else
+        where="runs from $dir"
+      fi
       list="${list:+$list, }$name ($where)"
     done
     fix=$(unlock "$(pwd)")
@@ -438,20 +484,14 @@ done)
 # A fresh machine gets the one-container product. An install that already exists keeps the shape it
 # was built with — the two store their data differently, so switching underneath it would look
 # exactly like data loss. Anything installed before this existed is compose.
-stack=${SARATI_STACK:-$(setting SARATI_STACK)}
-if [ -z "$stack" ]; then
-  if [ -f .env ] || has_database "$project"; then stack=compose; else stack=single; fi
-fi
-case "$stack" in
-  single | compose) ;;
-  *) die "SARATI_STACK must be 'single' or 'compose', not '$stack'." ;;
+kept_stack=$(recorded_shape .)
+case "$kept_stack" in
+  "" | single | compose) ;;
+  *) die "SARATI_STACK in $(pwd)/.env must be 'single' or 'compose', not '$kept_stack'." ;;
 esac
-
-kept_stack=$(setting SARATI_STACK)
 why="$(pwd)/.env records a $(shape "$kept_stack") install"
-if [ -z "$kept_stack" ] && [ -f .env ]; then
-  kept_stack=compose
-  why="$(pwd)/.env records no shape, which means five containers"
+if [ -n "$kept_stack" ] && [ -z "$(setting SARATI_STACK)" ]; then
+  why="$(pwd)/.env holds a database password, which means five containers"
 elif [ -z "$kept_stack" ] && has_database "$project"; then
   kept_stack=compose
   why="The install named $project keeps a five-container database"
@@ -459,6 +499,7 @@ elif [ -z "$kept_stack" ] && printf '%s\n' "$volumes" | grep -qx "$project data"
   kept_stack=single
   why="The install named $project keeps one-container data"
 fi
+stack=${SARATI_STACK:-${kept_stack:-single}}
 if [ -n "${SARATI_STACK:-}" ] && [ -n "$kept_stack" ] && [ "$SARATI_STACK" != "$kept_stack" ]; then
   name=$(free_name "$project")
   die "$why, and SARATI_STACK=$SARATI_STACK would switch it underneath its data — the two store their data differently.

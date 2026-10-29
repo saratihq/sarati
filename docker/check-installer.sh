@@ -114,6 +114,25 @@ answers() {
   done
 }
 
+echo '--- SARATI_PORT takes only a port in range, after only an IP address'
+for value in 0 08080 65536 ::8080 abc:def:8080 '[:]:8080' 127.0.0.01:8080 '[1.2.3.4]:8080'; do
+  refused ports - SARATI_PORT="$value"
+  says "takes a port, optionally after an IP address like 127.0.0.1: or [::1]:, not '$value'." "SARATI_PORT=$value was not refused"
+done
+for value in 1 65535 127.0.0.1:8080 '[::1]:8080' :::8080 ::ffff:127.0.0.1:8080 '[1:2:3:4:5:6:7::]:8080'; do
+  refused ports - SARATI_PORT="$value" COMPOSE_PROJECT_NAME=Invalid
+  says "not 'Invalid'." "SARATI_PORT=$value was refused"
+done
+
+echo '--- a hand-made .env, before any install, takes the shape asked for'
+mkdir "$work/hand"
+printf 'SARATI_URL=http://localhost:8188\nSARATI_PORT=8188\n' > "$work/hand/.env"
+run_installer hand - SARATI_STACK=single
+[ "$(recorded hand)" = sarati ] || fail 'the hand-made .env did not record its name'
+container hand >/dev/null
+answers 8188
+on hand down -v >/dev/null
+
 echo "--- pinned to $old"
 run_installer pinned 8181 COMPOSE_PROJECT_NAME=check-pinned SARATI_VERSION=$old
 says "this install runs Sarati $old" "pinned to $old, the installer did not warn"
@@ -287,7 +306,11 @@ before_installer plain 8191
 [ -z "$(recorded plain)" ] || fail 'the installer from before saved a name'
 on plain down
 docker volume create --label com.docker.compose.project=unrelated --label com.docker.compose.volume=data unrelated_data >/dev/null
+lens=$(docker image ls -q ghcr.io/saratihq/sarati | head -1)
+docker run --rm --entrypoint chown -v unrelated_data:/owned "$lens" 1000:1000 /owned
 run_installer plain -
+[ "$(docker run --rm --entrypoint stat -v unrelated_data:/owned:ro,nocopy "$lens" -c %u:%g /owned)" = 1000:1000 ] ||
+  fail 'looking inside an unrelated volume changed its owner'
 docker volume rm unrelated_data >/dev/null
 says 'Saved COMPOSE_PROJECT_NAME=sarati into .env' 'upgrading an install from before did not save its name'
 [ "$(recorded plain)" = sarati ] || fail 'the upgraded install did not record its name'
@@ -321,5 +344,19 @@ for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati); do
   [ "$(label "$id" project.working_dir)" = "$work/fivemover" ] || fail "the move left $(label "$id" service) started from another directory"
 done
 answers 8191
+
+echo '--- a second install by the installer from before, its directory moved while it runs'
+before_installer apart 8198 COMPOSE_PROJECT_NAME=sarati-6
+mkdir "$work/apps"
+mv "$work/apart" "$work/apps/apart"
+refused apps/apart -
+says "$work/apps/apart/.env names no install, and it could belong to sarati-6 (started from $work/apart, which no longer exists)." 'a moved install was not asked about'
+never 'already in use' 'the moved install was refused over the port it holds itself'
+run_installer apps/apart - COMPOSE_PROJECT_NAME=sarati-6
+[ "$(recorded apps/apart)" = sarati-6 ] || fail 'the moved install did not record its name'
+for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati-6); do
+  [ "$(label "$id" project.working_dir)" = "$work/apps/apart" ] || fail 'the moved install is still labelled with the directory it left'
+done
+answers 8198
 
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'

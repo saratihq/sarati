@@ -25,6 +25,14 @@ An install's port is its `.env`'s. A different `SARATI_PORT` on the command line
 new port while sign-in and webhook URLs still name the old one, so change it in the `.env`, with
 `SARATI_URL` to match, and re-run without it.
 
+```
+error: SARATI_PORT takes a port, optionally after an IP address like 127.0.0.1: or [::1]:, not 'localhost:8080'.
+```
+
+A port outside 1 to 65535, or written with a leading zero, and an address that is not an IP address
+are refused before anything is downloaded. When the value comes from a `.env`, the message names
+that `.env`.
+
 ## The installer refuses because the database outlived its `.env`
 
 ```
@@ -133,6 +141,18 @@ error: Port 9090 is held by the install named sarati, which was also started fro
 
 Either way, run the command above that names `sarati`, which moves the first install back, then the
 one that names `sarati-2`.
+
+A second install whose directory was moved since is asked about by the directory it left:
+
+```
+error: /home/you/apps/sarati-2/.env names no install, and it could belong to sarati-2 (started from /home/you/sarati-2, which no longer exists).
+```
+
+Name it there, and its containers move with it:
+
+```bash
+COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/apps/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
 
 ## A webhook returns 404
 
