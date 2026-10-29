@@ -74,7 +74,7 @@ run_installer offline 8183
 unblock
 says "this install runs Sarati $old" "left on $old by a failed download, the installer did not warn"
 says 'Downloading the images failed this time: ' 'the warning does not say the download failed'
-printf '%s\n' "$out" | grep -F 'Downloading the images failed' | grep -qF ghcr.io || fail 'the warning does not carry the error the download gave'
+printf '%s\n' "$out" | grep -F 'Downloading the images failed this time: ' | grep -qF '0.0.0.0' || fail 'the warning does not carry the error the download gave'
 [ "$(running offline sarati)" = "$old" ] || fail "the offline install is not running $old"
 on offline down -v >/dev/null
 

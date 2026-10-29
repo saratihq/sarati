@@ -64,7 +64,7 @@ restart, so each is judged again as it resumes. On a five-container install it i
 ### Going back
 
 Set `SARATI_VERSION` to the earlier version and upgrade again. Running it by hand, name the version
-on the image in both commands, `sarati/sarati:0.2.25` for example. What carries on there depends on
+on the image in both commands, `sarati/sarati:0.2.26` for example. What carries on there depends on
 the version you go back to.
 
 **To v0.2.26 or v0.2.25**, runs carry on as they do here: both resume a run this version started, on
