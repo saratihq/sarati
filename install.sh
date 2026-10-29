@@ -175,7 +175,7 @@ warn_left() {
 
 # Prints the chmod a run in directory $1 needs first, to save the name in its read-only .env.
 unlock() {
-  [ ! -f "$1/.env" ] || [ -n "$(setting COMPOSE_PROJECT_NAME "$1")" ] || [ -w "$1/.env" ] || printf 'chmod u+w %s && ' "$(shq "$1/.env")"
+  [ ! -f "$1/.env" ] || [ -n "$(setting COMPOSE_PROJECT_NAME "$1")" ] || [ -w "$1/.env" ] || printf 'chmod u+w %s' "$(shq "$1/.env")"
 }
 
 # Succeeds when a plain run in directory $1, after unlock, would upgrade $project there.
@@ -200,20 +200,21 @@ refuse() {
   else
     lead="The install named $project runs from $1"
     ways=""
+    fix=$(unlock "$1")
     ! passes "$1" || ways="
-  To upgrade it there:  $(unlock "$1")$(again SARATI_DIR="$(shq "$1")")"
+  To upgrade it there:  ${fix:+$fix && }$(again SARATI_DIR="$(shq "$1")")"
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
     if [ -z "$1" ]; then
       top=""
       ways="$ways
-  To move it here, move the .env and docker-compose.yaml from its directory into $here, then:  $move"
+  To move it here, move the .env and docker-compose.yaml from its directory into $here, then:  $private$move"
       if has_database "$project"; then
         ways="$ways
-  If its directory is gone, restore its .env into $here, then:  $move"
+  If its directory is gone, restore its .env into $here, then:  $private$move"
       else
         ways="$ways
-  If its directory is gone:  $move"
+  If its directory is gone:  $fresh"
       fi
     elif [ ! -f .env ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
       top=""
@@ -222,10 +223,14 @@ refuse() {
     elif [ ! -f .env ] && has_database "$project"; then
       top=""
       ways="$ways
-  To move it here, restore its .env into $here, then:  $move"
-    else
+  To move it here, restore its .env into $here, then:  $private$move"
+    elif [ ! -f .env ]; then
       ways="$ways
-  To move it here:  $move"
+  To move it here:  $fresh"
+    else
+      fix=$(unlock "$(pwd)")
+      ways="$ways
+  To move it here:  ${fix:+$fix && }$move"
     fi
   fi
   if [ ! -f .env ] && [ -z "$recorded" ]; then
@@ -239,15 +244,16 @@ refuse() {
   To install a separate one:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$into" SARATI_PORT="$(free_port)")"
 }
 
-# Prints the installs a .env naming none may be: sarati, and sarati-N or this directory's name whose data nothing runs.
+# Prints the installs a .env naming none may be: sarati, and each other install whose data nothing runs.
 candidates() {
   if printf '%s\n' "$listing" | grep -q '^sarati ' || has_data sarati; then echo sarati; fi
   {
+    printf '%s\n' "$volumes" | awk 'NF == 2 { v[$1] = v[$1] " " $2 } END { for (p in v) if (v[p] == " data" || (v[p] ~ / db-data( |$)/ && v[p] ~ / service-data( |$)/)) print p }'
     printf '%s\n' "$volumes" | sed -n 's/^\(sarati-[0-9][0-9]*\) data$/\1/p; s/^\(sarati-[0-9][0-9]*\) db-data$/\1/p'
     own=$(basename "$(pwd)")
-    [ "$own" = sarati ] || ! valid "$own" || ! has_data "$own" || echo "$own"
+    ! valid "$own" || ! has_data "$own" || echo "$own"
   } | sort -u | while read -r name; do
-    printf '%s\n' "$listing" | grep -q "^$name " || printf '%s\n' "$name"
+    [ "$name" = sarati ] || printf '%s\n' "$listing" | grep -q "^$name " || printf '%s\n' "$name"
   done
 }
 
@@ -258,6 +264,9 @@ esac
 keep=""
 [ -z "${SARATI_STACK:-}" ] || keep="SARATI_STACK=$SARATI_STACK "
 [ -z "${SARATI_VERSION:-}" ] || keep="${keep}SARATI_VERSION=$(shq "$SARATI_VERSION") "
+given=""
+[ -z "${SARATI_VERSION:-}" ] || given="SARATI_VERSION=$(shq "$SARATI_VERSION") "
+[ -z "${SARATI_PORT:-}" ] || given="${given}SARATI_PORT=$(shq "$SARATI_PORT") "
 
 command -v docker >/dev/null 2>&1 || die "Docker is required — install it from https://docs.docker.com/get-docker/ and re-run this."
 docker compose version >/dev/null 2>&1 || die "This needs Docker Compose v2 (bundled with modern Docker Desktop and docker-ce)."
@@ -285,7 +294,7 @@ port=${PORT##*:}
 bind=${PORT%"$port"}
 bind=${bind%:}
 case "$port" in "" | *[!$digits]*) die "SARATI_PORT takes a port, optionally after an address like 127.0.0.1:, not '$PORT'." ;; esac
-case "$bind" in "" | 0.0.0.0 | "[::]") host=localhost ;; *) host=$bind ;; esac
+case "$bind" in "" | 0.0.0.0 | :: | "[::]") host=localhost ;; \[*) host=$bind ;; *:*) host="[$bind]" ;; *) host=$bind ;; esac
 probe=${host#\[}
 probe=${probe%\]}
 
@@ -313,6 +322,8 @@ export COMPOSE_PROJECT_NAME="$project"
 
 here=$(shq "$(pwd)")
 move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
+fresh=$(again "${given}COMPOSE_PROJECT_NAME=$project" SARATI_DIR="$here")
+private="chmod 600 $here/.env && "
 if [ -z "$named$recorded" ] && [ -f .env ]; then
   maybe=$(candidates)
   (named=$project && [ -z "$(blocker)" ]) || maybe=$(printf '%s\n' "$maybe" | sed '/^sarati$/d')
@@ -324,8 +335,10 @@ if [ -z "$named$recorded" ] && [ -f .env ]; then
       [ -z "$dir" ] || where="runs from $dir"
       list="${list:+$list, }$name ($where)"
     done
+    fix=$(unlock "$(pwd)")
     die "$(pwd)/.env names no install, and it could belong to $list.
-  Re-run this with COMPOSE_PROJECT_NAME set to the one that belongs here, or to a new name for a separate install."
+  Re-run this with COMPOSE_PROJECT_NAME set to the one that belongs here, or to a new name for a separate install.${fix:+
+  Its .env is read-only, so make it writable first:  $fix}"
   fi
 fi
 held=$(blocker)
@@ -377,19 +390,22 @@ if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
   erase="
   To erase that database and start over:  docker volume rm ${project}_db-data"
   if printf '%s\n' "$listing" | grep -q "^$project "; then
-    erase=""
+    where=$(elsewhere | head -1)
     case " $(started_here) " in
       *" $project "*) erase="
   To erase that database and start over:  docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=$project) && docker volume rm ${project}_db-data" ;;
+      *) erase="${where:+
+  The install named $project was started from $where and still uses that database.}" ;;
     esac
   fi
   die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
-  Restore that .env into $here if you have it, then re-run this: a new FERNET_KEY cannot decrypt credentials the old one stored.
+  A new FERNET_KEY cannot decrypt credentials the old one stored. To keep them, restore that .env into $here, then:  $private$move
   To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")$erase"
 fi
 
-[ -z "$(unlock "$(pwd)")" ] ||
-  die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  chmod u+w $(shq "$(pwd)/.env")"
+fix=$(unlock "$(pwd)")
+[ -z "$fix" ] ||
+  die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  $fix"
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"

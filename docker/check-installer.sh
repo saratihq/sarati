@@ -70,6 +70,21 @@ follow() {
   printf '%s\n' "$out"
   [ "$status" = 0 ] || fail "the printed command failed: $cmd"
 }
+# listen <port> holds a loopback port with a process no container owns, until unlisten.
+listen() {
+  python3 -m http.server "$1" --bind 127.0.0.1 --directory "$(mktemp -d "$work/served.XXXXXX")" >/dev/null 2>&1 &
+  listener=$!
+  i=0
+  until curl -fsS "http://localhost:$1/" >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "the listener on $1 never came up"
+    sleep 1
+  done
+}
+unlisten() {
+  kill "$listener"
+  listener=''
+}
 before_installer() {
   script=$work/before.sh
   run_installer "$@"
@@ -156,17 +171,9 @@ moved=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ "$(label "$moved" project.working_dir)" = "$work/moved" ] || fail 'the installer from before did not move the first install'
 
 echo '--- moving it back onto a port something else holds'
-python3 -m http.server 8191 --bind 127.0.0.1 --directory "$(mktemp -d "$work/served.XXXXXX")" >/dev/null 2>&1 &
-listener=$!
-i=0
-until curl -fsS http://localhost:8191/ >/dev/null 2>&1; do
-  i=$((i + 1))
-  [ "$i" -lt 30 ] || fail 'the listener on 8191 never came up'
-  sleep 1
-done
+listen 8191
 refused first - COMPOSE_PROJECT_NAME=sarati
-kill "$listener"
-listener=''
+unlisten
 says "Port 8191 is already in use. Set SARATI_PORT in $work/first/.env to a free port" 'a move onto a held port was not refused'
 [ "$(docker ps -q --filter label=com.docker.compose.project=sarati)" = "$moved" ] || fail 'the refused move took down the running install'
 
@@ -187,7 +194,7 @@ run_installer moved - COMPOSE_PROJECT_NAME=sarati-4
 [ "$(container first)" = "$first" ] || fail 'naming the second directory touched the first install'
 
 echo '--- a second install, named'
-run_installer second 8192 COMPOSE_PROJECT_NAME=sarati-2
+run_installer second 9090 COMPOSE_PROJECT_NAME=sarati-2
 [ "$(recorded second)" = sarati-2 ] || fail 'the second install did not record its name'
 second=$(container second)
 [ "$second" != "$first" ] || fail 'docker compose in the second install acted on the first'
@@ -198,7 +205,7 @@ answers 8191
 
 echo '--- the second install upgraded in place, given neither name nor port'
 run_installer second -
-says 'Sarati is running at http://localhost:8192' 'the upgrade did not check the port the second install runs on'
+says 'Sarati is running at http://localhost:9090' 'the upgrade did not check the port the second install runs on'
 [ "$(label "$(container second)" project)" = sarati-2 ] || fail 're-running the second install changed its name'
 [ "$(container first)" = "$first" ] || fail 're-running the second install touched the first'
 
@@ -207,27 +214,32 @@ refused second - COMPOSE_PROJECT_NAME=other
 says "$work/second/.env names this install sarati-2, not other." 'a different name was not refused'
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=other)" ] || fail 'the refused name started containers'
 
-echo '--- a third directory, given no name'
+echo '--- a third directory, given no name, while the second install has 9090 and something else 9091'
+listen 9091
 refused stray 8193
+unlisten
 says "The install named sarati runs from $work/first — installing it here would take it over." 'a stray install was not refused'
 says "To upgrade it there:  SARATI_DIR=$work/first sh -c" 'the refusal does not say how to upgrade the first install'
-says "To install a separate one:  COMPOSE_PROJECT_NAME=sarati-3 SARATI_DIR=$work/stray SARATI_PORT=9090 sh -c" 'the refusal does not suggest a free name and port'
+says "To install a separate one:  COMPOSE_PROJECT_NAME=sarati-3 SARATI_DIR=$work/stray SARATI_PORT=9092 sh -c" 'the refusal does not suggest a free name and port'
 never 'To move it here' 'the refusal offered to move an install whose directory names it'
 [ ! -e "$work/stray" ] || fail 'the refused install left its directory behind'
 [ "$(container first)" = "$first" ] || fail 'the refused install touched the first'
 
-echo '--- ...while the first install is stopped'
+echo '--- ...while the first and second installs are stopped'
 on first stop
+on second stop
 refused stray 8193
 says "The install named sarati runs from $work/first — installing it here would take it over." 'a stopped install was not protected'
+says "SARATI_DIR=$work/stray SARATI_PORT=9091 sh -c" 'the suggested port is one a stopped install binds'
 on first start
+on second start
 [ "$(container first)" = "$first" ] || fail 'the refused install touched the stopped first install'
 
 echo '--- ...while the first install is removed, its data kept'
 on first down
 refused stray 8193
 says 'The install named sarati is not running, but its data is kept — installing it here would take it over.' 'a removed install was not protected'
-says "If its directory is gone:  COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to start the removed install from here'
+says "If its directory is gone:  SARATI_PORT=8193 COMPOSE_PROJECT_NAME=sarati SARATI_DIR=$work/stray sh -c" 'the refusal does not say how to start the removed install from here, on the port asked for'
 [ -d "$work/stray" ] || fail 'the refusal removed the directory it said to move the install into'
 mv "$work/first/.env" "$work/first/docker-compose.yaml" "$work/stray/"
 follow "To move it here, move the .env and docker-compose.yaml from its directory into $work/stray, then:"

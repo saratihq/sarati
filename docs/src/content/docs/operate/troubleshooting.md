@@ -28,8 +28,9 @@ old database give Postgres a password it never had, and a new `FERNET_KEY` canno
 old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
-Restore that install's `.env` into the directory you are installing to if you have it, then re-run
-the installer. To leave that database alone and run a separate install beside it:
+To keep what it stores, restore that install's `.env` into the directory you are installing to and
+run the command the message gives. To leave that database alone and run a separate install beside
+it:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
@@ -42,8 +43,13 @@ docker volume rm sarati_db-data
 ```
 
 When that install's containers were started from the directory you are installing to, the message
-gives the command that removes them first. When they run from another directory, it gives none:
-take that install down from its own directory first.
+gives the command that removes them first. When they were started from another directory, it names
+that directory and gives no erase command, because that install still uses the database. To erase it
+anyway, remove its containers first:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=com.docker.compose.project=sarati)
+```
 
 ## The installer refuses to take over another install
 
@@ -66,8 +72,9 @@ error: The install named sarati is not running, but its data is kept — install
 
 The same guard, for an install removed with `docker compose down`: its containers are gone, its data
 is not. Start it again from its own directory, or move its `.env` and `docker-compose.yaml` here and
-run the command the message gives. If the directory is gone, that same command starts it from here;
-a five-container install needs its `.env` put back first, because it holds the keys to its database.
+run the command the message gives. If the directory is gone, the message gives the command that
+starts it from here, on the port you asked for; a five-container install needs its `.env` put back
+first, because it holds the keys to its database.
 
 ```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.
