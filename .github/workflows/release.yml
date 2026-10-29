@@ -145,6 +145,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # One floor for every notice: the version install.sh warns below.
+      - id: safe
+        run: |
+          v=$(sed -n 's/^SAFE_VERSION=//p' install.sh)
+          test -n "$v" || { echo "::error::install.sh no longer sets SAFE_VERSION"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Make the README safe to render off GitHub
         run: |
           python3 docker/hub/hub-readme.py README.md > /tmp/hub-readme.md
@@ -156,6 +163,8 @@ jobs:
             '```' \
             '' \
             'This image is one service of that stack, for anyone running the [compose file](https://github.com/${{ github.repository }}/blob/main/docker-compose.yaml) instead.' \
+            '' \
+            '**Run ${{ steps.safe.outputs.version }} or later.** Every earlier version has a [published security advisory](https://github.com/${{ github.repository }}/security/advisories).' \
             > /tmp/component-readme.md
 
       - name: The product image gets the README
@@ -165,7 +174,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ vars.DOCKERHUB_USERNAME }}/sarati
           readme-filepath: /tmp/hub-readme.md
-          short-description: "Build automations on a canvas. Branch, review and merge them like code."
+          short-description: "Versions before ${{ steps.safe.outputs.version }} are insecure: upgrade. Automations you branch, review and merge like code."
 
       - name: Keep the component overviews for the next job
         uses: actions/upload-artifact@v4

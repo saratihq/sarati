@@ -19,7 +19,10 @@ file changed:
 cd sarati && docker compose pull && docker compose up -d
 ```
 
-Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`.
+Pin a version instead of tracking `latest` by setting `SARATI_VERSION` in `.env`. Pin 0.2.26 or
+later: every earlier version has a published
+[security advisory](https://github.com/saratihq/sarati/security/advisories), and the installer warns
+when it starts one.
 
 Sarati runs as one instance. An upgrade stops it and starts the new version on the same data, and runs
 in flight carry on where they were: a run waiting for an approval or on a **Wait** step keeps waiting.
@@ -115,7 +118,9 @@ joining. Coming back, the upgrade deletes each such invite (`044 deleted the pen
 images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
 answers without signing in, and can cancel, resume or fork any run. Neither stack file nor the
 one-container image publishes that port, but any container on the same Docker network can reach it,
-and so can anything that reaches the machine when the service runs outside Docker.
+and so can anything that reaches the machine when the service runs outside Docker. That is the flaw
+[GHSA-33cr-cppq-j5hp](https://github.com/saratihq/sarati/security/advisories/GHSA-33cr-cppq-j5hp)
+describes, and the installer warns when it starts such a version.
 
 Running it by hand, without the installer:
 
@@ -314,7 +319,8 @@ that makes runs durable. That API answers without signing in: it lists runs with
 with and every step's output, and cancels, resumes or forks any run. Neither stack file nor the
 one-container image publishes the port, but any container on the same Docker network could reach it,
 and so could anything that reaches the machine when the service runs outside Docker. Nothing in
-Sarati used it, so it needs nothing from you.
+Sarati used it, so it needs nothing from you. The advisory is
+[GHSA-33cr-cppq-j5hp](https://github.com/saratihq/sarati/security/advisories/GHSA-33cr-cppq-j5hp).
 
 What a caller of the API sees change:
 

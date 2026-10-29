@@ -9,9 +9,40 @@ REPO="${SARATI_REPO:-saratihq/sarati}"
 REF="${SARATI_REF:-main}"
 DIR="${SARATI_DIR:-sarati}"
 PORT="${SARATI_PORT:-8080}"
+# Raised to each published advisory's patched version.
+SAFE_VERSION=0.2.26
+ADVISORIES=https://github.com/saratihq/sarati/security/advisories
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
+warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Succeeds only when $1 is a release (MAJOR.MINOR.PATCH) before $2.
+before() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    if (a !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) exit 1
+    split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) if (x[i] + 0 != y[i] + 0) exit !(x[i] + 0 < y[i] + 0)
+    exit 1
+  }'
+}
+
+# The version the running container was built as, read from its image label.
+running_version() {
+  id=$(docker compose ps -q "$1" 2>/dev/null | head -1)
+  [ -z "$id" ] || docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$id" 2>/dev/null || true
+}
+
+warn_if_unsafe() {
+  before "$running" "$SAFE_VERSION" || return 0
+  printf '\n' >&2
+  warn "this install runs Sarati $running. Every version before $SAFE_VERSION has a published security advisory:"
+  echo "  $ADVISORIES" >&2
+  if [ -z "$pulled" ]; then
+    echo "  The images could not be downloaded this time: check this machine can reach ghcr.io." >&2
+  fi
+  echo "  To upgrade, set SARATI_VERSION in $(pwd)/.env to latest, or to $SAFE_VERSION or later, and re-run this." >&2
+}
 
 command -v docker >/dev/null 2>&1 || die "Docker is required — install it from https://docs.docker.com/get-docker/ and re-run this."
 docker compose version >/dev/null 2>&1 || die "This needs Docker Compose v2 (bundled with modern Docker Desktop and docker-ce)."
@@ -102,8 +133,14 @@ EOF
 fi
 
 say "Starting Sarati…"
-docker compose pull --quiet 2>/dev/null || true
+pulled=yes
+docker compose pull --quiet 2>/dev/null || pulled=""
 docker compose up -d
+if [ "$stack" = single ]; then
+  running=$(running_version sarati)
+else
+  running=$(running_version service)
+fi
 
 printf '\nWaiting for it to come up'
 i=0
@@ -118,6 +155,7 @@ while [ "$i" -lt 90 ]; do
     fi
     echo "  logs:  cd $DIR && docker compose logs -f"
     echo "  stop:  cd $DIR && docker compose down"
+    warn_if_unsafe
     exit 0
   fi
   printf '.'
@@ -126,4 +164,5 @@ while [ "$i" -lt 90 ]; do
 done
 
 printf '\n'
+warn_if_unsafe
 die "It did not answer within 3 minutes. Check: cd $DIR && docker compose logs"
