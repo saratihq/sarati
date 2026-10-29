@@ -99,7 +99,8 @@ into `.env`. **Back that file up** — losing `FERNET_KEY` makes stored credenti
 
 An install that already exists keeps the shape it was built with, so re-running the installer over a
 five-container install stays on five. The two store their data differently; nothing switches
-underneath you.
+underneath you, and asking for the other shape over it is refused with the command that installs
+that shape separately.
 
 ## What is running
 

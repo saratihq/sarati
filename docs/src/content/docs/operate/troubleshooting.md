@@ -72,7 +72,8 @@ under a name and port nothing else uses, and the one that upgrades it from its o
 that would work. When that directory names no install, it also gives the command that moves it
 here, copying its `.env` across first when it has one, so it keeps its port and settings. After a
 move, it says to remove the old directory's `docker-compose.yaml`, because `docker compose` there
-would still act on the install.
+would still act on the install, or, when another install was also started there, gives the command
+that names that one instead.
 
 ```
 error: The install named sarati is not running, but its data is kept — installing it here would take it over.
@@ -105,15 +106,17 @@ SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
 error: /home/you/sarati/.env names no install, and it could belong to sarati (runs from /home/you/sarati-2).
 ```
 
-Name it, which moves the first install back, then give the second directory the name it was meant
-to have:
+Name it, which moves the first install back:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
-```bash
-COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
+It then gives the command that names the second directory's install, which is the next step:
+
+```
+warning: docker compose in /home/you/sarati-2 would act on this install, though sarati-2 also started there.
+  To name it there:  COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
 Starting from the second directory instead can give:

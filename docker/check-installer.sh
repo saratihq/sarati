@@ -268,15 +268,18 @@ hijacked=$(docker ps -aq --filter label=com.docker.compose.project=sarati)
 [ -z "$(docker ps -q --filter label=com.docker.compose.project=sarati)" ] || fail 'the taken first install is still running'
 refused twin -
 says "$work/twin could hold more than one install: sarati, sarati-5." 'a directory holding two installs was not refused'
-run_installer twin - COMPOSE_PROJECT_NAME=sarati-5
-[ "$(recorded twin)" = sarati-5 ] || fail 'naming the second install did not record it'
-twin=$(container twin)
-[ "$(label "$twin" project)" = sarati-5 ] || fail 'docker compose in the second directory does not act on its own install'
 run_installer first -
 first=$(container first)
 [ "$(label "$first" project.working_dir)" = "$work/first" ] || fail 'the first install, which names itself, was not moved back to its own directory'
 answers 8191
-[ "$(container twin)" = "$twin" ] || fail 'moving the first install back touched the second'
+says "docker compose in $work/twin would act on this install, though sarati-5 also started there." 'moving the first install back did not name the install left in the second directory'
+never "rm $work/twin/docker-compose.yaml" 'moving the first install back said to remove the compose file of the second install'
+follow 'To name it there:'
+[ "$(recorded twin)" = sarati-5 ] || fail 'the printed command did not record the name of the second install'
+twin=$(container twin)
+[ "$(label "$twin" project)" = sarati-5 ] || fail 'docker compose in the second directory does not act on its own install'
+answers 8197
+[ "$(container first)" = "$first" ] || fail 'naming the second install touched the first'
 
 echo '--- an install from before, removed, upgraded by this one with neither name nor port, beside an unrelated lone data volume'
 on first down -v
