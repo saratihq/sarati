@@ -462,7 +462,8 @@ if ! pull_output=$(docker compose pull --quiet 2>&1); then
   pulled=""
   pull_error=$(printf '%s\n' "$pull_output" | sed '/^[[:space:]]*$/d' | tail -1)
 fi
-docker compose up -d
+# Compose recreates only what changed, so a move recreates every container for each one's labels to name this directory.
+if [ -n "$(elsewhere)" ]; then docker compose up -d --force-recreate; else docker compose up -d; fi
 if [ "$stack" = single ]; then
   running=$(running_version sarati)
 else

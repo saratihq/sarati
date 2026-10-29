@@ -29,6 +29,8 @@ below.
 
 | | |
 |---|---|
+| `COMPOSE_PROJECT_NAME` | This install's name. `docker compose` in this directory acts on it, and its volumes are named after it, so changing it points at a different, empty install. |
+| `SARATI_STACK` | `single` or `compose`: the shape the install was built with, which the installer keeps. |
 | `SARATI_URL` | The one origin everything is reached through. |
 | `SARATI_PORT` | Host port for the proxy. Default `8080`. |
 | `SARATI_VERSION` | Image tag. Default `latest`. |

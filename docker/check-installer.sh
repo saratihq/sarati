@@ -303,4 +303,15 @@ rm "$work/source/docker-compose.yaml"
 ! on source ps -q >/dev/null 2>&1 || fail 'docker compose in the old directory still acts on the moved install'
 [ -n "$(container mover)" ] || fail 'the moved install stopped'
 
+echo '--- a five-container install from before, moved by the command a refusal printed'
+on mover down -v
+before_installer fivesource 8191 SARATI_STACK=compose
+refused fivemover -
+follow 'To move it here with its settings:'
+[ "$(docker ps -q --filter label=com.docker.compose.project=sarati | wc -l)" -eq 5 ] || fail 'the moved install is not five running containers'
+for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati); do
+  [ "$(label "$id" project.working_dir)" = "$work/fivemover" ] || fail "the move left $(label "$id" service) started from another directory"
+done
+answers 8191
+
 echo 'the installer warns on a version with a published advisory, and keeps each install to its own directory'
