@@ -240,8 +240,9 @@ export default function ApprovalsInboxPage() {
           )}
         </div>
         <p className="text-[12px] m-0 mb-5" style={{ color: "var(--orchestr-ink-muted)" }}>
-          Every wait-for-event step paused anywhere in this organization. Approving or rejecting resumes what comes
-          after it with your decision — you can act on a teammate&apos;s run, not just your own.
+          Every wait-for-event step paused in this workspace, and your own in your other workspaces. Approving or
+          rejecting resumes what comes after it with your decision — you can act on a teammate&apos;s run, not just
+          your own.
         </p>
 
         {/* Mine/all lens — only shown once someone else's run is on the list. */}

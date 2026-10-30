@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Building2, Check, Plus } from "lucide-react";
-import { useOrgs } from "@/store/useOrgs";
+import { orgLabel, useOrgs } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 
 // Organization affordances for the header user menu. CreateOrgModal lives
@@ -57,7 +57,7 @@ export function OrgMenuSection({ onCreate }: { onCreate: () => void }) {
             >
               {o.is_personal ? "P" : (o.name.charAt(0) || "O").toUpperCase()}
             </span>
-            <span className="flex-1 truncate">{o.is_personal ? "Personal" : o.name}</span>
+            <span className="flex-1 truncate">{orgLabel(o)}</span>
             {active && <Check size={12} style={{ color: "var(--orchestr-success)" }} />}
           </button>
         );

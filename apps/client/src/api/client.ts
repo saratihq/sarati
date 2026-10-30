@@ -21,10 +21,11 @@ export function getActiveOrgId(): string | null {
 }
 
 export function setActiveOrgId(id: string | null): void {
+  if (typeof window !== "undefined") {
+    if (id) window.localStorage.setItem(ACTIVE_ORG_KEY, id);
+    else window.localStorage.removeItem(ACTIVE_ORG_KEY);
+  }
   activeOrgId = id;
-  if (typeof window === "undefined") return;
-  if (id) window.localStorage.setItem(ACTIVE_ORG_KEY, id);
-  else window.localStorage.removeItem(ACTIVE_ORG_KEY);
 }
 
 // Structural type for the ClerkProvider-managed window global.

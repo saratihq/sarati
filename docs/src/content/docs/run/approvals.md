@@ -23,7 +23,8 @@ has executed.
 
 Every wait for an event appears in the **Approvals inbox** in the header, org-wide — so an
 approval is not something one person has to remember. You can act on a teammate's run, not only your
-own.
+own. Your own waiting runs in your other workspaces are listed too; opening one switches to its
+workspace.
 
 A run paused by a **Wait** step of more than a minute is also `waiting`, but it is not in the inbox:
 it resumes when its time is up, and nothing else can wake it. The editor and **Runs** show it as

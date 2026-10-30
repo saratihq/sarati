@@ -25,7 +25,9 @@ invited into it, and its owner cannot leave it. Work you want to share lives in 
 which you create from the user menu.
 
 The organization switcher decides which workspace you are looking at, and workflows do not move
-between them.
+between them. Opening a workflow that belongs to another of your workspaces (a teammate's link, a
+bookmark, or a run in the approvals inbox) switches to that workspace and says so. A link to a
+workflow in a workspace you are not in does not open, the same as a link to one that does not exist.
 
 ## Invite someone
 
