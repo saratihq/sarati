@@ -13,6 +13,7 @@ import type { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
 import { RunRecorderService } from '../src/runtime/run-recorder.service';
@@ -166,6 +167,7 @@ describe.each([
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now())`,
       [orgId, userA, userB],
     );
+    await seedDefaultEnvironments(db, orgId);
 
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';

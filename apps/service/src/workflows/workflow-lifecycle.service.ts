@@ -14,7 +14,7 @@ import { WorkflowVersionTagEntity } from '../database/entities/workflow-version-
 import { EventsService } from '../events/events.service';
 import { assertAuthoredIrValid } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
-import { EnvPointersService, PROD_ENV } from './env-pointers.service';
+import { EnvPointersService } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import { lockDeletable } from '../triggers/trigger-release';
 import { VersionsWriteService } from './versions-write.service';
@@ -137,6 +137,7 @@ export class WorkflowLifecycleService {
 
     const workflowId = await this.dataSource.transaction(async (em) => {
       if (orgId) await lockOrgForWrite(em, orgId);
+      const production = await this.envPointers.productionFor(em, orgId);
       const wf = em.create(WorkflowEntity, {
         id: newId(),
         name,
@@ -168,7 +169,7 @@ export class WorkflowLifecycleService {
       branch.headVersionId = version.id;
       await em.save(WorkflowEntity, wf);
       await em.save(WorkflowBranchEntity, branch);
-      await this.envPointers.setPointer(em, wf.id, PROD_ENV, version.id);
+      await this.envPointers.setPointer(em, wf.id, production, version.id);
 
       await em.save(
         em.create(WorkflowVersionTagEntity, {

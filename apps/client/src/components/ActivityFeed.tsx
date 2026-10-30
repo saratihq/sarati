@@ -56,13 +56,6 @@ function mergedDetail(source: string, target: string, result: MergeResultRespons
     : `"${source}" merged into "${target}"`;
 }
 
-// Promote-menu fallback when the environments list can't load; promoting works by name, the flag still decides.
-const FALLBACK_ENVS = [
-  { name: "production", is_prod: true },
-  { name: "staging", is_prod: false },
-  { name: "uat", is_prod: false },
-] as const;
-
 const CARD_STYLE = {
   background: "var(--orchestr-surface-card)",
   border: "1px solid var(--orchestr-line)",
@@ -694,21 +687,25 @@ export default function ActivityFeed({
 
   const [promoteMenuId, setPromoteMenuId] = useState<string | null>(null);
   const [pendingPromote, setPendingPromote] = useState<{
-    environment: string;
+    environment: EnvironmentSummary;
     version: WorkflowVersionSummary;
   } | null>(null);
   const promoteMenuRef = useRef<HTMLDivElement>(null);
 
-  // The workspace's named environments; kept across refetches so a failure never blanks it.
+  // The environments of the workflow's own workspace, not the active one; kept across refetches so a failure never blanks it.
   const [environments, setEnvironments] = useState<EnvironmentSummary[] | null>(null);
+  const [orgless, setOrgless] = useState(false);
   const [envsFailed, setEnvsFailed] = useState(false);
   const [envsRetry, setEnvsRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    listEnvironments()
-      .then((res) => {
+    api
+      .getWorkflow(workflowId)
+      .then(async (wf) => {
+        const res = await listEnvironments(wf.org_id);
         if (cancelled) return;
+        setOrgless(!wf.org_id);
         setEnvironments(res.environments);
         setEnvsFailed(false);
       })
@@ -718,7 +715,7 @@ export default function ActivityFeed({
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, envsRetry]);
+  }, [workflowId, refreshKey, envsRetry]);
 
   // Menu order: prod first, then the rest as the service lists them.
   const sortedEnvs = useMemo(
@@ -744,7 +741,7 @@ export default function ActivityFeed({
     };
   }, [promoteMenuId]);
 
-  const openPromote = (environment: string, version: WorkflowVersionSummary) => {
+  const openPromote = (environment: EnvironmentSummary, version: WorkflowVersionSummary) => {
     setPromoteMenuId(null);
     setPendingPromote({ environment, version });
   };
@@ -1006,19 +1003,15 @@ export default function ActivityFeed({
     }
   };
 
-  // One Promote-menu entry; with the env row loaded it flips to "Remove from <env>" for the active one.
-  const renderPromoteEntry = (
-    v: WorkflowVersionSummary,
-    target: Pick<EnvironmentSummary, "name" | "is_prod">,
-    env?: EnvironmentSummary,
-  ) => {
-    const { name } = target;
+  // One Promote-menu entry per listed environment; the active one flips to "Remove from <env>".
+  const renderPromoteEntry = (v: WorkflowVersionSummary, env: EnvironmentSummary) => {
+    const { name } = env;
     const pointer = envPointers.find((p) => p.environment === name);
     const alreadyHere = pointer?.version_id === v.id;
-    const mainOnlyBlocked = isProtectedEnv(target) && !isMain;
+    const mainOnlyBlocked = isProtectedEnv(env) && !isMain;
     const color = getTagColor(name);
 
-    if (alreadyHere && env) {
+    if (alreadyHere) {
       return (
         <button
           key={name}
@@ -1036,7 +1029,7 @@ export default function ActivityFeed({
     const item = (
       <button
         key={name}
-        onClick={() => !disabled && openPromote(name, v)}
+        onClick={() => !disabled && openPromote(env, v)}
         disabled={disabled}
         className="w-full text-left px-3 py-1.5 text-[12px] bg-transparent border-none cursor-pointer hover:bg-[var(--orchestr-accent-tint)] disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-2"
         style={{ color: alreadyHere ? color.text : "var(--orchestr-ink-muted)" }}
@@ -1238,29 +1231,30 @@ export default function ActivityFeed({
                 }}
               >
                 {sortedEnvs !== null ? (
-                  sortedEnvs.map((env) => renderPromoteEntry(v, env, env))
-                ) : envsFailed ? (
-                  <>
-                    {FALLBACK_ENVS.map((target) => renderPromoteEntry(v, target))}
-                    <div
-                      className="px-3 pt-2 mt-1 flex items-center gap-2"
-                      style={{ borderTop: "1px solid var(--orchestr-line)" }}
-                    >
-                      <span className="text-[11px] flex-1" style={{ color: "var(--orchestr-danger)" }}>
-                        Couldn&apos;t load environments.
-                      </span>
-                      <button
-                        onClick={() => {
-                          setEnvsFailed(false);
-                          setEnvsRetry((k) => k + 1);
-                        }}
-                        className="text-[11px] underline bg-transparent border-none p-0 cursor-pointer"
-                        style={{ color: "var(--orchestr-ink-muted)" }}
-                      >
-                        Retry
-                      </button>
+                  sortedEnvs.length > 0 ? (
+                    sortedEnvs.map((env) => renderPromoteEntry(v, env))
+                  ) : (
+                    <div className="px-3 py-1.5 text-[12px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
+                      This workspace has no environments yet.
                     </div>
-                  </>
+                  )
+                ) : envsFailed ? (
+                  <div className="px-3 py-1.5 flex items-start gap-2">
+                    <span className="text-[12px] flex-1" style={{ color: "var(--orchestr-danger)" }}>
+                      {"Couldn't load environments, so there's nothing to promote to yet."}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEnvsFailed(false);
+                        setEnvsRetry((k) => k + 1);
+                      }}
+                      className="text-[12px] underline bg-transparent border-none p-0 cursor-pointer"
+                      style={{ color: "var(--orchestr-ink)" }}
+                    >
+                      Retry
+                    </button>
+                  </div>
                 ) : (
                   <div className="px-3 py-1.5 text-[12px]" style={{ color: "var(--orchestr-ink-subtle)" }}>
                     Loading environments…
@@ -1302,7 +1296,7 @@ export default function ActivityFeed({
 
   // What the target environment runs right now — the from side of the promote diff.
   const promotedNow = pendingPromote
-    ? (envPointers.find((p) => p.environment === pendingPromote.environment) ?? null)
+    ? (envPointers.find((p) => p.environment === pendingPromote.environment.name) ?? null)
     : null;
 
   return (
@@ -1510,6 +1504,12 @@ export default function ActivityFeed({
             setPendingPromote(null);
             onChanged();
           }}
+          onNotFound={() => {
+            setPendingPromote(null);
+            setEnvsRetry((k) => k + 1);
+            onChanged();
+          }}
+          byName={orgless}
         />
       )}
     </div>

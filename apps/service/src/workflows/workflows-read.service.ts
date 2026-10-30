@@ -332,6 +332,7 @@ export class WorkflowsReadService {
     return {
       id: wf.id,
       name: wf.name,
+      org_id: wf.orgId,
       active: isWorkflowLive(wf),
       nodes: docList(doc?.nodes),
       edges: edgeList(doc?.edges),

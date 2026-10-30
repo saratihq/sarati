@@ -137,7 +137,6 @@ describe('a branch test under an environment takes the right to promote there (e
     );
     await insertPersonalOrgs(db, { id: personalOrgId, userId: owner, name: 'Owner' });
     await seedDefaultEnvironments(db, orgId);
-    await seedDefaultEnvironments(db, personalOrgId);
     for (const [user, org, key, scopes] of [
       [member, orgId, keys.member, ['run:execute', 'workflow:read', 'workflow:deploy']],
       [owner, orgId, keys.ownerNoDeploy, ['run:execute', 'workflow:read']],

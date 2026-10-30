@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RenameMovesUrlsError, renameEnvironment, type UrlChange } from "@/api/environments";
+import { setActiveOrgId } from "@/api/client";
+import { listEnvironments, RenameMovesUrlsError, renameEnvironment, type UrlChange } from "@/api/environments";
 
 const moved: UrlChange = {
   workflow_id: "wf1",
@@ -19,6 +20,21 @@ function answer(status: number, body: unknown) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setActiveOrgId(null);
+});
+
+describe("listEnvironments", () => {
+  it("lists the workspace it is given, whichever is active, and the active one otherwise", async () => {
+    const fetchMock = answer(200, { environments: [] });
+    setActiveOrgId("org-a");
+
+    await listEnvironments("org-b");
+    await listEnvironments();
+    await listEnvironments(null);
+
+    const sent = fetchMock.mock.calls.map(([, init]) => (init?.headers as Record<string, string>)["X-Org-Id"]);
+    expect(sent).toEqual(["org-b", "org-a", "org-a"]);
+  });
 });
 
 describe("renameEnvironment", () => {

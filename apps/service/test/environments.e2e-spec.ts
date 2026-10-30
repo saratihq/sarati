@@ -10,7 +10,6 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
-import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
@@ -64,6 +63,39 @@ function gmailIr(connectionId: string): Record<string, unknown> {
   };
 }
 
+/** A canvas webhook feeding a text step: it needs no account, so no environment's slots refuse it. */
+function webhookIr(name: string): Record<string, unknown> {
+  return {
+    ...gmailIr(''),
+    name,
+    nodes: [
+      {
+        id: 'trigger',
+        name: 'On incoming webhook',
+        node_type: 'orchestr:webhook',
+        type_version: 1,
+        parameters: {},
+        position: { x: 0, y: 0 },
+        metadata: {},
+      },
+      {
+        id: 'profile',
+        name: 'Echo',
+        node_type: 'text.concat',
+        type_version: 1,
+        parameters: { texts: ['fired'], separator: '' },
+        position: { x: 300, y: 0 },
+        metadata: {},
+      },
+    ],
+  };
+}
+
+const notFoundText = (name: string): string =>
+  name === 'default'
+    ? "'default' is reserved — it names the connection pool"
+    : `This workspace has no environment named '${name}' — create it under Integrations → Environments first`;
+
 /** Environments as first-class rows, end to end against a stubbed Composio transport. */
 describe('environments (e2e, isolated DB, org owner + member via API keys, stubbed Composio)', () => {
   let app: INestApplication;
@@ -114,8 +146,6 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
       { id: personalA, userId: userA, name: 'Env Owner A' },
       { id: personalB, userId: userB, name: 'Env Member B' },
     );
-    await seedDefaultEnvironments(db, personalA);
-    await seedDefaultEnvironments(db, personalB);
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
        VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
@@ -219,6 +249,26 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     (await envsIn(org)).find((e) => e.name === 'staging')!.id;
   const newOrg = async (name: string): Promise<string> =>
     (await asA(http().post('/api/orgs').send({ name })).expect(201)).body.id as string;
+  const deployIn = async (org: string, name: string, as = asA): Promise<{ wf: string; v1: string }> => {
+    const deployed = await as(
+      http()
+        .post('/api/deploy')
+        .set('X-Org-Id', org)
+        .send({ workflow_json: webhookIr(name) }),
+    ).expect(201);
+    const wf = deployed.body.workflow_id as string;
+    const versions = await as(http().get(`/api/workflows/${wf}/versions`).set('X-Org-Id', org)).expect(200);
+    return { wf, v1: (versions.body.versions as Array<{ id: string }>)[0]!.id };
+  };
+  const promoteIn = (org: string, wf: string, body: Record<string, unknown>): request.Test =>
+    asA(http().post(`/api/workflows/${wf}/promote`).set('X-Org-Id', org).send(body));
+  const envRowsNamed = async (org: string, names: string[]): Promise<string[]> =>
+    (
+      await db.query<{ name: string }>(
+        `SELECT name FROM environments WHERE org_id = $1 AND lower(name) = ANY($2) ORDER BY name`,
+        [org, names],
+      )
+    ).rows.map((row) => row.name);
 
   it('a new org starts with production (is_prod anchor) + staging + uat before anything lists them', async () => {
     const rows = await db.query<{ name: string; is_prod: boolean }>(
@@ -293,6 +343,142 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     ).expect(200);
     expect(back.body).toEqual({ id: staging, name: 'staging' });
     expect(await envNames(org)).toEqual(['production', 'staging', 'uat']);
+  });
+
+  it('a promote names an environment the workspace has: a deleted staging, a reserved name and a name never made are refused 404 and none is made', async () => {
+    const org = await newOrg('Promotes Only Where It Has');
+    await asA(
+      http()
+        .delete(`/api/environments/${await stagingOf(org)}`)
+        .set('X-Org-Id', org),
+    ).expect(200);
+    const { wf, v1 } = await deployIn(org, 'promoted where it has');
+
+    for (const name of ['staging', 'default', 'qa-typo', 'Staging']) {
+      const refused = await promoteIn(org, wf, { environment: name, version_id: v1 }).expect(404);
+      expect(refused.body).toEqual({
+        detail: notFoundText(name.toLowerCase()),
+        code: 'environment_not_found',
+      });
+    }
+    const prod = await promoteIn(org, wf, { environment: 'prod', version_id: v1 }).expect(201);
+    expect(prod.body).toMatchObject({ environment: 'production', version_id: v1 });
+
+    expect(await envNames(org)).toEqual(['production', 'uat']);
+    expect(await envRowsNamed(org, ['staging', 'default', 'qa-typo', 'prod'])).toEqual([]);
+    const created = await db.query(
+      `SELECT 1 FROM domain_events WHERE org_id = $1 AND type = 'environment.created'`,
+      [org],
+    );
+    expect(created.rows).toEqual([]);
+    const pointers = await db.query(`SELECT environment FROM workflow_env_pointers WHERE workflow_id = $1`, [
+      wf,
+    ]);
+    expect(pointers.rows).toEqual([{ environment: 'production' }]);
+  });
+
+  it('a workflow names its own workspace, whichever is active, so a page lists the ids its promote accepts', async () => {
+    const org = await newOrg('Names Its Workspace');
+    const { wf, v1 } = await deployIn(org, 'opened from another workspace');
+
+    const detail = await asA(http().get(`/api/workflows/${wf}`).set('X-Org-Id', personalA)).expect(200);
+    expect(detail.body.org_id).toBe(org);
+
+    const promote = (environmentId: string): request.Test =>
+      asA(
+        http()
+          .post(`/api/workflows/${wf}/promote`)
+          .set('X-Org-Id', personalA)
+          .send({ environment_id: environmentId, version_id: v1 }),
+      );
+    await promote(await stagingOf(personalA)).expect(404);
+    const landed = await promote(await stagingOf(detail.body.org_id as string)).expect(201);
+    expect(landed.body).toMatchObject({ environment: 'staging', version_id: v1 });
+  });
+
+  it("a promote by environment_id lands on that environment under its current name; an id the workspace lacks or another org's answers 404", async () => {
+    const org = await newOrg('Promotes By Id');
+    const other = await newOrg('Holds Another Staging');
+    const qa = (
+      await asA(http().post('/api/environments').set('X-Org-Id', org).send({ name: 'qa' })).expect(201)
+    ).body.id as string;
+    await asA(http().patch(`/api/environments/${qa}`).set('X-Org-Id', org).send({ name: 'qa-two' })).expect(
+      200,
+    );
+    const { wf, v1 } = await deployIn(org, 'promoted by id');
+
+    const landed = await promoteIn(org, wf, { environment_id: qa, version_id: v1 }).expect(201);
+    expect(landed.body).toMatchObject({ status: 'promoted', environment: 'qa-two', version_id: v1 });
+    const pointer = await db.query(
+      `SELECT environment, environment_id FROM workflow_env_pointers WHERE workflow_id = $1 AND environment_id = $2`,
+      [wf, qa],
+    );
+    expect(pointer.rows).toEqual([{ environment: 'qa-two', environment_id: qa }]);
+
+    for (const id of [randomUUID(), await stagingOf(other)]) {
+      const refused = await promoteIn(org, wf, { environment_id: id, version_id: v1 }).expect(404);
+      expect(refused.body.detail).toBe('Environment not found');
+    }
+    const both = await promoteIn(org, wf, {
+      environment_id: qa,
+      environment: 'qa-two',
+      version_id: v1,
+    }).expect(400);
+    expect(both.body.detail).toBe('Name the environment by environment_id or by environment, not both');
+    await promoteIn(org, wf, { environment_id: 'not-an-id', version_id: v1 }).expect(400);
+    await promoteIn(org, wf, { version_id: v1 }).expect(400);
+    expect(await envNames(other)).toEqual(['production', 'staging', 'uat']);
+    const pointed = await db.query(
+      `SELECT environment_id FROM workflow_env_pointers WHERE workflow_id = $1`,
+      [wf],
+    );
+    expect(pointed.rows.map((row: { environment_id: string }) => row.environment_id).sort()).toEqual(
+      [qa, (await envsIn(org)).find((e) => e.name === 'production')!.id].sort(),
+    );
+  });
+
+  it('a workspace with no production — which no path makes — refuses a first version, a publish and a restore with 404 and makes none', async () => {
+    const org = randomUUID();
+    await db.query(
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'No Production', false, now(), now())`,
+      [org],
+    );
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now())`,
+      [org, userA, userB],
+    );
+    const workflowsIn = async (): Promise<unknown[]> =>
+      (await db.query(`SELECT id FROM workflows WHERE org_id = $1`, [org])).rows;
+
+    const first = await asA(
+      http()
+        .post('/api/deploy')
+        .set('X-Org-Id', org)
+        .send({ workflow_json: webhookIr('never live') }),
+    ).expect(404);
+    expect(first.body).toEqual({ detail: notFoundText('production'), code: 'environment_not_found' });
+    expect(await workflowsIn()).toEqual([]);
+
+    const { wf } = await deployIn(org, 'a member saves it', asB);
+    for (const [route, body] of [
+      ['publish', {}],
+      ['restore', { version_number: 1 }],
+    ] as const) {
+      const refused = await asA(
+        http().post(`/api/workflows/${wf}/${route}`).set('X-Org-Id', org).send(body),
+      ).expect(404);
+      expect(refused.body).toEqual({ detail: notFoundText('production'), code: 'environment_not_found' });
+    }
+
+    expect(await workflowsIn()).toEqual([{ id: wf }]);
+    const left = await db.query(
+      `SELECT (SELECT count(*)::int FROM environments WHERE org_id = $1) AS environments,
+              (SELECT count(*)::int FROM workflow_env_pointers WHERE workflow_id = $2) AS pointers,
+              (SELECT active_version_id FROM workflows WHERE id = $2) AS alias`,
+      [org, wf],
+    );
+    expect(left.rows).toEqual([{ environments: 0, pointers: 0, alias: null }]);
   });
 
   it('personal workspaces get the identical surface (no X-Org-Id → the personal org)', async () => {

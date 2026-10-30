@@ -13,6 +13,7 @@ import { OrganizationEntity } from '../database/entities/organization.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowEnvPointerEntity } from '../database/entities/workflow-env-pointer.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
+import { environmentByName } from '../environments/env-lookup';
 import { canonicalEnvName, ENV_NAME_SHAPE, PROD_ENV } from '../environments/env-name';
 import { assertEnvSlotsCover } from '../environments/env-slot-preflight';
 import { EnvironmentsService } from '../environments/environments.service';
@@ -24,8 +25,11 @@ import { lockWorkflowForPointerMove } from './workflow-row-lock';
 // Re-exported so existing importers (triggers, controllers) keep one source.
 export { PROD_ENV };
 
-/** Environment name shape — one vocabulary with environments rows and env-scoped triggers. */
-export const ENV_SHAPE = ENV_NAME_SHAPE;
+/** Which environment a promote names: by id, which a rename cannot redirect, or by name, canonicalized. */
+export type PromoteTarget = { environmentId: string } | { environment: string };
+
+/** Where a pointer goes: the environment row an org workflow's pointer is on, held by the caller, or an org-less workflow's environment name. */
+export type PointerEnvironment = EnvironmentEntity | string;
 
 /** Environments that may only be promoted from the default branch. */
 const MAIN_ONLY_ENVS = new Set([PROD_ENV, 'uat']);
@@ -119,26 +123,22 @@ export class EnvPointersService {
     return env.isProd || env.name === PROD_ENV ? wf.activeVersionId : null;
   }
 
-  /**
-   * Move an environment's pointer (upsert). A prod move syncs the legacy alias in the SAME
-   * transaction, and the row carries a find-or-created environments id so it can never dangle.
-   */
+  /** Move an environment's pointer (upsert) onto the environment the caller holds, never resolving or creating one; a prod move syncs the legacy alias in the SAME transaction. */
   async setPointer(
     em: EntityManager,
     workflowId: string,
-    environment: string,
+    env: PointerEnvironment,
     versionId: string,
   ): Promise<void> {
-    const env = normalizeEnv(environment);
-    const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
-    const envRow = wf?.orgId ? await this.environments.ensureEnvironment(em, wf.orgId, env) : null;
+    const row = typeof env === 'string' ? null : env;
+    const name = typeof env === 'string' ? normalizeEnv(env) : env.name;
     // The env row is locked, so its name is current: the pointer is found by its id and carries that name.
-    const moved = envRow
+    const moved = row
       ? await rawMutate(
           em,
           `UPDATE workflow_env_pointers SET version_id = $3, environment = $4, updated_at = now()
             WHERE workflow_id = $1 AND environment_id = $2`,
-          [workflowId, envRow.id, versionId, envRow.name],
+          [workflowId, row.id, versionId, row.name],
         )
       : 0;
     if (moved === 0) {
@@ -148,12 +148,17 @@ export class EnvPointersService {
          ON CONFLICT (workflow_id, environment)
          DO UPDATE SET version_id = EXCLUDED.version_id, updated_at = now(),
                        environment_id = EXCLUDED.environment_id`,
-        [workflowId, envRow?.name ?? env, versionId, envRow?.id ?? null],
+        [workflowId, name, versionId, row?.id ?? null],
       );
     }
-    if (env === PROD_ENV) {
+    if (name === PROD_ENV) {
       await em.query(`UPDATE workflows SET active_version_id = $2 WHERE id = $1`, [workflowId, versionId]);
     }
+  }
+
+  /** The production a publish, a restore or a first version moves, held FOR SHARE until the caller commits; 404 for an org without one. */
+  productionFor(em: EntityManager, orgId: string | null): Promise<PointerEnvironment> {
+    return orgId ? environmentByName(em, orgId, PROD_ENV, true) : Promise.resolve(PROD_ENV);
   }
 
   /**
@@ -235,18 +240,16 @@ export class EnvPointersService {
     return pointers;
   }
 
-  /**
-   * Promote: point `environment` at a version. {@link MAIN_ONLY_ENVS} promote from the default
-   * branch only, and an org workflow needs an owner/admin. Idempotent — a re-promote writes nothing.
-   */
+  /** Promote: point an environment the workspace has (a name it lacks is 404, never created) at a version; {@link MAIN_ONLY_ENVS} promote from the default branch only, an org workflow needs an owner/admin, and a re-promote writes nothing. */
   async promote(
     workflowId: string,
-    environmentRaw: string,
+    target: PromoteTarget,
     versionId: string,
     actor: Principal,
   ): Promise<Record<string, unknown>> {
-    if (!ENV_SHAPE.test(environmentRaw)) throw new DomainError('Invalid environment name', 400);
-    const environment = normalizeEnv(environmentRaw);
+    if ('environment' in target && !ENV_NAME_SHAPE.test(target.environment)) {
+      throw new DomainError('Invalid environment name', 400);
+    }
 
     const result = await this.dataSource.transaction(async (em) => {
       await lockWorkflowForPointerMove(em, workflowId);
@@ -260,27 +263,28 @@ export class EnvPointersService {
       });
       if (!version) throw notFound;
 
+      // Taken first and held until commit: a rename or delete of it waits, and a name one took away is refused.
+      const env = await this.promotedEnvironment(em, wf, target);
+      const environment = typeof env === 'string' ? env : env.name;
       if (MAIN_ONLY_ENVS.has(environment) && wf.defaultBranchId && version.branchId !== wf.defaultBranchId) {
         throw new DomainError(
           `'${environment}' promotes from the default branch only — merge the branch first.`,
           400,
         );
       }
-
-      // Taken first and held until commit: a rename of this env waits, and one that committed is not followed.
-      const envRow = wf.orgId ? await this.environments.ensureEnvironment(em, wf.orgId, environment) : null;
       await this.assertMayPromote(em, wf.orgId, environment, actor);
-      await this.assertEnvCanRun(em, wf, environment, version);
+      await this.assertEnvCanRun(em, env, version);
 
-      const currentVersionId = envRow
-        ? await this.resolveVersionIdForEnv(em, wf, envRow)
-        : await this.resolveVersionId(em, wf, environment);
+      const currentVersionId =
+        typeof env === 'string'
+          ? await this.resolveVersionId(em, wf, env)
+          : await this.resolveVersionIdForEnv(em, wf, env);
       const previous = currentVersionId
         ? await em.findOne(WorkflowVersionEntity, { where: { id: currentVersionId } })
         : null;
 
       if (currentVersionId !== version.id) {
-        await this.setPointer(em, wf.id, environment, version.id);
+        await this.setPointer(em, wf.id, env, version.id);
         await this.events.emit(em, {
           orgId: wf.orgId,
           actorUserId: actor.user.id,
@@ -306,15 +310,28 @@ export class EnvPointersService {
     return result;
   }
 
+  // An org workflow's environment row, held FOR SHARE until commit; an org-less workflow has none, so only a name reaches it.
+  private async promotedEnvironment(
+    em: EntityManager,
+    wf: WorkflowEntity,
+    target: PromoteTarget,
+  ): Promise<PointerEnvironment> {
+    if ('environment' in target) {
+      return wf.orgId
+        ? environmentByName(em, wf.orgId, target.environment, true)
+        : normalizeEnv(target.environment);
+    }
+    if (!wf.orgId) throw new DomainError('Environment not found', 404);
+    return this.environments.byIdForOrg(em, wf.orgId, target.environmentId, 'pessimistic_read');
+  }
+
   /** Refuse a promote, publish or restore whose steps or app triggers the environment's slots can't serve, by the run-as slot rule; creating a workflow never asks. */
   async assertEnvCanRun(
     em: EntityManager,
-    wf: WorkflowEntity,
-    environment: string,
+    env: PointerEnvironment,
     version: WorkflowVersionEntity,
   ): Promise<void> {
-    if (!wf.orgId) return;
-    const env = await this.environments.ensureEnvironment(em, wf.orgId, normalizeEnv(environment));
+    if (typeof env === 'string') return;
     await assertEnvSlotsCover(
       version.workflowIr ?? version.workflowJson,
       env,

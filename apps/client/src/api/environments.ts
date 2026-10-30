@@ -79,8 +79,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...(options?.headers as Record<string, string>),
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const orgId = getActiveOrgId();
-  if (orgId) headers["X-Org-Id"] = orgId;
+  const activeOrgId = getActiveOrgId();
+  if (activeOrgId && !headers["X-Org-Id"]) headers["X-Org-Id"] = activeOrgId;
 
   let res: Response;
   try {
@@ -119,8 +119,9 @@ function toApiError(body: unknown, status: number): ApiError {
   return new ApiError(message, status);
 }
 
-export async function listEnvironments(): Promise<{ environments: Environment[] }> {
-  return request("/environments");
+/** A workspace's environments: `orgId`'s when given, else the active workspace's. */
+export async function listEnvironments(orgId?: string | null): Promise<{ environments: Environment[] }> {
+  return request("/environments", orgId ? { headers: { "X-Org-Id": orgId } } : undefined);
 }
 
 export async function createEnvironment(name: string): Promise<void> {

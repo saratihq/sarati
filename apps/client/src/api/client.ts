@@ -606,6 +606,8 @@ export interface EnvPointer {
 export interface WorkflowDetailResponse {
   id: string;
   name: string;
+  /** The workspace the workflow belongs to, which need not be the active one; null for one made before workspaces. */
+  org_id?: string | null;
   active: boolean;
   nodes: Record<string, unknown>[];
   edges: Record<string, unknown>[];
@@ -1571,10 +1573,10 @@ export async function publishWorkflow(
   });
 }
 
-/** Point an environment at a version (publish ≡ promote-to-prod). Idempotent. */
+/** Point an environment the workspace has at a version (publish ≡ promote-to-prod); 404 once it is gone. Idempotent. */
 export async function promoteToEnvironment(
   workflowId: string,
-  environment: string,
+  target: { environment_id: string } | { environment: string },
   versionId: string,
 ): Promise<{
   status: string;
@@ -1587,7 +1589,7 @@ export async function promoteToEnvironment(
 }> {
   return request(`/workflows/${workflowId}/promote`, {
     method: "POST",
-    body: JSON.stringify({ environment, version_id: versionId }),
+    body: JSON.stringify({ ...target, version_id: versionId }),
   });
 }
 

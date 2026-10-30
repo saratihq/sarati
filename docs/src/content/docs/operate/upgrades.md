@@ -124,6 +124,15 @@ versions still let an owner invite someone into it through the API, but nobody j
 invite answers `500`, and a sign-up with it makes the account and then answers `500` without
 joining. Coming back, the upgrade deletes each such invite (`044 deleted the pending invite …`).
 
+**Environments, going back to v0.2.26 or earlier.** Those versions make environments you didn't
+create. Every start there makes one for each name a
+[cluster connection](#an-environment-is-made-only-by-creating-it) gives that the workspace doesn't
+have, one you deleted or renamed here included, and puts the connection in that environment's slot
+for its app when the slot is empty. Listing a workspace's environments there makes `staging` again
+where you deleted or renamed it, and a promote to a name the workspace doesn't have creates it.
+Coming back keeps what they made: delete those environments, or empty those slots, under
+**Integrations → Environments**.
+
 **Going back to v0.2.25 or earlier** also undoes everything else
 [v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own). Above all, with durable runs on, the
 images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
@@ -256,6 +265,50 @@ What a caller of the API sees change:
 
 Going back to v0.2.26 or earlier still makes accounts there; what else changes for personal
 workspaces is under [Going back](#going-back).
+
+#### An environment is made only by creating it
+
+A workspace starts with `production`, `staging` and `uat`, and an owner or admin adds, renames and
+deletes environments under **Integrations → Environments**. Nothing else makes an environment or
+brings one back. See [Environments](/run/environments/).
+
+What changes:
+
+- **A promote to a name the workspace doesn't have answers `404` and creates nothing.** It used to
+  create the environment, so a promote to a deleted `staging`, to `default` or to a typo made one.
+  The refusal has the code `environment_not_found` and says to create the environment under
+  Integrations → Environments first; for `default` it says the name belongs to the connection pool. `POST /api/workflows/<id>/promote` takes `environment_id`, the
+  environment's `id`, which a rename doesn't change; a name in `environment` still works, in any
+  letter case, and `prod` still reaches `production`. See [Promote](/run/environments/#promote).
+- **Listing environments no longer makes any.** Earlier versions made each of `production`,
+  `staging` and `uat` a workspace lacked whenever its environments were listed, as
+  Integrations → Environments does, so a deleted or renamed `staging` came back. The upgrade gives
+  each workspace whichever of the three it never had, once, leaving out a `staging` it deleted or
+  renamed.
+- **The cluster connect route, `POST /api/orgs/<id>/clusters/<env>/connect`, is removed** and
+  answers `404`. It connected an account for one environment of an organization, a cluster
+  connection. Cluster connections an earlier version made are still listed by
+  `GET /api/orgs/<id>/clusters`, still run from any environment slot that holds them, and can still
+  be deleted with
+  `DELETE /api/orgs/<id>/clusters/connections/<connection-id>`. To give an environment an account,
+  connect it under **Integrations** and assign it to the environment's slot under
+  **Integrations → Environments**.
+- **A restart no longer brings back an environment a cluster connection still names, nor refills a
+  slot an owner emptied.** Earlier versions read the environment name on each cluster connection at
+  every start: an environment of that name the workspace didn't have was made, one you had deleted
+  or renamed included, and the connection went into that environment's slot for its app whenever
+  the slot was empty.
+
+After upgrading:
+
+- **What an earlier version made by mistake stays:** a deleted `staging` that a list, a restart or a
+  promote brought back, a `default` or a typo that a promote or a restart made, and a slot a restart
+  filled again after an owner emptied it. Delete the environment, or empty the slot, under
+  Integrations → Environments.
+- **A cluster connection made since the instance last started on an earlier version is not put in
+  its environment's slot** by this upgrade, as the next restart there would have done, and no
+  environment is made for a name it gives that the workspace doesn't have. Add the environment if
+  the workspace lacks it, then assign its slot an account under Integrations → Environments.
 
 #### A TypeScript Code step may await and return
 

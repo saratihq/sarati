@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { DomainError } from '../common/domain-error';
 import { ComposioProvider } from './composio.provider';
-import { ConnectionsService, type ConnectionSummary } from './connections.service';
+import { ConnectionsService } from './connections.service';
 import { isExecutableApp } from './managed-app-rails';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
 
@@ -103,37 +103,6 @@ export class ManagedConnectionsService {
     const connection = await this.connections.createManaged(userId, app, connectedAccountId);
     this.logger.log(`Managed connect started: ${app} → connection ${connection.id} (user ${userId})`);
     return { connectionId: connection.id, redirectUrl };
-  }
-
-  /** The ORG CLUSTER variant: same hosted flow, but tagged org+env so env-deployed runs resolve it. */
-  async createClusterLink(
-    ownerUserId: string,
-    orgId: string,
-    environment: string,
-    app: string,
-  ): Promise<{ connectionId: string; redirectUrl: string }> {
-    // A cluster connection belongs to the ORG by construction, so its key does too.
-    const scope: PlatformKeyScope = { kind: 'org', orgId };
-    const apps = await this.listApps(scope);
-    if (!apps.some((a) => a.slug === app)) {
-      throw new DomainError(`App "${app}" is not available for managed connections`);
-    }
-    const authConfigId = await this.composio.ensureAuthConfig(scope, toComposioSlug(app));
-    const link = await this.composio.createLink(scope, ownerUserId, authConfigId);
-    let connection: ConnectionSummary;
-    try {
-      connection = await this.connections.createManaged(ownerUserId, app, link.connectedAccountId, {
-        orgId,
-        environment,
-      });
-    } catch (err) {
-      await link.discard();
-      throw err;
-    }
-    this.logger.log(
-      `Cluster connect started: ${app} → ${environment} cluster of org ${orgId} (connection ${connection.id})`,
-    );
-    return { connectionId: connection.id, redirectUrl: link.redirectUrl };
   }
 
   /**

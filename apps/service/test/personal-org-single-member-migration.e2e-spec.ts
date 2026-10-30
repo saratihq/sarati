@@ -7,6 +7,7 @@ import { Client } from 'pg';
 import type request from 'supertest';
 
 import { mintSession } from '../src/auth/local/local-session';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { webhookDoc } from './support/golden-docs';
 import { pause } from './support/lock-probes';
 import { SSO_SECRET_KEY, bootSsoApp, from, snapshotEnv } from './support/sso-app';
@@ -210,6 +211,7 @@ describe('migration 044: a personal workspace keeps exactly one member, its owne
     ] as const) {
       await org(own, name, true, 99);
       await member(own, owner, 'owner', 99);
+      await seedDefaultEnvironments(migrated, own);
     }
 
     // Ada's workspace, made when her account was: Bo joined it, Cy joined as owner and demoted Ada, Fay joined and was adopted there.

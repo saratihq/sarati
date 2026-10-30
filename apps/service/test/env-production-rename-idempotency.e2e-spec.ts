@@ -134,6 +134,42 @@ describe('migration idempotency: prod → production re-run (scratch DB)', () =>
     expect(slot.rows).toEqual([{ name: 'production' }]);
   });
 
+  it("an org's production is the flagged one: an unflagged production a fold kept or a boot derived gets is_prod, never a second flagged row", async () => {
+    const [orgC, orgD, orgE] = [randomUUID(), randomUUID(), randomUUID()];
+    await db.query(
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at)
+       VALUES ($1, 'Org C', false, now(), now()), ($2, 'Org D', false, now(), now()), ($3, 'Org E', false, now(), now())`,
+      [orgC, orgD, orgE],
+    );
+    await db.query(
+      `INSERT INTO environments (org_id, name, is_prod)
+       VALUES ($1, 'prod', true), ($1, 'production', false),
+              ($2, 'production', false), ($2, 'staging', false), ($2, 'uat', false),
+              ($3, 'live', true), ($3, 'production', false)`,
+      [orgC, orgD, orgE],
+    );
+
+    await runChain();
+    await runChain();
+
+    const flags = await db.query<{ org_id: string; name: string; is_prod: boolean }>(
+      `SELECT org_id, name, is_prod FROM environments WHERE org_id = ANY($1) ORDER BY org_id, name`,
+      [[orgC, orgD, orgE]],
+    );
+    const of = (org: string) =>
+      flags.rows.filter((row) => row.org_id === org).map(({ name, is_prod }) => ({ name, is_prod }));
+    expect(of(orgC)).toEqual([{ name: 'production', is_prod: true }]);
+    expect(of(orgD)).toEqual([
+      { name: 'production', is_prod: true },
+      { name: 'staging', is_prod: false },
+      { name: 'uat', is_prod: false },
+    ]);
+    expect(of(orgE)).toEqual([
+      { name: 'live', is_prod: true },
+      { name: 'production', is_prod: false },
+    ]);
+  });
+
   it('re-running the whole chain twice more is a no-op (the property db:migrate relies on)', async () => {
     await expect(runChain()).resolves.toBeUndefined();
     await runChain();

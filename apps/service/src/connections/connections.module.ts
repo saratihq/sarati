@@ -39,6 +39,6 @@ import { OAuthService } from './oauth.service';
     },
   ],
   controllers: [ConnectionsController, ManagedConnectionsController, OAuthController],
-  exports: [ConnectionsService, ManagedConnectionsService, ComposioExecutionProvider, ComposioProvider],
+  exports: [ConnectionsService, ComposioExecutionProvider, ComposioProvider],
 })
 export class ConnectionsModule {}

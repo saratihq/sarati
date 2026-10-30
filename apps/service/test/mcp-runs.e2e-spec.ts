@@ -13,6 +13,7 @@ import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { fernetEncrypt } from '../src/common/crypto/fernet';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -160,6 +161,7 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
               (gen_random_uuid(), $1, $3, 'member', now())`,
       [orgId, userA, userB],
     );
+    await seedDefaultEnvironments(db, orgId);
     await db.query(
       `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'agent', $3, $4, $5::json, now()),

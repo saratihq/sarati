@@ -17,6 +17,8 @@ vi.mock("@/api/client", async (importOriginal) => ({
   updateBranch: vi.fn(),
   approveReview: vi.fn(),
   mergeReview: vi.fn(),
+  promoteToEnvironment: vi.fn(),
+  getWorkflow: vi.fn(),
 }));
 vi.mock("@/lib/toast", () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(), dismiss: vi.fn() },
@@ -77,6 +79,7 @@ beforeEach(() => {
   vi.mocked(api.listVersions).mockResolvedValue({ workflow_id: "wf", versions: [], env_pointers: [] } as never);
   vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [review] });
   vi.mocked(environments.listEnvironments).mockResolvedValue([] as never);
+  vi.mocked(api.getWorkflow).mockResolvedValue({ org_id: "org-a" } as never);
 });
 
 describe("ActivityFeed review card", () => {
@@ -113,25 +116,123 @@ describe("ActivityFeed review card", () => {
 });
 
 describe("ActivityFeed promote menu", () => {
-  it("keeps production and uat main-only off main even when the environments list can't load", async () => {
-    vi.mocked(api.listVersions).mockResolvedValue({
-      workflow_id: "wf",
-      env_pointers: [],
-      versions: [
-        { id: "v-lane", version_number: 1, workflow_json: {}, tags: ["latest"], parent_id: "v-main", branch_name: "lane" },
-      ],
-    });
+  const env = (id: string, name: string, is_prod = false): environments.EnvironmentSummary => ({
+    id,
+    name,
+    is_prod,
+    slots: [],
+    pointer_count: 0,
+    trigger_count: 0,
+  });
+  const production = env("env-production", "production", true);
+  const staging = env("env-staging", "staging");
+  const uat = env("env-uat", "uat");
+
+  beforeEach(() => {
+    vi.mocked(api.listVersions).mockResolvedValue(laneVersions);
     vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
     vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
-    vi.mocked(environments.listEnvironments).mockRejectedValue(new Error("environments are down"));
+  });
+
+  it("offers no environment to promote to while the list can't load, says so, and lists them once Retry loads them — production and uat main-only off main", async () => {
+    vi.mocked(environments.listEnvironments)
+      .mockRejectedValueOnce(new Error("environments are down"))
+      .mockResolvedValue({ environments: [production, staging, uat] });
     const user = userEvent.setup();
     render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
 
     await user.click(await screen.findByRole("button", { name: "Promote" }));
 
+    expect(await screen.findByText("Couldn't load environments, so there's nothing to promote to yet.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("button", { name: /Promote to/ })).toHaveLength(0);
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Retry" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByRole("button", { name: /Promote to staging/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /Promote to production/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Promote to uat/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Promote to staging/ })).toBeEnabled();
+    expect(screen.queryByText(/Couldn't load environments/)).not.toBeInTheDocument();
+  });
+
+  it("promotes to the environment it lists by its id", async () => {
+    vi.mocked(environments.listEnvironments).mockResolvedValue({ environments: [staging] });
+    vi.mocked(api.promoteToEnvironment).mockResolvedValue({
+      status: "promoted",
+      workflow_id: "wf",
+      environment: "staging",
+      version_id: "v-lane",
+      version_number: 1,
+      previous_version_number: null,
+    });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={onChanged} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Promote" }));
+    await user.click(await screen.findByRole("button", { name: /Promote to staging/ }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Promote to staging" }));
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(api.promoteToEnvironment).toHaveBeenCalledWith("wf", { environment_id: "env-staging" }, "v-lane");
+  });
+
+  it("lists the environments of the workflow's own workspace, not the active one", async () => {
+    vi.mocked(api.getWorkflow).mockResolvedValue({ org_id: "org-b" } as never);
+    vi.mocked(environments.listEnvironments).mockResolvedValue({ environments: [staging] });
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Promote" }));
+
+    expect(await screen.findByRole("button", { name: /Promote to staging/ })).toBeEnabled();
+    expect(api.getWorkflow).toHaveBeenCalledWith("wf");
+    expect(vi.mocked(environments.listEnvironments).mock.calls).toEqual([["org-b"]]);
+  });
+
+  it("promotes a workflow made before workspaces by the environment's name", async () => {
+    vi.mocked(api.getWorkflow).mockResolvedValue({ org_id: null } as never);
+    vi.mocked(environments.listEnvironments).mockResolvedValue({ environments: [staging] });
+    vi.mocked(api.promoteToEnvironment).mockResolvedValue({
+      status: "promoted",
+      workflow_id: "wf",
+      environment: "staging",
+      version_id: "v-lane",
+      version_number: 1,
+      previous_version_number: null,
+    });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={onChanged} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Promote" }));
+    await user.click(await screen.findByRole("button", { name: /Promote to staging/ }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Promote to staging" }));
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(api.promoteToEnvironment).toHaveBeenCalledWith("wf", { environment: "staging" }, "v-lane");
+  });
+
+  it("drops an environment the workspace no longer has from the menu once promoting to it answers 404", async () => {
+    vi.mocked(environments.listEnvironments)
+      .mockResolvedValueOnce({ environments: [production, staging] })
+      .mockResolvedValue({ environments: [production] });
+    vi.mocked(api.promoteToEnvironment).mockRejectedValue(new api.ApiError("Environment not found", 404));
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={onChanged} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Promote" }));
+    await user.click(await screen.findByRole("button", { name: /Promote to staging/ }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Promote to staging" }));
+
+    await vi.waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(toast.error).toHaveBeenCalledWith("Couldn't promote to staging", "Environment not found");
+    expect(onChanged).toHaveBeenCalled();
+    await vi.waitFor(() => expect(environments.listEnvironments).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Promote" }));
+    expect(await screen.findByRole("button", { name: /Promote to production/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Promote to staging/ })).not.toBeInTheDocument();
   });
 });
 

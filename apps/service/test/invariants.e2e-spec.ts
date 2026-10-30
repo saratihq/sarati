@@ -710,6 +710,33 @@ describe('domain invariants (the constitution)', () => {
     await http().post('/api/environments').send({ name: 'prod' }).expect(400); // reserved
   });
 
+  it('invariant 7: only creating an environment makes one — a promote by a name the workspace lacks, the reserved default included, is refused 404 and makes none', async () => {
+    const wf = await seedDoc(webhookIr('inv7', 'inv7 promote'));
+    const v1 = await versionId(wf, 1);
+    const environmentRows = async (): Promise<unknown[]> =>
+      (await db.query(`SELECT id, name FROM environments ORDER BY id`)).rows;
+    const before = await environmentRows();
+
+    for (const name of ['default', 'ghost-7']) {
+      const refused = await http()
+        .post(`/api/workflows/${wf}/promote`)
+        .send({ environment: name, version_id: v1 })
+        .expect(404);
+      expect(refused.body).toEqual({
+        detail:
+          name === 'default'
+            ? "'default' is reserved — it names the connection pool"
+            : `This workspace has no environment named '${name}' — create it under Integrations → Environments first`,
+        code: 'environment_not_found',
+      });
+    }
+    const reserved = await http().post('/api/environments').send({ name: 'default' }).expect(400);
+    expect(reserved.body.detail).toBe("'default' is reserved — it names the connection pool");
+
+    expect(await environmentRows()).toEqual(before);
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
   it('main-only promotion: prod/uat refuse branch versions; staging accepts them', async () => {
     const wf = await seed('inv main-only');
     await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);

@@ -20,14 +20,8 @@ import { runBounded } from '../common/bounded';
 import { chatPathFor, webhookPathFor } from '../triggers/canvas/webhook-url';
 import { INCOMING_CHAT_PUBLIC, INCOMING_WEBHOOK_PUBLIC } from '../triggers/trigger-catalog.service';
 import type { WorkflowIR } from '../ir/models';
-import {
-  canonicalEnvName,
-  ENV_NAME_SHAPE,
-  normalizeEnvName,
-  PROD_ENV,
-  RESERVED_ENV_NAMES,
-  UAT_ENV,
-} from './env-name';
+import { findEnvironmentByName } from './env-lookup';
+import { admitEnvName, PROD_ENV, UAT_ENV } from './env-name';
 
 /** One slot as the environments surface renders it. */
 export interface SlotView {
@@ -82,8 +76,6 @@ export interface HeldWebhook {
 }
 
 const DRAIN_CONCURRENCY = 5;
-
-const ENSURE_ATTEMPTS = 3;
 
 const HAND_GIVEN_URLS = [
   { trigger: 'chat', nodeType: INCOMING_CHAT_PUBLIC, pathFor: chatPathFor },
@@ -212,7 +204,7 @@ export class EnvironmentsService {
       if (env.name === UAT_ENV)
         throw new DomainError(`'uat' is a predefined environment — it cannot be renamed`, 409);
       if (env.name === name) return { id: env.id, name };
-      const taken = await this.findByName(em, orgId, name);
+      const taken = await findEnvironmentByName(em, orgId, name);
       if (taken && taken.id !== env.id) {
         throw new DomainError(`An environment named '${name}' already exists`, 409);
       }
@@ -519,36 +511,14 @@ export class EnvironmentsService {
     }));
   }
 
-  /** Find-or-create by name, held FOR SHARE until the caller commits, so a rename waits for the pointer write it serves. */
-  async ensureEnvironment(em: EntityManager, orgId: string, rawName: string): Promise<EnvironmentEntity> {
-    const name = canonicalEnvName(rawName);
-    let found = await this.findByName(em, orgId, name, true);
-    // A rename or delete can take the row between the conflicting insert and the read, freeing the name again.
-    for (let attempt = 0; !found && attempt < ENSURE_ATTEMPTS; attempt++) {
-      await em.query(
-        `INSERT INTO environments (org_id, name, is_prod) VALUES ($1, $2, $3)
-         ON CONFLICT (org_id, lower(name)) DO NOTHING`,
-        [orgId, name, name === PROD_ENV],
-      );
-      found = await this.findByName(em, orgId, name, true);
-    }
-    if (!found) {
-      throw new DomainError(
-        `The environment '${name}' kept being renamed or deleted while this ran — try again`,
-        409,
-      );
-    }
-    return found;
-  }
-
-  /** The org's env row by canonicalized NAME, or null; never creates one, unlike `ensureEnvironment`. `lock` holds it FOR SHARE until the caller commits. */
+  /** The org's env row by canonicalized NAME, or null; never creates one. `lock` holds it FOR SHARE until the caller commits. */
   findByNameForOrg(
     em: EntityManager,
     orgId: string,
     rawName: string,
     lock = false,
   ): Promise<EnvironmentEntity | null> {
-    return this.findByName(em, orgId, canonicalEnvName(rawName), lock);
+    return findEnvironmentByName(em, orgId, rawName, lock);
   }
 
   /** The org's env row by id — a foreign/unknown/malformed id is an indistinguishable 404. */
@@ -568,25 +538,10 @@ export class EnvironmentsService {
     return env;
   }
 
-  private findByName(
-    em: EntityManager,
-    orgId: string,
-    name: string,
-    lock = false,
-  ): Promise<EnvironmentEntity | null> {
-    const query = em
-      .createQueryBuilder(EnvironmentEntity, 'e')
-      .where('e.org_id = :orgId', { orgId })
-      .andWhere('lower(e.name) = :name', { name: normalizeEnvName(name) });
-    return (lock ? query.setLock('pessimistic_read') : query).getOne();
-  }
-
   private validName(rawName: string): string {
-    const name = normalizeEnvName(rawName.trim());
-    if (!ENV_NAME_SHAPE.test(name)) throw new DomainError('Invalid environment name', 400);
-    const reserved = RESERVED_ENV_NAMES.get(name);
-    if (reserved) throw new DomainError(`'${name}' is reserved — ${reserved}`, 400);
-    return name;
+    const admitted = admitEnvName(rawName);
+    if ('refusal' in admitted) throw new DomainError(admitted.refusal, 400);
+    return admitted.name;
   }
 }
 

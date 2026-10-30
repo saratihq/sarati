@@ -424,42 +424,78 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     expect(await productionVersion(wfId)).toEqual({ alias: v1!.id, pointer: v1!.id });
   });
 
-  it('a promote by the name a rename just gave, overtaken by a second rename, lands on a new environment of that name', async () => {
+  const environmentsNamed = async (
+    org: string,
+    names: string[],
+  ): Promise<Array<{ id: string; name: string }>> =>
+    (
+      await db.query<{ id: string; name: string }>(
+        `SELECT id, name FROM environments WHERE org_id = $1 AND name = ANY($2) ORDER BY name`,
+        [org, names],
+      )
+    ).rows;
+
+  it('a promote by the name a rename just gave, overtaken by a second rename, is refused 404 and creates no environment', async () => {
     const org = await workspace('Rename twice');
     const env = await createEnv(org, 'pe-a');
     const wfId = await deploy(org, 'promoted by new name');
     const [v1] = await versions(org, wfId);
     const rename = (name: string): Promise<number> =>
       statusOf(as(http().patch(`/api/environments/${env}`), org).send({ name }));
+    expect(await rename('pe-b')).toBe(200);
     const renamed = gateEmits('environment.renamed');
+    let promoted: request.Response;
     try {
-      const first = rename('pe-b');
-      await renamed.arrived(0);
-      const promoting = statusOf(promote(org, wfId, 'pe-b', v1!.id));
-      await lockWaiters(1);
       const second = rename('pe-c');
-      await lockWaiters(2);
-      renamed.release(0);
-      await renamed.arrived(1);
+      await renamed.arrived(0);
+      const promoting = promote(org, wfId, 'pe-b', v1!.id).then((res) => res);
       await lockWaiters(1);
-      renamed.release(1);
-      expect(await first).toBe(200);
+      renamed.release(0);
       expect(await second).toBe(200);
-      expect(await promoting).toBe(201);
+      promoted = await promoting;
     } finally {
       renamed.restore();
     }
-    const { rows } = await db.query<{ id: string; name: string; pointed: boolean }>(
-      `SELECT e.id, e.name,
-              EXISTS (SELECT 1 FROM workflow_env_pointers p WHERE p.environment_id = e.id AND p.workflow_id = $2) AS pointed
-         FROM environments e WHERE e.org_id = $1 AND e.name IN ('pe-b', 'pe-c') ORDER BY e.name`,
-      [org, wfId],
+    expect(promoted.status).toBe(404);
+    expect(promoted.body.code).toBe('environment_not_found');
+    expect(await environmentsNamed(org, ['pe-a', 'pe-b', 'pe-c'])).toEqual([{ id: env, name: 'pe-c' }]);
+    const pointed = await db.query(
+      `SELECT 1 FROM workflow_env_pointers WHERE workflow_id = $1 AND environment <> 'production'`,
+      [wfId],
     );
-    expect(rows).toEqual([
-      { id: expect.any(String), name: 'pe-b', pointed: true },
-      { id: env, name: 'pe-c', pointed: false },
-    ]);
-    expect(rows[0]!.id).not.toBe(env);
+    expect(pointed.rows).toEqual([]);
+  });
+
+  it("a promote by name waiting on its environment's delete is refused 404 and does not bring it back", async () => {
+    const org = await workspace('Promote during delete');
+    const env = await createEnv(org, 'doomed');
+    const wfId = await deploy(org, 'promoted while its environment goes');
+    const [v1] = await versions(org, wfId);
+    const held = holdQuery(/DELETE FROM environments WHERE id/, 'after');
+    const before = await deadlocks();
+    let promoted: request.Response;
+    try {
+      const deleting = statusOf(removeEnv(org, env));
+      await held.arrived;
+      const promoting = promote(org, wfId, 'doomed', v1!.id).then((res) => res);
+      await lockWaiters(1);
+      held.release();
+      expect(await deleting).toBe(200);
+      promoted = await promoting;
+    } finally {
+      held.restore();
+    }
+    expect(promoted.status).toBe(404);
+    expect(promoted.body.code).toBe('environment_not_found');
+    expect(await environmentsNamed(org, ['doomed'])).toEqual([]);
+    const events = await db.query(
+      `SELECT type, count(*)::int AS n FROM domain_events
+        WHERE org_id = $1 AND type IN ('environment.created', 'workflow.promoted')
+        GROUP BY type ORDER BY type`,
+      [org],
+    );
+    expect(events.rows).toEqual([{ type: 'environment.created', n: 1 }]);
+    expect(await deadlocksSince(before)).toBe(0);
   });
 
   interface FireBeside {

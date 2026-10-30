@@ -7,6 +7,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -84,6 +85,7 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
               (gen_random_uuid(), $1, $3, 'member', now())`,
       [orgId, owner, member],
     );
+    await seedDefaultEnvironments(db, orgId);
     await db.query(
       `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
        VALUES (gen_random_uuid(), $1, 'o', $2, $3, now()),

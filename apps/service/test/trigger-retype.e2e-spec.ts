@@ -2525,43 +2525,64 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     await http().post(`/api/hooks/${wfId}/mv`).send({ title: 'still here' }).expect(202);
   });
 
-  it('a promote by name while its environment is being renamed waits, and lands on an environment of that name', async () => {
+  it("a promote by the name a rename is taking away waits for it, then is refused 404 and creates nothing; one by the environment's id lands on it under its new name", async () => {
     const { org } = await workspace('Promote during rename');
     const env = await createEnv(org, 'qa');
     const racer = await deploy(triggerDoc('orchestr:webhook', {}, 'racing webhook'), org);
     const v1 = await versionOf(org, racer);
-    const held = gateEmits('environment.renamed');
-    try {
-      const renaming = renameEnv(org, env, 'qa-two').then((res) => res);
-      await reached(held.arrived(0), 'the rename');
-      const promoting = asA(
-        http()
-          .post(`/api/workflows/${racer}/promote`)
-          .set('X-Org-Id', org)
-          .send({ environment: 'qa', version_id: v1 }),
-      ).then((res) => res);
-      await lockWaiters(1);
-      held.release(0);
+    const promoteDuringRename = async (
+      to: string,
+      target: Record<string, string>,
+    ): Promise<{ renamed: number; promoted: request.Response }> => {
+      const held = gateEmits('environment.renamed');
+      try {
+        const renaming = renameEnv(org, env, to).then((res) => res);
+        await reached(held.arrived(0), 'the rename');
+        const promoting = asA(
+          http()
+            .post(`/api/workflows/${racer}/promote`)
+            .set('X-Org-Id', org)
+            .send({ ...target, version_id: v1 }),
+        ).then((res) => res);
+        await lockWaiters(1);
+        held.release(0);
+        return { renamed: (await renaming).status, promoted: await promoting };
+      } finally {
+        held.restore();
+      }
+    };
+    const namesIn = async (): Promise<string[]> =>
+      (
+        await db.query<{ name: string }>(
+          `SELECT name FROM environments WHERE org_id = $1 AND name LIKE 'qa%' ORDER BY name`,
+          [org],
+        )
+      ).rows.map((row) => row.name);
 
-      expect((await renaming).status).toBe(200);
-      expect((await promoting).status).toBe(201);
-    } finally {
-      held.restore();
-    }
-    const mismatched = await db.query(
-      `SELECT p.environment, e.name FROM workflow_env_pointers p JOIN environments e ON e.id = p.environment_id
-        WHERE e.org_id = $1 AND p.environment <> e.name`,
-      [org],
+    const byName = await promoteDuringRename('qa-two', { environment: 'qa' });
+    expect(byName.renamed).toBe(200);
+    expect(byName.promoted.status).toBe(404);
+    expect(byName.promoted.body).toEqual({
+      detail:
+        "This workspace has no environment named 'qa' — create it under Integrations → Environments first",
+      code: 'environment_not_found',
+    });
+    expect(await namesIn()).toEqual(['qa-two']);
+    expect(await pointersAt(env)).toEqual([]);
+
+    const byId = await promoteDuringRename('qa-three', { environment_id: env });
+    expect(byId.renamed).toBe(200);
+    expect(byId.promoted.status).toBe(201);
+    expect(byId.promoted.body).toMatchObject({ environment: 'qa-three', version_id: v1 });
+    expect(await namesIn()).toEqual(['qa-three']);
+    const pointer = await db.query(
+      `SELECT environment, environment_id FROM workflow_env_pointers WHERE workflow_id = $1 AND environment_id = $2`,
+      [racer, env],
     );
-    expect(mismatched.rows).toEqual([]);
-    const qa = await db.query<{ id: string }>(
-      `SELECT id FROM environments WHERE org_id = $1 AND name = 'qa'`,
-      [org],
-    );
-    expect(qa.rows).toHaveLength(1);
-    expect(qa.rows[0]!.id).not.toBe(env);
-    await http().post(`/api/hooks/${racer}/qa`).send({ title: 'on qa' }).expect(202);
-    await http().post(`/api/hooks/${racer}/qa-two`).send({ title: 'not on qa-two' }).expect(404);
+    expect(pointer.rows).toEqual([{ environment: 'qa-three', environment_id: env }]);
+    await reconcile(racer);
+    await http().post(`/api/hooks/${racer}/qa`).send({ title: 'not on qa' }).expect(404);
+    await http().post(`/api/hooks/${racer}/qa-three`).send({ title: 'on qa-three' }).expect(202);
   });
 
   it("a stand-up refused over a pending delete at its URL lands it without waiting on another workflow's stalled retry, and deletes it once", async () => {

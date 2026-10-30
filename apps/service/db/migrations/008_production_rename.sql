@@ -1,11 +1,11 @@
 -- 008 — 'prod' → 'production'. The is_prod FLAG stays the anchor; this renames the
 -- label everywhere it is stored as a string.
 --
--- CONVERGENT, not merely idempotent: 005/006 re-run first and can resurrect a
--- 'prod' env + pointer alongside the 'production' this file already created. So
--- before renaming it MERGES any duplicate 'prod' env into the org's 'production'
--- env, re-pointing every reference first — the env FKs CASCADE/SET NULL, so a bare
--- delete would lose data — and every rename below is collision-safe.
+-- CONVERGENT, not merely idempotent: a database an earlier release migrated can
+-- hold a 'prod' env and pointer beside 'production'. So before renaming it MERGES
+-- any duplicate 'prod' env into the org's 'production' env, re-pointing every
+-- reference first — the env FKs CASCADE/SET NULL, so a bare delete would lose
+-- data — and every rename below is collision-safe.
 
 -- ── Converge: fold a duplicate 'prod' env into the org's 'production' env ──
 DO $$
@@ -86,6 +86,13 @@ UPDATE environments e
      SELECT 1 FROM environments x
       WHERE x.org_id = e.org_id AND lower(x.name) = 'production' AND x.id <> e.id
    );
+
+-- An org's 'production' carries is_prod even when the fold above kept an unflagged one, or an earlier boot derived it from a name.
+UPDATE environments e
+   SET is_prod = true
+ WHERE NOT e.is_prod
+   AND lower(e.name) = 'production'
+   AND NOT EXISTS (SELECT 1 FROM environments x WHERE x.org_id = e.org_id AND x.is_prod);
 
 -- ── Pointer/trigger name strings follow, collision-safe. Run history is
 --    untouched: environment there is a historical snapshot. ──

@@ -4,14 +4,15 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Rocket } from "lucide-react";
 import * as api from "@/api/client";
+import type { EnvironmentSummary } from "@/api/environments";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/lib/toast";
 import DiffView from "./DiffView";
 
 interface PromoteDialogProps {
   workflowId: string;
-  /** The environment being pointed (lowercase slug — "staging", "prod", …). */
-  environment: string;
+  /** The listed environment being pointed; promoted by its id unless `byName`, so a rename can't redirect it. */
+  environment: Pick<EnvironmentSummary, "id" | "name">;
   /** The version about to run in this environment. */
   targetVersion: number;
   targetVersionId: string;
@@ -24,6 +25,10 @@ interface PromoteDialogProps {
   onClose: () => void;
   /** Fired after a successful promote so the parent can refetch. */
   onPromoted: () => void;
+  /** Fired when the promote answers 404, so the parent can refetch what it offered. */
+  onNotFound: () => void;
+  /** A workflow made before workspaces has no environment rows, so it promotes by name. */
+  byName?: boolean;
 }
 
 /** Promotion confirmation — shows the field-level diff, then moves that environment's pointer. */
@@ -37,7 +42,10 @@ export default function PromoteDialog({
   targetBranch,
   onClose,
   onPromoted,
+  onNotFound,
+  byName = false,
 }: PromoteDialogProps) {
+  const { name } = environment;
   const [promoting, setPromoting] = useState(false);
   // Compare IDENTITY, not the number: version numbers are per-branch, so promoting feature@v3 over
   // a pointer at main@v3 is a real change that a number comparison calls a no-op (invariant #1).
@@ -58,15 +66,20 @@ export default function PromoteDialog({
   const handlePromote = async () => {
     setPromoting(true);
     try {
-      const res = await api.promoteToEnvironment(workflowId, environment, targetVersionId);
+      const res = await api.promoteToEnvironment(
+        workflowId,
+        byName ? { environment: name } : { environment_id: environment.id },
+        targetVersionId,
+      );
       toast.success(
-        `${environment} runs v${res.version_number}`,
-        `Runs and ${environment}-scoped triggers use this version now.`,
+        `${res.environment} runs v${res.version_number}`,
+        `Runs and ${res.environment}-scoped triggers use this version now.`,
       );
       onPromoted();
     } catch (e) {
-      toast.error(`Couldn't promote to ${environment}`, e instanceof Error ? e.message : undefined);
+      toast.error(`Couldn't promote to ${name}`, e instanceof Error ? e.message : undefined);
       setPromoting(false);
+      if (e instanceof api.ApiError && e.status === 404) onNotFound();
     }
   };
 
@@ -79,7 +92,7 @@ export default function PromoteDialog({
       <motion.div
         role="dialog"
         aria-modal="true"
-        aria-label={`Promote v${targetVersion} to ${environment}`}
+        aria-label={`Promote v${targetVersion} to ${name}`}
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.15 }}
@@ -94,14 +107,14 @@ export default function PromoteDialog({
         <div className="p-6 pb-3">
           <h2 className="text-[16px] font-semibold m-0 flex items-center gap-2" style={{ color: "var(--orchestr-ink)" }}>
             <Rocket size={16} style={{ color: "var(--orchestr-success)" }} />
-            Promote v{targetVersion} to {environment}
+            Promote v{targetVersion} to {name}
           </h2>
           <p className="text-[13px] m-0 mt-1.5 leading-relaxed" style={{ color: "var(--orchestr-ink-muted)" }}>
             {canDiff ? (
               <>
-                Here is exactly what {environment} will start doing — the change from{" "}
+                Here is exactly what {name} will start doing — the change from{" "}
                 <span className="font-mono font-semibold" style={{ color: "var(--orchestr-ink)" }}>
-                  {sameNumber ? `the version ${environment} runs now` : `v${currentVersion}`}
+                  {sameNumber ? `the version ${name} runs now` : `v${currentVersion}`}
                 </span>{" "}
                 to{" "}
                 <span className="font-mono font-semibold" style={{ color: "var(--orchestr-ink)" }}>
@@ -111,7 +124,7 @@ export default function PromoteDialog({
               </>
             ) : (
               <>
-                {environment} will start running v{targetVersion}. Runs and {environment}-scoped triggers use
+                {name} will start running v{targetVersion}. Runs and {name}-scoped triggers use
                 it immediately.
               </>
             )}
@@ -137,7 +150,7 @@ export default function PromoteDialog({
           </Button>
           <Button variant="success" size="sm" onClick={handlePromote} disabled={promoting}>
             <Rocket size={13} />
-            {promoting ? "Promoting…" : `Promote to ${environment}`}
+            {promoting ? "Promoting…" : `Promote to ${name}`}
           </Button>
         </div>
       </motion.div>
