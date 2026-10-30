@@ -41,8 +41,8 @@ error: A Sarati database already exists on this machine, but its .env is gone �
 
 This is a guard, not a bug, and only a five-container install can reach it: fresh secrets against an
 old database give Postgres a password it never had, and a new `FERNET_KEY` cannot decrypt what the
-old one stored. A `.env` that is there but holds none of the keys is refused the same way, with
-`…but /home/you/sarati/.env does not hold its keys`. A one-container install keeps its keys inside the data volume, so the two cannot be
+old one stored. A `.env` that is there but lacks any of `SECRET_KEY`, `FERNET_KEY` and
+`POSTGRES_PASSWORD` is refused the same way, with `…but /home/you/sarati/.env does not hold its keys`. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
 To keep what it stores, restore that install's `.env` into the directory you are installing to and

@@ -155,13 +155,8 @@ recorded_shape() {
   echo "$kind"
 }
 
-# Prints the five-container keys neither the .env here nor the environment holds.
-lacking() {
-  for key in SECRET_KEY FERNET_KEY POSTGRES_PASSWORD; do
-    eval "value=\${$key:-}"
-    [ -n "$value" ] || [ -n "$(setting "$key")" ] || echo "$key"
-  done
-}
+# Prints the five-container keys the .env here does not hold.
+lacking() { for key in SECRET_KEY FERNET_KEY POSTGRES_PASSWORD; do [ -n "$(setting "$key")" ] || echo "$key"; done; }
 
 # Succeeds when no .env here holds the keys to $project's database, or there is no .env here at all.
 keyless() { [ ! -f .env ] || { has_database "$project" && [ -n "$(lacking)" ]; }; }
@@ -338,7 +333,7 @@ listed() { echo "$1" | sed 's/ /, /g'; }
 shape() { if [ "$1" = single ]; then echo one-container; else echo five-container; fi; }
 
 # Prints the command that copies the .env in directory $1 here, as private and writable as one this writes.
-copy() { printf 'cp %s %s/.env && chmod 600 %s/.env && ' "$(shq "$1/.env")" "$here" "$here"; }
+copy() { printf 'cp -f %s %s/.env && chmod 600 %s/.env && ' "$(shq "$1/.env")" "$here" "$here"; }
 
 warn_left() {
   [ -z "$left" ] || printf '%s\n' "$left" | while read -r dir; do
@@ -608,13 +603,6 @@ elif [ -z "$kept_stack" ] && printf '%s\n' "$volumes" | grep -qx "$project data"
   kept_stack=single
   why="The install named $project keeps one-container data"
 fi
-stack=${SARATI_STACK:-${kept_stack:-single}}
-if [ -n "${SARATI_STACK:-}" ] && [ -n "$kept_stack" ] && [ "$SARATI_STACK" != "$kept_stack" ]; then
-  name=$(free_name "$project")
-  die "$why, and SARATI_STACK=$SARATI_STACK would switch it underneath its data — the two store their data differently.
-  To upgrade it, re-run this without SARATI_STACK.
-  To install a $(shape "$SARATI_STACK") one separately:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
-fi
 held_stack=""
 if has_database "$project" && ! printf '%s\n' "$volumes" | grep -qx "$project data"; then
   held_stack=compose
@@ -624,12 +612,19 @@ fi
 if [ -n "$kept_stack" ] && [ -n "$held_stack" ] && [ "$kept_stack" != "$held_stack" ]; then
   if [ -n "$from" ]; then
     name=$(free_name "$project")
-    [ -n "${SARATI_STACK:-}" ] || keep="SARATI_STACK=$kept_stack $keep"
     die "$why, but the install named $project keeps $(shape "$held_stack") data — the two store their data differently.
-  To install a $(shape "$kept_stack") one separately:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
+  To install a $(shape "$kept_stack") one separately:  $(again "SARATI_STACK=$kept_stack ${given%%SARATI_PORT=*}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
   fi
   die "$why, but the install named $project keeps $(shape "$held_stack") data — the two store their data differently.
   If this .env belongs to another install, re-run this with COMPOSE_PROJECT_NAME set to its name, or to a new one:  $(again COMPOSE_PROJECT_NAME="$(free_name "$project")" SARATI_DIR="$here")"
+fi
+
+stack=${SARATI_STACK:-${kept_stack:-single}}
+if [ -n "${SARATI_STACK:-}" ] && [ -n "$kept_stack" ] && [ "$SARATI_STACK" != "$kept_stack" ]; then
+  name=$(free_name "$project")
+  die "$why, and SARATI_STACK=$SARATI_STACK would switch it underneath its data — the two store their data differently.
+  To upgrade it, re-run this without SARATI_STACK.
+  To install a $(shape "$SARATI_STACK") one separately:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
 fi
 
 kept_port=$(setting SARATI_PORT)
@@ -681,13 +676,14 @@ if [ "$stack" = compose ] && has_database "$project" && { [ ! -f .env ] || [ -n 
   To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")$erase"
 fi
 
-fix=$(unlock "$(pwd)")
-[ -z "$fix" ] ||
-  die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  $fix"
 missing_keys=""
 [ "$stack" != compose ] || [ ! -f .env ] || missing_keys=$(lacking | paste -sd ' ' -)
-[ -z "$missing_keys" ] || [ -w .env ] ||
-  die "$(pwd)/.env is read-only, and this needs to write $missing_keys into it. Make it writable:  chmod u+w $here/.env"
+fix=$(unlock "$(pwd)")
+if [ -n "$missing_keys" ] && [ ! -w .env ]; then
+  die "$(pwd)/.env is read-only, and this needs to write $missing_keys${fix:+ and COMPOSE_PROJECT_NAME=$project} into it. Make it writable:  chmod u+w $here/.env"
+fi
+[ -z "$fix" ] ||
+  die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  $fix"
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"
