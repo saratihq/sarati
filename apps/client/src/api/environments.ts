@@ -3,7 +3,7 @@
 // a pool connection. Slots are references — assignment never moves the connection.
 
 import { apiBaseUrl } from "@/lib/config";
-import { ApiError, getActiveOrgId, getAuthToken } from "./client";
+import { ApiError, sessionHeaders } from "./client";
 
 const API_BASE = apiBaseUrl + "/api";
 
@@ -73,14 +73,11 @@ export class RenameMovesUrlsError extends ApiError {
 
 // Mirrors client.ts's request(), plus the parsed error bodies this surface needs (the 409 `references` and `url_changes` payloads).
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = await getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...(await sessionHeaders()),
     ...(options?.headers as Record<string, string>),
   };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const activeOrgId = getActiveOrgId();
-  if (activeOrgId && !headers["X-Org-Id"]) headers["X-Org-Id"] = activeOrgId;
 
   let res: Response;
   try {

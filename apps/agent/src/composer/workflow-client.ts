@@ -353,6 +353,7 @@ export class WorkflowServiceClient {
         method,
         headers: {
           Authorization: `Bearer ${bearer}`,
+          ...(caller.orgId ? { 'X-Org-Id': caller.orgId } : {}),
           ...(caller.address ? { 'X-Forwarded-For': caller.address } : {}),
           ...(jsonBody !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },

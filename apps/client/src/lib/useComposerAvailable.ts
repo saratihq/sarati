@@ -4,9 +4,8 @@ import { useEffect, useState } from "react";
 import { composerStatus, type ComposerAvailability } from "@/api/agent";
 
 /**
- * Whether this instance has the AI composer, probed ONCE per page load and
- * shared by every entry point — it is a property of the deployment, not of the
- * user or the workflow.
+ * Whether the composer is available to you in the active workspace (whose Anthropic key it uses),
+ * probed ONCE per page load and shared by every entry point; switching workspace reloads the page.
  *
  * `null` means "still probing": callers render the composer as neither present
  * nor refused, so a slow probe never flashes a disabled state at an install

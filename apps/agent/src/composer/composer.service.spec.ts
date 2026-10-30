@@ -1793,10 +1793,13 @@ describe('WorkflowServiceClient credentials', () => {
     expect(seen).toEqual(['Bearer ork_test']);
   });
 
-  it("carries the visitor's address on every call, so the service counts their limits, not this process's", async () => {
+  async function headerOnEachCall(
+    header: string,
+    calls: (client: WorkflowServiceClient) => Promise<void>,
+  ): Promise<Array<string | undefined>> {
     const seen: Array<string | undefined> = [];
     const service = createServer((req, res) => {
-      seen.push(req.headers['x-forwarded-for'] as string | undefined);
+      seen.push(req.headers[header] as string | undefined);
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ results: [] }));
     });
     await new Promise<void>((resolve) => service.listen(0, '127.0.0.1', resolve));
@@ -1806,13 +1809,29 @@ describe('WorkflowServiceClient credentials', () => {
       workflowServiceUrl: `http://127.0.0.1:${(service.address() as AddressInfo).port}`,
     });
     try {
-      await client.searchCatalog('slack', 5, { token: 'jwt', address: '203.0.113.9' });
-      await client.listConnections({ token: 'jwt', address: '2001:db8:a:b::7' });
-      await client.searchCatalog('slack', 5, { token: 'jwt' });
+      await calls(client);
     } finally {
       await new Promise((resolve) => service.close(resolve));
     }
+    return seen;
+  }
+
+  it("carries the visitor's address on every call, so the service counts their limits, not this process's", async () => {
+    const seen = await headerOnEachCall('x-forwarded-for', async (client) => {
+      await client.searchCatalog('slack', 5, { token: 'jwt', address: '203.0.113.9' });
+      await client.listConnections({ token: 'jwt', address: '2001:db8:a:b::7' });
+      await client.searchCatalog('slack', 5, { token: 'jwt' });
+    });
     expect(seen).toEqual(['203.0.113.9', '2001:db8:a:b::7', undefined]);
+  });
+
+  it("runs every call in the caller's workspace, and in their personal one when they name none", async () => {
+    const seen = await headerOnEachCall('x-org-id', async (client) => {
+      await client.searchCatalog('slack', 5, { token: 'jwt', orgId: 'org_team' });
+      await client.listConnections({ token: 'jwt', orgId: 'org_team' });
+      await client.searchCatalog('slack', 5, { token: 'jwt', orgId: null });
+    });
+    expect(seen).toEqual(['org_team', 'org_team', undefined]);
   });
 });
 
