@@ -29,8 +29,10 @@ below.
 
 | | |
 |---|---|
+| `COMPOSE_PROJECT_NAME` | This install's name. `docker compose` in this directory acts on it, and its volumes are named after it, so changing it points at a different, empty install. |
+| `SARATI_STACK` | `single` or `compose`: the shape the install was built with, which the installer keeps. |
 | `SARATI_URL` | The one origin everything is reached through. |
-| `SARATI_PORT` | Host port for the proxy. Default `8080`. |
+| `SARATI_PORT` | Host port for the proxy, 1 to 65535, optionally after an IP address to listen on, like `127.0.0.1:8080`. Default `8080`. |
 | `SARATI_VERSION` | Image tag. Default `latest`. |
 | `SECRET_KEY` | Signs sessions. Rotating it signs everyone out. |
 | `FERNET_KEY` | Encrypts stored credentials. **Lose it and they are unrecoverable.** |

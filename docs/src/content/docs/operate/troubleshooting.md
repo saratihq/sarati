@@ -11,31 +11,176 @@ Every message on this page is one the product actually prints.
 error: Port 8080 is already in use. Re-run with SARATI_PORT=9090 (or any free port).
 ```
 
-Either Sarati is already running — stop it before [upgrading](/operate/upgrades/) — or something
-else owns the port. Pick another with `SARATI_PORT`.
+Something else holds the port: another program, or another install. The install being upgraded
+never counts, because its own container publishing the port is not a conflict. Pick another port
+with `SARATI_PORT`. For an install that already has a `.env`, the message says to set `SARATI_PORT`
+there instead, with `SARATI_URL` to match, so later upgrades keep the port. A port given on an
+address, like `127.0.0.1:8080`, gets a suggestion on the same address.
+
+```
+error: /home/you/sarati/.env sets SARATI_PORT=8080, and SARATI_PORT=9090 would override it while SARATI_URL stays as it is.
+```
+
+An install's port is its `.env`'s. A different `SARATI_PORT` on the command line would publish the
+new port while sign-in and webhook URLs still name the old one, so change it in the `.env`, with
+`SARATI_URL` to match, and re-run without it.
+
+```
+error: SARATI_PORT takes a port, optionally after an IP address like 127.0.0.1: or [::1]:, not 'localhost:8080'.
+```
+
+A port outside 1 to 65535, or written with a leading zero, and an address that is not an IP address
+are refused before anything is downloaded. When the value comes from a `.env`, the message names
+that `.env`.
 
 ## The installer refuses because the database outlived its `.env`
 
 ```
-error: A Sarati database already exists on this machine, but its .env is gone — these new
-secrets would not match it.
+error: A Sarati database already exists on this machine, but its .env is gone — new secrets would not match it.
 ```
 
 This is a guard, not a bug, and only a five-container install can reach it: fresh secrets against an
 old database give Postgres a password it never had, and a new `FERNET_KEY` cannot decrypt what the
-old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
+old one stored. A `.env` that is there but lacks any of `SECRET_KEY`, `FERNET_KEY` and
+`POSTGRES_PASSWORD` is refused the same way, with `…but /home/you/sarati/.env does not hold its keys`. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
-Restore the `.env` if you have it. To run a **second** instance alongside the first:
+To keep what it stores, restore that install's `.env` into the directory you are installing to and
+run the command the message gives. To leave that database alone and run a separate install beside
+it:
 
 ```bash
-COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
+COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
 To erase the old database and start over:
 
 ```bash
 docker volume rm sarati_db-data
+```
+
+When that install's containers were started from the directory you are installing to, the message
+gives the command that removes them first. When they were started from another directory, it names
+that directory and gives no erase command, because that install still uses the database. To erase it
+anyway, remove its containers first:
+
+```bash
+docker rm -f $(docker ps -aq --filter label=com.docker.compose.project=sarati)
+```
+
+## The installer refuses to take over another install
+
+```
+error: The install named sarati runs from /home/you/sarati — installing it here would take it over.
+```
+
+Every install has a name, `sarati` unless you gave it another, and runs from one directory. Running
+the installer from a second directory under the same name would move that install, data and all,
+under the new directory's settings. The message gives the command that installs a separate one
+under a name and port nothing else uses, and the one that upgrades it from its own directory when
+that would work. When that directory names no install, it also gives the command that moves it
+here, copying its `.env` across first when it has one, so it keeps its port and settings. After a
+move, it says to remove the old directory's `docker-compose.yaml`, because `docker compose` there
+would still act on the install, or, when another install was also started there, gives the command
+that names that one instead.
+
+```
+error: The install named sarati is not running, but its data is kept — installing it here would take it over.
+```
+
+The same guard, for an install removed with `docker compose down`: its containers are gone, its data
+is not. Start it again from its own directory, or move its `.env` and `docker-compose.yaml` here and
+run the command the message gives. If the directory is gone, the message gives the command that
+starts it from here, on the port you asked for; a five-container install needs its `.env` put back
+first, because it holds the keys to its database.
+
+```
+error: The install named sarati was started from /home/you/sarati, which no longer exists — installing it here would take it over.
+```
+
+The same guard, for an install whose directory was moved or deleted while its containers kept
+running. If you moved it, run the installer in its new place. To bring it here instead, the message
+says to move its `.env` and `docker-compose.yaml` across first, so it keeps its settings, and gives
+the command that starts it here afresh only for a directory that is truly gone.
+
+```
+error: /home/you/sarati did not exist until this run made it, but the install named sarati was started there.
+```
+
+The installer was pointed at the directory an install was moved away from. Nothing is written, and
+the directory the run made is removed. Run it in the directory the install was moved to, or move
+that directory back and run it again; either way the install keeps its settings. Only when the
+directory is truly gone does the message give the command that starts the install there afresh,
+after its `.env` is restored for a five-container install.
+
+```
+error: /home/you/sarati/.env records a one-container install, but the install named sarati keeps five-container data — the two store their data differently.
+```
+
+A `.env` whose shape contradicts the data of the install it would be taken for is refused, rather
+than starting an empty install under that name. When the `.env` names no install, the message
+gives the command that names it as its own; otherwise, the command that installs that shape
+separately.
+
+```
+error: /home/you/sarati-2/.env names this install sarati-2, not other.
+```
+
+A directory keeps the name it was installed with. Re-run without `COMPOSE_PROJECT_NAME` to upgrade it.
+
+### After the old second-instance instructions
+
+The installer used not to save a second install's name, so `docker compose` in its directory acted
+on the first install instead: `down` stopped the first, and `up -d` restarted it from the second
+directory. Run the installer for the first install's own directory first, then for each of the
+others. It saves each install's name as it goes, and asks when it cannot tell:
+
+```bash
+SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
+
+```
+error: /home/you/sarati/.env names no install, and it could belong to sarati (runs from /home/you/sarati-2).
+```
+
+Name it, which moves the first install back:
+
+```bash
+COMPOSE_PROJECT_NAME=sarati SARATI_DIR=/home/you/sarati sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
+
+It then gives the command that names the second directory's install, which is the next step:
+
+```
+warning: docker compose in /home/you/sarati-2 would act on this install, though sarati-2 also started there.
+  To name it there:  COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
+```
+
+Starting from the second directory instead can give:
+
+```
+error: /home/you/sarati-2 could hold more than one install: sarati, sarati-2.
+```
+
+or, when the first install holds the second's port:
+
+```
+error: Port 9090 is held by the install named sarati, which was also started from /home/you/sarati-2.
+```
+
+Either way, run the command above that names `sarati`, which moves the first install back, then the
+one that names `sarati-2`.
+
+A second install whose directory was moved since is asked about by the directory it left:
+
+```
+error: /home/you/apps/sarati-2/.env names no install, and it could belong to sarati-2 (started from /home/you/sarati-2, which no longer exists).
+```
+
+Name it there, and its containers move with it:
+
+```bash
+COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/apps/sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
 ## A webhook returns 404

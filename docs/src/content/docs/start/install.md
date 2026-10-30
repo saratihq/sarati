@@ -72,11 +72,16 @@ container leaves the volume alone — that is how you [upgrade](/operate/upgrade
 
 ## Run a second instance
 
-One machine can hold several installs, each with its own database:
+One machine can hold several installs, each with its own name, directory and database:
 
 ```bash
 COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=sarati-2 SARATI_PORT=9090 sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
+
+The installer saves the name in `sarati-2/.env`, so `docker compose` run there acts on that install
+alone, and `SARATI_DIR=sarati-2 sh -c 'curl -fsSL https://get.sarati.io | sh'`, run from the same
+place, upgrades it without the name. Given no name, the installer
+refuses rather than take over another install, running or not.
 
 ## The pieces apart
 
@@ -90,11 +95,12 @@ SARATI_STACK=compose sh -c 'curl -fsSL https://get.sarati.io | sh'
 
 That fetches [`docker-compose.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.yaml)
 instead and starts five containers, generating `SECRET_KEY`, `FERNET_KEY` and `POSTGRES_PASSWORD`
-into `.env`. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
+into `.env`, or adding them to a `.env` you wrote yourself. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
 
 An install that already exists keeps the shape it was built with, so re-running the installer over a
 five-container install stays on five. The two store their data differently; nothing switches
-underneath you.
+underneath you, and asking for the other shape over it is refused with the command that installs
+that shape separately.
 
 ## What is running
 
