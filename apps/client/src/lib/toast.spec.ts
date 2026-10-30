@@ -122,3 +122,47 @@ describe("toast.undoable", () => {
     expect(second.onUndo).not.toHaveBeenCalled();
   });
 });
+
+describe("toast.undoable: leaving the page", () => {
+  const handlers = () => ({ onCommit: vi.fn(), onUndo: vi.fn() });
+  const leavePage = () => window.dispatchEvent(new Event("pagehide"));
+
+  it("commits an open window once when the page is left, and its timer adds nothing", () => {
+    const h = handlers();
+    toast.undoable("Rejected", undefined, h);
+    leavePage();
+
+    expect(h.onCommit).toHaveBeenCalledTimes(1);
+    expect(toasts()).toEqual([]);
+
+    vi.advanceTimersByTime(AUTO_DISMISS_MS * 2);
+    expect(h.onCommit).toHaveBeenCalledTimes(1);
+    expect(h.onUndo).not.toHaveBeenCalled();
+  });
+
+  it("never commits a window that was undone", () => {
+    const h = handlers();
+    toast.undoable("Rejected", undefined, h);
+    toasts()[0].action?.onClick();
+    leavePage();
+
+    expect(h.onUndo).toHaveBeenCalledTimes(1);
+    expect(h.onCommit).not.toHaveBeenCalled();
+  });
+
+  it("commits every window still open, and none already closed", () => {
+    const closed = handlers();
+    const first = handlers();
+    const second = handlers();
+    toast.undoable("Closed", undefined, closed);
+    useToasts.getState().dismiss(toasts()[0].id);
+    toast.undoable("First", undefined, first);
+    toast.undoable("Second", undefined, second);
+    leavePage();
+
+    expect(closed.onCommit).toHaveBeenCalledTimes(1);
+    for (const open of [first, second]) {
+      expect(open.onCommit).toHaveBeenCalledTimes(1);
+    }
+  });
+});

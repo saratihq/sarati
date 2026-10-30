@@ -15,7 +15,7 @@ export interface ToastItem {
   description?: string;
   /** Inline action button (e.g. Undo) rendered beside the text. */
   action?: { label: string; onClick: () => void };
-  /** Fires exactly once, when the toast leaves the stack (timeout or ✕). */
+  /** Fires exactly once, when the toast leaves the stack (timeout, ✕, or the page leaving under an Undo window). */
   onDismiss?: () => void;
 }
 
@@ -27,6 +27,13 @@ interface ToastState {
 }
 
 let nextId = 1;
+
+const leaveHandlers = new Map<number, () => void>();
+let watchingPageHide = false;
+
+function leaveAll(): void {
+  for (const leave of [...leaveHandlers.values()]) leave();
+}
 
 export const useToasts = create<ToastState>((set, get) => ({
   toasts: [],
@@ -52,7 +59,7 @@ export const toast = {
   info: (title: string, description?: string) => useToasts.getState().push("info", title, description),
   warning: (title: string, description?: string) => useToasts.getState().push("warning", title, description),
   dismiss: (id: number) => useToasts.getState().dismiss(id),
-  /** Undo window: commits only when the toast leaves un-undone. Exactly one of onCommit/onUndo runs. */
+  /** Undo window: commits only when the toast leaves un-undone, or the page goes away first. Exactly one of onCommit/onUndo runs. */
   undoable: (title: string, description: string | undefined, handlers: { onCommit: () => void; onUndo: () => void }) => {
     const id = nextId++;
     let undone = false;
@@ -72,9 +79,16 @@ export const toast = {
       },
       onDismiss: () => {
         clearTimeout(timer);
+        leaveHandlers.delete(id);
         if (!undone) handlers.onCommit();
       },
     };
     useToasts.setState((s) => ({ toasts: [...s.toasts, item] }));
+    // Leaving is not an undo: the timer dies with the page, so the window closes and commits now.
+    leaveHandlers.set(id, () => useToasts.getState().dismiss(id));
+    if (!watchingPageHide) {
+      window.addEventListener("pagehide", leaveAll);
+      watchingPageHide = true;
+    }
   },
 };

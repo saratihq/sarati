@@ -63,6 +63,27 @@ export async function getAuthToken(): Promise<string | null> {
   }
 }
 
+/** Who a request is sent as, and in which workspace. */
+export interface Sender {
+  /** The bearer token, null when signed out. */
+  token: string | null;
+  /** The workspace, null for personal. */
+  orgId: string | null;
+}
+
+/** The sender a request made now would carry, for a decision sent later as it was made. */
+export async function currentSender(): Promise<Sender> {
+  const orgId = getActiveOrgId();
+  return { token: await getAuthToken(), orgId };
+}
+
+function senderHeaders({ token, orgId }: Sender): Record<string, string> {
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(orgId ? { "X-Org-Id": orgId } : {}),
+  };
+}
+
 /** End the session — the local one if there is one, else Clerk's. */
 export async function signOut(): Promise<void> {
   if (typeof window === "undefined") return;
@@ -140,24 +161,23 @@ function handleUnauthorized(code: string | undefined): void {
 
 /** The caller's bearer token and, for a team workspace, its X-Org-Id; the personal workspace sends none. */
 export async function sessionHeaders(): Promise<Record<string, string>> {
-  const token = await getAuthToken();
-  const orgId = getActiveOrgId();
-  return {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(orgId ? { "X-Org-Id": orgId } : {}),
-  };
+  return senderHeaders(await currentSender());
 }
 
 /** Shared fetch: auth + org headers, ApiError translation. Exported for sibling API modules. */
 export async function request<T>(
   path: string,
   options?: RequestInit,
-  /** Sign-in calls set false: their 401 IS the answer, and bouncing would wipe the form's error. */
-  config?: { redirectOn401?: boolean },
+  config?: {
+    /** Sign-in calls set false: their 401 IS the answer, and bouncing would wipe the form's error. */
+    redirectOn401?: boolean;
+    /** Sends as this sender instead of the live session and workspace; its 401 says nothing about the live session. */
+    as?: Sender;
+  },
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(await sessionHeaders()),
+    ...senderHeaders(config?.as ?? (await currentSender())),
     ...(options?.headers as Record<string, string>),
   };
   let res: Response;
@@ -182,7 +202,7 @@ export async function request<T>(
         ? (body as { code?: unknown }).code
         : undefined;
     const code = typeof rawCode === "string" ? rawCode : undefined;
-    if (res.status === 401 && config?.redirectOn401 !== false) {
+    if (res.status === 401 && config?.redirectOn401 !== false && !config?.as) {
       handleUnauthorized(code);
     }
     throw new ApiError(
@@ -1525,15 +1545,25 @@ export async function listWaitingRuns(
   return request(`/runs/waiting${q}`);
 }
 
+/** How a run event is sent: as whom, and whether it must outlive the page. */
+export interface RunEventOptions {
+  /** Who decided, and where; left out, the live session in the active workspace. */
+  as?: Sender;
+  /** Sent even as the page unloads. */
+  keepalive?: boolean;
+}
+
 /** Answer one of a run's waits (e.g. an approval decision): the named step, else the oldest on the topic. */
 export async function sendRunEvent(
   runId: string,
   body: { topic: string; step_key?: string; payload?: unknown },
+  opts?: RunEventOptions,
 ): Promise<void> {
-  await request(`/runs/${encodeURIComponent(runId)}/events`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  await request(
+    `/runs/${encodeURIComponent(runId)}/events`,
+    { method: "POST", body: JSON.stringify(body), keepalive: opts?.keepalive },
+    { as: opts?.as },
+  );
 }
 
 // ─── Publish / Restore (Save ≠ Live) ───

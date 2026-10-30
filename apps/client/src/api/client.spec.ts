@@ -4,8 +4,10 @@ import {
   absoluteApiUrl,
   asBranchMoved,
   completeOidcSignIn,
+  currentSender,
   getActiveOrgId,
   request,
+  sendRunEvent,
   setActiveOrgId,
   signOut,
   startOidcSignIn,
@@ -124,6 +126,65 @@ describe("request: URL building and headers", () => {
     const personal = mockFetch(jsonResponse(200, {}));
     await request("/x");
     expect(headersOf(personal)["X-Org-Id"]).toBeUndefined();
+  });
+});
+
+describe("sendRunEvent", () => {
+  const body = { topic: "approval", step_key: "approve", payload: { decision: "rejected" } };
+  const decidedAs = { token: "decided", orgId: "org_a" };
+
+  it("lets a decision sent as the page unloads outlive it", async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { status: "sent", step_key: "approve" }));
+    await sendRunEvent("u-1:r-1", body, { keepalive: true });
+
+    expect(requestedUrl(fetchMock)).toBe(`${API}/runs/u-1%3Ar-1/events`);
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", keepalive: true, body: JSON.stringify(body) });
+  });
+
+  it("sends as the decision was made, whatever session and workspace are live now", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    setActiveOrgId("org_b");
+    const pinned = mockFetch(jsonResponse(200, {}));
+    await sendRunEvent("u-1:r-1", body, { as: decidedAs });
+    expect(headersOf(pinned)).toMatchObject({ Authorization: "Bearer decided", "X-Org-Id": "org_a" });
+
+    const personal = mockFetch(jsonResponse(200, {}));
+    await sendRunEvent("u-1:r-1", body, { as: { token: "decided", orgId: null } });
+    expect(headersOf(personal)["X-Org-Id"]).toBeUndefined();
+  });
+
+  it("leaves the live session alone when the decision's own credentials are refused", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    mockFetch(jsonResponse(401, { detail: "Token expired", code: "token_expired" }));
+    await expect(sendRunEvent("u-1:r-1", body, { as: decidedAs })).rejects.toMatchObject({ status: 401 });
+    expect(document.cookie).toContain("live");
+    expect(navigatedTo).toEqual([]);
+  });
+
+  it("sends an ordinary request as the live session in the active workspace when given no options", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    setActiveOrgId("org_b");
+    const fetchMock = mockFetch(jsonResponse(200, {}));
+    await sendRunEvent("u-1:r-1", body);
+
+    expect(headersOf(fetchMock)).toMatchObject({ Authorization: "Bearer live", "X-Org-Id": "org_b" });
+    expect(fetchMock.mock.calls[0][1]?.keepalive).toBeFalsy();
+  });
+});
+
+describe("currentSender", () => {
+  it("is the live session in the active workspace", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    setActiveOrgId("org_b");
+    await expect(currentSender()).resolves.toEqual({ token: "live", orgId: "org_b" });
+  });
+
+  it("records the workspace as it was when asked, even if it changes before the token arrives", async () => {
+    document.cookie = `${LOCAL_SESSION_COOKIE}=live; Path=/`;
+    setActiveOrgId("org_b");
+    const asked = currentSender();
+    setActiveOrgId("org_c");
+    await expect(asked).resolves.toEqual({ token: "live", orgId: "org_b" });
   });
 });
 
