@@ -36,12 +36,13 @@ that `.env`.
 ## The installer refuses because the database outlived its `.env`
 
 ```
-error: A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
+error: A Sarati database already exists on this machine, but its .env is gone — new secrets would not match it.
 ```
 
 This is a guard, not a bug, and only a five-container install can reach it: fresh secrets against an
 old database give Postgres a password it never had, and a new `FERNET_KEY` cannot decrypt what the
-old one stored. A one-container install keeps its keys inside the data volume, so the two cannot be
+old one stored. A `.env` that is there but holds none of the keys is refused the same way, with
+`…but /home/you/sarati/.env does not hold its keys`. A one-container install keeps its keys inside the data volume, so the two cannot be
 separated in the first place.
 
 To keep what it stores, restore that install's `.env` into the directory you are installing to and
@@ -98,16 +99,28 @@ error: The install named sarati was started from /home/you/sarati, which no long
 ```
 
 The same guard, for an install whose directory was moved or deleted while its containers kept
-running. If you moved it, run the installer in its new place; the message also gives the command
-that moves the install here instead.
+running. If you moved it, run the installer in its new place. To bring it here instead, the message
+says to move its `.env` and `docker-compose.yaml` across first, so it keeps its settings, and gives
+the command that starts it here afresh only for a directory that is truly gone.
 
 ```
 error: /home/you/sarati did not exist until this run made it, but the install named sarati was started there.
 ```
 
 The installer was pointed at the directory an install was moved away from. Nothing is written, and
-the directory the run made is removed. Run it in the directory the install was moved to, or, to
-start the install from the old place again, re-run it with `COMPOSE_PROJECT_NAME` set to its name.
+the directory the run made is removed. Run it in the directory the install was moved to, or move
+that directory back and run it again; either way the install keeps its settings. Only when the
+directory is truly gone does the message give the command that starts the install there afresh,
+after its `.env` is restored for a five-container install.
+
+```
+error: /home/you/sarati/.env records a one-container install, but the install named sarati keeps five-container data — the two store their data differently.
+```
+
+A `.env` whose shape contradicts the data of the install it would be taken for is refused, rather
+than starting an empty install under that name. When the `.env` names no install, the message
+gives the command that names it as its own; otherwise, the command that installs that shape
+separately.
 
 ```
 error: /home/you/sarati-2/.env names this install sarati-2, not other.

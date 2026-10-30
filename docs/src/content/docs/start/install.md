@@ -95,7 +95,7 @@ SARATI_STACK=compose sh -c 'curl -fsSL https://get.sarati.io | sh'
 
 That fetches [`docker-compose.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.yaml)
 instead and starts five containers, generating `SECRET_KEY`, `FERNET_KEY` and `POSTGRES_PASSWORD`
-into `.env`. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
+into `.env`, or adding them to a `.env` you wrote yourself. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
 
 An install that already exists keeps the shape it was built with, so re-running the installer over a
 five-container install stays on five. The two store their data differently; nothing switches

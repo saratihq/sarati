@@ -125,6 +125,20 @@ for value in 1 65535 127.0.0.1:8080 '[::1]:8080' :::8080 ::ffff:127.0.0.1:8080 '
   says "not 'Invalid'." "SARATI_PORT=$value was refused"
 done
 
+echo '--- a port is probed as text, on the address asked for'
+nowhere=0000000000000000000000000000000000000000
+listen 4096
+refused probe 7683 SARATI_REF=$nowhere
+says 'Could not download docker-compose.single.yaml' 'a free port whose number reads like a held one was refused as in use'
+refused probe 4096
+says 'Port 4096 is already in use.' 'a held port was not refused'
+refused probe 127.0.0.1:4096
+says 'Port 127.0.0.1:4096 is already in use. Re-run with SARATI_PORT=127.0.0.1:' 'a port held on the address asked for was not refused'
+refused probe 127.0.0.2:4096 SARATI_REF=$nowhere
+says 'Could not download docker-compose.single.yaml' 'a port held only on another address was refused as in use'
+unlisten
+[ ! -e "$work/probe" ] || fail 'a refused run left its directory behind'
+
 echo '--- a hand-made .env, before any install, takes the shape asked for'
 mkdir "$work/hand"
 printf 'SARATI_URL=http://localhost:8188\nSARATI_PORT=8188\n' > "$work/hand/.env"
@@ -133,6 +147,12 @@ run_installer hand - SARATI_STACK=single
 container hand >/dev/null
 answers 8188
 on hand down -v >/dev/null
+mkdir "$work/hand5"
+printf 'SARATI_URL=http://localhost:8189\nSARATI_PORT=8189\n' > "$work/hand5/.env"
+run_installer hand5 - SARATI_STACK=compose COMPOSE_PROJECT_NAME=check-hand5
+says 'Wrote SECRET_KEY FERNET_KEY POSTGRES_PASSWORD into' 'the hand-made .env asked for five containers did not get its keys'
+answers 8189
+on hand5 down -v >/dev/null
 
 echo "--- pinned to $old"
 run_installer pinned 8181 COMPOSE_PROJECT_NAME=check-pinned SARATI_VERSION=$old
@@ -179,6 +199,12 @@ run_installer five 8184 COMPOSE_PROJECT_NAME=check-five SARATI_STACK=compose SAR
 says "this install runs Sarati $old" "five containers pinned to $old, the installer did not warn"
 [ "$(running five service)" = "$old" ] || fail "the five-container install is not running $old"
 [ "$(recorded five)" = check-five ] || fail 'the five-container install did not record its name'
+on five down >/dev/null
+mkdir "$work/keyless"
+printf 'SARATI_URL=http://localhost:8187\nSARATI_PORT=8187\n' > "$work/keyless/.env"
+refused keyless - COMPOSE_PROJECT_NAME=check-five
+says "A Sarati database already exists on this machine, but $work/keyless/.env does not hold its keys" 'a .env without the keys was taken for a five-container database'
+[ -z "$(recorded keyless)" ] || fail 'the refused run wrote into the .env'
 on five down -v >/dev/null
 
 echo '--- a first install, by the installer from before names were saved'
@@ -346,17 +372,34 @@ for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati); do
 done
 answers 8191
 
+echo '--- the default install moved away, and a fresh directory given no name'
+mkdir -p "$work/apps"
+mv "$work/fivemover" "$work/apps/fivemover"
+refused fresh -
+says "The install named sarati was started from $work/fivemover, which no longer exists — installing it here would take it over." 'the refusal did not say the directory is gone'
+says 'If you moved its directory, re-run this in the one you moved it to.' 'the refusal did not say where to re-run'
+rm -r "$work/fresh"
+run_installer apps/fivemover -
+for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati); do
+  [ "$(label "$id" project.working_dir)" = "$work/apps/fivemover" ] || fail "the move left $(label "$id" service) labelled with the directory it left"
+done
+answers 8191
+
 echo '--- a five-container second install by the installer from before, its directory moved while it runs'
 before_installer apart 8198 COMPOSE_PROJECT_NAME=sarati-6 SARATI_STACK=compose
-mkdir "$work/apps"
 mv "$work/apart" "$work/apps/apart"
 refused apart -
 says "$work/apart did not exist until this run made it, but the install named sarati-6 was started there." 'the old directory of a moved install was taken for it'
+says 'If you moved that directory, re-run this in the one you moved it to, or move it back and re-run this.' 'the refusal did not say to move it back'
 [ ! -e "$work/apart" ] || fail 'the refusal left behind the directory it made'
 refused apps/apart -
 says "$work/apps/apart/.env names no install, and it could belong to sarati-6 (started from $work/apart, which no longer exists)." 'a moved install was not asked about'
-run_installer apps/apart - COMPOSE_PROJECT_NAME=sarati-6
-[ "$(recorded apps/apart)" = sarati-6 ] || fail 'the moved install did not record its name'
+mv "$work/apps/apart" "$work/apart"
+run_installer apart -
+[ "$(recorded apart)" = sarati-6 ] || fail 'the install moved back did not record its name'
+answers 8198
+mv "$work/apart" "$work/apps/apart"
+run_installer apps/apart -
 [ "$(docker ps -q --filter label=com.docker.compose.project=sarati-6 | wc -l)" -eq 5 ] || fail 'the moved install is not five running containers'
 for id in $(docker ps -aq --filter label=com.docker.compose.project=sarati-6); do
   [ "$(label "$id" project.working_dir)" = "$work/apps/apart" ] || fail "the move left $(label "$id" service) labelled with the directory it left"

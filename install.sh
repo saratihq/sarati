@@ -118,6 +118,11 @@ started_here() {
   printf '%s\n' "$listing" | while read -r name dir; do if is_here "$dir"; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -
 }
 
+# Prints the installs started from this directory before this run made it again.
+remade_here() {
+  printf '%s\n' "$listing" | while read -r name dir; do if gone "$dir" && [ "$dir" -ef . ]; then printf '%s\n' "$name"; fi; done | paste -sd ' ' -
+}
+
 # Prints the installs started from here, and beside one the installs this directory's .env may have held instead.
 found_here() {
   started=$(started_here)
@@ -149,6 +154,17 @@ recorded_shape() {
   [ -n "$kind" ] || [ -z "$(setting POSTGRES_PASSWORD "$1")" ] || kind=compose
   echo "$kind"
 }
+
+# Prints the five-container keys neither the .env here nor the environment holds.
+lacking() {
+  for key in SECRET_KEY FERNET_KEY POSTGRES_PASSWORD; do
+    eval "value=\${$key:-}"
+    [ -n "$value" ] || [ -n "$(setting "$key")" ] || echo "$key"
+  done
+}
+
+# Succeeds when no .env here holds the keys to $project's database, or there is no .env here at all.
+keyless() { [ ! -f .env ] || { has_database "$project" && [ -n "$(lacking)" ]; }; }
 
 # Succeeds unless the .env here records a five-container install.
 may_be_single() { [ "$(recorded_shape .)" != compose ]; }
@@ -237,12 +253,54 @@ free_name() {
   echo "$base-$n"
 }
 
-# Succeeds when something listens on port $1: from Linux's socket table on any address, unless nc can probe the one asked for.
+# Prints, as Linux's socket table spells them in either byte order, the local addresses a bind to address $1 clashes with; none for a wildcard.
+clashes() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    function v4(s,   o) { split(s, o, "."); return sprintf("%02X%02X%02X%02X", o[1], o[2], o[3], o[4]) }
+    function swap(h,   out, i, w) {
+      for (i = 1; i <= length(h); i += 8) { w = substr(h, i, 8); out = out substr(w, 7, 2) substr(w, 5, 2) substr(w, 3, 2) substr(w, 1, 2) }
+      return out
+    }
+    function hex4(g) { g = toupper(g); while (length(g) < 4) g = "0" g; return g }
+    function v6(s,   e, head, tail, hg, tg, nh, nt, i, out, q) {
+      if (index(s, ".")) { match(s, /[0-9.]+$/); q = v4(substr(s, RSTART)); s = substr(s, 1, RSTART - 1) substr(q, 1, 4) ":" substr(q, 5, 4) }
+      e = index(s, "::")
+      if (e) { head = substr(s, 1, e - 1); tail = substr(s, e + 2) } else head = s
+      nh = head == "" ? 0 : split(head, hg, ":")
+      nt = tail == "" ? 0 : split(tail, tg, ":")
+      for (i = 1; i <= nh; i++) out = out hex4(hg[i])
+      for (i = nh + nt; i < 8; i++) out = out "0000"
+      for (i = 1; i <= nt; i++) out = out hex4(tg[i])
+      return out
+    }
+    function both(h) { print h; print swap(h) }
+    {
+      zero = "00000000000000000000000000000000"
+      s = $0
+      sub(/^\[/, "", s)
+      sub(/\]$/, "", s)
+      if (s == "") exit
+      if (index(s, ":") == 0) {
+        if (s == "0.0.0.0") exit
+        print "00000000"; both(v4(s)); print zero; both("00000000000000000000FFFF" v4(s))
+        exit
+      }
+      h = v6(s)
+      if (h == zero) exit
+      print zero; both(h)
+      if (substr(h, 1, 24) == "00000000000000000000FFFF") { print "00000000"; both(substr(h, 25)) }
+    }'
+}
+
+# Succeeds when something listens on port $1 where a bind to the address asked for would clash: from Linux's socket table, else from nc.
 listening() {
   tables=""
   for table in /proc/net/tcp /proc/net/tcp6; do [ ! -r "$table" ] || tables="$tables $table"; done
-  if [ -n "$tables" ] && { [ "$probe" = localhost ] || ! command -v nc >/dev/null 2>&1; }; then
-    LC_ALL=C awk -v port="$(printf '%04X' "$1")" '$4 == "0A" { n = split($2, a, ":"); if (a[n] == port) found = 1 } END { exit !found }' $tables
+  if [ -n "$tables" ]; then
+    LC_ALL=C awk -v port="$(printf '%04X' "$1")" -v want="$clashing" '
+      BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) ok[w[i]] = 1 }
+      $4 == "0A" { split($2, a, ":"); if (a[2] == port "" && (n == 0 || (a[1] in ok))) found = 1 }
+      END { exit !found }' $tables
   else
     command -v nc >/dev/null 2>&1 && nc -z "$probe" "$1" 2>/dev/null
   fi
@@ -337,10 +395,12 @@ refuse() {
   To upgrade it there:  ${fix:+$fix && }$(again SARATI_DIR="$(shq "$1")")"
   fi
   if [ -z "$named$from" ] && (named=$project && [ -z "$(blocker)" ]); then
-    if [ -z "$1" ]; then
+    if [ -z "$1" ] || { gone "$1" && [ ! -f .env ]; }; then
       top=""
+      there="from its directory"
+      [ -z "$1" ] || there="from the directory you moved it to"
       ways="$ways
-  To move it here, move the .env and docker-compose.yaml from its directory into $here, then:  $private$move"
+  To move it here, move the .env and docker-compose.yaml $there into $here, then:  $private$move"
       if has_database "$project"; then
         ways="$ways
   If its directory is gone, restore its .env into $here, then:  $private$move"
@@ -348,11 +408,11 @@ refuse() {
         ways="$ways
   If its directory is gone:  $fresh"
       fi
-    elif [ ! -f .env ] && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
+    elif keyless && [ -r "$1/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$1")" ]; then
       top=""
       ways="$ways
   To move it here with its settings:  $(copy "$1")$move"
-    elif [ ! -f .env ] && has_database "$project"; then
+    elif keyless && has_database "$project"; then
       top=""
       ways="$ways
   To move it here, restore its .env into $here, then:  $private$move"
@@ -435,6 +495,7 @@ made=$(pwd -P)
 [ "$made" != "$top" ] || top=""
 [ ! -e .env ] || [ -r .env ] || die "Cannot read $(pwd)/.env, which holds this install's settings. Re-run this as the user that owns it."
 parent=$(dirname "$(pwd)")
+here=$(shq "$(pwd)")
 
 PORT=${SARATI_PORT:-$(setting SARATI_PORT)}
 PORT=${PORT:-8080}
@@ -448,17 +509,29 @@ case "$port" in "" | 0* | *[!$digits]* | ??????*) badport ;; esac
 case "$bind" in "" | 0.0.0.0 | :: | "[::]") host=localhost ;; \[*) host=$bind ;; *:*) host="[$bind]" ;; *) host=$bind ;; esac
 probe=${host#\[}
 probe=${probe%\]}
+clashing=$(clashes "$bind" | paste -sd ' ' -)
 
 # The compose files pin `name: sarati`; COMPOSE_PROJECT_NAME in .env overrides it for docker compose here.
 named=${COMPOSE_PROJECT_NAME:-}
-revived=$(printf '%s\n' "$listing" | while read -r name dir; do if gone "$dir" && [ "$dir" -ef . ]; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -)
-if [ -n "$revived" ] && [ -z "$named" ]; then
+remade=$(printf '%s\n' "$missing" | while read -r dir; do if [ -n "$dir" ] && [ -e "$dir" ]; then printf '%s\n' "$dir"; fi; done | head -1)
+if [ -n "$remade" ] && [ -z "$named" ]; then
+  revived=$(printf '%s\n' "$listing" | while read -r name dir; do if [ "$dir" = "$remade" ]; then printf '%s\n' "$name"; fi; done | sort -u | paste -sd ' ' -)
+  old=$(shq "$remade")
   case "$revived" in
-    *" "*) who="the installs named $(listed "$revived") were" how="COMPOSE_PROJECT_NAME set to the one that belongs here" ;;
-    *) who="the install named $revived was" how="COMPOSE_PROJECT_NAME=$revived" ;;
+    *" "*)
+      who="the installs named $(listed "$revived") were"
+      lost="If its directory is gone, re-run this with COMPOSE_PROJECT_NAME set to the one that belongs there and SARATI_DIR=$old." ;;
+    *)
+      who="the install named $revived was"
+      lost="If its directory is gone:  $(again "${given}COMPOSE_PROJECT_NAME=$revived" SARATI_DIR="$old")"
+      ! has_database "$revived" ||
+        lost="If its directory is gone, make $old again and restore its .env into it, then:  chmod 600 $old/.env && $(again COMPOSE_PROJECT_NAME="$revived" SARATI_DIR="$old")" ;;
   esac
-  die "$(pwd) did not exist until this run made it, but $who started there.
-  If you moved that directory, re-run this in the one you moved it to. To start it from here instead, re-run this with $how."
+  [ "$remade" -ef . ] || lost="$lost
+  To install a separate one here:  $(again "${keep}COMPOSE_PROJECT_NAME=$(free_name "${revived%% *}")" SARATI_DIR="$here" SARATI_PORT="$(free_port)")"
+  die "$remade did not exist until this run made it, but $who started there.
+  If you moved that directory, re-run this in the one you moved it to, or move it back and re-run this.
+  $lost"
 fi
 recorded=$(setting COMPOSE_PROJECT_NAME)
 from=${recorded:+$(pwd)/.env}
@@ -483,7 +556,6 @@ valid "$project" ||
   die "COMPOSE_PROJECT_NAME${from:+ in $from} takes lowercase letters, digits, dashes and underscores, starting with a letter or digit — not '$project'."
 export COMPOSE_PROJECT_NAME="$project"
 
-here=$(shq "$(pwd)")
 move=$(again COMPOSE_PROJECT_NAME="$project" SARATI_DIR="$here")
 fresh=$(again "${given}COMPOSE_PROJECT_NAME=$project" SARATI_DIR="$here")
 private="chmod 600 $here/.env && "
@@ -543,6 +615,22 @@ if [ -n "${SARATI_STACK:-}" ] && [ -n "$kept_stack" ] && [ "$SARATI_STACK" != "$
   To upgrade it, re-run this without SARATI_STACK.
   To install a $(shape "$SARATI_STACK") one separately:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
 fi
+held_stack=""
+if has_database "$project" && ! printf '%s\n' "$volumes" | grep -qx "$project data"; then
+  held_stack=compose
+elif printf '%s\n' "$volumes" | grep -qx "$project data" && ! has_database "$project"; then
+  held_stack=single
+fi
+if [ -n "$kept_stack" ] && [ -n "$held_stack" ] && [ "$kept_stack" != "$held_stack" ]; then
+  if [ -n "$from" ]; then
+    name=$(free_name "$project")
+    [ -n "${SARATI_STACK:-}" ] || keep="SARATI_STACK=$kept_stack $keep"
+    die "$why, but the install named $project keeps $(shape "$held_stack") data — the two store their data differently.
+  To install a $(shape "$kept_stack") one separately:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")"
+  fi
+  die "$why, but the install named $project keeps $(shape "$held_stack") data — the two store their data differently.
+  If this .env belongs to another install, re-run this with COMPOSE_PROJECT_NAME set to its name, or to a new one:  $(again COMPOSE_PROJECT_NAME="$(free_name "$project")" SARATI_DIR="$here")"
+fi
 
 kept_port=$(setting SARATI_PORT)
 [ -z "${SARATI_PORT:-}" ] || [ -z "$kept_port" ] || [ "$SARATI_PORT" = "$kept_port" ] ||
@@ -567,8 +655,10 @@ case " $(echo $published) " in
     ;;
 esac
 
-if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
+if [ "$stack" = compose ] && has_database "$project" && { [ ! -f .env ] || [ -n "$(lacking)" ]; }; then
   top=""
+  gone_env="its .env is gone"
+  [ ! -f .env ] || gone_env="$(pwd)/.env does not hold its keys"
   kept=$(elsewhere | while read -r dir; do
     if [ -r "$dir/.env" ] && [ -z "$(setting COMPOSE_PROJECT_NAME "$dir")" ]; then printf '%s\n' "$dir" && break; fi
   done)
@@ -579,14 +669,14 @@ if [ "$stack" = compose ] && [ ! -f .env ] && has_database "$project"; then
   To erase that database and start over:  docker volume rm ${project}_db-data"
   if printf '%s\n' "$listing" | grep -q "^$project "; then
     where=$(elsewhere | head -1)
-    case " $(started_here) " in
+    case " $(started_here) $(remade_here) " in
       *" $project "*) erase="
   To erase that database and start over:  docker rm -f \$(docker ps -aq --filter label=com.docker.compose.project=$project) && docker volume rm ${project}_db-data" ;;
       *) erase="${where:+
   The install named $project was started from $where and still uses that database.}" ;;
     esac
   fi
-  die "A Sarati database already exists on this machine, but its .env is gone — these new secrets would not match it.
+  die "A Sarati database already exists on this machine, but $gone_env — new secrets would not match it.
   A new FERNET_KEY cannot decrypt credentials the old one stored. To keep them, restore that .env into $here, then:  $private$move
   To leave it alone and run a separate install beside it:  $(again "${keep}COMPOSE_PROJECT_NAME=$name" SARATI_DIR="$(shq "$parent/$name")" SARATI_PORT="$(free_port)")$erase"
 fi
@@ -594,6 +684,10 @@ fi
 fix=$(unlock "$(pwd)")
 [ -z "$fix" ] ||
   die "$(pwd)/.env is read-only, and this needs to save COMPOSE_PROJECT_NAME=$project in it. Add that line yourself, or make it writable:  $fix"
+missing_keys=""
+[ "$stack" != compose ] || [ ! -f .env ] || missing_keys=$(lacking | paste -sd ' ' -)
+[ -z "$missing_keys" ] || [ -w .env ] ||
+  die "$(pwd)/.env is read-only, and this needs to write $missing_keys into it. Make it writable:  chmod u+w $here/.env"
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"
@@ -607,8 +701,23 @@ else
   done
 fi
 
+# Base64url so the values are safe unquoted in an env file.
+rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"; }
+if [ -n "$missing_keys" ]; then
+  say "Keeping the existing .env, and adding the keys a five-container install needs…"
+  [ -z "$(tail -c 1 .env)" ] || echo >> .env
+  for key in $missing_keys; do
+    case "$key" in
+      SECRET_KEY) echo "SECRET_KEY=$(rand 48)" ;;
+      FERNET_KEY) echo "FERNET_KEY=$(rand 43)=" ;;
+      POSTGRES_PASSWORD) echo "POSTGRES_PASSWORD=$(rand 32)" ;;
+    esac >> .env
+  done
+  chmod 600 .env
+  say "Wrote $missing_keys into $(pwd)/.env — back it up. Losing FERNET_KEY makes stored credentials unrecoverable."
+fi
 if [ -f .env ]; then
-  say "Keeping the existing .env — your keys and data are untouched."
+  [ -n "$missing_keys" ] || say "Keeping the existing .env — your keys and data are untouched."
   if [ -z "$(setting COMPOSE_PROJECT_NAME)" ]; then
     [ -z "$(tail -c 1 .env)" ] || echo >> .env
     echo "COMPOSE_PROJECT_NAME=$project" >> .env
@@ -627,8 +736,6 @@ EOF
   chmod 600 .env
 else
   say "Generating this install's secrets…"
-  # Base64url so the values are safe unquoted in an env file.
-  rand() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1"; }
   cat > .env <<EOF
 SARATI_STACK=compose
 COMPOSE_PROJECT_NAME=${project}
