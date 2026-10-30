@@ -1,11 +1,15 @@
 // agent-service (:8010) client — the composer's SSE streams over fetch+ReadableStream, since EventSource
-// can't POST. Every request carries the Clerk JWT; every frame carries a seq (`id:` line) = the replay key.
+// can't POST. Every request carries agentHeaders(); every frame carries a seq (`id:` line) = the replay key.
 
-import { getActiveOrgId, getAuthToken } from "@/api/client";
+import { sessionHeaders } from "@/api/client";
 import { agentBaseUrl } from "@/lib/config";
 
 // Resolved in @/lib/config, which fails a production build when NEXT_PUBLIC_AGENT_URL is unset.
 const AGENT_BASE = agentBaseUrl + "/api";
+
+async function agentHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+  return { ...extra, ...(await sessionHeaders()) };
+}
 
 /** Why the composer is off. `unreachable` is ours — the others are the service's own reasons. */
 export type ComposerDisabledReason =
@@ -45,15 +49,7 @@ const UNREACHABLE: ComposerAvailability = {
 export async function composerStatus(signal?: AbortSignal): Promise<ComposerAvailability> {
   let res: Response;
   try {
-    const token = await getAuthToken();
-    const orgId = getActiveOrgId();
-    res = await fetch(`${AGENT_BASE}/composer/status`, {
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(orgId ? { "X-Org-Id": orgId } : {}),
-      },
-      signal,
-    });
+    res = await fetch(`${AGENT_BASE}/composer/status`, { headers: await agentHeaders(), signal });
   } catch {
     return UNREACHABLE;
   }
@@ -171,10 +167,9 @@ export function composerStream(
 
 /** Clear the caller's conversation for a workflow (or the pre-save scratch thread). */
 export async function composerClear(opts: { workflowId?: string; scratch?: boolean }): Promise<{ cleared: boolean }> {
-  const token = await getAuthToken();
   const res = await fetch(`${AGENT_BASE}/composer/clear`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    headers: await agentHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ workflow_id: opts.workflowId, scratch: opts.scratch === true }),
   });
   if (!res.ok) throw new Error(`clear failed (${res.status})`);
@@ -199,14 +194,9 @@ async function* sse(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): AsyncGenerator<SequencedComposerEvent> {
-  const token = await getAuthToken();
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: await agentHeaders({ "Content-Type": "application/json", Accept: "text/event-stream" }),
     body: JSON.stringify(body),
     signal,
   });
@@ -237,11 +227,11 @@ async function* sse(
 
 /** Long-turn token refresh: hand the session a fresh Clerk JWT while a turn streams. */
 export async function refreshSessionToken(sessionId: string): Promise<void> {
-  const token = await getAuthToken();
-  if (!token) return;
+  const headers = await agentHeaders({ "Content-Type": "application/json" });
+  if (!headers.Authorization) return;
   await fetch(`${AGENT_BASE}/composer/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers,
     body: JSON.stringify({ session_id: sessionId }),
   }).catch(() => {
     // Best effort — the next /answer or /stream refreshes it anyway.
@@ -254,13 +244,9 @@ export async function answerQuestion(params: {
   questionId: string;
   answer: string;
 }): Promise<void> {
-  const token = await getAuthToken();
   const res = await fetch(`${AGENT_BASE}/composer/answer`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: await agentHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       session_id: params.sessionId,
       question_id: params.questionId,

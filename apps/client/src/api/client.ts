@@ -138,6 +138,16 @@ function handleUnauthorized(code: string | undefined): void {
   }
 }
 
+/** The caller's bearer token and, for a team workspace, its X-Org-Id; the personal workspace sends none. */
+export async function sessionHeaders(): Promise<Record<string, string>> {
+  const token = await getAuthToken();
+  const orgId = getActiveOrgId();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(orgId ? { "X-Org-Id": orgId } : {}),
+  };
+}
+
 /** Shared fetch: auth + org headers, ApiError translation. Exported for sibling API modules. */
 export async function request<T>(
   path: string,
@@ -145,18 +155,11 @@ export async function request<T>(
   /** Sign-in calls set false: their 401 IS the answer, and bouncing would wipe the form's error. */
   config?: { redirectOn401?: boolean },
 ): Promise<T> {
-  const token = await getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...(await sessionHeaders()),
     ...(options?.headers as Record<string, string>),
   };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  const orgId = getActiveOrgId();
-  if (orgId) {
-    headers["X-Org-Id"] = orgId;
-  }
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
