@@ -10,12 +10,13 @@ import type { OrgSummary } from "@/api/client";
 interface OrgState {
   orgs: OrgSummary[];
   loaded: boolean;
-  isLoading: boolean;
   /** Mirror of the persisted selection. null = personal (no X-Org-Id sent). */
   activeOrgId: string | null;
 
+  /** Never rejects: resolves when the load ends, waiting for one already in flight; `loaded` turns true on the first load that works and stays true. */
   fetchOrgs: (opts?: { force?: boolean }) => Promise<void>;
-  switchOrg: (id: string) => void;
+  /** `stay` reloads the current address instead of going to the dashboard. */
+  switchOrg: (id: string, opts?: { stay?: boolean }) => void;
   createAndSwitch: (name: string) => Promise<void>;
 }
 
@@ -26,6 +27,11 @@ export function activeOrgOf(s: Pick<OrgState, "orgs" | "activeOrgId">): OrgSumma
     if (found) return found;
   }
   return s.orgs.find((o) => o.is_personal) ?? null;
+}
+
+/** The name a workspace goes by in the app. */
+export function orgLabel(o: Pick<OrgSummary, "is_personal" | "name">): string {
+  return o.is_personal ? "Personal" : o.name;
 }
 
 /**
@@ -45,42 +51,50 @@ export const ENV_POINTER_GATE = {
   test: "Only owners and admins can test a branch under an environment, the same as promoting to it — test it on Default (your connections).",
 } as const;
 
+let pending: Promise<void> | null = null;
+
+async function loadOrgs(set: (partial: Partial<OrgState>) => void): Promise<void> {
+  try {
+    const { orgs } = await api.listOrgs();
+    // Self-heal a stale selection, or every request 403s forever.
+    let active = api.getActiveOrgId();
+    if (active && !orgs.some((o) => o.id === active)) {
+      api.setActiveOrgId(null);
+      active = null;
+    }
+    set({ orgs, loaded: true, activeOrgId: active });
+  } catch (e) {
+    // A stale X-Org-Id can 403 even this call — clear it and retry once.
+    if (e instanceof api.ApiError && e.status === 403 && api.getActiveOrgId()) {
+      api.setActiveOrgId(null);
+      set({ activeOrgId: null });
+      return loadOrgs(set);
+    }
+    // Anything else: degrade quietly — the switcher just won't list orgs.
+  }
+}
+
 export const useOrgs = create<OrgState>((set, get) => ({
   orgs: [],
   loaded: false,
-  isLoading: false,
   activeOrgId: api.getActiveOrgId(),
 
-  fetchOrgs: async (opts) => {
-    const { loaded, isLoading } = get();
-    if (isLoading || (loaded && !opts?.force)) return;
-    set({ isLoading: true });
-    try {
-      const { orgs } = await api.listOrgs();
-      // Self-heal a stale selection, or every request 403s forever.
-      let active = api.getActiveOrgId();
-      if (active && !orgs.some((o) => o.id === active)) {
-        api.setActiveOrgId(null);
-        active = null;
-      }
-      set({ orgs, loaded: true, isLoading: false, activeOrgId: active });
-    } catch (e) {
-      // A stale X-Org-Id can 403 even this call — clear it and retry once.
-      if (e instanceof api.ApiError && e.status === 403 && api.getActiveOrgId()) {
-        api.setActiveOrgId(null);
-        set({ isLoading: false, activeOrgId: null });
-        return get().fetchOrgs(opts);
-      }
-      // Anything else: degrade quietly — the switcher just won't list orgs.
-      set({ isLoading: false });
-    }
+  fetchOrgs: (opts) => {
+    if (pending) return opts?.force ? pending.then(() => get().fetchOrgs(opts)) : pending;
+    if (get().loaded && !opts?.force) return Promise.resolve();
+    pending = loadOrgs(set).finally(() => {
+      pending = null;
+    });
+    return pending;
   },
 
-  switchOrg: (id: string) => {
+  switchOrg: (id, opts) => {
     const target = get().orgs.find((o) => o.id === id);
     // Personal is the server-side fallback — store null so the header is only sent for real orgs.
     api.setActiveOrgId(target?.is_personal ? null : id);
-    window.location.assign("/"); // hard reload: see the note on the interface
+    // A hard reload either way: see the note on the interface.
+    if (opts?.stay) window.location.reload();
+    else window.location.assign("/");
   },
 
   createAndSwitch: async (name: string) => {
