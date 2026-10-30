@@ -9,6 +9,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -104,6 +105,7 @@ describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
         [id, userId],
       );
     }
+    for (const org of [orgId, otherOrgId]) await seedDefaultEnvironments(db, org);
     await db.query(
       `INSERT INTO api_keys (id,user_id,org_id,name,key_hash,prefix,scopes,created_at)
        VALUES (gen_random_uuid(),$1,$2,'invoke',$3,'ork_wt_invok',$6,now()),

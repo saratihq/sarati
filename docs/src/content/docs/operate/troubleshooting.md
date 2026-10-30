@@ -190,7 +190,8 @@ COMPOSE_PROJECT_NAME=sarati-2 SARATI_DIR=/home/you/apps/sarati-2 sh -c 'curl -fs
 ```
 
 No version carrying that trigger is live in that environment. Promote one — a URL exists as soon as
-you save, but it does nothing until something is live behind it. Check the id too.
+you save, but it does nothing until something is live behind it. Check the id too. If the workspace
+has no environment of that name, create it under Integrations → Environments before promoting.
 
 ## A webhook returns 401
 

@@ -27,16 +27,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // sign-in and strand its poll loop.
 let connectInFlight = false;
 
-export type LinkFn = () => Promise<{ connection_id: string; redirect_url: string }>;
-
 /** Hosted-OAuth connect; resolves (never rejects) with an outcome. Must be called inside a click gesture. */
-async function connectManagedApp(appSlug: string, linkFn?: LinkFn): Promise<ConnectOutcome> {
+async function connectManagedApp(appSlug: string): Promise<ConnectOutcome> {
   if (connectInFlight) {
     return { ok: false, reason: "busy" };
   }
   connectInFlight = true;
   try {
-    return await runConnect(linkFn ?? (() => api.createManagedLink(appSlug)));
+    return await runConnect(appSlug);
   } finally {
     connectInFlight = false;
   }
@@ -53,7 +51,7 @@ async function cleanupDeadLink(connectionId: string): Promise<void> {
   }
 }
 
-async function runConnect(linkFn: LinkFn): Promise<ConnectOutcome> {
+async function runConnect(appSlug: string): Promise<ConnectOutcome> {
   // Open first, navigate later — window.open after an await gets blocked.
   const popup = window.open("about:blank", "orchestr-connect", "popup,width=500,height=700");
   if (!popup) {
@@ -62,7 +60,7 @@ async function runConnect(linkFn: LinkFn): Promise<ConnectOutcome> {
 
   let link: { connection_id: string; redirect_url: string };
   try {
-    link = await linkFn();
+    link = await api.createManagedLink(appSlug);
   } catch (e) {
     popup.close();
     return { ok: false, reason: "start-failed", message: e instanceof Error ? e.message : undefined };
@@ -111,14 +109,9 @@ async function runConnect(linkFn: LinkFn): Promise<ConnectOutcome> {
 }
 
 /** connectManagedApp + the ONE set of outcome toasts; returns the connection id, or null (already toasted). */
-export async function connectAppWithFeedback(
-  app: string,
-  appName: string,
-  /** Override the link creator — e.g. an org env-cluster connect instead of a personal one. */
-  linkFn?: LinkFn,
-): Promise<string | null> {
+export async function connectAppWithFeedback(app: string, appName: string): Promise<string | null> {
   const { toast } = await import("@/lib/toast");
-  const outcome = await connectManagedApp(app, linkFn);
+  const outcome = await connectManagedApp(app);
   if (outcome.ok) {
     // Say WHICH account was just linked: a connection authorized against the wrong workspace is
     // healthy in every other respect, and this is the moment that mistake is cheapest to catch.

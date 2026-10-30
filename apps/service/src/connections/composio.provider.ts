@@ -157,8 +157,6 @@ export type ManagedAccountStatus = 'pending' | 'active' | 'expired' | 'failed';
 export interface ComposioLink {
   redirectUrl: string;
   connectedAccountId: string;
-  /** Deletes the account the link created with the key that minted it, which a deleted org no longer has; logs, never throws. */
-  discard: () => Promise<void>;
 }
 
 /** Composio itself failed (network, 5xx, unexpected shape) — a gateway problem, not the caller's. */
@@ -291,15 +289,7 @@ export class ComposioProvider {
     ) {
       throw new ComposioUpstreamError('Composio connect-link response was missing redirect_url');
     }
-    const connectedAccountId = body.connected_account_id;
-    const discard = async (): Promise<void> => {
-      try {
-        await this.deleteAccountWith(apiKey, connectedAccountId);
-      } catch (err) {
-        this.logger.warn(`Composio account ${connectedAccountId} could not be deleted: ${errorMessage(err)}`);
-      }
-    };
-    return { redirectUrl: body.redirect_url, connectedAccountId, discard };
+    return { redirectUrl: body.redirect_url, connectedAccountId: body.connected_account_id };
   }
 
   /** Poll a connected account: INITIALIZING/INITIATED/PENDING → pending, ACTIVE → active, EXPIRED → expired, else failed. */

@@ -13,14 +13,26 @@ import {
   Patch,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { IsIn, IsInt, IsObject, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
+import { DomainError } from '../common/domain-error';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
 import type { PolicyAction } from '../policy/policy.service';
-import { EnvPointersService } from './env-pointers.service';
+import { EnvPointersService, type PromoteTarget } from './env-pointers.service';
 import { VersionsWriteService } from './versions-write.service';
 import { WorkflowLifecycleService } from './workflow-lifecycle.service';
 import { WorkflowsReadService } from './workflows-read.service';
@@ -89,13 +101,28 @@ class RestoreDto {
 }
 
 class PromoteDto {
+  /** The environment by id, which a rename cannot redirect. */
+  @IsOptional()
+  @IsUUID()
+  environment_id?: string | null;
+
+  /** The environment by name, canonicalized; required without `environment_id`. */
+  @ValidateIf((body: PromoteDto) => body.environment_id == null)
   @IsString()
   @MinLength(1)
   @MaxLength(100)
-  environment!: string;
+  environment?: string | null;
 
   @IsString()
   version_id!: string;
+}
+
+function promoteTarget({ environment_id: environmentId, environment }: PromoteDto): PromoteTarget {
+  if (environmentId == null) return { environment: environment as string };
+  if (environment != null) {
+    throw new DomainError('Name the environment by environment_id or by environment, not both', 400);
+  }
+  return { environmentId };
 }
 
 export { CommitDto, PromoteDto, ProtectionDto, PublishDto, RestoreDto, WorkflowUpdateDto };
@@ -209,8 +236,9 @@ export class WorkflowsWriteController {
     @Body() body: PromoteDto,
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
+    const target = promoteTarget(body);
     await this.authorize(req, workflowId, 'deploy');
-    return this.envPointers.promote(workflowId, body.environment, body.version_id, principal);
+    return this.envPointers.promote(workflowId, target, body.version_id, principal);
   }
 
   /** Layout patch: node moves are presentation, not history — the branch head is updated in place, no new version. */

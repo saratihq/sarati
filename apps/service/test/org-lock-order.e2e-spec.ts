@@ -166,16 +166,33 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     asOwner(http().put(`/api/environments/${t.env}/slots/gmail`), t.org).send({ connection_id: gmail });
   const setOrgKey = (t: Team, name: string): request.Test =>
     asOwner(http().put(`/api/platform-keys/${name}`), t.org).send({ value: `${name}-${suffix()}` });
-  const connectCluster = (t: Team): request.Test =>
-    asOwner(http().post(`/api/orgs/${t.org}/clusters/production/connect`)).send({ app: 'slack' });
 
-  // An org's cluster connection and the Composio account its connect made.
+  // A cluster connection an earlier release's connect made in `environment`, and the Composio account it holds.
+  const seedCluster = async (
+    t: Team,
+    environment: string,
+  ): Promise<{ connection: string; account: string }> => {
+    const connection = randomUUID();
+    const account = `ca_lock_${randomUUID()}`;
+    composioAccounts.created.add(account);
+    await db.query(
+      `INSERT INTO connections (id, user_id, provider, auth_type, credential, created_at, status, org_id, environment)
+       VALUES ($1, $2, 'slack', 'managed', $3, now(), 'pending', $4, $5)`,
+      [
+        connection,
+        owner,
+        fernetEncrypt(TEST_FERNET_KEY, JSON.stringify({ connected_account_id: account })),
+        t.org,
+        environment,
+      ],
+    );
+    return { connection, account };
+  };
+
+  // An org's production cluster connection, under the org's own Composio key.
   const clusterIn = async (t: Team): Promise<{ connection: string; account: string }> => {
     await setOrgKey(t, 'composio_api_key').expect(200);
-    const before = new Set(composioAccounts.created);
-    const connection = (await connectCluster(t).expect(201)).body.connection_id as string;
-    const [account] = [...composioAccounts.created].filter((id) => !before.has(id));
-    return { connection, account: account! };
+    return seedCluster(t, 'production');
   };
 
   const kept = async (cluster: { connection: string; account: string }): Promise<unknown> => ({
@@ -328,19 +345,9 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       heldAt: 'org lock',
     },
     {
-      name: 'a cluster connect',
-      prepare: async (t) => {
-        await setOrgKey(t, 'composio_api_key').expect(200);
-      },
-      send: connectCluster,
-      status: 201,
-      heldAt: 'org lock',
-    },
-    {
       name: 'a cluster connection delete',
       prepare: async (t) => {
-        await setOrgKey(t, 'composio_api_key').expect(200);
-        t.cluster = (await connectCluster(t).expect(201)).body.connection_id as string;
+        t.cluster = (await clusterIn(t)).connection;
       },
       send: (t) => asOwner(http().delete(`/api/orgs/${t.org}/clusters/connections/${t.cluster ?? ''}`)),
       status: 200,
@@ -417,7 +424,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       ],
     );
 
-    let account = 0;
     composio = createServer((req, res) => {
       const url = req.url ?? '';
       const json = (status: number, body: unknown): void => {
@@ -426,20 +432,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       };
       req.resume();
       req.on('end', () => {
-        if (req.method === 'GET' && url.startsWith('/api/v3/toolkits')) {
-          json(200, {
-            items: [{ slug: 'slack', name: 'Slack', composio_managed_auth_schemes: ['OAUTH2'] }],
-            next_cursor: null,
-          });
-        } else if (req.method === 'GET' && url.startsWith('/api/v3/auth_configs')) {
-          json(200, { items: [] });
-        } else if (req.method === 'POST' && url === '/api/v3/auth_configs') {
-          json(201, { toolkit: { slug: 'slack' }, auth_config: { id: `ac_lock_${suffix()}` } });
-        } else if (req.method === 'POST' && url === '/api/v3/connected_accounts/link') {
-          const created = `ca_lock_${++account}`;
-          composioAccounts.created.add(created);
-          json(201, { redirect_url: 'https://connect.composio.test/lock', connected_account_id: created });
-        } else if (req.method === 'DELETE' && url.startsWith('/api/v3/connected_accounts/')) {
+        if (req.method === 'DELETE' && url.startsWith('/api/v3/connected_accounts/')) {
           const deleted = decodeURIComponent(url.slice('/api/v3/connected_accounts/'.length));
           void heldByConnection(deleted).then(
             (held) => {
@@ -600,8 +593,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     };
     const cluster = async (): Promise<{ owner: string; connection: string }> => {
       const t = await team('Cluster owner');
-      await setOrgKey(t, 'composio_api_key').expect(200);
-      return { owner: t.org, connection: (await connectCluster(t).expect(201)).body.connection_id as string };
+      return { owner: t.org, connection: (await clusterIn(t)).connection };
     };
 
     const DELETERS: Array<[string, ConnectionDeleter]> = [
@@ -622,18 +614,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
           remove: (owner, connection) =>
             asOwner(http().delete(`/api/orgs/${owner ?? ''}/clusters/connections/${connection}`)),
           status: 200,
-        },
-      ],
-      [
-        "a cluster connect replacing the cluster's connection",
-        {
-          app: 'slack',
-          connect: cluster,
-          remove: (owner) =>
-            asOwner(http().post(`/api/orgs/${owner ?? ''}/clusters/production/connect`)).send({
-              app: 'slack',
-            }),
-          status: 201,
         },
       ],
       [
@@ -1100,40 +1080,6 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     });
   });
 
-  it("a cluster connect replacing the connection a concurrent connect has just made deletes that connection's Composio account", async () => {
-    const t = await team('Two cluster connects');
-    await setOrgKey(t, 'composio_api_key').expect(200);
-    const known = new Set(composioAccounts.created);
-    const minted = (): string[] => [...composioAccounts.created].filter((id) => !known.has(id));
-    const held = bounded(holdQuery(ORG_LOCK), 'a cluster connect');
-    const before = await deadlocks();
-    try {
-      const replacing = connectCluster(t).then((res) => ({
-        status: res.status,
-        connection: res.body.connection_id as string,
-      }));
-      await held.arrived;
-      expect(minted()).toHaveLength(1);
-      const replaced = (await connectCluster(t).expect(201)).body.connection_id as string;
-      const [replacingAccount, replacedAccount] = minted();
-      held.release();
-      const { status, connection } = await replacing;
-      expect(status).toBe(201);
-      const rows = await db.query(`SELECT id FROM connections WHERE org_id = $1`, [t.org]);
-      expect({ rows: rows.rows, replaced: replaced !== connection }).toEqual({
-        rows: [{ id: connection }],
-        replaced: true,
-      });
-      expect({
-        replaced: composioAccounts.deleted.has(replacedAccount!),
-        replacing: composioAccounts.deleted.has(replacingAccount!),
-      }).toEqual({ replaced: true, replacing: false });
-    } finally {
-      held.restore();
-    }
-    expect(await deadlocksSince(before)).toBe(0);
-  });
-
   it("a cluster connection delete the org's delete follows at once still deletes the connection's Composio account, with the key the org had", async () => {
     const t = await team('Cluster connection delete, then the org delete');
     const cluster = await clusterIn(t);
@@ -1161,9 +1107,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   it("a cluster connection delete and an org delete still delete when the org's Composio key no longer decrypts, leaving the accounts at Composio", async () => {
     const t = await team('Composio key that no longer decrypts');
     const production = await clusterIn(t);
-    const staging = await asOwner(http().post(`/api/orgs/${t.org}/clusters/staging/connect`))
-      .send({ app: 'slack' })
-      .expect(201);
+    const staging = await seedCluster(t, 'staging');
     await db.query(
       `UPDATE platform_secrets SET secret = $1 WHERE org_id = $2 AND name = 'composio_api_key'`,
       [fernetEncrypt(randomBytes(32).toString('base64url'), 'a key under another FERNET_KEY'), t.org],
@@ -1180,7 +1124,7 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     const left = await db.query(
       `SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1) AS org,
               (SELECT count(*)::int FROM connections WHERE id = ANY($2::uuid[])) AS connections`,
-      [t.org, [production.connection, staging.body.connection_id as string]],
+      [t.org, [production.connection, staging.connection]],
     );
     expect({ ...left.rows[0], deletes: composioAccounts.deleted.size - deletes }).toEqual({
       org: false,

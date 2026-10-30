@@ -29,5 +29,8 @@ A migration must also stay **convergent**, not just re-runnable: after an earlie
 row a later file renamed, re-running the chain has to end in the same state. Where that is subtle —
 the `prod` → `production` rename, the dropped legacy trigger tables — the file says so in a comment.
 
+A migration that derives rows from data an owner can later change derives them once — in the statement
+that creates the table it fills (006), or behind a per-row marker (042) — never on every boot.
+
 A new migration is numbered next in sequence and its result is folded into `schema.sql` (re-dump, or
 hand-apply the same DDL) so a fresh install and a migrated install agree.

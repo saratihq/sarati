@@ -4,8 +4,9 @@ description: Point each environment at its own version, with its own accounts an
 ---
 
 An environment is a **pointer at one version**. Each workspace has its own environments, starting
-with `production`, `staging` and `uat`; promoting to a name the workspace doesn't have yet creates
-it.
+with `production`, `staging` and `uat`. You add, rename and delete them under
+**Integrations → Environments**; in an organization, owners and admins do. Promoting never creates
+one.
 
 `production` and `uat` cannot be renamed or deleted.
 
@@ -21,10 +22,18 @@ Promoting moves the pointer. Nothing is copied, and the version being promoted d
 
 ```
 POST /api/workflows/<id>/promote
-{"environment":"staging","version_id":"40cb9926-…"}
+{"environment_id":"5c1e0f3a-…","version_id":"40cb9926-…"}
 
 {"status":"promoted","environment":"staging","version_number":1,"previous_version_number":null}
 ```
+
+`environment_id` is the environment's `id` from `GET /api/environments`, listed with the
+workflow's workspace in `X-Org-Id`, and a rename doesn't change it. You can name the environment instead —
+`{"environment":"staging","version_id":"40cb9926-…"}` — in any letter case, and `prod` reaches
+`production`. A name the workspace doesn't have is refused with `404` and the code
+`environment_not_found`, and nothing is created:
+
+> This workspace has no environment named 'qa' — create it under Integrations → Environments first
 
 Two environments can sit on different versions of the same workflow at the same time, and each has
 its own webhook URL:
@@ -232,6 +241,10 @@ removed with the others. A change that reaches a workflow as its delete is finis
 delete, then answers `404`. So does assigning an account to one of an environment's slots as its
 delete is finishing; an assignment made before then lands, and the delete removes that slot with the
 environment.
+
+A promote that reaches an environment as a rename or a delete of it is finishing waits for it. One
+by name then answers `404` if the name is gone, and makes no environment of that name; one by
+`environment_id` lands on the renamed environment, or answers `404` once it is deleted.
 
 ## Publishing
 

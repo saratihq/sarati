@@ -4,7 +4,6 @@ import { ActionError } from '@sarati/actions-sdk';
 import { ILike, In, IsNull } from 'typeorm';
 import type { DataSource, EntityManager, FindOptionsWhere } from 'typeorm';
 
-import { DomainError } from '../common/domain-error';
 import { EncryptionService } from '../common/crypto/encryption.service';
 import { errorMessage } from '../common/error-message';
 import { ConnectionEntity } from '../database/entities/connection.entity';
@@ -193,8 +192,6 @@ export class ConnectionsService implements RunAsAccounts {
     userId: string,
     provider: string,
     connectedAccountId: string,
-    /** When set, this is an ORG CLUSTER connection for an environment (not personal). */
-    cluster?: { orgId: string; environment: string },
   ): Promise<ConnectionSummary> {
     const entity = new ConnectionEntity();
     entity.id = newId();
@@ -207,38 +204,7 @@ export class ConnectionsService implements RunAsAccounts {
     );
     entity.createdAt = now();
     entity.status = 'pending';
-    entity.orgId = cluster?.orgId ?? null;
-    entity.environment = cluster?.environment ?? null;
-
-    if (!cluster) {
-      await this.dataSource.manager.save(ConnectionEntity, entity);
-      return toSummary(entity);
-    }
-
-    // One account per app per env: the swap replaces whichever row holds it when the swap runs, revokes that one's grant and reconciles what listened as it.
-    const replaced = await this.dataSource
-      .transaction(async (em) => {
-        await lockOrgForWrite(em, cluster.orgId);
-        const removal = await this.deleteWithSlots(em, {
-          orgId: cluster.orgId,
-          environment: cluster.environment,
-          provider,
-        });
-        await em.save(ConnectionEntity, entity);
-        return removal;
-      })
-      .catch((err: unknown) => {
-        // Lost the unique-index race for the same (org, env, app) — a clean 409, not a raw 500.
-        const code = (err as { driverError?: { code?: string }; code?: string }) ?? {};
-        if (code.driverError?.code === '23505' || code.code === '23505') {
-          throw new DomainError(
-            `A ${provider} connection for the ${cluster.environment} environment is already being set up — try again in a moment`,
-            409,
-          );
-        }
-        throw err;
-      });
-    await replaced.afterCommit();
+    await this.dataSource.manager.save(ConnectionEntity, entity);
     return toSummary(entity);
   }
 

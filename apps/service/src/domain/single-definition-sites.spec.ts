@@ -3,6 +3,8 @@ import { join } from 'node:path';
 
 import ts from 'typescript';
 
+import { ENV_NAME_SHAPE } from '../environments/env-name';
+
 /**
  * VAULT CANARY — the constitution's "ONE definition site" rules, enforced.
  * Add a row here in the same PR as any new one-definition-site rule.
@@ -15,6 +17,9 @@ const SINGLE_DEFINITION = [
   { symbol: 'isTriggerNode', definedIn: 'compiler/compile-ir.ts' },
   // Constitution #4 — "did the content change?" is answered ONLY by computeDiff.
   { symbol: 'computeDiff', definedIn: 'ir/diff.ts' },
+  // Constitution #7 — the name an environment may take, and the environment a name reaches without making one.
+  { symbol: 'admitEnvName', definedIn: 'environments/env-name.ts' },
+  { symbol: 'environmentByName', definedIn: 'environments/env-lookup.ts' },
   // Constitution #17 — what `{{$account…}}` reads, and how it is filled.
   { symbol: 'fillAccountRefs', definedIn: 'runtime/account-ref.ts' },
   // Constitution #18 — which account a step runs as, which accounts serve an app, and which actions need one, or a one-click one.
@@ -426,6 +431,34 @@ describe('vault: one definition site per load-bearing question', () => {
       'workflows/versions-write.service.ts',
       'workflows/workflow-lifecycle.service.ts',
     ]);
+  });
+
+  /** Constitution #7: an environment row is made by its org's creation and by creating it, nowhere else, and its name's shape is declared once. */
+  it("only an org's creation and creating an environment insert an environment row", () => {
+    const inserts = [
+      /INSERT\s+INTO\s+(?:"?public"?\.)?"?environments\b/gi,
+      /\b(?:create|insert|save|upsert)\(\s*EnvironmentEntity\b/g,
+      /\binto\(\s*(?:EnvironmentEntity\b|['"`](?:public\.)?environments['"`])/g,
+      /\b(?:get|Inject)Repository\(\s*EnvironmentEntity\b/g,
+      /\bnew\s+EnvironmentEntity\b/g,
+      /\bcreateQueryBuilder\(\s*EnvironmentEntity\b[^;]*?\.insert\(/g,
+    ];
+    const inserting = sources()
+      .map((f) => ({
+        rel: f.rel,
+        inserts: inserts.reduce((n, form) => n + (f.text.match(form)?.length ?? 0), 0),
+      }))
+      .filter((f) => f.inserts > 0)
+      .sort((a, b) => a.rel.localeCompare(b.rel));
+    const declaringShape = sources()
+      .filter((f) => f.text.includes(ENV_NAME_SHAPE.source))
+      .map((f) => f.rel);
+
+    expect(inserting).toEqual([
+      { rel: 'environments/default-environments.ts', inserts: 1 },
+      { rel: 'environments/environments.service.ts', inserts: 1 },
+    ]);
+    expect(declaringShape).toEqual(['environments/env-name.ts']);
   });
 
   /** Constitution #19: a recorded history is replayed as it ran, never patched into another one. */

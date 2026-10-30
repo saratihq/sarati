@@ -9,6 +9,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { listenOnLoopback } from './support/listen';
@@ -940,10 +941,8 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     expect((after.body.runs as Array<{ run_id: string }>).map((r) => r.run_id)).not.toContain('org-appr-1');
   }, 20_000);
 
-  it('connection clusters: owner/admin manage; member 403; list + delete; bad env 400', async () => {
-    // A member can neither list nor connect clusters.
+  it('connection clusters: owner/admin list and delete; member 403', async () => {
     await asB(http().get(`/api/orgs/${orgId}/clusters`)).expect(403);
-    await asB(http().post(`/api/orgs/${orgId}/clusters/prod/connect`).send({ app: 'slack' })).expect(403);
 
     // Owner: empty to start.
     const empty = await asA(http().get(`/api/orgs/${orgId}/clusters`)).expect(200);
@@ -959,14 +958,12 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     const list = await asA(http().get(`/api/orgs/${orgId}/clusters`)).expect(200);
     expect(list.body.clusters).toHaveLength(1);
     expect(list.body.clusters[0]).toMatchObject({ id: connId, provider: 'slack', environment: 'prod' });
+    await asB(http().delete(`/api/orgs/${orgId}/clusters/connections/${connId}`)).expect(403);
 
     // The cluster row must not leak into personal connections, nor be removable by the personal delete.
     const personal = await asA(http().get('/api/connections')).expect(200);
     expect((personal.body as Array<{ id: string }>).some((c) => c.id === connId)).toBe(false);
     await asA(http().delete(`/api/connections/${connId}`)).expect(404);
-
-    // An invalid environment name is rejected before any connect work.
-    await asA(http().post(`/api/orgs/${orgId}/clusters/bad.env/connect`).send({ app: 'slack' })).expect(400);
 
     // Owner removes it; a second delete is a 404.
     const del = await asA(http().delete(`/api/orgs/${orgId}/clusters/connections/${connId}`)).expect(200);
@@ -974,6 +971,30 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     const after = await asA(http().get(`/api/orgs/${orgId}/clusters`)).expect(200);
     expect(after.body.clusters).toEqual([]);
     await asA(http().delete(`/api/orgs/${orgId}/clusters/connections/${randomUUID()}`)).expect(404);
+  });
+
+  it('the cluster connect route is gone: a connect as the org owner answers 404, makes no connection and never asks Composio for a link', async () => {
+    const composio = app.get(ComposioProvider);
+    const spies = [
+      jest.spyOn(composio, 'listManagedToolkits').mockResolvedValue([{ slug: 'slack', name: 'Slack' }]),
+      jest.spyOn(composio, 'ensureAuthConfig').mockResolvedValue('ac_cluster_gone'),
+    ];
+    const link = jest.spyOn(composio, 'createLink').mockResolvedValue({
+      redirectUrl: 'https://connect.invalid/link',
+      connectedAccountId: 'ca_cluster_gone',
+    });
+    const connections = (): Promise<unknown[]> =>
+      db.query(`SELECT id FROM connections ORDER BY id`).then((res) => res.rows);
+    const before = await connections();
+    try {
+      await asA(http().post(`/api/orgs/${orgId}/clusters/production/connect`).send({ app: 'slack' })).expect(
+        404,
+      );
+      expect(link).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of [...spies, link]) spy.mockRestore();
+    }
+    expect(await connections()).toEqual(before);
   });
 
   it('cluster owner lifecycle: an ACTIVE cluster connection blocks its owner; failed rows do not', async () => {

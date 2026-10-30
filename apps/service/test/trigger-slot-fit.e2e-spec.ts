@@ -2626,26 +2626,17 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       },
     );
 
-    // An account of `org`'s production cluster, connected through Composio's link and found working.
+    // An account of `org`'s production cluster, as an earlier release's connect made one, found working.
     const clusterAccount = async (org: string): Promise<string> => {
-      const composio = app.get(ComposioProvider);
-      const appSlug = TRIGGERS.composio.app;
-      jest.spyOn(composio, 'listManagedToolkits').mockResolvedValue([{ slug: appSlug, name: 'Acme CRM' }]);
-      jest.spyOn(composio, 'ensureAuthConfig').mockResolvedValue('ac_slotfit');
-      jest.spyOn(composio, 'createLink').mockImplementation(() =>
-        Promise.resolve({
-          redirectUrl: 'https://connect.invalid/link',
-          connectedAccountId: `ca_${randomUUID()}`,
-          discard: () => Promise.resolve(),
-        }),
+      const id = randomUUID();
+      const credential = app
+        .get(EncryptionService)
+        .encryptToken(JSON.stringify({ connected_account_id: `ca_${randomUUID()}` }));
+      await db.query(
+        `INSERT INTO connections (id, user_id, provider, auth_type, credential, created_at, status, org_id, environment)
+         VALUES ($1, $2, $3, 'managed', $4, now(), 'pending', $5, 'production')`,
+        [id, userA, TRIGGERS.composio.app, credential, org],
       );
-      const linked = await asA(
-        http()
-          .post(`/api/orgs/${org}/clusters/production/connect`)
-          .set('X-Org-Id', org)
-          .send({ app: appSlug }),
-      ).expect(201);
-      const id = linked.body.connection_id as string;
       await app.get(ConnectionsService).setStatus(id, 'active');
       return id;
     };
@@ -2661,26 +2652,18 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
         }),
       );
 
-    it('replacing or deleting the org cluster account a live trigger listens as tears it down and says its slot is empty', async () => {
+    it('deleting the org cluster account a live trigger listens as tears it down and says its slot is empty', async () => {
       const { app: appSlug, nodeType, name, props } = TRIGGERS.composio;
       const { org, production } = await workspace('cluster account');
-      const connect = (): Promise<string> => clusterAccount(org);
-      const listening = (as: string | null): Promise<void> => listeningAs(wf, production, as);
-
-      const first = await connect();
-      await assignSlot(org, production, appSlug, first);
+      const account = await clusterAccount(org);
+      await assignSlot(org, production, appSlug, account);
       const { wf } = await deploy(org, triggerDoc(nodeType, name, props));
-      await listening(first);
+      await listeningAs(wf, production, account);
 
-      const second = await connect();
-      await listening(null);
-
-      await assignSlot(org, production, appSlug, second);
-      await listening(second);
-      await asA(http().delete(`/api/orgs/${org}/clusters/connections/${second}`).set('X-Org-Id', org)).expect(
-        200,
-      );
-      await listening(null);
+      await asA(
+        http().delete(`/api/orgs/${org}/clusters/connections/${account}`).set('X-Org-Id', org),
+      ).expect(200);
+      await listeningAs(wf, production, null);
     });
 
     it("deleting the org whose cluster account fills a live trigger's slot in another org's environment tears it down there and says its slot is empty", async () => {
@@ -2700,21 +2683,13 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       });
     });
 
-    type Removal =
-      'its delete' | 'its cluster delete' | 'a cluster connect replacing it' | "its org's delete";
+    type Removal = 'its delete' | 'its cluster delete' | "its org's delete";
 
     // Each way an account leaves its slots; a cluster account is `owner`'s.
     const REMOVALS: Record<Removal, (account: string, owner: string) => request.Test> = {
       'its delete': (account) => asA(http().delete(`/api/connections/${account}?force=true`)),
       'its cluster delete': (account, owner) =>
         asA(http().delete(`/api/orgs/${owner}/clusters/connections/${account}`).set('X-Org-Id', owner)),
-      'a cluster connect replacing it': (_account, owner) =>
-        asA(
-          http()
-            .post(`/api/orgs/${owner}/clusters/production/connect`)
-            .set('X-Org-Id', owner)
-            .send({ app: TRIGGERS.composio.app }),
-        ),
       "its org's delete": (_account, owner) => asA(http().delete(`/api/orgs/${owner}`)),
     };
 
@@ -2807,7 +2782,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
             });
           }
 
-          expect(await held.release()).toBe(removal === 'a cluster connect replacing it' ? 201 : 200);
+          expect(await held.release()).toBe(200);
           expect((await db.query(`SELECT 1 FROM connections WHERE id = $1`, [account])).rows).toHaveLength(0);
           await emptied(wf, envId, env);
         } finally {

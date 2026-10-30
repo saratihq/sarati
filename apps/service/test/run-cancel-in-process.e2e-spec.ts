@@ -11,6 +11,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
+import { seedDefaultEnvironments } from '../src/environments/default-environments';
 import { RunsService } from '../src/runs/runs.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -903,6 +904,7 @@ describe('a cancel landing mid-decision (e2e, isolated DB, DBOS off, local sessi
        VALUES (gen_random_uuid(), $1, $2, 'owner', now()), (gen_random_uuid(), $1, $3, 'member', now())`,
       [orgId, owner, approver],
     );
+    await seedDefaultEnvironments(db, orgId);
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
