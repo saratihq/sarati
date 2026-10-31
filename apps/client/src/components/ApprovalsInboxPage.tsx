@@ -46,10 +46,10 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
     }
   }, [customText]);
 
-  const deliver = async (payload: unknown): Promise<boolean> => {
+  const deliver = async (payload: unknown, opts?: api.RunEventOptions): Promise<boolean> => {
     try {
       // The UNIQUE run id, and the step so a row answered meanwhile is refused rather than deciding the next wait.
-      await api.sendRunEvent(run.id, { topic: run.topic, ...(run.step_key ? { step_key: run.step_key } : {}), payload });
+      await api.sendRunEvent(run.id, { topic: run.topic, ...(run.step_key ? { step_key: run.step_key } : {}), payload }, opts);
       settle(run);
       return true;
     } catch (e) {
@@ -70,9 +70,13 @@ function WaitingRow({ run, now, mine }: { run: WaitingRun; now: number; mine: bo
 
   const reject = () => {
     remove(run);
+    // A sign-out or workspace switch changes the session before the page unloads, so the send goes as decided here.
+    const decidedAs = api.currentSender();
     toast.undoable("Rejected", run.workflow_name ?? undefined, {
-      // The rejection is only sent once the Undo window closes.
-      onCommit: () => void deliver({ decision: "rejected", decided_at: new Date().toISOString() }),
+      onCommit: () => {
+        const payload = { decision: "rejected", decided_at: new Date().toISOString() };
+        void decidedAs.then((as) => deliver(payload, { as, keepalive: true }));
+      },
       onUndo: () => restore(run),
     });
   };

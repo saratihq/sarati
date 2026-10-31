@@ -78,7 +78,8 @@ not applied. Run it again. Going back to an earlier version is in
 ## Deciding
 
 **Approve** or **Reject** from the inbox — both resume what comes after that wait, carrying your
-decision into it. Or send the event yourself:
+decision into it. A rejection is held for five seconds behind **Undo**, and leaving the page in that
+time sends it. Or send the event yourself:
 
 ```bash
 curl -X POST http://localhost:8080/api/runs/<run-id>/events \
