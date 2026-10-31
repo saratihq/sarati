@@ -13,6 +13,9 @@ export const HOOKS_PREFIX = 'api/hooks';
 /** The route prefix of the public chat intake, no leading slash. */
 export const CHAT_PREFIX = 'api/chat';
 
+/** The route that shapes a pasted sample as a webhook delivery of it, no leading slash. */
+export const WEBHOOK_SAMPLE_PATH = 'api/triggers/webhook-sample';
+
 /** The parsed target of a per-`(workflow, env)` webhook hit. */
 export interface WebhookTarget {
   workflowId: string;

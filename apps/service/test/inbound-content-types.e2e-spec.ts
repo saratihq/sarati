@@ -283,7 +283,7 @@ describe('inbound bodies of every content type reach the run, signed over their 
       const minted = await asA(http().post('/api/catch')).expect(201);
       await post(minted.body.path as string, type, bytes).expect(201);
       const got = await asA(http().get(`/api/catch/${minted.body.catch_id as string}`)).expect(200);
-      expect(got.body).toEqual({ received: true, payload: expected });
+      expect(got.body).toEqual({ received: true, payload: expected, deliveries: 1 });
     });
   });
 

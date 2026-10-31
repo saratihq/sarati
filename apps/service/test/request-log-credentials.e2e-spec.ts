@@ -167,6 +167,7 @@ describe('the service log never prints a credential a request carried in its URL
     expect(await polled.json()).toEqual({
       received: true,
       payload: { body: { hello: 'world' }, hello: 'world' },
+      deliveries: 1,
     });
   });
 
