@@ -42,15 +42,17 @@ describe('live-run consent', () => {
     expect(codeOf(() => consent.consume('u1', token, doc('hello')))).toBe('confirmation_expired');
   });
 
-  it("is per credential — another key cannot spend this one's token", () => {
+  it("is per person — another person cannot spend this one's token", () => {
     const token = consent.issue('u1', doc('hello'));
     expect(codeOf(() => consent.consume('u2', token, doc('hello')))).toBe('confirmation_expired');
   });
 
-  it('caps live runs per credential per hour, and says so', () => {
+  it('caps live runs per person per hour, and says the limit spans all of their keys and sessions', () => {
     for (let i = 0; i < LIVE_RUNS_PER_HOUR; i++) consent.chargeLiveRun('u1');
     expect(codeOf(() => consent.chargeLiveRun('u1'))).toBe('live_run_budget_exhausted');
-    // The budget is per credential, not global.
+    expect(() => consent.chargeLiveRun('u1')).toThrow(
+      /^You have fired \d+ live runs through MCP in the last hour, across all of your keys and sessions/,
+    );
     expect(() => consent.chargeLiveRun('u2')).not.toThrow();
   });
 });

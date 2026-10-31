@@ -1,5 +1,5 @@
 #!/bin/sh
-# List the runs in flight and whether each would resume, from inside the container:
+# List the runs v0.2.24 or earlier started that are in flight, and whether each would resume, from inside the container:
 #   docker exec sarati sarati-legacy-report
 # `docker exec` starts from the IMAGE environment, not the boot process's, so the one-container
 # image leaves what it computed in /data/runtime.env; under compose it is already in the environment.

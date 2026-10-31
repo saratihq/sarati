@@ -6,7 +6,7 @@ import { DomainError } from '../common/domain-error';
 /** How long a dry run's confirmation stays usable — long enough to read the result, short enough to mean something. */
 const TTL_MS = 5 * 60 * 1000;
 
-/** How many live runs one credential may fire per hour, so a loop cannot become a broadcast. */
+/** How many live runs one person may fire through MCP per hour, across all of their keys and sessions, so a loop cannot become a broadcast. */
 export const LIVE_RUNS_PER_HOUR = 20;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -65,13 +65,13 @@ export class LiveRunConsentService {
     }
   }
 
-  /** Count a live run against the credential's hourly budget, or refuse. */
+  /** Count a live run fired through MCP against the person's hourly budget, or refuse. */
   chargeLiveRun(userId: string): void {
     const now = Date.now();
     const recent = (this.liveRuns.get(userId) ?? []).filter((at) => now - at < HOUR_MS);
     if (recent.length >= LIVE_RUNS_PER_HOUR) {
       throw new DomainError(
-        `This credential has fired ${LIVE_RUNS_PER_HOUR} live runs in the last hour, which is the limit. Dry runs are unaffected.`,
+        `You have fired ${LIVE_RUNS_PER_HOUR} live runs through MCP in the last hour, across all of your keys and sessions, which is the limit for one person. Dry runs are unaffected.`,
         429,
         { code: 'live_run_budget_exhausted' },
       );

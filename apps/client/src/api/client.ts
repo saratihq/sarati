@@ -47,7 +47,7 @@ async function clerkWhenLoaded(): Promise<ClerkGlobal | null> {
   }
 }
 
-/** The bearer token for this request: a local email+password session, else a fresh Clerk JWT. */
+/** The bearer token for this request: the local session (password or single sign-on), else a fresh Clerk JWT. */
 export async function getAuthToken(): Promise<string | null> {
   if (typeof window === "undefined") return null;
   const local = readLocalSession();
@@ -237,14 +237,13 @@ export interface MeResponse {
 }
 
 // ─── Auth API Functions ───
-// Sign-in/sign-up go to Clerk directly; the backend only exposes /auth/me.
 
 export async function authMe(): Promise<MeResponse> {
   return request("/auth/me");
 }
 
 // ─── Local email + password auth ───
-// The self-host front door. Registration is never open: the instance's FIRST account, or an invite.
+// Password registration is never open: the instance's FIRST account, or an invite.
 
 /** Mirrors the service's minimum, so the form can refuse a short password before submitting. */
 export const MIN_PASSWORD_LENGTH = 12;
@@ -1976,8 +1975,7 @@ export interface TriggerActivationHealth {
   environment: string;
   environment_id: string;
   trigger_type: string;
-  /** webhook | registered_webhook | polling | schedule. */
-  kind: string;
+  kind: "webhook" | "chat" | "registered_webhook" | "polling" | "schedule" | "composio_subscription";
   /** false only when an operator paused it (desired-present but not firing). */
   active: boolean;
   /** Held back or held by its environment's account: nothing is stood up, polled or changed at its app for it, and `last_error` says why and what fixes it. */

@@ -10,7 +10,7 @@ export interface LocalAuthGateState {
   error: string | null;
 }
 
-/** Ask the service whether it offers email + password sign-in, once per mount. */
+/** Ask the service which sign-in it offers — password, single sign-on, first-run setup — once per mount. */
 export function useLocalAuthStatus(): LocalAuthGateState {
   const [state, setState] = useState<LocalAuthGateState>({ status: null, error: null });
 

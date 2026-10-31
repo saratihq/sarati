@@ -41,7 +41,7 @@ environment supplies the account. Staging hits the sandbox; production hits the 
 One execution of one version, in one environment.
 
 Runs are durable. If the engine restarts mid-flight, a run resumes where it was rather than being
-orphaned — except one an earlier version started that can't be resumed safely, which
+orphaned — except one v0.2.24 or earlier started that can't be resumed safely, which
 [ends in an error](/run/runs/#durability) rather than resuming out of order.
 
 ## How they fit

@@ -2,7 +2,6 @@ import type { RuntimeTriggerActivationEntity } from '../../database/entities/run
 import { deepEqual, type WorkflowIR } from '../../ir/models';
 import {
   type ActivationKey,
-  type ActivationKind,
   type ActualActivation,
   type ConnectionRef,
   type DesiredActivation,
@@ -19,7 +18,7 @@ export function activationKeyOf(row: RuntimeTriggerActivationEntity): Activation
 export function actualOf(row: RuntimeTriggerActivationEntity): ActualActivation {
   return {
     key: activationKeyOf(row),
-    kind: row.kind as ActivationKind,
+    kind: row.kind,
     triggerType: row.triggerType,
     versionId: row.versionId ?? '',
     props: row.props ?? {},

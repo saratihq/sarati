@@ -40,7 +40,7 @@ async function report(history: LegacyHistory, app: Client): Promise<void> {
   const rows: Sql = async (text, params) => (await app.query<Record<string, unknown>>(text, params)).rows;
   const counts = { resume: 0, fail: 0, ended: 0 };
   process.stdout.write(
-    'Runs an earlier version started, in flight as of now; each is judged again when it recovers.\n',
+    'Runs v0.2.24 or earlier started, in flight as of now; each is judged again when it recovers.\n',
   );
   for (const { runId, run } of await history.pending()) {
     if (await alreadyEnded(rows, runId)) {

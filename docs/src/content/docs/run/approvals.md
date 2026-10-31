@@ -58,21 +58,22 @@ before a timer, then whichever is due first — and each step in the run's `step
 `waiting` while it is parked.
 
 Two waits in one run on the **same topic** are both listed, each row naming its step. Deciding one in
-the inbox answers that wait and no other. A run started before this version with two such waits in
-parallel branches is listed once for both, marked as sharing one decision: a decision sent by topic
-answers one of them, whichever the run picks. The other ends with no decision (`null`) if it sees the
-decision before the first one takes it; otherwise it stays parked until it times out, and a second
-decision for it is refused as already decided. That entry leaves the inbox, and a decision for it is
-refused, once either wait is within two seconds of timing out.
+the inbox answers that wait and no other. Two such waits that a run v0.2.23 or earlier started
+reaches at once after an upgrade — in parallel branches, or beside each other — are listed once,
+marked as sharing one decision: a decision sent by topic answers one of them, whichever the run
+picks. The other ends with no decision (`null`) if it sees the decision before the first one takes
+it; otherwise it stays parked until it times out, and a second decision for it is refused as already
+decided. That entry leaves the inbox, and a decision for it is refused, once either wait is within
+two seconds of timing out.
 
-A run this version starts with a wait in a parallel branch, or beside another step that runs at the
-same time, resumes after a restart or an upgrade where it was: no step that had finished runs again —
-except in a workflow it was calling, which runs again from its start if the call had not finished —
-and each decision reaches its own wait. A run an earlier version started that had already run steps
-side by side when the service stopped can't be resumed safely, even with a single approval waiting:
-after a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying so, its waits leave
-the inbox, and a decision made for one that it had not taken yet is recorded, with who made it, but
-not applied. Run it again. Going back to an earlier version is in
+A run v0.2.25 or later started with a wait in a parallel branch, or beside another step that runs at
+the same time, resumes after a restart or an upgrade where it was: no step that had finished runs
+again — except in a workflow it was calling, which runs again from its start if the call had not
+finished — and each decision reaches its own wait. A run v0.2.24 or earlier started that had
+already run steps side by side when the service stopped can't be resumed safely, even with a single
+approval waiting: after a restart or an upgrade it [ends in `error`](/run/runs/#durability) saying
+so, its waits leave the inbox, and a decision made for one that it had not taken yet is recorded,
+with who made it, but not applied. Run it again. Going back to an earlier version is in
 [Upgrades](/operate/upgrades/#going-back).
 
 ## Deciding

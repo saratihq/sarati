@@ -33,8 +33,7 @@ function toLogin(req: NextRequest) {
 // A UX gate only — presence, never validity: the service verifies the token on every call.
 const hasLocalSession = (req: NextRequest) => Boolean(req.cookies.get(LOCAL_SESSION_COOKIE)?.value);
 
-// No Clerk key = a self-hosted instance that signs in with email + password; calling clerkMiddleware
-// at all would throw on the missing key.
+// No Clerk key = signing in with a password or single sign-on; clerkMiddleware would throw on the missing key.
 function localMiddleware(req: NextRequest) {
   if (isLocalPublicRoute(req) || hasLocalSession(req)) return;
   return toLogin(req);

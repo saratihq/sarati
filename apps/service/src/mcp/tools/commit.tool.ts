@@ -49,7 +49,7 @@ const Output = z.object({
   is_live: z
     .literal(false)
     .describe(
-      'Always false. A commit advances the branch head only; releasing is a separate human act (publish/promote) that no MCP scope can perform.',
+      'Always false. A commit advances the branch head only; releasing (publish/promote) is a separate act that no MCP tool performs.',
     ),
   live_versions: z
     .array(z.object({ environment: z.string(), version_id: z.string(), version_number: z.number() }))

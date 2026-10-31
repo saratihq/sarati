@@ -35,13 +35,14 @@ the server refuses anything beyond them whether or not a tool was listed:
 
 | Scope | What it unlocks |
 | --- | --- |
-| `workflow:read` | Reading workflows, versions, diffs and runs. Required to open a session at all. |
+| `workflow:read` | Reading workflows, versions, diffs and runs. It or `workflow:invoke` opens a session. |
 | `connection:read` | Listing which connections exist (ids and status only — never credentials). |
 | `workflow:write` | Editing, committing to a branch, opening a review. |
 | `run:dry` | Testing a workflow as a dry run, which changes nothing outside. |
 | `run:execute` | Letting that test fire for real instead. |
+| `workflow:invoke` | Calling a workflow published as a tool. A key holding only this sees only those tools. |
 
-Those five are every scope the tools ask for. No tool deploys, promotes, merges, changes a connection
+Those six are every scope the tools ask for. No tool deploys, promotes, merges, changes a connection
 or administers an organization — so a key carrying broader scopes still cannot reach those operations
 here. An agent's terminal move is opening a review for a human.
 

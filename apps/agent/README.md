@@ -119,9 +119,10 @@ Two deliberate choices worth keeping:
 - The probe is 200 even when disabled. A 503 here is indistinguishable from the proxy's own 503 for
   an upstream that is down — precisely the ambiguity the endpoint exists to remove.
 
-On a self-host the auth wall is cleared by `SECRET_KEY`: sign-in there is **local email + password**,
-and sharing that one value lets this service verify the resulting session. So the self-host path to a
-working composer is `SECRET_KEY` + an Anthropic key stored in Settings, with no Clerk account anywhere.
+On a self-host the auth wall is cleared by `SECRET_KEY`: sign-in there is a **password or single
+sign-on**, either way ending in a session the service signs with that value, so sharing it lets this
+service verify the session. So the self-host path to a working composer is `SECRET_KEY` + an Anthropic
+key stored in Settings, with no Clerk account anywhere.
 
 ## Caller auth
 
@@ -130,13 +131,14 @@ working composer is `SECRET_KEY` + an Anthropic key stored in Settings, with no 
 | path              | token                            | verified with                                          | enabled when |
 | ----------------- | -------------------------------- | ------------------------------------------------------ | ------------ |
 | Clerk             | Clerk session JWT (RS256)        | networkless against the instance JWKS (`CLERK_ISSUER`)  | `CLERK_ISSUER` is set |
-| Local session     | local sign-in JWT (HS256)        | shared `SECRET_KEY`, issuer `orchestr:local`            | `SECRET_KEY` is set and Clerk is not (override: `LOCAL_AUTH_ENABLED`) |
+| Local session     | local sign-in JWT (HS256)        | shared `SECRET_KEY`, issuer `orchestr:local`            | `SECRET_KEY` is set, and password sessions are on (`LOCAL_AUTH_ENABLED`) or single sign-on is configured (`OIDC_ISSUER` with `OIDC_CLIENT_ID`) |
 
 Each path pins **its own issuer and algorithm**, so a token minted for one can never be accepted by
 the other — holding `SECRET_KEY` does not let anyone forge a Clerk caller, and vice versa. Local is
-tried first: it is networkless, and on a self-host it is the only path there is. Local auth is off by
-default whenever Clerk is configured, so a Clerk deployment never silently grows a second front door;
-`LOCAL_AUTH_ENABLED` overrides either way.
+tried first: it is networkless, and on a self-host it is the only path there is. Password sessions are
+off by default whenever Clerk or single sign-on is configured, so neither door silently grows a second
+one; `LOCAL_AUTH_ENABLED` overrides that. A single sign-on session passes only while single sign-on is
+configured here, and only from `OIDC_ISSUER`.
 
 `SECRET_KEY` must be **the same value `apps/service` uses** — its `docker/entrypoint.sh` generates
 one onto the shared data volume on first run, so a compose file has to pass that same value here.
@@ -212,8 +214,9 @@ Required environment (**never commit secrets**; `apps/agent/.env.example` is the
 | `WORKFLOW_SERVICE_URL`     | yes                 | Base URL of `apps/service` (the tools' backend). Defaults to `http://localhost:8001`.             |
 | `WORKFLOW_SERVICE_API_KEY` | recommended         | `ork_` fallback key for tool calls. In authed mode each call forwards the caller's own token; this is the `MOCK_AUTH`/no-token fallback. |
 | `CLERK_ISSUER`             | Clerk deploys       | Clerk instance issuer. Callers' session JWTs are verified **networklessly against its JWKS** (RS256, iss/exp) — this is **not** `CLERK_SECRET_KEY`; this service holds no Clerk secret. Unset with no other caller-auth path boots with the composer **disabled**, never unauthenticated. |
-| `SECRET_KEY`               | yes                 | The **same value `apps/service` uses** (its `docker/entrypoint.sh` generates one onto the shared data volume). Every deployment needs it, Clerk ones included: it is how this service reads the Anthropic key stored in Settings, which is not an environment variable. On a self-host it is also the caller-auth path, in place of `CLERK_ISSUER`: it verifies local email + password sessions, and rotating it signs everyone out. Without it `/api/composer/status` reports `caller_auth_unconfigured`; with it but no key stored for the caller, `anthropic_api_key_missing`, and the composer's endpoints answer **503** with that reason — the service still boots. See "Availability". |
-| `LOCAL_AUTH_ENABLED`       | optional            | Forces local-session auth on or off. Default: on when `CLERK_ISSUER` is unset, off when it is set. |
+| `SECRET_KEY`               | yes                 | The **same value `apps/service` uses** (its `docker/entrypoint.sh` generates one onto the shared data volume). Every deployment needs it, Clerk ones included: it is how this service reads the Anthropic key stored in Settings, which is not an environment variable. On a self-host it is also the caller-auth path, in place of `CLERK_ISSUER`: it verifies the service's own sessions, from a password or single sign-on, and rotating it signs everyone out. Without it `/api/composer/status` reports `caller_auth_unconfigured`; with it but no key stored for the caller, `anthropic_api_key_missing`, and the composer's endpoints answer **503** with that reason — the service still boots. See "Availability". |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID` | single sign-on | The service's values. With both set, single sign-on sessions are accepted, from this issuer only. The client secret is not needed here. |
+| `LOCAL_AUTH_ENABLED`       | optional            | Turns password sessions on or off. Default: on unless `CLERK_ISSUER` is set, or `OIDC_ISSUER` and `OIDC_CLIENT_ID` both are. Single sign-on sessions pass while single sign-on is configured, whatever this says. |
 | `CLERK_AUTHORIZED_PARTIES` | recommended         | Comma-separated `azp` allow-list (the client origin[s]). Empty = `azp` not checked.               |
 | `CORS_ORIGINS`             | yes                 | Comma-separated browser origins allowed to open composer streams. Defaults to `http://localhost:3100`. |
 | `DATABASE_URL`             | optional            | Postgres for durable composer threads (the service's database). Unset = memory-only sessions.     |

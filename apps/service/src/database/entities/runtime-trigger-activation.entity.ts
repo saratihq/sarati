@@ -1,6 +1,6 @@
 import { Column, Entity, Index, PrimaryColumn, Unique } from 'typeorm';
 
-import type { MaterializedActivation } from '../../triggers/canvas/trigger-activation';
+import type { ActivationKind, MaterializedActivation } from '../../triggers/canvas/trigger-activation';
 
 /**
  * A materialized trigger ACTIVATION — DERIVED STATE the reconciler converges. Only an
@@ -26,9 +26,9 @@ export class RuntimeTriggerActivationEntity {
   @Column({ name: 'trigger_node_id', type: 'varchar', length: 64 })
   triggerNodeId!: string;
 
-  /** Activation kind: `webhook` | `registered_webhook` | `polling` | `schedule`. */
+  /** How the activation is materialized against the outside world. */
   @Column({ type: 'varchar', length: 40 })
-  kind!: string;
+  kind!: ActivationKind;
 
   /** The trigger node's `node_type` (public trigger type) — what the provider seam is handed. */
   @Column({ name: 'trigger_type', type: 'varchar', length: 300 })

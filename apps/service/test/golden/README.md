@@ -20,7 +20,7 @@ They are recovered on this build by:
   under the guard's own checks.
 
 `test/rollback-to-earlier-build.e2e-spec.ts` boots `LEGACY_BUILD` over runs this build started. Going
-back to the release this build replaces, `LAST_RELEASE` in `test/support/earlier-build.ts`, is
+back to the release this build replaces, `lastRelease()` in `test/support/earlier-build.ts`, is
 `test/rollback-to-last-release.e2e-spec.ts`.
 
 Record a build's histories from `apps/service`, all shapes or those named after the sha:

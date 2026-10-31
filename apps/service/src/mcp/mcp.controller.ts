@@ -11,10 +11,7 @@ import type { EnvConfig } from '../config/env.config';
 import { sendWebResponse, toWebRequest } from './http/express-bridge';
 import { McpHandlerService } from './mcp-handler.service';
 
-/**
- * Streamable HTTP transport for the Platform MCP surface. Per-tool authority comes from
- * the key's scopes; `workflow:read` is the floor for reaching the endpoint at all.
- */
+/** Streamable HTTP transport for the Platform MCP surface. */
 @Controller('mcp')
 @UseGuards(AuthGuard)
 export class McpController {

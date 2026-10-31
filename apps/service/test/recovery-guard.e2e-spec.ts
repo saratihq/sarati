@@ -123,6 +123,24 @@ describe('the recovery guard (e2e)', () => {
   const decide = (runId: string, step_key: string): Promise<Response> =>
     post(`/api/runs/${runId}/events`, { topic: 'approval', step_key, payload: { d: runId } });
 
+  async function startParked(runId: string): Promise<void> {
+    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
+    expect(
+      (await post('/api/runs/async', { run_id: runId, plan: { id: `plan-${runId}`, nodes } })).status,
+    ).toBe(201);
+    await eventually(
+      () => parkedSteps(runId),
+      (rows) => rows.length === 1,
+      `${runId} parked`,
+    );
+    const [workflow] = (
+      await dbos.query<{ name: string }>(`SELECT name FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
+        `${MOCK_USER_ID}:${runId}`,
+      ])
+    ).rows;
+    expect(workflow?.name).toBe(RUN_PLAN_V2_WORKFLOW);
+  }
+
   async function reboot(between: () => Promise<void> = () => Promise.resolve()): Promise<void> {
     await service?.crash();
     await between();
@@ -190,6 +208,8 @@ describe('the recovery guard (e2e)', () => {
 
   describe('on the histories the builds before left', () => {
     const CLAIMED_AT = '2026-10-20T08:00:00.000Z';
+    const SEQUENCED = 'sequenced-in-flight';
+    const BOOT_COUNT = `Runs v0.2.24 or earlier started, in flight at boot: ${RECORDED_RESUMABLE.length} can resume, ${RECORDED_EXPOSED.length + 1} can't be resumed safely and will fail, 1 had already ended`;
     const judged = [...RECORDED_EXPOSED, ...RECORDED_RESUMABLE].map(runIdOf);
     let report: string;
     let endedByReport: number;
@@ -201,6 +221,7 @@ describe('the recovery guard (e2e)', () => {
           readFileSync(join(GOLDEN_DIR, build, 'inside-step-fan-out.json'), 'utf8'),
         )![0]]: base(),
       });
+      await startParked(SEQUENCED);
       await reboot(async () => {
         for (const golden of [...RECORDED_EXPOSED, ...RECORDED_RESUMABLE]) {
           await restoreGoldenHistory(db, dbos, golden, runIdOf(golden), fixtureOf(golden.split('/')[0]!));
@@ -247,11 +268,11 @@ describe('the recovery guard (e2e)', () => {
       });
     }, 120_000);
 
-    it('reports, reading only, which runs an earlier version started would resume, which would fail and which had ended', () => {
+    it('reports, reading only, which runs v0.2.24 or earlier started would resume, which would fail and which had ended', () => {
       const lines = report.trim().split('\n');
       const failing = RECORDED_EXPOSED.length + 1;
       expect(lines[0]).toBe(
-        'Runs an earlier version started, in flight as of now; each is judged again when it recovers.',
+        'Runs v0.2.24 or earlier started, in flight as of now; each is judged again when it recovers.',
       );
       expect(lines).toHaveLength(RECORDED_RESUMABLE.length + failing + 1 + 2);
       for (const golden of RECORDED_RESUMABLE) {
@@ -270,10 +291,26 @@ describe('the recovery guard (e2e)', () => {
       expect(endedByReport).toBe(0);
     });
 
-    it('counts at boot how many runs an earlier version started can resume, how many will fail and how many had ended', () => {
-      expect(service!.log()).toContain(
-        `Runs an earlier version started, in flight at boot: ${RECORDED_RESUMABLE.length} can resume, ${RECORDED_EXPOSED.length + 1} can't be resumed safely and will fail, 1 had already ended`,
+    it('counts at boot how many runs v0.2.24 or earlier started can resume, how many will fail and how many had ended', () => {
+      expect(service!.log()).toContain(BOOT_COUNT);
+    });
+
+    it('leaves a run v0.2.25 or later started out of the report and the boot count, and resumes it', async () => {
+      expect(report).not.toContain(`${MOCK_USER_ID}:${SEQUENCED}`);
+      expect(service!.log()).toContain(BOOT_COUNT);
+      await eventually(
+        () => parkedSteps(SEQUENCED),
+        (rows) => rows.length === 1,
+        `${SEQUENCED} parked again`,
       );
+      expect((await decide(SEQUENCED, 'approve')).status).toBe(200);
+      expect(
+        await eventually(
+          () => runOf(SEQUENCED),
+          (row) => row?.status === 'completed',
+          `${SEQUENCED} done`,
+        ),
+      ).toEqual({ status: 'completed', error: null });
     });
 
     it.each(RECORDED_EXPOSED)(
@@ -530,17 +567,7 @@ describe('the recovery guard (e2e)', () => {
       'other-executor': { executor: 'elsewhere' },
       'later-build-ended': { name: 'orchestr.runPlan.later', status: 'ERROR' },
     };
-    // A run this build started on the sequenced engine, parked, whose workflow is then another executor's.
-    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
-    expect(
-      (await post('/api/runs/async', { run_id: 'v2-elsewhere', plan: { id: 'plan-v2-elsewhere', nodes } }))
-        .status,
-    ).toBe(201);
-    await eventually(
-      () => parkedSteps('v2-elsewhere'),
-      (rows) => rows.length === 1,
-      'v2-elsewhere parked',
-    );
+    await startParked('v2-elsewhere');
     await reboot(async () => {
       await dbos.query(
         `UPDATE dbos.workflow_status SET executor_id = 'elsewhere' WHERE workflow_uuid = $1 AND name = $2`,
@@ -571,22 +598,7 @@ describe('the recovery guard (e2e)', () => {
   }, 120_000);
 
   it('takes the decision for a healthy run parked on the sequenced engine', async () => {
-    const nodes = [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }];
-    expect(
-      (await post('/api/runs/async', { run_id: 'healthy-v2', plan: { id: 'plan-healthy-v2', nodes } }))
-        .status,
-    ).toBe(201);
-    await eventually(
-      () => parkedSteps('healthy-v2'),
-      (rows) => rows.length === 1,
-      'healthy-v2 parked',
-    );
-    const [workflow] = (
-      await dbos.query<{ name: string }>(`SELECT name FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
-        `${MOCK_USER_ID}:healthy-v2`,
-      ])
-    ).rows;
-    expect(workflow?.name).toBe(RUN_PLAN_V2_WORKFLOW);
+    await startParked('healthy-v2');
     expect((await decide('healthy-v2', 'approve')).status).toBe(200);
     expect(
       await eventually(

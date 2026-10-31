@@ -78,15 +78,15 @@ not an environment's, so a passing test does not prove the workflow runs in prod
 
 Firing for real takes three things together: the `run:execute` scope, `dry_run: false`, and the
 confirmation token a dry run of that exact document returned. Each person may fire 20 live runs an
-hour, across all of their keys; dry runs are not counted. The count is kept in memory, so a restart
-of the service resets it.
+hour through MCP, across all of their keys and sessions; dry runs are not counted. The count is kept
+in memory, so a restart of the service resets it.
 
 ## Published workflows as tools
 
 A workflow whose production version starts with the **Called by another workflow**
 [trigger](/build/triggers/) appears to a `workflow:invoke` key as a tool of its own, with the name,
-description and inputs that trigger declares. Committing never changes the list — only publishing
-does.
+description and inputs that trigger declares. Committing never changes the list; publishing does,
+and so does renaming a workflow whose trigger leaves the tool name blank.
 
 The tool name is the trigger's tool name, or the workflow's name when that is blank. It is
 lowercased, every run of characters other than `a`–`z` and `0`–`9` becomes one `_`, leading and

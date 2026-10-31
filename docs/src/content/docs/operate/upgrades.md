@@ -38,26 +38,26 @@ when it starts one.
 
 Sarati runs as one instance. An upgrade stops it and starts the new version on the same data, and runs
 in flight carry on where they were: a run waiting for an approval or on a **Wait** step keeps waiting.
-The exception is a run an earlier version started that can't be resumed safely — one that had
+The exception is a run v0.2.24 or earlier started that can't be resumed safely — one that had
 already run steps side by side (parallel branches, or steps that start at the same time), whose AI
 Agent step was refused a sub-workflow call and carried on, or whose history doesn't fit its workflow:
 it [ends in `error`](/run/runs/#durability) as the new version starts, saying why, and none of its
 steps runs again. A restart treats it the same
-way. Let those runs finish first, or run them again after. Runs this version starts resume where they
-were, through later restarts and upgrades.
+way. Let those runs finish first, or run them again after. Runs v0.2.25 or later started resume where
+they were, through later restarts and upgrades.
 
-The boot log counts the runs an earlier version started that are in flight, for example
-`Runs an earlier version started, in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
+The boot log counts the runs v0.2.24 or earlier started that are in flight, for example
+`Runs v0.2.24 or earlier started, in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
 and names each one that fails at warn level with its reason, followed by a `RunNotResumable` error
-and its stack trace: that is the run ending, not the service failing. Runs this version started are
-not counted there, as only a run an earlier version started is judged this way. From v0.2.24 on, you
-can list them before you restart or upgrade:
+and its stack trace: that is the run ending, not the service failing. Runs v0.2.25 or later started
+are not counted there: they resume where they were, so only a run v0.2.24 or earlier started is
+judged this way. From v0.2.24 on, you can list them before you restart or upgrade:
 
 ```bash
 cd sarati && docker compose exec sarati sarati-legacy-report
 ```
 
-It only reads, and prints each run an earlier version started that is in flight as `would resume`
+It only reads, and prints each run v0.2.24 or earlier started that is in flight as `would resume`
 or `would fail` with the reason, or `already ended` for one that had finished or been cancelled but
 not yet stopped, which stays as it ended. A run can still move on between the report and the
 restart, so each is judged again as it resumes. On a five-container install it is
@@ -147,6 +147,11 @@ describes, and the installer warns when it starts such a version.
 ## Notes for specific versions
 
 ### v0.2.27
+
+**Five containers: re-run the installer.** The stack file changed — `docker/Caddyfile` now leaves
+the authorization code and state of an OAuth or single sign-on callback out of the proxy's log, and
+only the installer refreshes it — so `docker compose pull` alone is not enough this time. One
+container needs only the new image.
 
 #### Sign in through your own identity provider, and invites for one address
 

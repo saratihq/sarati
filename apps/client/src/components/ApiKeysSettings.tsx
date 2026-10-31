@@ -21,7 +21,7 @@ const SCOPE_LABELS: Record<string, string> = {
   "workflow:invoke": "Call published workflows",
   "connection:read": "See connected accounts",
   "connection:write": "Manage connected accounts",
-  "org:manage": "Manage the organization",
+  "org:manage": "Manage your platform keys (Composio, Anthropic)",
 };
 
 const scopeLabel = (scope: string) => SCOPE_LABELS[scope] ?? scope;
