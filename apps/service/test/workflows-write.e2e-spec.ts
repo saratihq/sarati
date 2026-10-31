@@ -329,6 +329,31 @@ describe('workflow write surface (e2e, isolated DB, mock auth)', () => {
     expect(refused.body.code).toBe('branch_protected');
   });
 
+  it('merging the default branch into another lands, and keeps the default branch', async () => {
+    const http = () => request(app.getHttpServer());
+    const wf = (
+      await http()
+        .post('/api/deploy')
+        .send({ workflow_json: wfJson('Default source', 'base') })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_json: wfJson('Default source', 'main-change'), branch: 'main' })
+      .expect(201);
+
+    const merged = await http()
+      .post(`/api/workflows/${wf}/branches/main/merge`)
+      .send({ target_branch: 'lane' })
+      .expect(201);
+    expect(merged.body).toMatchObject({ status: 'merged', cleaned_up: null });
+    const lane = await http().get(`/api/workflows/${wf}/branches/lane/head`).expect(200);
+    expect(lane.body.head.version_id).toBe(merged.body.merged_version_id);
+    const branches = await http().get(`/api/workflows/${wf}/branches`).expect(200);
+    expect(branches.body.branches.map((b: { name: string }) => b.name)).toContain('main');
+  });
+
   it('a step both branches added, resolved by hand, keeps the connections either branch gave it', async () => {
     const http = () => request(app.getHttpServer());
     const withExtra = (text: string, from: string): Record<string, unknown> => {
