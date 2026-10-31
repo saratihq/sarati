@@ -1,16 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { WorkflowReviewEntity } from '../database/entities/review.entity';
-import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { EventsService } from '../events/events.service';
 import { now } from '../database/ids';
 import type { ConflictEntry, MergeResolution } from '../ir/merge';
 import { BranchService } from './branch.service';
-import { lockWorkflowRow } from './workflow-row-lock';
+import { lockWorkflowForWrite } from './workflow-row-lock';
 
 /** Machine code for a merge whose target already has every change on the source. */
 export const NOTHING_TO_MERGE = 'nothing_to_merge';
@@ -31,58 +30,53 @@ export class MergeOrchestrationService {
     userId: string,
     resolutions?: MergeResolution[],
   ): Promise<Record<string, unknown>> {
-    const result = await this.branches.mergeBranch(
-      workflowId,
-      sourceBranchName,
-      targetBranchName,
-      userId,
-      resolutions,
-    );
-
-    if (!result.success) return conflictsResponse(result);
-
-    // Refused before the cleanup below, which would otherwise delete a branch that merged nothing.
-    if (result.mergedVersionId === null) {
-      throw new DomainError(
-        `'${sourceBranchName}' has no changes that '${targetBranchName}' doesn't already have — there is nothing to merge.`,
-        409,
-        { code: NOTHING_TO_MERGE },
+    // One transaction, so the source stays locked from the merge until its cleanup commits.
+    return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
+      const pair = await this.branches.lockBranchPair(em, workflowId, sourceBranchName, targetBranchName);
+      const result = await this.branches.mergeBranchIn(
+        em,
+        workflowId,
+        sourceBranchName,
+        targetBranchName,
+        userId,
+        resolutions,
       );
-    }
 
-    // An active review for the same (source → target) pair must be resolved and the branch cleanup
-    // SKIPPED: `workflow_reviews.source_branch_id` is ON DELETE CASCADE, so deleting the branch would
-    // silently destroy the review with its comments and approvals.
-    const resolvedReviewIds = await this.resolveActiveReviewsForMerge(
-      workflowId,
-      sourceBranchName,
-      targetBranchName,
-      result.mergedVersionId,
-      userId,
-    );
-    if (resolvedReviewIds.length > 0) {
-      return {
-        status: 'merged',
-        merged_version_id: result.mergedVersionId,
-        cleaned_up: null,
-        reviews_resolved: resolvedReviewIds.map((id) => ({ review_id: id, status: 'merged' })),
-      };
-    }
+      if (!result.success) return conflictsResponse(result);
 
-    // A protected branch outlives its merge: deleting one takes an owner or admin unprotecting it first.
-    const source = await this.dataSource.manager.findOne(WorkflowBranchEntity, {
-      where: { workflowId, name: sourceBranchName },
+      // Refused before the cleanup below, which would otherwise delete a branch that merged nothing.
+      if (result.mergedVersionId === null) {
+        throw new DomainError(
+          `'${sourceBranchName}' has no changes that '${targetBranchName}' doesn't already have — there is nothing to merge.`,
+          409,
+          { code: NOTHING_TO_MERGE },
+        );
+      }
+      const merged = { status: 'merged', merged_version_id: result.mergedVersionId };
+
+      // A resolved review keeps its source: `workflow_reviews.source_branch_id` is ON DELETE CASCADE.
+      const resolvedReviewIds = await this.resolveHeldReviews(
+        em,
+        workflowId,
+        result.reviews,
+        result.mergedVersionId,
+        userId,
+      );
+      if (resolvedReviewIds.length > 0) {
+        return {
+          ...merged,
+          cleaned_up: null,
+          reviews_resolved: resolvedReviewIds.map((id) => ({ review_id: id, status: 'merged' })),
+        };
+      }
+
+      // A protected branch outlives its merge, as the default branch does: neither can be deleted.
+      if (pair.source.isProtected || pair.source.isDefault) return { ...merged, cleaned_up: null };
+      await this.branches.deleteBranchIn(em, workflowId, sourceBranchName, userId);
+
+      return { ...merged, cleaned_up: { branch_deleted: sourceBranchName } };
     });
-    if (source?.isProtected) {
-      return { status: 'merged', merged_version_id: result.mergedVersionId, cleaned_up: null };
-    }
-    await this.branches.deleteBranch(workflowId, sourceBranchName, userId);
-
-    return {
-      status: 'merged',
-      merged_version_id: result.mergedVersionId,
-      cleaned_up: { branch_deleted: sourceBranchName },
-    };
   }
 
   /**
@@ -96,69 +90,59 @@ export class MergeOrchestrationService {
     userId: string,
     resolutions?: MergeResolution[],
   ): Promise<Record<string, unknown>> {
-    const target = await this.dataSource.manager.findOne(WorkflowBranchEntity, {
-      where: { workflowId, name: branchName },
-    });
-    if (target?.isProtected) {
-      throw new DomainError(
-        `Branch '${branchName}' is protected — it takes changes only through a review`,
-        409,
-        {
-          code: 'branch_protected',
-        },
+    return this.dataSource.transaction(async (em) => {
+      await lockWorkflowForWrite(em, workflowId);
+      const target = (
+        await this.branches.lockBranches(em, workflowId, { names: [fromBranch, branchName] })
+      ).find((b) => b.name === branchName);
+      if (target?.isProtected) {
+        throw new DomainError(
+          `Branch '${branchName}' is protected — it takes changes only through a review`,
+          409,
+          { code: 'branch_protected' },
+        );
+      }
+      const result = await this.branches.mergeBranchIn(
+        em,
+        workflowId,
+        fromBranch,
+        branchName,
+        userId,
+        resolutions,
       );
-    }
-    const result = await this.branches.mergeBranch(workflowId, fromBranch, branchName, userId, resolutions);
-    if (!result.success) return conflictsResponse(result);
-    return result.mergedVersionId === null
-      ? { status: 'up_to_date', merged_version_id: null }
-      : { status: 'merged', merged_version_id: result.mergedVersionId };
+      if (!result.success) return conflictsResponse(result);
+      return result.mergedVersionId === null
+        ? { status: 'up_to_date', merged_version_id: null }
+        : { status: 'merged', merged_version_id: result.mergedVersionId };
+    });
   }
 
-  /** Mark every non-terminal review for this (source → target) pair merged, under a row lock so it can't race a concurrent approve/merge. */
-  private async resolveActiveReviewsForMerge(
+  /** Mark merged the pair's reviews the merge has held since before its gate read them. */
+  private async resolveHeldReviews(
+    em: EntityManager,
     workflowId: string,
-    sourceBranchName: string,
-    targetBranchName: string,
-    mergedVersionId: string | null,
+    reviews: WorkflowReviewEntity[],
+    mergedVersionId: string,
     actorId: string,
   ): Promise<string[]> {
-    return this.dataSource.transaction(async (em) => {
-      if (!(await lockWorkflowRow(em, workflowId))) return [];
-      const branches = await em.find(WorkflowBranchEntity, {
-        where: { workflowId },
+    if (reviews.length === 0) return [];
+
+    const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
+    for (const review of reviews) {
+      review.status = 'merged';
+      review.mergedVersionId = mergedVersionId;
+      review.updatedAt = now();
+      await em.save(WorkflowReviewEntity, review);
+      await this.events.emit(em, {
+        orgId: wf?.orgId ?? null,
+        actorUserId: actorId,
+        type: 'review.merged',
+        subjectType: 'review',
+        subjectId: review.id,
+        payload: { merged_version_id: mergedVersionId, via: 'branch_merge' },
       });
-      const source = branches.find((b) => b.name === sourceBranchName);
-      const target = branches.find((b) => b.name === targetBranchName);
-      if (!source || !target) return [];
-
-      const reviews = await em
-        .createQueryBuilder(WorkflowReviewEntity, 'r')
-        .setLock('pessimistic_write')
-        .where('r.workflow_id = :workflowId', { workflowId })
-        .andWhere('r.source_branch_id = :sourceId', { sourceId: source.id })
-        .andWhere('r.target_branch_id = :targetId', { targetId: target.id })
-        .andWhere('r.status NOT IN (:...terminal)', { terminal: ['merged', 'closed'] })
-        .getMany();
-      if (reviews.length === 0) return [];
-
-      const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
-      for (const review of reviews) {
-        review.status = 'merged';
-        review.mergedVersionId = mergedVersionId;
-        review.updatedAt = now();
-        await em.save(WorkflowReviewEntity, review);
-        await this.events.emit(em, {
-          orgId: wf?.orgId ?? null,
-          actorUserId: actorId,
-          type: 'review.merged',
-          subjectType: 'review',
-          subjectId: review.id,
-          payload: { merged_version_id: mergedVersionId, via: 'branch_merge' },
-        });
-      }
-      return reviews.map((r) => r.id);
-    });
+    }
+    return reviews.map((r) => r.id);
   }
 }
 
