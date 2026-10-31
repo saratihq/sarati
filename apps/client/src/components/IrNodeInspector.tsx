@@ -412,6 +412,8 @@ interface UpstreamStep {
   /** Human label for the menu. */
   name: string;
   isTrigger: boolean;
+  /** The trigger's kind; absent on a step. */
+  triggerKind?: TriggerKind;
   /** Pick targets flattened from the live sample; absent until the step has been tested. */
   fields?: SampleField[];
 }
@@ -537,6 +539,7 @@ function upstreamStepsFor(doc: Record<string, unknown>, nodeId: string): Upstrea
       id: n.id,
       name: n.name && n.name.trim() ? n.name : n.id,
       isTrigger,
+      ...(isTrigger ? { triggerKind: kindOf(n.node_type) } : {}),
     });
   }
   return out;
@@ -604,16 +607,15 @@ function missingSampleHint(steps: string[], upstream: UpstreamStep[]): string {
     : "no sample yet — test those steps";
 }
 
-/**
- * Mints an ephemeral catch URL; the payload the user fires at it becomes the trigger's sample.
- * Nothing is registered and nothing runs.
- */
+const INVALID_SAMPLE_JSON = 'That isn\'t valid JSON — an event looks like {"email": "sara@acme.com", "plan": "pro"}.';
+
+/** The trigger's sample: a pasted event, or for a webhook one caught at an ephemeral URL; nothing is registered and nothing runs. */
 function TriggerCatch({
   onSample,
   pasteOnly,
 }: {
   onSample: (payload: unknown) => void;
-  /** Paste-as-sample only: app triggers arrive over the provider's rail, so a catch URL would mislead. */
+  /** Paste-as-sample only, kept as pasted: a caught or shaped sample is a webhook run's trigger, which no other kind's run sees. */
   pasteOnly?: boolean;
 }) {
   const [state, setState] = useState<
@@ -626,15 +628,50 @@ function TriggerCatch({
   const [pasteOpen, setPasteOpen] = useState(Boolean(pasteOnly));
   const [pasteText, setPasteText] = useState("");
   const [pasteError, setPasteError] = useState<string | null>(null);
-  const usePasted = () => {
+  const [pasting, setPasting] = useState(false);
+  // A poll applies only a delivery newer than the last it applied, so a Clear or a paste stays until a new event.
+  const applied = useRef({ catchId: "", deliveries: 0 });
+  const pasteAsIs = () => {
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(pasteText);
-      if (parsed === null || typeof parsed !== "object") throw new Error("not an object");
-      setPasteError(null);
-      onSample(parsed);
+      parsed = JSON.parse(pasteText);
     } catch {
-      setPasteError('That isn\'t valid JSON — an event looks like {"email": "sara@acme.com", "plan": "pro"}.');
+      setPasteError(INVALID_SAMPLE_JSON);
+      return;
     }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      setPasteError('That\'s valid JSON, but this trigger\'s events are objects — like {"email": "sara@acme.com", "plan": "pro"}.');
+      return;
+    }
+    setPasteError(null);
+    onSample(parsed);
+  };
+  const usePasted = () => {
+    if (pasteOnly) {
+      pasteAsIs();
+      return;
+    }
+    setPasting(true);
+    setPasteError(null);
+    const listening = state.phase === "waiting" ? state.catchId : null;
+    void api
+      .shapeWebhookSample(pasteText)
+      .then(async (res) => {
+        // An event caught before the paste but not yet polled must not replace it.
+        const caught = listening ? await api.getCatch(listening).catch(() => null) : null;
+        if (listening && caught) applied.current = { catchId: listening, deliveries: caught.deliveries };
+        onSample(res.payload);
+      })
+      .catch((e: unknown) =>
+        setPasteError(
+          e instanceof api.ApiError && e.status === 400
+            ? INVALID_SAMPLE_JSON
+            : e instanceof Error
+              ? e.message
+              : "Couldn't read that sample.",
+        ),
+      )
+      .finally(() => setPasting(false));
   };
   const pasteBlock = pasteOpen ? (
     <div className="flex flex-col gap-1 mt-1">
@@ -648,19 +685,20 @@ function TriggerCatch({
         style={{ background: "var(--orchestr-field)", border: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink)" }}
       />
       {pasteError && (
-        <p className="text-[10px] m-0" style={{ color: "var(--orchestr-danger)" }}>
+        <p role="alert" className="text-[10px] m-0" style={{ color: "var(--orchestr-danger)" }}>
           {pasteError}
         </p>
       )}
       <button
         type="button"
         onClick={usePasted}
-        disabled={!pasteText.trim()}
+        disabled={!pasteText.trim() || pasting}
+        aria-busy={pasting}
         className="self-start text-[10px] px-1.5 py-1 rounded cursor-pointer disabled:opacity-40"
         style={{ background: "var(--orchestr-field)", border: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink)" }}
         data-testid="trigger-paste-use"
       >
-        Use as sample
+        {pasting ? "Reading…" : "Use as sample"}
       </button>
     </div>
   ) : (
@@ -682,7 +720,10 @@ function TriggerCatch({
       api
         .getCatch(catchId)
         .then((res) => {
-          if (res.received) onSample(res.payload);
+          const seen = applied.current.catchId === catchId ? applied.current.deliveries : 0;
+          if (res.deliveries <= seen) return;
+          applied.current = { catchId, deliveries: res.deliveries };
+          onSample(res.payload);
         })
         .catch(() => setState({ phase: "error", message: "The catch expired — mint a new one." }));
     }, 2000);
@@ -1003,7 +1044,9 @@ function ReferenceTextInput({
                         </span>
                       </button>
                     ))}
-                    {fields.length === 0 && s.isTrigger && <TriggerCatch onSample={onTriggerSample} />}
+                    {fields.length === 0 && s.isTrigger && (
+                      <TriggerCatch onSample={onTriggerSample} pasteOnly={s.triggerKind !== "webhook"} />
+                    )}
                     {fields.length === 0 && !s.isTrigger && (
                       <div
                         className="px-3 pb-1.5 pt-0.5 text-[9px] leading-snug"

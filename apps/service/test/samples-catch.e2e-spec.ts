@@ -95,7 +95,7 @@ describe('run samples + catch inbox (e2e, isolated DB, mock auth)', () => {
 
     // Nothing yet.
     const pending = await request(app.getHttpServer()).get(`/api/catch/${catchId}`).expect(200);
-    expect(pending.body).toEqual({ received: false, payload: null });
+    expect(pending.body).toEqual({ received: false, payload: null, deliveries: 0 });
 
     // Public intake — no auth header at all.
     await request(app.getHttpServer())
@@ -105,7 +105,7 @@ describe('run samples + catch inbox (e2e, isolated DB, mock auth)', () => {
 
     const got = await request(app.getHttpServer()).get(`/api/catch/${catchId}`).expect(200);
     const event = { email: 'sara@acme.com', name: 'Sara' };
-    expect(got.body).toEqual({ received: true, payload: { ...event, body: event } });
+    expect(got.body).toEqual({ received: true, payload: { ...event, body: event }, deliveries: 1 });
 
     // Unknown ids: capability-token model — 404, never enumeration.
     await request(app.getHttpServer())
@@ -115,5 +115,31 @@ describe('run samples + catch inbox (e2e, isolated DB, mock auth)', () => {
     await request(app.getHttpServer()).get('/api/catch/00000000-0000-4000-8000-000000000000').expect(404);
     // Garbage id shape refused before the store is touched.
     await request(app.getHttpServer()).post('/api/hooks/catch/not-a-uuid').send({}).expect(404);
+  });
+
+  it('a poll counts the deliveries, so a poller can tell a new event from the one it already applied', async () => {
+    const minted = await request(app.getHttpServer()).post('/api/catch').expect(201);
+    const catchId = minted.body.catch_id as string;
+    const poll = async (): Promise<Record<string, unknown>> =>
+      (await request(app.getHttpServer()).get(`/api/catch/${catchId}`).expect(200)).body as Record<
+        string,
+        unknown
+      >;
+    const deliver = (event: unknown) =>
+      request(app.getHttpServer())
+        .post(`/api/hooks/catch/${catchId}`)
+        .set('Content-Type', 'application/json')
+        .send(JSON.stringify(event))
+        .expect(201);
+
+    await deliver({ email: 'sara@acme.com' });
+    expect(await poll()).toMatchObject({ deliveries: 1, payload: { email: 'sara@acme.com' } });
+    expect(await poll()).toMatchObject({ deliveries: 1 });
+
+    await deliver({ email: 'sara@acme.com' });
+    expect(await poll()).toMatchObject({ deliveries: 2, payload: { email: 'sara@acme.com' } });
+
+    await deliver('ping');
+    expect(await poll()).toEqual({ received: true, payload: { body: 'ping' }, deliveries: 3 });
   });
 });

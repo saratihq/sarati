@@ -21,6 +21,7 @@ import { TriggersController } from './triggers.controller';
 import { TriggersService } from './triggers.service';
 import { WebhookSecretsController } from './webhook-secrets.controller';
 import { WebhookSecretsService } from './webhook-secrets.service';
+import { WebhookSampleController } from './webhook-sample.controller';
 
 /**
  * Canvas triggers: triggers are NODES in the version doc, activated by env promotion.
@@ -46,6 +47,7 @@ import { WebhookSecretsService } from './webhook-secrets.service';
     HooksController,
     ChatController,
     CatchController,
+    WebhookSampleController,
     WebhookSecretsController,
   ],
   providers: [

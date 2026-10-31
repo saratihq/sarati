@@ -709,10 +709,23 @@ export async function createCatch(): Promise<CatchHandle> {
   return request("/catch", { method: "POST" });
 }
 
+export interface CatchPoll {
+  received: boolean;
+  /** The trigger a webhook run of the last event would see; null until one lands. */
+  payload: unknown;
+  /** How many events have landed, so each is applied once. */
+  deliveries: number;
+}
+
 export async function getCatch(
   catchId: string,
-): Promise<{ received: boolean; payload: unknown }> {
+): Promise<CatchPoll> {
   return request(`/catch/${encodeURIComponent(catchId)}`);
+}
+
+/** Pasted JSON text read as a webhook delivery's body, answered as the trigger its run would see. */
+export async function shapeWebhookSample(json: string): Promise<{ payload: Record<string, unknown> }> {
+  return request("/triggers/webhook-sample", { method: "POST", body: json });
 }
 
 /** The API host a sender outside the browser reaches: the configured base, else this page's origin (a same-origin build). */
