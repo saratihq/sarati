@@ -609,6 +609,68 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     (await db.query(`SELECT 1 FROM workflow_branches WHERE workflow_id = $1 AND name = $2`, [wfId, name]))
       .rows.length === 1;
 
+  const branchRow = async (
+    wfId: string,
+    name: string,
+  ): Promise<{ head: string; is_protected: boolean } | undefined> =>
+    (
+      await db.query<{ head: string; is_protected: boolean }>(
+        `SELECT head_version_id AS head, is_protected FROM workflow_branches WHERE workflow_id = $1 AND name = $2`,
+        [wfId, name],
+      )
+    ).rows[0];
+
+  const protect = (org: string, wfId: string, name: string): request.Test =>
+    as(http().patch(`/api/workflows/${wfId}/branches/${name}/protection`), org).send({ is_protected: true });
+
+  // A merge writes version tags while it holds both its branches, so this parks it there until COMMIT.
+  const holdTagWrites = async (): Promise<Client> => {
+    const blocker = new Client({ connectionString: dbUrl });
+    await blocker.connect();
+    await blocker.query('BEGIN');
+    await blocker.query('LOCK TABLE workflow_version_tags IN SHARE MODE');
+    return blocker;
+  };
+
+  // `diverged` with its review approved and main protected, so that review alone lets feat merge in.
+  const approvedIntoProtectedMain = async (
+    org: string,
+    name: string,
+  ): Promise<{ wfId: string; reviewId: string }> => {
+    const s = await diverged(org, name);
+    await as(http().post(`/api/workflows/${s.wfId}/reviews/${s.reviewId}/approve`), org)
+      .send({ decision: 'approved' })
+      .expect(201);
+    await protect(org, s.wfId, 'main').expect(200);
+    return s;
+  };
+
+  const reviewStatus = async (reviewId: string): Promise<string | undefined> =>
+    (await db.query<{ status: string }>(`SELECT status FROM workflow_reviews WHERE id = $1`, [reviewId]))
+      .rows[0]?.status;
+
+  const reviewDecisions: Array<
+    [string, (org: string, s: { wfId: string; reviewId: string }) => request.Test, string, string, string]
+  > = [
+    [
+      'a rejection',
+      (org, s) =>
+        as(http().post(`/api/workflows/${s.wfId}/reviews/${s.reviewId}/approve`), org).send({
+          decision: 'rejected',
+        }),
+      'review.rejected',
+      'rejected',
+      'Cannot approve a closed or merged review',
+    ],
+    [
+      'a close',
+      (org, s) => as(http().post(`/api/workflows/${s.wfId}/reviews/${s.reviewId}/close`), org).send({}),
+      'review.closed',
+      'closed',
+      'Cannot close a merged review',
+    ],
+  ];
+
   const pointerCount = async (wfId: string, environment: string): Promise<number> =>
     Number(
       (
@@ -903,6 +965,241 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
       deleted.restore();
     }
     expect(await branchExists(s.wfId, 'side')).toBe(false);
+  });
+
+  it.each([
+    ['protecting it', (org: string, wfId: string) => protect(org, wfId, 'feat')],
+    ['a commit to it', (org: string, wfId: string, head: string) => commit(org, wfId, head, 'feat')],
+  ])(
+    '%s while Merge into main holds the branch waits for the merge, which deletes the branch, then answers 404',
+    async (_, write) => {
+      const org = await workspace('Branch write vs merge cleanup');
+      const s = await diverged(org, 'branch write vs merge cleanup');
+      await as(http().post(`/api/workflows/${s.wfId}/reviews/${s.reviewId}/close`), org)
+        .send({})
+        .expect(201);
+      const { head } = (await branchRow(s.wfId, 'feat'))!;
+      const before = await deadlocks();
+      const blocker = await holdTagWrites();
+      try {
+        const merging = as(http().post(`/api/workflows/${s.wfId}/branches/feat/merge`), org)
+          .send({ target_branch: 'main' })
+          .then((res) => res);
+        await lockWaiters(1);
+        const writing = write(org, s.wfId, head).then((res) => res);
+        await lockWaiters(2);
+        await blocker.query('COMMIT');
+        const merged = await merging;
+        expect(merged.status).toBe(201);
+        expect(merged.body).toMatchObject({ status: 'merged', cleaned_up: { branch_deleted: 'feat' } });
+        const refused = await writing;
+        expect(refused.status).toBe(404);
+        expect(refused.body.detail).toBe("Branch 'feat' not found");
+      } finally {
+        await blocker.end();
+      }
+      expect(await branchExists(s.wfId, 'feat')).toBe(false);
+      expect(await deadlocksSince(before)).toBe(0);
+    },
+  );
+
+  it('Merge into main waiting on a protect of its branch lands, and keeps the branch', async () => {
+    const org = await workspace('Merge cleanup vs protect');
+    const s = await diverged(org, 'merge cleanup vs protect');
+    await as(http().post(`/api/workflows/${s.wfId}/reviews/${s.reviewId}/close`), org)
+      .send({})
+      .expect(201);
+    const gate = gateEmits('branch.protected');
+    try {
+      const protecting = statusOf(protect(org, s.wfId, 'feat'));
+      await gate.arrived(0);
+      const merging = as(http().post(`/api/workflows/${s.wfId}/branches/feat/merge`), org)
+        .send({ target_branch: 'main' })
+        .then((res) => res);
+      await lockWaiters(1);
+      gate.release(0);
+      expect(await protecting).toBe(200);
+      const merged = await merging;
+      expect(merged.status).toBe(201);
+      expect(merged.body).toMatchObject({ status: 'merged', cleaned_up: null });
+    } finally {
+      gate.restore();
+    }
+    expect(await branchRow(s.wfId, 'feat')).toMatchObject({ is_protected: true });
+  });
+
+  it.each([
+    ['no review', () => Promise.resolve()],
+    [
+      'an approved review of main into it',
+      async (org: string, wfId: string) => {
+        const review = await as(http().post(`/api/workflows/${wfId}/reviews`), org)
+          .send({ source_branch: 'main', target_branch: 'feat', title: 'main into feat' })
+          .expect(201);
+        await as(http().post(`/api/workflows/${wfId}/reviews/${review.body.id}/approve`), org)
+          .send({ decision: 'approved' })
+          .expect(201);
+      },
+    ],
+  ])(
+    'an update waiting on a protect of its branch is refused 409 branch_protected and lands nothing, with %s',
+    async (_, review) => {
+      const org = await workspace('Update vs protect');
+      const s = await diverged(org, 'update vs protect');
+      await review(org, s.wfId);
+      const { head } = (await branchRow(s.wfId, 'feat'))!;
+      const gate = gateEmits('branch.protected');
+      try {
+        const protecting = statusOf(protect(org, s.wfId, 'feat'));
+        await gate.arrived(0);
+        const updating = as(http().post(`/api/workflows/${s.wfId}/branches/feat/update`), org)
+          .send({ from_branch: 'main' })
+          .then((res) => res);
+        await lockWaiters(1);
+        gate.release(0);
+        expect(await protecting).toBe(200);
+        const refused = await updating;
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('branch_protected');
+      } finally {
+        gate.restore();
+      }
+      expect(await branchRow(s.wfId, 'feat')).toEqual({ head, is_protected: true });
+    },
+  );
+
+  it('protecting a branch while an update holds it waits for the update to land, then protects it', async () => {
+    const org = await workspace('Protect vs update');
+    const s = await diverged(org, 'protect vs update');
+    const blocker = await holdTagWrites();
+    try {
+      const updating = as(http().post(`/api/workflows/${s.wfId}/branches/feat/update`), org)
+        .send({ from_branch: 'main' })
+        .then((res) => res);
+      await lockWaiters(1);
+      const protecting = statusOf(protect(org, s.wfId, 'feat'));
+      await lockWaiters(2);
+      await blocker.query('COMMIT');
+      const updated = await updating;
+      expect(updated.status).toBe(201);
+      expect(updated.body.status).toBe('merged');
+      expect(await protecting).toBe(200);
+      expect(await branchRow(s.wfId, 'feat')).toEqual({
+        head: updated.body.merged_version_id,
+        is_protected: true,
+      });
+    } finally {
+      await blocker.end();
+    }
+  });
+
+  it.each(reviewDecisions)(
+    '%s of the approved review, holding it when Merge into a protected main starts, lands first and the merge is refused',
+    async (_, decide, event, status) => {
+      const org = await workspace('Decision vs protected merge');
+      const s = await approvedIntoProtectedMain(org, 'decision vs protected merge');
+      const { head } = (await branchRow(s.wfId, 'main'))!;
+      const gate = gateEmits(event);
+      try {
+        const deciding = statusOf(decide(org, s));
+        await gate.arrived(0);
+        const merging = as(http().post(`/api/workflows/${s.wfId}/branches/feat/merge`), org)
+          .send({ target_branch: 'main' })
+          .then((res) => res);
+        await lockWaiters(1);
+        gate.release(0);
+        expect(await deciding).toBe(201);
+        const refused = await merging;
+        expect(refused.status).toBe(400);
+        expect(refused.body.detail).toBe("Branch 'main' is protected — merge it through an approved review");
+      } finally {
+        gate.restore();
+      }
+      expect(await reviewStatus(s.reviewId)).toBe(status);
+      expect(await branchRow(s.wfId, 'main')).toEqual({ head, is_protected: true });
+      expect(await branchExists(s.wfId, 'feat')).toBe(true);
+    },
+  );
+
+  it.each(reviewDecisions)(
+    '%s of the approved review arriving while Merge into a protected main holds it waits, then is refused as merged',
+    async (_, decide, _event, _status, refusal) => {
+      const org = await workspace('Protected merge vs decision');
+      const s = await approvedIntoProtectedMain(org, 'protected merge vs decision');
+      const before = await deadlocks();
+      const blocker = await holdTagWrites();
+      try {
+        const merging = as(http().post(`/api/workflows/${s.wfId}/branches/feat/merge`), org)
+          .send({ target_branch: 'main' })
+          .then((res) => res);
+        await lockWaiters(1);
+        const deciding = decide(org, s).then((res) => res);
+        await lockWaiters(2);
+        await blocker.query('COMMIT');
+        const merged = await merging;
+        expect(merged.status).toBe(201);
+        expect(merged.body).toMatchObject({
+          status: 'merged',
+          cleaned_up: null,
+          reviews_resolved: [{ review_id: s.reviewId, status: 'merged' }],
+        });
+        const refused = await deciding;
+        expect(refused.status).toBe(400);
+        expect(refused.body.detail).toBe(refusal);
+      } finally {
+        await blocker.end();
+      }
+      expect(await reviewStatus(s.reviewId)).toBe('merged');
+      expect(await deadlocksSince(before)).toBe(0);
+    },
+  );
+
+  it('deleting two branches with a review each way between them, one parked on a review an approve holds, deletes both without deadlock', async () => {
+    const org = await workspace('Branch delete vs branch delete');
+    const wfId = await deploy(org, 'branch delete vs branch delete');
+    const [v1] = await versions(org, wfId);
+    for (const [branch, separator] of [
+      ['left', '-'],
+      ['right', '+'],
+    ] as const) {
+      await as(http().post(`/api/workflows/${wfId}/branches`), org)
+        .send({ name: branch })
+        .expect(201);
+      await as(http().post(`/api/workflows/${wfId}/commit`), org)
+        .send({ workflow_ir: webhookDoc(branch, 'title', separator), branch, base_version_id: v1!.id })
+        .expect(201);
+    }
+    const open = async (source: string, target: string): Promise<string> =>
+      (
+        await as(http().post(`/api/workflows/${wfId}/reviews`), org)
+          .send({ source_branch: source, target_branch: target, title: `${source} into ${target}` })
+          .expect(201)
+      ).body.id as string;
+    const leftIntoRight = await open('left', 'right');
+    await open('right', 'left');
+    const approved = gateEmits('review.approved');
+    const before = await deadlocks();
+    try {
+      const approving = statusOf(
+        as(http().post(`/api/workflows/${wfId}/reviews/${leftIntoRight}/approve`), org).send({
+          decision: 'approved',
+        }),
+      );
+      await approved.arrived(0);
+      const deletingLeft = statusOf(as(http().delete(`/api/workflows/${wfId}/branches/left`), org));
+      await lockWaiters(1);
+      const deletingRight = statusOf(as(http().delete(`/api/workflows/${wfId}/branches/right`), org));
+      await lockWaiters(2);
+      approved.release(0);
+      expect(await approving).toBe(201);
+      expect(await deletingLeft).toBe(200);
+      expect(await deletingRight).toBe(200);
+    } finally {
+      approved.restore();
+    }
+    expect(await branchExists(wfId, 'left')).toBe(false);
+    expect(await branchExists(wfId, 'right')).toBe(false);
+    expect(await deadlocksSince(before)).toBe(0);
   });
 
   it.each([
