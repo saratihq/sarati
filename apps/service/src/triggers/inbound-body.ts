@@ -5,10 +5,14 @@ import type { RawBodyRequest } from '@nestjs/common';
 import { raw, type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 
 import { DomainError } from '../common/domain-error';
-import { CHAT_PREFIX, HOOKS_PREFIX } from './canvas/webhook-url';
+import { CHAT_PREFIX, HOOKS_PREFIX, WEBHOOK_SAMPLE_PATH } from './canvas/webhook-url';
 
-/** The public intakes, whose senders pick the content type: webhooks, catches, Composio and chat. */
-export const INBOUND_PATHS: readonly string[] = [`/${HOOKS_PREFIX}`, `/${CHAT_PREFIX}`];
+/** The bodies read as a webhook delivery's: the public intakes (webhooks, catches, Composio, chat) and a pasted webhook sample. */
+export const INBOUND_PATHS: readonly string[] = [
+  `/${HOOKS_PREFIX}`,
+  `/${CHAT_PREFIX}`,
+  `/${WEBHOOK_SAMPLE_PATH}`,
+];
 
 type BodyKind = 'json' | 'form' | 'text';
 type FormFields = Record<string, string | string[]>;

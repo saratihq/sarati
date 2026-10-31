@@ -18,7 +18,7 @@ interface CatchEntry {
   userId: string;
   expiresAt: number;
   body?: unknown;
-  receivedAt?: number;
+  deliveries: number;
 }
 
 @Injectable()
@@ -34,7 +34,7 @@ export class CatchStore {
     }
     const catchId = newId();
     const expiresAt = Date.now() + TTL_MS;
-    this.entries.set(catchId, { userId, expiresAt });
+    this.entries.set(catchId, { userId, expiresAt, deliveries: 0 });
     return { catchId, expiresAt: new Date(expiresAt).toISOString() };
   }
 
@@ -46,16 +46,17 @@ export class CatchStore {
     const size = Buffer.byteLength(JSON.stringify(body ?? null), 'utf8');
     if (size > MAX_PAYLOAD_BYTES) throw new DomainError('Test payload too large for a sample', 413);
     entry.body = body;
-    entry.receivedAt = Date.now();
+    entry.deliveries += 1;
   }
 
-  /** Owner poll: has anything landed yet? Its payload is the `trigger` scope a run it started would see. */
-  read(catchId: string, userId: string): { received: boolean; payload: unknown } {
+  /** Owner poll: the `trigger` scope a run of the last event would see, and how many events landed, so a poller applies each once. */
+  read(catchId: string, userId: string): { received: boolean; payload: unknown; deliveries: number } {
     this.purge();
     const entry = this.entries.get(catchId);
     if (!entry || entry.userId !== userId) throw new DomainError('Catch not found or expired', 404);
-    if (entry.receivedAt === undefined) return { received: false, payload: null };
-    return { received: true, payload: coerceWebhookBody(entry.body) };
+    const { deliveries } = entry;
+    if (deliveries === 0) return { received: false, payload: null, deliveries };
+    return { received: true, payload: coerceWebhookBody(entry.body), deliveries };
   }
 
   private purge(): void {

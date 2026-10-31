@@ -11,7 +11,7 @@ import { INBOUND_PATHS, inboundBody } from './triggers/inbound-body';
 /**
  * Shared app wiring for main.ts and the e2e harness — identical middleware
  * order in tests and production:
- *   request-id → public-intake body reader → JSON parser → CORS → routes.
+ *   request-id → CORS → inbound body reader → JSON parser → routes.
  */
 export function configureApp(app: INestApplication): EnvConfig {
   app.useLogger(app.get(Logger));
@@ -30,10 +30,7 @@ export function configureApp(app: INestApplication): EnvConfig {
     next();
   });
 
-  // Must precede json(), which then skips the request because its body is already read.
-  app.use(INBOUND_PATHS, ...inboundBody(env.maxRequestBodyBytes));
-  app.use(json({ limit: env.maxRequestBodyBytes }));
-
+  // Before the body readers, so a browser can read their refusals too.
   app.enableCors({
     origin: [...env.corsOriginList],
     credentials: true,
@@ -42,6 +39,10 @@ export function configureApp(app: INestApplication): EnvConfig {
     // The export download: the browser client reads the filename + notes.
     exposedHeaders: ['Content-Disposition'],
   });
+
+  // Must precede json(), which then skips the request because its body is already read.
+  app.use(INBOUND_PATHS, ...inboundBody(env.maxRequestBodyBytes));
+  app.use(json({ limit: env.maxRequestBodyBytes }));
 
   app.enableShutdownHooks();
   return env;
