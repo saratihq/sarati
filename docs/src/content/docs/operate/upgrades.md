@@ -6,7 +6,9 @@ description: Move to a new version without losing anything, and be able to go ba
 ## Upgrade
 
 Re-run the installer. It keeps your `.env`, refreshes the stack definition, pulls the new images and
-restarts in place — no need to stop anything first.
+restarts what changed in place — the proxy too, unless the installer last started it on the same
+`docker/Caddyfile` it just fetched and found that file on disk unchanged. No need to stop anything
+first.
 
 ```bash
 curl -fsSL https://get.sarati.io | sh

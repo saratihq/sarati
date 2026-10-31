@@ -687,14 +687,25 @@ fi
 
 say "Fetching the stack definition…"
 base="https://raw.githubusercontent.com/${REPO}/${REF}"
+# fetch <path upstream> <file here> renames the download into place whole, so a failed one leaves the file as it was.
+fetch() {
+  [ ! -d "$2" ] || die "$(pwd)/$2 is a directory, where this keeps a file. Remove it, then re-run this:  rmdir $(shq "$(pwd)/$2")"
+  [ -w "$(dirname "$2")" ] || die "Cannot write in the directory that holds $(pwd)/$2. Re-run this as the user that owns it."
+  curl -fsSL "$base/$1" -o "$2.download" || { rm -f "$2.download"; die "Could not download $1 from $base"; }
+  chmod 644 "$2.download"
+  # An unchanged file stays the one a running proxy's bind mount holds.
+  if cmp -s "$2.download" "$2"; then rm -f "$2.download"; return 0; fi
+  mv -f "$2.download" "$2" || { rm -f "$2.download"; die "Cannot replace $(pwd)/$2. Re-run this as the user that owns it."; }
+}
 if [ "$stack" = single ]; then
-  curl -fsSL "$base/docker-compose.single.yaml" -o docker-compose.yaml ||
-    die "Could not download docker-compose.single.yaml from $base"
+  fetch docker-compose.single.yaml docker-compose.yaml
 else
   mkdir -p docker
-  for f in docker-compose.yaml docker/Caddyfile; do
-    curl -fsSL "$base/$f" -o "$f" || die "Could not download $f from $base"
-  done
+  ondisk=$({ cksum < docker/Caddyfile; } 2>/dev/null) || ondisk=""
+  for f in docker-compose.yaml docker/Caddyfile; do fetch "$f" "$f"; done
+  # The proxy's label: compose recreates a container whose labels changed, never one whose mounted file did.
+  SARATI_CADDYFILE_SUM=$(cksum < docker/Caddyfile)
+  export SARATI_CADDYFILE_SUM
 fi
 
 # Base64url so the values are safe unquoted in an env file.
@@ -753,8 +764,20 @@ if ! pull_output=$(docker compose pull --quiet 2>&1); then
   pulled=""
   pull_error=$(printf '%s\n' "$pull_output" | sed '/^[[:space:]]*$/d' | tail -1)
 fi
+proxy_id() { docker compose ps -q proxy 2>/dev/null | head -1; }
+proxy=""
+[ "$stack" != compose ] || proxy=$(proxy_id)
 # Compose recreates only what changed, so a move recreates every container for each one's labels to name this directory.
 if [ -n "$(elsewhere)" ]; then docker compose up -d --force-recreate; else docker compose up -d; fi
+if [ -n "$proxy" ]; then
+  now=$(proxy_id)
+  # A proxy compose kept may run a docker/Caddyfile edited by hand, which its label cannot show.
+  if [ "$now" = "$proxy" ] && [ "$ondisk" != "$SARATI_CADDYFILE_SUM" ]; then
+    docker compose up -d --no-deps --force-recreate proxy
+    now=$(proxy_id)
+  fi
+  [ "$now" = "$proxy" ] || say "Restarted the proxy, so it runs the docker/Caddyfile just fetched."
+fi
 if [ "$stack" = single ]; then
   running=$(running_version sarati)
 else

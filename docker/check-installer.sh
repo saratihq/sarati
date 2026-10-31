@@ -10,6 +10,8 @@ set -eu
 old=0.2.25
 # The last installer that did not save an install's name.
 before=387f56bb1272c871f6df05744e0b87f38fb4f063
+# The last installer that left the proxy on the docker/Caddyfile it started with.
+stuck=05cd32ece9e7cec3038a07febe6d0d0270d639c5
 root=$(cd "$(dirname "$0")/.." && pwd)
 safe=$(sed -n 's/^SAFE_VERSION=//p' "$root/install.sh")
 work=$(mktemp -d)
@@ -34,6 +36,7 @@ cleanup() {
     for volume in $(docker volume ls -q --filter "label=com.docker.compose.project=$project"); do docker volume rm "$volume" >/dev/null 2>&1 || true; done
     for network in $(docker network ls -q --filter "label=com.docker.compose.project=$project"); do docker network rm "$network" >/dev/null 2>&1 || true; done
   done
+  chmod -R u+rwX "$work" 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -41,6 +44,7 @@ trap cleanup EXIT
 fail() { echo "::error::$1" >&2; exit 1; }
 [ -n "$safe" ] || fail 'install.sh no longer sets SAFE_VERSION'
 curl -fsSL "https://raw.githubusercontent.com/saratihq/sarati/$before/install.sh" -o "$work/before.sh"
+curl -fsSL "https://raw.githubusercontent.com/saratihq/sarati/$stuck/install.sh" -o "$work/stuck.sh"
 
 # attempt <name> <port|-> [VAR=value ...] runs $script for that install, keeping what it printed in $out.
 attempt() {
@@ -86,11 +90,14 @@ unlisten() {
   kill "$listener"
   listener=''
 }
-before_installer() {
-  script=$work/before.sh
+# installed_by <installer> <name> <port|-> [VAR=value ...] runs that earlier installer instead of this one.
+installed_by() {
+  script=$1
+  shift
   run_installer "$@"
   script=$root/install.sh
 }
+before_installer() { installed_by "$work/before.sh" "$@"; }
 
 says() { printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
 never() { ! printf '%s\n' "$out" | grep -qF -- "$1" || fail "$2"; }
@@ -114,6 +121,29 @@ answers() {
     sleep 2
   done
 }
+# callback <name> <port> <tag> sends a request carrying a callback's code and state through that install's proxy and prints the access log line it left.
+callback() {
+  # A route every version answers with no redirect, whose logged Location would repeat the query past the filter.
+  curl -s -o /dev/null "http://localhost:$2/api/health?code=oauth-code-$3&state=oauth-state-$3&probe=$3" || fail "the proxy of $1 did not answer"
+  id=$(on "$1" ps -q proxy)
+  i=0
+  until line=$(docker logs "$id" 2>&1 | grep -F "probe=$3"); do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "the proxy of $1 logged no request tagged $3"
+    sleep 1
+  done
+  printf '%s\n' "$line"
+}
+started() { docker inspect --format '{{ .State.StartedAt }}' "$1"; }
+image() { docker inspect --format '{{ .Image }}' "$1"; }
+# still <name> <proxy id> <its image id> <why> fails with why unless that install still runs that proxy.
+still() {
+  id=$(on "$1" ps -q proxy)
+  [ "$id" != "$2" ] || return 0
+  [ -z "$id" ] || [ "$(image "$id")" = "$3" ] || fail 'caddy:2-alpine was republished between two runs, so compose recreated the proxy for its new image and this proves nothing: re-run the check'
+  fail "$4"
+}
+loaded() { docker inspect --format '{{ index .Config.Labels "io.sarati.caddyfile" }}' "$1"; }
 
 echo '--- SARATI_PORT takes only a port in range, after only an IP address'
 for value in 0 08080 65536 ::8080 abc:def:8080 '[:]:8080' 127.0.0.01:8080 '[1.2.3.4]:8080'; do
@@ -151,6 +181,7 @@ mkdir "$work/hand5"
 printf 'SARATI_URL=http://localhost:8189\nSARATI_PORT=8189\n' > "$work/hand5/.env"
 run_installer hand5 - SARATI_STACK=compose COMPOSE_PROJECT_NAME=check-hand5
 says 'Wrote SECRET_KEY FERNET_KEY POSTGRES_PASSWORD into' 'the hand-made .env asked for five containers did not get its keys'
+never 'Restarted the proxy' 'a first install said it restarted its proxy'
 answers 8189
 on hand5 down -v >/dev/null
 
@@ -206,6 +237,92 @@ refused keyless - COMPOSE_PROJECT_NAME=check-five
 says "A Sarati database already exists on this machine, but $work/keyless/.env does not hold its keys" 'a .env without the keys was taken for a five-container database'
 [ -z "$(recorded keyless)" ] || fail 'the refused run wrote into the .env'
 on five down -v >/dev/null
+
+echo '--- five containers, left on an earlier docker/Caddyfile by the installer from before'
+# v0.2.26's stack definition is that installer's but for a docker/Caddyfile that logs a sign-in callback's code and state.
+installed_by "$work/stuck.sh" caddy 8199 COMPOSE_PROJECT_NAME=check-caddy SARATI_STACK=compose SARATI_REF=v0.2.26
+cp "$work/caddy/docker/Caddyfile" "$work/v0.2.26.Caddyfile"
+logged=$(callback caddy 8199 old)
+printf '%s\n' "$logged" | grep -qF oauth-code-old || fail "the proxy did not start on v0.2.26's docker/Caddyfile, so this does not reproduce the upgrade"
+was=$(on caddy ps -q proxy)
+img=$(image "$was")
+installed_by "$work/stuck.sh" caddy - SARATI_REF=$stuck
+grep -qF 'delete code' "$work/caddy/docker/Caddyfile" || fail "the installer from before did not fetch $stuck's docker/Caddyfile"
+still caddy "$was" "$img" 'the installer from before restarted the proxy, so this does not reproduce the stuck upgrade'
+logged=$(callback caddy 8199 stuck)
+printf '%s\n' "$logged" | grep -qF oauth-code-stuck || fail 'the proxy already drops the code, so this does not reproduce the stuck upgrade'
+
+echo '--- ...upgraded by this one'
+run_installer caddy -
+says 'Restarted the proxy, so it runs the docker/Caddyfile just fetched.' 'the installer did not say it restarted the proxy'
+proxy=$(on caddy ps -q proxy)
+[ "$proxy" != "$was" ] || fail 'the installer left the proxy running the docker/Caddyfile it started with'
+[ "$(loaded "$proxy")" = "$(cksum < "$work/caddy/docker/Caddyfile")" ] || fail 'the proxy is not labelled with the checksum of docker/Caddyfile'
+logged=$(callback caddy 8199 new)
+! printf '%s\n' "$logged" | grep -qF -e oauth-code-new -e oauth-state-new || fail "the running proxy still logs a callback's code or state, so it did not load the new docker/Caddyfile: $logged"
+
+echo '--- ...re-run with nothing changed'
+since=$(started "$proxy")
+img=$(image "$proxy")
+inode=$(stat -c %i "$work/caddy/docker/Caddyfile")
+run_installer caddy -
+[ "$(stat -c %i "$work/caddy/docker/Caddyfile")" = "$inode" ] || fail 'the installer replaced an unchanged docker/Caddyfile, so the running proxy no longer holds the file on disk'
+still caddy "$proxy" "$img" 'the installer recreated the proxy though docker/Caddyfile had not changed'
+never 'Restarted the proxy' 'the installer restarted the proxy though docker/Caddyfile had not changed'
+[ "$(started "$proxy")" = "$since" ] || fail 'the installer restarted the proxy though docker/Caddyfile had not changed'
+
+echo '--- ...restarted by plain docker compose, then re-run over an edit to docker/Caddyfile'
+plain=$(on caddy up -d 2>&1) || fail "plain docker compose up -d failed: $plain"
+! printf '%s\n' "$plain" | grep -qF SARATI_CADDYFILE_SUM || fail "plain docker compose up -d warned about SARATI_CADDYFILE_SUM: $plain"
+was=$(on caddy ps -q proxy)
+[ "$was" != "$proxy" ] && [ -z "$(loaded "$was")" ] || fail 'plain docker compose up -d kept the proxy the installer labelled, so this does not reproduce a proxy started some other way'
+printf '# an edit the installer replaces\n' >> "$work/caddy/docker/Caddyfile"
+run_installer caddy -
+says 'Restarted the proxy, so it runs the docker/Caddyfile just fetched.' 'the installer did not restart a proxy it had not started'
+proxy=$(on caddy ps -q proxy)
+[ "$proxy" != "$was" ] || fail 'the installer kept a proxy it had not started'
+! grep -qF '# an edit the installer replaces' "$work/caddy/docker/Caddyfile" || fail 'the installer left an edit in docker/Caddyfile'
+[ "$(loaded "$proxy")" = "$(cksum < "$work/caddy/docker/Caddyfile")" ] || fail 'the installer did not label the proxy with the checksum of the docker/Caddyfile it fetched'
+
+echo '--- ...edited and restarted by hand, then re-run'
+cp "$work/v0.2.26.Caddyfile" "$work/caddy/docker/Caddyfile"
+on caddy restart proxy >/dev/null
+answers 8199
+logged=$(callback caddy 8199 edit)
+printf '%s\n' "$logged" | grep -qF oauth-code-edit || fail 'the proxy restarted by hand did not load the edited docker/Caddyfile, so this does not reproduce a hand edit'
+was=$proxy
+run_installer caddy -
+says 'Restarted the proxy, so it runs the docker/Caddyfile just fetched.' 'the installer did not say it restarted a proxy running a hand-edited docker/Caddyfile'
+proxy=$(on caddy ps -q proxy)
+[ "$proxy" != "$was" ] || fail 'the installer left the proxy running a hand-edited docker/Caddyfile'
+[ "$(loaded "$proxy")" = "$(cksum < "$work/caddy/docker/Caddyfile")" ] || fail 'the installer did not label the proxy with the checksum of the docker/Caddyfile it fetched over a hand edit'
+logged=$(callback caddy 8199 fixed)
+! printf '%s\n' "$logged" | grep -qF -e oauth-code-fixed -e oauth-state-fixed || fail "the proxy still logs a callback's code or state, so it kept the hand-edited docker/Caddyfile: $logged"
+
+echo '--- ...refused where Docker left a directory for a missing docker/Caddyfile'
+mv "$work/caddy/docker/Caddyfile" "$work/caddy.Caddyfile"
+mkdir "$work/caddy/docker/Caddyfile"
+refused caddy -
+says "$work/caddy/docker/Caddyfile is a directory, where this keeps a file. Remove it, then re-run this:  rmdir $work/caddy/docker/Caddyfile" 'a directory where docker/Caddyfile goes was not refused'
+rmdir "$work/caddy/docker/Caddyfile" || fail 'the refused run left something in the directory at docker/Caddyfile'
+mv "$work/caddy.Caddyfile" "$work/caddy/docker/Caddyfile"
+# Root may read and write anywhere, so these refusals show only as another user, as on GitHub's runners.
+if [ "$(id -u)" != 0 ]; then
+  echo '--- ...refused where it cannot write in docker/'
+  chmod 555 "$work/caddy/docker"
+  refused caddy -
+  chmod 755 "$work/caddy/docker"
+  says "Cannot write in the directory that holds $work/caddy/docker/Caddyfile. Re-run this as the user that owns it." 'a docker directory this cannot write in was not refused'
+  echo '--- ...re-run under a umask that would leave what it downloads unreadable'
+  printf '# an edit the installer replaces\n' >> "$work/caddy/docker/Caddyfile"
+  mask=$(umask)
+  umask 477
+  run_installer caddy -
+  umask "$mask"
+  [ "$(stat -c %a "$work/caddy/docker/Caddyfile")" = 644 ] || fail 'a docker/Caddyfile fetched under umask 477 is not readable by the proxy'
+fi
+[ -z "$(find "$work/caddy" -name '*.download')" ] || fail 'a refused run left a download behind'
+on caddy down -v >/dev/null
 
 echo '--- a first install, by the installer from before names were saved'
 before_installer first 8191

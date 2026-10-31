@@ -76,6 +76,9 @@ services:
     environment:
       # Ranges of a proxy in front of this one (Cloudflare, a load balancer); empty trusts none.
       SARATI_TRUSTED_PROXIES: ${SARATI_TRUSTED_PROXIES:-}
+    labels:
+      # docker/Caddyfile's checksum, set by the installer, so a changed file recreates the proxy.
+      io.sarati.caddyfile: ${SARATI_CADDYFILE_SUM:-}
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
