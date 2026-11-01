@@ -26,10 +26,10 @@ export class RunReaperJob implements OnModuleInit {
       return;
     }
     try {
-      const on = await this.jobs.register(async (boss) => {
-        await boss.createQueue(QUEUE);
-        await boss.work(QUEUE, () => this.tick());
-        await boss.schedule(QUEUE, '*/5 * * * *');
+      const on = await this.jobs.register(async (queues) => {
+        await queues.createQueue(QUEUE);
+        await queues.work(QUEUE, (_jobs, signal) => this.tick(signal));
+        await queues.schedule(QUEUE, '*/5 * * * *');
       });
       this.logger.log(
         on ? 'run reaper scheduled every 5m (pg-boss singleton)' : 'run reaper cron disabled (no pg-boss)',
@@ -41,9 +41,9 @@ export class RunReaperJob implements OnModuleInit {
   }
 
   // A failed pass is logged and still fails the job, so pg-boss records it.
-  private async tick(): Promise<void> {
+  private async tick(signal: AbortSignal): Promise<void> {
     try {
-      const r = await this.reaper.reapStale();
+      const r = await this.reaper.reapStale(signal);
       if (r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
         this.logger.warn(
           `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +

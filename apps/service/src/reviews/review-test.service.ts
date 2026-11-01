@@ -7,6 +7,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import type { Principal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { ShuttingDown } from '../common/shutdown-deadline';
 import { ConnectionsService } from '../connections/connections.service';
 import { planRunAs } from '../connections/run-as-account';
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
@@ -249,6 +250,7 @@ export class ReviewTestService {
       });
       return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
     } catch (err) {
+      if (err instanceof ShuttingDown) throw err;
       return {
         runId,
         status: 'error',

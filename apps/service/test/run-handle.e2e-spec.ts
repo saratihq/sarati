@@ -8,6 +8,7 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { ShutdownDeadline } from '../src/common/shutdown-deadline';
 import type { EnvConfig } from '../src/config/env.config';
 import { DbosRuntime, type DurableRun } from '../src/dbos/dbos-runtime';
 import type { WorkflowIR } from '../src/ir/models';
@@ -271,9 +272,13 @@ describe('run handle: run_id, bounded wait, and debuggable failure (e2e, isolate
     } as unknown as DbosRuntime;
     // The real interpreter + compiler, with durability the only thing stubbed (proven separately
     // by dbos-durable-step.e2e-spec.ts) — what is under test here is the compile seam.
-    const runs = new RunsService(app.get(DagInterpreter), app.get(RuntimeCompiler), dbos, {
-      get: () => ({ dbosEnabled: true }),
-    } as unknown as ConfigService<{ env: EnvConfig }, true>);
+    const runs = new RunsService(
+      app.get(DagInterpreter),
+      app.get(RuntimeCompiler),
+      dbos,
+      { get: () => ({ dbosEnabled: true }) } as unknown as ConfigService<{ env: EnvConfig }, true>,
+      new ShutdownDeadline(),
+    );
 
     const { runId } = await runs.startRun(
       { ir: slowIr() as unknown as WorkflowIR },

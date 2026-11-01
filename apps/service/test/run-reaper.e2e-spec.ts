@@ -297,6 +297,24 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
     expect(await stepsOf(stranded)).toEqual([{ status: 'error', waiting_topic: null }]);
   });
 
+  it('leaves a run holding a decision nothing can resume to the next pass once a stop has aborted this one', async () => {
+    const stranded = await insertRun({
+      status: 'waiting',
+      startedAgo: '3 hours',
+      parked: [{ stepKey: 'approve', timeoutAt: `now() - interval '2 hours'` }],
+    });
+    await db.query(
+      `UPDATE runtime_run_steps SET claimed_at = now() - interval '150 minutes', claimed_by = $2, claimed_payload = '{"d":1}'
+        WHERE run_id = $1`,
+      [stranded, userId],
+    );
+
+    expect((await reaper.reapStale(AbortSignal.abort())).strandedDecisions).toBe(0);
+    expect((await statusOf(stranded)).status).toBe('waiting');
+    expect((await reaper.reapStale()).strandedDecisions).toBeGreaterThanOrEqual(1);
+    expect((await statusOf(stranded)).status).toBe('error');
+  });
+
   it('names the latest of a stranded run’s decisions on the run, unless the run already holds a later one', async () => {
     const other = randomUUID();
     const strand = async (slotAgo: string | null): Promise<string> => {

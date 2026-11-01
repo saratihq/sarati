@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { Observable, Subject } from 'rxjs';
 
 import { errorMessage } from '../common/error-message';
@@ -42,15 +42,22 @@ interface Channel {
  * : the durable loop publishes, the `@Sse()` chat-events endpoint subscribes. Run
  * history is the source of truth, so the bus is deliberately best-effort — publishing with no live
  * channel is a silent drop, `publish` never blocks (backpressure is the socket's problem, no queue
- * is held), and a channel is dropped on last unsubscribe, `close`, or TTL.
+ * is held), and a channel is dropped on last unsubscribe, `close`, TTL, or as the service starts to stop.
  *
  * IN-MEMORY: publisher and subscriber must be the SAME process. Horizontal scale needs a shared
  * fan-out (Redis / LISTEN-NOTIFY) behind this same sink/subscribe surface — deliberately deferred.
  */
 @Injectable()
-export class AgentStepBus implements AgentStepSink {
+export class AgentStepBus implements AgentStepSink, OnModuleDestroy {
   private readonly logger = new Logger(AgentStepBus.name);
   private readonly channels = new Map<string, Channel>();
+  private stopping = false;
+
+  /** Ends every channel's streams as the service starts to stop, so no open stream holds the HTTP server's close. */
+  onModuleDestroy(): void {
+    this.stopping = true;
+    for (const key of [...this.channels.keys()]) this.close(key);
+  }
 
   /**
    * Publish one recorded step to a channel's live subscribers, stamped with the channel's next
@@ -68,12 +75,13 @@ export class AgentStepBus implements AgentStepSink {
     }
   }
 
-  /**
-   * Subscribe to a channel's live step stream. Subscribing creates or joins the channel and bumps
-   * its refcount; the channel is torn down at zero. Subscribe BEFORE the run publishes.
-   */
+  /** Subscribe, BEFORE the run publishes, to a channel's live steps, creating or joining it (torn down at zero subscribers); once the service has begun to stop, it opens no channel and ends at once. */
   subscribe(channelKey: string): Observable<SequencedStep> {
     return new Observable<SequencedStep>((subscriber) => {
+      if (this.stopping) {
+        subscriber.complete();
+        return undefined;
+      }
       const channel = this.ensureChannel(channelKey);
       channel.refCount += 1;
       const inner = channel.subject.subscribe(subscriber);

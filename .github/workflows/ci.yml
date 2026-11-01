@@ -147,5 +147,40 @@ jobs:
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-client-address.sh one one-bundled
       - name: The one-container proxy logs a request as its time, status and visitor, never its address
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-proxy-log.sh one one-bundled
+      - name: Stopping the one-container install stops its service at once, even with a request held open through its proxy
+        run: |
+          # The proxy stops with the service, so a request held open through it is cut by the service's own stop, not the proxy's kill.
+          cd "$RUNNER_TEMP"
+          docker run -d --name one-stop -p 8095:8080 sarati-one:ci
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:8095/api/ready >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8095/api/ready >/dev/null \
+            || { echo "::error::the one-container install to stop does not come up"; docker logs one-stop 2>&1 | tail -60; exit 1; }
+          mkfifo held-body
+          exec 3<>held-body
+          # `-T .` reads the never-ending body without blocking, so curl still sees the answer.
+          curl -sS -v --max-time 45 -o /dev/null -w '%{http_code}' -X POST -T . -H 'content-type: application/json' -H 'Expect:' \
+            http://localhost:8095/api/health <held-body >held-status 2>held-curl.log &
+          held=$!
+          for i in $(seq 1 50); do
+            grep -q '^> POST /api/health' held-curl.log && break
+            sleep 0.1
+          done
+          grep -q '^> POST /api/health' held-curl.log \
+            || { echo "::error::the held request never left curl"; cat held-curl.log; exit 1; }
+          sleep 1
+          began=$(date +%s)
+          docker stop -t 30 one-stop
+          took=$(( $(date +%s) - began ))
+          wait "$held" || true
+          docker logs one-stop >one-stop.log 2>&1
+          test "$(cat held-status)" = 502 \
+            || { echo "::error::the held request was not cut by the service's stop (got '$(cat held-status)')"; cat held-curl.log; tail -60 one-stop.log; exit 1; }
+          grep -q 'database system is shut down' one-stop.log \
+            || { echo "::error::Postgres did not shut down cleanly"; tail -60 one-stop.log; exit 1; }
+          test "$took" -lt 20 || { echo "::error::the stop took ${took}s"; exit 1; }
+          echo "one-container stop: the held request cut by the service's stop, Postgres shut down cleanly, in ${took}s"
       - if: failure()
         run: docker compose logs --no-color | tail -100

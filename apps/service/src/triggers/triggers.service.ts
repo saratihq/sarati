@@ -11,6 +11,7 @@ import { withDeadline } from '../common/deadline';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
+import { ShuttingDown } from '../common/shutdown-deadline';
 import type { EnvConfig } from '../config/env.config';
 import { ConnectionsService } from '../connections/connections.service';
 import { isIdShape, nameBasedId, newId, now } from '../database/ids';
@@ -569,19 +570,17 @@ export class TriggersService {
     return account === null || account === deliveryAccountId;
   }
 
-  /**
-   * One poll cycle over the enabled schedule/polling activations, firing the due ones.
-   * Never throws (scheduler safety).
-   */
-  async runActivationPollCycle(): Promise<void> {
+  /** One poll cycle over the enabled schedule/polling activations, firing the due ones; once `signal` aborts it admits nothing more and waits on no run. Never throws. */
+  async runActivationPollCycle(signal?: AbortSignal): Promise<void> {
     try {
       const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity, {
         where: { paused: false },
       });
       let events = 0;
       for (const row of rows) {
+        if (signal?.aborted) break;
         if (row.kind !== ORCHESTR_SCHEDULE_KIND && row.kind !== POLLING_KIND) continue;
-        events += await this.pollActivation(row);
+        events += await this.pollActivation(row, signal);
       }
       if (rows.length > 0) {
         this.logger.log(`activation poll: ${rows.length} activation(s), ${events} event(s)`);
@@ -590,7 +589,7 @@ export class TriggersService {
       this.logger.error(`activation poll cycle failed: ${errorMessage(err)}`);
     }
     // Orphan reaper — throttled to the sweep cadence, never throws.
-    if (Date.now() - this.lastComposioReapAt >= COMPOSIO_REAP_INTERVAL_MS) {
+    if (!signal?.aborted && Date.now() - this.lastComposioReapAt >= COMPOSIO_REAP_INTERVAL_MS) {
       this.lastComposioReapAt = Date.now();
       await this.reapOrphanedComposioSubscriptions().catch((err) =>
         this.logger.warn(`composio orphan reaper failed: ${errorMessage(err)}`),
@@ -661,7 +660,10 @@ export class TriggersService {
   }
 
   /** Fire one due activation (schedule/polling). Compile/resolve failures land on its `last_error`. */
-  private async pollActivation(loaded: RuntimeTriggerActivationEntity): Promise<number> {
+  private async pollActivation(
+    loaded: RuntimeTriggerActivationEntity,
+    signal: AbortSignal | undefined,
+  ): Promise<number> {
     // A reconcile holding the lock is changing this activation; the next cycle polls what it leaves.
     const polled = await ifActivationUnlocked(this.pool, loaded.id, async () => {
       const row = await this.dataSource.manager.findOne(RuntimeTriggerActivationEntity, {
@@ -671,7 +673,7 @@ export class TriggersService {
       if (!row || !sameLiveTrigger(row, loaded) || !applyFinished(actualOf(row))) return null;
       // Held back by its slot: nothing is stood up or polled, and `last_error` keeps the slot rule's refusal.
       if (heldBack(row)) return null;
-      return this.pollLockedActivation(row);
+      return this.pollLockedActivation(row, signal);
     }).catch((err: unknown) => {
       this.logger.warn(`activation ${loaded.id}: not polled this cycle: ${errorMessage(err)}`);
       return null;
@@ -679,14 +681,20 @@ export class TriggersService {
     if (!polled) return 0;
     // Only awaiting a run happens outside the lock (a run can wait for days); every write to the activation's store stays inside it.
     for (const run of polled) {
-      await run
-        .outcome()
-        .catch((err) => this.logger.warn(`activation ${loaded.id}: fired run failed: ${String(err)}`));
+      if (signal?.aborted) break;
+      await run.outcome(signal).catch((err: unknown) => {
+        if (!(err instanceof ShuttingDown)) {
+          this.logger.warn(`activation ${loaded.id}: fired run failed: ${String(err)}`);
+        }
+      });
     }
     return polled.length;
   }
 
-  private async pollLockedActivation(row: RuntimeTriggerActivationEntity): Promise<AdmittedRun[] | null> {
+  private async pollLockedActivation(
+    row: RuntimeTriggerActivationEntity,
+    signal: AbortSignal | undefined,
+  ): Promise<AdmittedRun[] | null> {
     const em = this.dataSource.manager;
     try {
       const target = await this.resolveActivationTarget(row);
@@ -701,6 +709,7 @@ export class TriggersService {
       const events = await this.pollableEvents(row, store, target.wf);
       const admitted: AdmittedRun[] = [];
       for (const event of events) {
+        if (signal?.aborted) throw new ShuttingDown();
         admitted.push(
           await this.admitActivationRun(
             row,
@@ -721,6 +730,8 @@ export class TriggersService {
       );
       return admitted;
     } catch (err) {
+      // A stop leaves the activation as it was, its cursor unmoved, for the next boot to poll.
+      if (err instanceof ShuttingDown) throw err;
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },

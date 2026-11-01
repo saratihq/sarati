@@ -31,12 +31,10 @@ export class TriggerPollerJob implements OnModuleInit {
 
     const minutes = Math.max(1, Math.round(env.triggerPollIntervalSeconds / 60));
     try {
-      const on = await this.jobs.register(async (boss) => {
-        await boss.createQueue(QUEUE);
-        await boss.work(QUEUE, async () => {
-          await this.triggers.runActivationPollCycle();
-        });
-        await boss.schedule(QUEUE, `*/${minutes} * * * *`);
+      const on = await this.jobs.register(async (queues) => {
+        await queues.createQueue(QUEUE);
+        await queues.work(QUEUE, (_jobs, signal) => this.triggers.runActivationPollCycle(signal));
+        await queues.schedule(QUEUE, `*/${minutes} * * * *`);
       });
       this.logger.log(
         on ? `trigger poller scheduled every ${minutes}m (pg-boss singleton)` : 'trigger poller disabled',

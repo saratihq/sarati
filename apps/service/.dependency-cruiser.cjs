@@ -40,6 +40,15 @@ module.exports = {
       to: { path: '@dbos-inc/dbos-sdk' },
     },
     {
+      name: 'moat-pg-boss-confined',
+      severity: 'error',
+      comment:
+        'Only src/jobs talks to pg-boss: a job is sent through JobSender and a worker attaches through ' +
+        'JobRegistry, so a stop drains every worker (constitution #23).',
+      from: { path: '^src', pathNot: ['^src/jobs', '\\.spec\\.ts$'] },
+      to: { path: '(^|/)pg-boss/' },
+    },
+    {
       name: 'moat-mcp-answers-nothing-itself',
       severity: 'error',
       comment:

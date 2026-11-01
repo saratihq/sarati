@@ -11,6 +11,7 @@ import type { Principal } from '../auth/principal';
 import { scopeSatisfied } from '../auth/scopes';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { isRecord } from '../common/json-util';
 import { MCP_TOOLS, type McpTool } from './mcp-tool';
 import { toToolError, toToolResult } from './presentation/result';
 import { uniquelyNamed } from './unique-tool-names';
@@ -20,6 +21,9 @@ import { CallableWorkflowsService, type WorkflowTool } from '../workflows/callab
 // What an MCP client labels this server in its own UI — presentational, unlike the `orchestr_*`
 // tool names, which are the contract agents call and are not renamed here.
 const SERVER_INFO = { name: 'sarati', version: '1.0.0' };
+
+// How long a caller is told to wait before calling again once the service has begun to stop: a container stop's grace.
+const RETRY_AFTER_SECONDS = 10;
 
 /** The principal for the request being served; keyed by the Request the controller built for it. */
 const principals = new WeakMap<Request, Principal>();
@@ -32,6 +36,22 @@ function allowedFor(principal: Principal, tool: McpTool): boolean {
 function messageOf(err: unknown): string {
   if (err instanceof DomainError || err instanceof HttpException) return err.message;
   return errorMessage(err);
+}
+
+// What every call is answered once the handler has closed, while HTTP still serves the rest of a stop.
+function stoppingResponse(body: unknown): Response {
+  const id = isRecord(body) && (typeof body.id === 'string' || typeof body.id === 'number') ? body.id : null;
+  return new Response(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32000, message: 'The service is stopping; call again once it is back' },
+    }),
+    {
+      status: 503,
+      headers: { 'content-type': 'application/json', 'retry-after': String(RETRY_AFTER_SECONDS) },
+    },
+  );
 }
 
 /** A DomainError's machine-readable fields, so a failure reaches the agent as data, not prose. */
@@ -49,6 +69,7 @@ export class McpHandlerService implements OnModuleDestroy {
   private readonly logger = new Logger(McpHandlerService.name);
   private readonly reportedClashes = new Set<string>();
   private readonly handler: McpHttpHandler;
+  private closed = false;
 
   constructor(
     @Inject(MCP_TOOLS) private readonly tools: readonly McpTool[],
@@ -61,6 +82,7 @@ export class McpHandlerService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.closed = true;
     await this.handler.close();
   }
 
@@ -73,7 +95,9 @@ export class McpHandlerService implements OnModuleDestroy {
     return this.ordered().filter((tool) => allowedFor(principal, tool));
   }
 
+  /** Answers one MCP request; once the handler has closed for a stop, every request is answered 503 with Retry-After. */
   serve(request: Request, principal: Principal, parsedBody: unknown): Promise<Response> {
+    if (this.closed) return Promise.resolve(stoppingResponse(parsedBody));
     principals.set(request, principal);
     return this.handler.fetch(request, { parsedBody });
   }

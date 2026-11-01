@@ -141,8 +141,12 @@ function alreadyHeld(err: unknown): boolean {
   );
 }
 
+/** Every call waits for DBOS to launch, whatever made it and whenever it booted, and fails if it never will. */
 @Injectable()
 export class DbosRuntime {
+  private readonly launch: Promise<void>;
+  private settleLaunch!: { launched: () => void; refused: (reason: Error) => void };
+
   constructor(
     interpreter: DagInterpreter,
     @Optional() recorder?: RunRecorderService,
@@ -151,17 +155,29 @@ export class DbosRuntime {
     activeInterpreter = interpreter;
     activeRecorder = recorder ?? null;
     activeGuard = guard ?? null;
+    this.launch = new Promise<void>((launched, refused) => (this.settleLaunch = { launched, refused }));
+    this.launch.catch(() => undefined);
+  }
+
+  /** DBOS has launched: every call waiting goes ahead, and every later one goes straight through. */
+  launched(): void {
+    this.settleLaunch.launched();
+  }
+
+  /** DBOS will not launch (it is off, its launch failed, or the service stopped first): every call fails with `reason`. A no-op once launched. */
+  notLaunched(reason: Error): void {
+    this.settleLaunch.refused(reason);
   }
 
   /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. A repeat of `key` is dropped. */
-  sendEvent(runId: string, topic: string, payload: unknown, key?: string): Promise<void> {
-    outsideWorkflow();
+  async sendEvent(runId: string, topic: string, payload: unknown, key?: string): Promise<void> {
+    await this.outsideWorkflowOnceLaunched();
     return DBOS.send(runId, payload, topic, key);
   }
 
   /** Cancel a durable run at its next step boundary; a no-op for a run DBOS does not know or has finished. */
-  cancelWorkflow(runId: string): Promise<void> {
-    outsideWorkflow();
+  async cancelWorkflow(runId: string): Promise<void> {
+    await this.outsideWorkflowOnceLaunched();
     return DBOS.cancelWorkflow(runId);
   }
 
@@ -179,7 +195,7 @@ export class DbosRuntime {
       chatChannelKey?: string | null;
     },
   ): Promise<DurableRun> {
-    outsideWorkflow();
+    await this.outsideWorkflowOnceLaunched();
     try {
       const handle = await DBOS.startWorkflow(runPlanV2Workflow, { workflowID: opts.runId })({
         plan,
@@ -194,14 +210,14 @@ export class DbosRuntime {
 
   /** Whether a workflow holds the run id, on any engine and in any state. */
   async holdsWorkflow(runId: string): Promise<boolean> {
-    outsideWorkflow();
+    await this.outsideWorkflowOnceLaunched();
     const held = await DBOS.listWorkflows({ workflowIDs: [runId], loadInput: false, loadOutput: false });
     return held.length > 0;
   }
 
   /** Whether this instance can still take a durable run on to its end: pending, a workflow it knows, and its own to recover. */
   async canResume(runId: string): Promise<boolean> {
-    outsideWorkflow();
+    await this.outsideWorkflowOnceLaunched();
     const status = await DBOS.getWorkflowStatus(runId);
     return status !== null && resumable(status);
   }
@@ -211,14 +227,14 @@ export class DbosRuntime {
    * this instance can't resume it. `false` for a run with no workflow, and for one another build started.
    */
   async wontResume(runId: string): Promise<boolean> {
-    outsideWorkflow();
+    await this.outsideWorkflowOnceLaunched();
     const status = await DBOS.getWorkflowStatus(runId);
     return status !== null && (ENDED.has(status.status) || (owned(status) && !resumable(status)));
   }
 
   /** Poll a durable run's status (and its outputs once it has completed). */
   async getRunStatus(runId: string): Promise<RunStatus> {
-    outsideWorkflow();
+    await this.outsideWorkflowOnceLaunched();
     const handle = DBOS.retrieveWorkflow<RunResult>(runId);
     const status = await handle.getStatus();
     if (!status) return { runId, status: 'not_found' };
@@ -231,5 +247,10 @@ export class DbosRuntime {
       return { runId, status: 'error', error: status.status };
     }
     return { runId, status: 'running' };
+  }
+
+  private async outsideWorkflowOnceLaunched(): Promise<void> {
+    outsideWorkflow();
+    await this.launch;
   }
 }

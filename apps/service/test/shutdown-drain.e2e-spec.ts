@@ -138,8 +138,7 @@ describe('shutdown waits for in-process runs (e2e, isolated DB, DBOS off)', () =
       await eventually(
         'shutdown say it waits for the run',
         () => lines,
-        (seen) =>
-          seen.some((line) => line.startsWith('Shutting down: waiting up to 8000 ms for 1 in-process run')),
+        (seen) => seen.some((line) => /^Shutting down: waiting up to \d+ ms for 1 in-process run/.test(line)),
       );
       expect(closed).toBe(false);
 
@@ -240,7 +239,7 @@ describe('shutdown waits for in-process runs (e2e, isolated DB, DBOS off)', () =
         );
         await again.terminate();
         expect(again.log()).toContain(
-          `stopped waiting for in-process run(s) still going after 8000 ms: ${MOCK_USER_ID}:${runId}`,
+          `stopped waiting for in-process run(s) still going 8000 ms into the stop: ${MOCK_USER_ID}:${runId}`,
         );
       } finally {
         await again.crash();

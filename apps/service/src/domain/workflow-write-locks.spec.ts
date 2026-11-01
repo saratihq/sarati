@@ -163,6 +163,8 @@ const OPAQUE_READS: Record<string, string> = {
   'service:database/schema-guard.ts#onApplicationBootstrap':
     "runs this file's canary probes, every one a SELECT",
   'service:dbos/recovery-guard.ts#legacyRuns': "sends alreadyEnded's read of a run's status, a SELECT",
+  'service:jobs/jobs.module.ts#executeSql':
+    "sends pg-boss's own SQL, every table it writes in its pgboss schema",
   'service:dbos/recovery-guard.ts#resumability':
     "sends readResumability's reads of a run's history, every one a SELECT",
   'service:scripts/legacy-report.cli.ts#report':

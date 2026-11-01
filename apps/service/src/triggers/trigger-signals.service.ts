@@ -1,8 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import type PgBoss from 'pg-boss';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
-import { PG_BOSS } from '../jobs/jobs.module';
+import { JobSender } from '../jobs/jobs.module';
 
 /** pg-boss queue that reconciles ONE workflow's trigger activations (payload: `{ workflowId }`), at most one job per workflow waiting. */
 export const RECONCILE_QUEUE = 'trigger-reconcile';
@@ -18,7 +17,7 @@ export type InlineReconcile = (workflowId: string) => Promise<void>;
 /**
  * The pointer/slot-move → reconcile SIGNAL seam: the signal carries only a workflow
  * id, and the reconcile recomputes that workflow's whole desired set. MUST stay dependency-light
- * (PG_BOSS only) — workflows/environments depend on it, so importing the trigger layer would
+ * (JobSender only) — workflows/environments depend on it, so importing the trigger layer would
  * be a module cycle. With pg-boss off it runs inline via a handler registered at boot.
  */
 @Injectable()
@@ -28,7 +27,7 @@ export class TriggerSignalsService {
   private readonly waiting: string[] = [];
   private readonly running = new Set<string>();
 
-  constructor(@Inject(PG_BOSS) private readonly boss: PgBoss | null) {}
+  constructor(private readonly jobs: JobSender) {}
 
   /** The trigger layer wires its reconciler here at boot (registered in every mode). */
   registerInline(handler: InlineReconcile): void {
@@ -56,11 +55,8 @@ export class TriggerSignalsService {
    */
   async enqueue(workflowId: string): Promise<void> {
     try {
-      if (this.boss) {
-        // A reconcile reads the state when it starts, so one waiting job per workflow covers every change before it.
-        await this.boss.send(RECONCILE_QUEUE, { workflowId }, { singletonKey: workflowId });
-        return;
-      }
+      // A reconcile reads the state when it starts, so one waiting job per workflow covers every change before it.
+      if (await this.jobs.send(RECONCILE_QUEUE, { workflowId }, { singletonKey: workflowId })) return;
       // Fire-and-forget: the caller must not block on provider registration.
       if (!this.waiting.includes(workflowId)) this.waiting.push(workflowId);
       this.drain();
