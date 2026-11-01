@@ -9,11 +9,12 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import type { EnvConfig } from '../src/config/env.config';
-import { DbosRuntime } from '../src/dbos/dbos-runtime';
+import { DbosRuntime, type DurableRun } from '../src/dbos/dbos-runtime';
 import type { WorkflowIR } from '../src/ir/models';
 import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import type { DagPlan } from '../src/runtime/dag-plan';
+import type { RunResult } from '../src/runtime/run-plan';
 import { RuntimeCompiler } from '../src/runtime/runtime-compiler';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -263,9 +264,9 @@ describe('run handle: run_id, bounded wait, and debuggable failure (e2e, isolate
       startDurably: (
         plan: DagPlan,
         opts: { runId: string; initialScope?: Record<string, unknown> },
-      ): Promise<string> => {
+      ): Promise<DurableRun> => {
         started.push({ plan, runId: opts.runId, initialScope: opts.initialScope });
-        return Promise.resolve(opts.runId);
+        return Promise.resolve({ result: () => new Promise<RunResult>(() => undefined) });
       },
     } as unknown as DbosRuntime;
     // The real interpreter + compiler, with durability the only thing stubbed (proven separately

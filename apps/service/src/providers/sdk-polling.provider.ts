@@ -141,8 +141,9 @@ export class SdkPollingProvider {
 
   /** One poll returning only events unseen since the stored cursor; each payload becomes a fired run's `trigger` scope. */
   async pollOne(type: string, ctx: SdkPollingContext): Promise<TriggerEvent[]> {
+    const trigger = this.require(type);
     const events = await this.runPollEvents(type, ctx);
-    return events.map((payload) => ({ payload }));
+    return events.map((payload) => ({ payload, key: trigger.dedupeKey(payload as never) }));
   }
 
   /** Resolve auth, run one poll, return the SDK's fresh (deduped) events. */

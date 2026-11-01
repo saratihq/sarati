@@ -128,6 +128,19 @@ function outsideWorkflow(): void {
   if (DBOS.isWithinWorkflow()) throw new Error('DbosRuntime is called only from outside a durable workflow');
 }
 
+/** A durable run once its workflow is persisted; `result` settles as the run ends. */
+export interface DurableRun {
+  result: () => Promise<RunResult>;
+}
+
+// A workflow already holds the run id: one the legacy engine started, or one out of recovery attempts.
+function alreadyHeld(err: unknown): boolean {
+  return (
+    err instanceof DbosErrors.DBOSConflictingWorkflowError ||
+    err instanceof DbosErrors.DBOSMaxRecoveryAttemptsExceededError
+  );
+}
+
 @Injectable()
 export class DbosRuntime {
   constructor(
@@ -138,30 +151,6 @@ export class DbosRuntime {
     activeInterpreter = interpreter;
     activeRecorder = recorder ?? null;
     activeGuard = guard ?? null;
-  }
-
-  /** Run a plan durably; `runId` is the idempotency key and resume handle (requires `DBOS_ENABLED`). */
-  async runDurably(
-    plan: DagPlan,
-    opts: {
-      externalUserId: string;
-      runId: string;
-      initialScope?: Record<string, unknown>;
-      pins?: Record<string, unknown>;
-      environment?: string | null;
-      environmentId?: string | null;
-      orgId?: string | null;
-      chatChannelKey?: string | null;
-    },
-  ): Promise<RunResult> {
-    outsideWorkflow();
-    try {
-      return await DBOS.withNextWorkflowID(opts.runId, () => runPlanV2Workflow({ plan, ...opts }));
-    } catch (err) {
-      // A run id a workflow from before the sequenced engine already holds: wait on that run instead.
-      if (!(err instanceof DbosErrors.DBOSConflictingWorkflowError)) throw err;
-      return DBOS.retrieveWorkflow<RunResult>(opts.runId).getResult();
-    }
   }
 
   /** Resume a run suspended on a `waitForEvent` node; safe to call before it reaches the wait. A repeat of `key` is dropped. */
@@ -176,25 +165,38 @@ export class DbosRuntime {
     return DBOS.cancelWorkflow(runId);
   }
 
-  /** Start a durable run without awaiting it; returns once the workflow is persisted (no race). */
+  /** Start a run durably, resolving once its workflow is persisted; `runId` is the idempotency key, so a run already on it starts nothing new. */
   async startDurably(
     plan: DagPlan,
     opts: {
       externalUserId: string;
       runId: string;
       initialScope?: Record<string, unknown>;
+      pins?: Record<string, unknown>;
       environment?: string | null;
       environmentId?: string | null;
       orgId?: string | null;
+      chatChannelKey?: string | null;
     },
-  ): Promise<string> {
+  ): Promise<DurableRun> {
     outsideWorkflow();
     try {
-      await DBOS.startWorkflow(runPlanV2Workflow, { workflowID: opts.runId })({ plan, ...opts });
+      const handle = await DBOS.startWorkflow(runPlanV2Workflow, { workflowID: opts.runId })({
+        plan,
+        ...opts,
+      });
+      return { result: () => handle.getResult() };
     } catch (err) {
-      if (!(err instanceof DbosErrors.DBOSConflictingWorkflowError)) throw err;
+      if (!alreadyHeld(err)) throw err;
+      return { result: () => DBOS.retrieveWorkflow<RunResult>(opts.runId).getResult() };
     }
-    return opts.runId;
+  }
+
+  /** Whether a workflow holds the run id, on any engine and in any state. */
+  async holdsWorkflow(runId: string): Promise<boolean> {
+    outsideWorkflow();
+    const held = await DBOS.listWorkflows({ workflowIDs: [runId], loadInput: false, loadOutput: false });
+    return held.length > 0;
   }
 
   /** Whether this instance can still take a durable run on to its end: pending, a workflow it knows, and its own to recover. */

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional, type OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { LessThan, type DataSource, type EntityManager } from 'typeorm';
@@ -15,7 +15,7 @@ import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/run
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { isDurableCancellation, isUnknownDurableRun } from '../dbos/dbos-durable-step';
-import { DbosRuntime } from '../dbos/dbos-runtime';
+import { DbosRuntime, type DurableRun } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
 import { PassThroughDurableStep, RunCancelledError } from '../providers/durable-step';
 import type { AgentWorkflowCatalog } from '../runtime/agent';
@@ -27,9 +27,12 @@ import {
   lockRunRow,
   PARKED_STEP,
   parkedStep,
+  rearmUnstarted,
   recordCancel,
   REFUSED_RUN_ERROR_PREFIX,
+  refuseUnstarted,
   RunRecorderService,
+  type RunStartMeta,
   truncatedValueOf,
   withRunLock,
 } from '../runtime/run-recorder.service';
@@ -278,16 +281,47 @@ function runPlanIds(nodes: RunNode[]): string[] {
   return nodes.flatMap((node) => [node.id, ...childLists(node).flatMap(runPlanIds)]);
 }
 
+// How long shutdown waits for in-process runs to end or park: inside the 10 s a container stop allows by default.
+const SHUTDOWN_WAIT_MS = 8_000;
+const SHUTDOWN_POLL_MS = 25;
+
+/** A run recorded and started on its rail; `outcome` settles as it ends, answered as a synchronous caller is. */
+export interface AdmittedRun {
+  runId: string;
+  outcome: () => Promise<RunResult>;
+}
+
+interface InProcessRun {
+  durable: PassThroughDurableStep;
+  outcome: Promise<RunResult>;
+}
+
+/** The `code` a run's caller is answered with when its run id already holds a run it cannot start again. */
+export const RUN_EXISTS = 'run_exists';
+
+function alreadyRan(runId: string): DomainError {
+  return new DomainError(`Run ${runId} already exists — run it again under a new run id`, 409, {
+    code: RUN_EXISTS,
+  });
+}
+
+/** Whether an admission was refused because its run id already holds a run it cannot start again. */
+export function isRunExists(err: unknown): err is DomainError {
+  return err instanceof DomainError && err.details?.code === RUN_EXISTS;
+}
+
 /**
  * Front door for executing a RunPlan: durably via DBOS when `DBOS_ENABLED`, else directly
  * through the interpreter (approvals then pause in-memory and die with the process).
  */
 @Injectable()
-export class RunsService {
+export class RunsService implements OnApplicationShutdown {
   private readonly logger = new Logger(RunsService.name);
   private readonly dbosEnabled: boolean;
   /** In-process runs in flight, nested ones included: scoped run id → the step substrate `sendEvent` and `cancelRun` act on. */
   private readonly waiters = new Map<string, PassThroughDurableStep>();
+  /** Top-level in-process runs in flight, by scoped run id: what shutdown waits for. */
+  private readonly inProcess = new Map<string, InProcessRun>();
 
   constructor(
     private readonly interpreter: DagInterpreter,
@@ -308,11 +342,16 @@ export class RunsService {
     return this.runExecutable(await this.compile({ plan }, opts, runId), { ...opts, runId });
   }
 
-  /** Dispatch a COMPILED `DagPlan`: record the run, then execute via DBOS or the interpreter. Every entry point funnels here. */
+  /** Admit a COMPILED `DagPlan` and wait for its outcome. */
   async runExecutable(plan: DagPlan, opts: RunDispatchOptions): Promise<RunResult> {
+    return (await this.admit(plan, opts)).outcome();
+  }
+
+  /** Record a run and start it on its rail — a durable one's workflow persisted, so a crash after this resumes it; an id already holding a run starts nothing new. */
+  async admit(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
-    await this.recorder?.runStarted(scoped, runId, opts.externalUserId, plan, {
+    const meta: RunStartMeta = {
       workflowId: opts.workflowId ?? null,
       workflowVersionId: opts.workflowVersionId ?? null,
       source: opts.source ?? 'api',
@@ -321,61 +360,136 @@ export class RunsService {
       reviewId: opts.reviewId ?? null,
       dryRun: opts.dryRun ?? false,
       orgId: opts.orgId ?? null,
-    });
+    };
+    const recorded =
+      (await this.recorder?.runAdmitted(scoped, runId, opts.externalUserId, plan, meta)) ?? true;
+    if (await this.cancelled(scoped)) {
+      return { runId, outcome: () => this.settle(Promise.reject(new RunCancelledError()), scoped, runId) };
+    }
+    // DBOS can't inject our dry-run http client, so a dry run must take the in-process path.
+    if (this.dbosEnabled && !opts.dryRun) {
+      const start = (): Promise<DurableRun> =>
+        this.dbos.startDurably(plan, {
+          externalUserId: opts.externalUserId,
+          runId: scoped,
+          initialScope: opts.initialScope,
+          pins: opts.pins,
+          environment: opts.environment,
+          environmentId: opts.environmentId,
+          orgId: opts.orgId,
+          chatChannelKey: opts.chatChannelKey,
+        });
+      const durable = await this.startDurable(scoped, recorded ? null : { runId, plan, meta }, start);
+      return { runId, outcome: () => this.settle(durable.result(), scoped, runId) };
+    }
+    const running = this.inProcess.get(scoped);
+    if (running) return { runId, outcome: () => running.outcome };
+    if (!recorded) return { runId, outcome: () => Promise.reject(alreadyRan(runId)) };
+    const durable = new PassThroughDurableStep();
+    const outcome = this.settle(this.runInProcess(plan, scoped, opts, durable), scoped, runId);
+    this.inProcess.set(scoped, { durable, outcome });
+    const forget = (): void => {
+      this.inProcess.delete(scoped);
+    };
+    void outcome.then(forget, forget);
+    return { runId, outcome: () => outcome };
+  }
+
+  // `unrecorded` when a run already held the id: one that failed before it ever started runs again.
+  private async startDurable(
+    scoped: string,
+    unrecorded: { runId: string; plan: DagPlan; meta: RunStartMeta } | null,
+    start: () => Promise<DurableRun>,
+  ): Promise<DurableRun> {
+    const em = this.dataSource?.manager;
+    if (!em) return start();
+    if (unrecorded) {
+      const run = await this.rearmIfNeverStarted(em, scoped, unrecorded.plan, unrecorded.meta);
+      if (run === 'ended') throw alreadyRan(unrecorded.runId);
+      if (run === 'held') return start();
+    }
     try {
-      const result = await this.execute(plan, scoped, opts);
-      return { ...result, run_id: runId };
+      return await start();
     } catch (err) {
-      // A step failing is a RUN outcome, not a server fault → structured 422, never a 500 — and it
-      // carries the handle + failing node + step log, so the failure is debuggable from itself.
-      const details = await this.failureDetails(scoped, runId);
-      if (err instanceof DomainError) {
-        throw new DomainError(err.message, err.status, { ...details, ...(err.details ?? {}) });
-      }
-      if (isDurableCancellation(err)) {
-        throw new DomainError(`Run ${runId} was cancelled`, 409, { code: RUN_CANCELLED, ...details });
-      }
-      throw new DomainError(`Run ${runId} failed: ${errorMessage(err)}`, 422, {
-        code: 'run_failed',
-        ...details,
-      });
+      await this.refuseIfNeverStarted(em, scoped, err);
+      throw err;
     }
   }
 
-  /** Run a plan on its rail; on both, the run's row decides whether a cancel landed — before it starts, and however it ends. */
-  private async execute(plan: DagPlan, scoped: string, opts: RunDispatchOptions): Promise<RunResult> {
-    if (await this.cancelled(scoped)) throw new RunCancelledError();
-    let result: RunResult;
+  // Under the run's lock, and committed before its start, so the workflow's gate reads the run running.
+  private rearmIfNeverStarted(
+    em: EntityManager,
+    scoped: string,
+    plan: DagPlan,
+    meta: RunStartMeta,
+  ): Promise<'rearmed' | 'ended' | 'held'> {
+    return em.transaction(async (tx) => {
+      await lockRunRow(tx, scoped);
+      const [row] = await rawQuery<{ status: string }>(tx, `SELECT status FROM runtime_runs WHERE id = $1`, [
+        scoped,
+      ]);
+      if (await this.dbos.holdsWorkflow(scoped)) return 'held';
+      if (!['running', 'waiting', 'completed', 'error'].includes(row?.status ?? '')) return 'held';
+      // One left running or waiting and refused is an in-process run or another workflow's, which no durable start may run beside.
+      return (await rearmUnstarted(tx, scoped, plan, meta)) ? 'rearmed' : 'ended';
+    });
+  }
+
+  // Run history says the start failed, and a resend of its id takes the run over; a workflow DBOS holds for it is left to run.
+  private async refuseIfNeverStarted(em: EntityManager, scoped: string, cause: unknown): Promise<void> {
     try {
-      result = await this.dispatch(plan, scoped, opts);
+      await em.transaction(async (tx) => {
+        await lockRunRow(tx, scoped);
+        if (await this.dbos.holdsWorkflow(scoped)) return;
+        await refuseUnstarted(tx, scoped, `it could not be started: ${errorMessage(cause)}`);
+      });
     } catch (err) {
-      throw (await this.cancelled(scoped)) ? new RunCancelledError() : err;
+      this.logger.error(`run ${scoped} could not be started, nor recorded as refused: ${errorMessage(err)}`);
     }
-    if (await this.cancelled(scoped)) throw new RunCancelledError();
-    return result;
+  }
+
+  // The run's outcome as its caller is answered; on both rails the run's row decides whether a cancel landed.
+  private async settle(running: Promise<RunResult>, scoped: string, runId: string): Promise<RunResult> {
+    try {
+      let result: RunResult;
+      try {
+        result = await running;
+      } catch (err) {
+        throw (await this.cancelled(scoped)) ? new RunCancelledError() : err;
+      }
+      if (await this.cancelled(scoped)) throw new RunCancelledError();
+      return { ...result, run_id: runId };
+    } catch (err) {
+      throw await this.failureOf(err, scoped, runId);
+    }
+  }
+
+  // A step failing is a RUN outcome, not a server fault: a 422 or 409 carrying the handle, failing node and step log.
+  private async failureOf(err: unknown, scoped: string, runId: string): Promise<DomainError> {
+    const details = await this.failureDetails(scoped, runId);
+    if (err instanceof DomainError) {
+      return new DomainError(err.message, err.status, { ...details, ...(err.details ?? {}) });
+    }
+    if (isDurableCancellation(err)) {
+      return new DomainError(`Run ${runId} was cancelled`, 409, { code: RUN_CANCELLED, ...details });
+    }
+    return new DomainError(`Run ${runId} failed: ${errorMessage(err)}`, 422, {
+      code: 'run_failed',
+      ...details,
+    });
   }
 
   private cancelled(scoped: string): Promise<boolean> {
     return this.recorder?.isCancelled(scoped) ?? Promise.resolve(false);
   }
 
-  /** The two rails a compiled plan runs on: DBOS durable, or the in-process interpreter. */
-  private async dispatch(plan: DagPlan, scoped: string, opts: RunDispatchOptions): Promise<RunResult> {
-    // DBOS can't inject our dry-run http client, so a dry run must take the in-process path.
-    if (this.dbosEnabled && !opts.dryRun) {
-      return this.dbos.runDurably(plan, {
-        externalUserId: opts.externalUserId,
-        runId: scoped,
-        initialScope: opts.initialScope,
-        pins: opts.pins,
-        environment: opts.environment,
-        environmentId: opts.environmentId,
-        orgId: opts.orgId,
-        chatChannelKey: opts.chatChannelKey,
-      });
-    }
-    // Direct path: hold the run's step substrate so POST /runs/:id/events can resume a waitForEvent pause.
-    const durable = new PassThroughDurableStep();
+  // The run's step substrate is held so POST /runs/:id/events can resume a waitForEvent pause.
+  private async runInProcess(
+    plan: DagPlan,
+    scoped: string,
+    opts: RunDispatchOptions,
+    durable: PassThroughDurableStep,
+  ): Promise<RunResult> {
     this.waiters.set(scoped, durable);
     try {
       return await this.interpreter.run(plan, {
@@ -393,6 +507,26 @@ export class RunsService {
       });
     } finally {
       this.waiters.delete(scoped);
+    }
+  }
+
+  /** Waits, within {@link SHUTDOWN_WAIT_MS}, for every in-process run to end or park; it never cancels one. */
+  async onApplicationShutdown(): Promise<void> {
+    const going = (): string[] =>
+      [...this.inProcess].filter(([, run]) => !run.durable.parked()).map(([scoped]) => scoped);
+    if (going().length === 0) return;
+    this.logger.log(
+      `Shutting down: waiting up to ${SHUTDOWN_WAIT_MS} ms for ${going().length} in-process run(s) to end or park`,
+    );
+    const deadline = Date.now() + SHUTDOWN_WAIT_MS;
+    while (going().length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_POLL_MS));
+    }
+    const left = going();
+    if (left.length > 0) {
+      this.logger.warn(
+        `Shutting down: stopped waiting for in-process run(s) still going after ${SHUTDOWN_WAIT_MS} ms: ${left.join(', ')}`,
+      );
     }
   }
 
@@ -501,7 +635,7 @@ export class RunsService {
 
   /** Compile a WorkflowIR (from generation) to a RunPlan and run it (sync). */
   async runFromIr(ir: WorkflowIR, opts: IrRunOptions): Promise<RunResult> {
-    return (await this.startIr(ir, opts)).pending;
+    return (await this.startIr(ir, opts)).outcome();
   }
 
   /**
@@ -509,26 +643,16 @@ export class RunsService {
    * `awaitMs`, else a handle — the run goes on, and `GET /api/runs/:run_id` reports it.
    */
   async runFromIrBounded(ir: WorkflowIR, opts: IrRunOptions & { awaitMs: number }): Promise<RunOutcome> {
-    const { runId, pending } = await this.startIr(ir, opts);
-    return this.settleWithin(pending, runId, opts.awaitMs);
+    const { runId, outcome } = await this.startIr(ir, opts);
+    return this.settleWithin(outcome(), runId, opts.awaitMs);
   }
 
-  /** Guard, compile and dispatch a WorkflowIR; the caller decides how long to wait on the run. */
-  private async startIr(
-    ir: WorkflowIR,
-    opts: IrRunOptions,
-  ): Promise<{ runId: string; pending: Promise<RunResult> }> {
+  /** Guard, compile and admit a WorkflowIR; the caller decides how long to wait on the run. */
+  private async startIr(ir: WorkflowIR, opts: IrRunOptions): Promise<AdmittedRun> {
     if (opts.workflowId) await this.runnableWorkflow(opts.workflowId, opts.activeOrgId ?? null);
     const runId = opts.runId ?? randomUUID();
     const plan = await this.compile({ ir }, opts, runId);
-    return {
-      runId,
-      pending: this.runExecutable(plan, {
-        ...opts,
-        runId,
-        orgId: opts.orgId ?? opts.activeOrgId ?? null,
-      }),
-    };
+    return this.admit(plan, { ...opts, runId, orgId: opts.orgId ?? opts.activeOrgId ?? null });
   }
 
   private assertAuthored(source: PlanSource): void {
@@ -718,24 +842,9 @@ export class RunsService {
   async startRun(source: PlanSource, opts: IrRunOptions): Promise<{ runId: string }> {
     this.requireDbos();
     const runId = opts.runId ?? randomUUID();
-    const scoped = this.scopedRunId(opts.externalUserId, runId);
     if (opts.workflowId) await this.runnableWorkflow(opts.workflowId, opts.activeOrgId ?? null);
     const dag = await this.compile(source, opts, runId);
-    await this.recorder?.runStarted(scoped, runId, opts.externalUserId, dag, {
-      workflowId: opts.workflowId ?? null,
-      source: opts.source ?? 'api',
-      environment: opts.environment ?? null,
-      environmentId: opts.environmentId ?? null,
-      orgId: opts.orgId ?? opts.activeOrgId ?? null,
-    });
-    await this.dbos.startDurably(dag, {
-      externalUserId: opts.externalUserId,
-      runId: scoped,
-      initialScope: opts.initialScope,
-      environment: opts.environment,
-      environmentId: opts.environmentId,
-      orgId: opts.orgId ?? opts.activeOrgId ?? null,
-    });
+    await this.admit(dag, { ...opts, runId, orgId: opts.orgId ?? opts.activeOrgId ?? null });
     return { runId };
   }
 

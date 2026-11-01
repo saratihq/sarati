@@ -58,6 +58,8 @@ export interface TriggerInput {
 
 export interface TriggerEvent {
   payload: unknown;
+  /** The event's identity in its trigger, so a poll that yields it again starts the same run. */
+  key: string;
 }
 
 /** DI token for the runtime's action provider — the interpreter depends on this SEAM, not a concrete vendor. */

@@ -65,7 +65,7 @@ describe('SdkPollingProvider', () => {
     ]);
   });
 
-  it('polls a no-auth trigger (http.new_item) with NO connection and returns fresh events', async () => {
+  it('polls a no-auth trigger (http.new_item) with NO connection and returns fresh events, each keyed as its trigger dedupes it', async () => {
     const fetch = queuedFetch([[{ id: 1 }, { id: 2 }]]);
     const provider = new SdkPollingProvider(undefined, fetch);
     const events = await provider.pollOne('http.new_item', {
@@ -74,7 +74,10 @@ describe('SdkPollingProvider', () => {
       auth: null, // no connection — the OSS rail
       store: new InMemoryStore(),
     });
-    expect(events).toEqual([{ payload: { id: 1 } }, { payload: { id: 2 } }]);
+    expect(events).toEqual([
+      { payload: { id: 1 }, key: 'id:1' },
+      { payload: { id: 2 }, key: 'id:2' },
+    ]);
     expect(fetch.calls).toEqual([`${HTTP_URL}`]);
   });
 
@@ -97,8 +100,8 @@ describe('SdkPollingProvider', () => {
       auth: null,
       store,
     });
-    expect(first).toEqual([{ payload: { id: 1 } }, { payload: { id: 2 } }]);
-    expect(second).toEqual([{ payload: { id: 3 } }]); // 1 + 2 already seen
+    expect(first.map((e) => e.payload)).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(second.map((e) => e.payload)).toEqual([{ id: 3 }]); // 1 + 2 already seen
   });
 
   it('enable primes the watermark so pre-activation items never fire on the first poll', async () => {
@@ -120,7 +123,7 @@ describe('SdkPollingProvider', () => {
       auth: null,
       store,
     });
-    expect(events).toEqual([{ payload: { id: 3 } }]);
+    expect(events.map((e) => e.payload)).toEqual([{ id: 3 }]);
   });
 
   it('resolves a {connectionId} reference through ConnectionsService for a connection trigger (slack)', async () => {
@@ -157,7 +160,7 @@ describe('SdkPollingProvider', () => {
       store,
     });
     expect(getCredential).toHaveBeenCalledWith('user-9', 'conn-1');
-    expect(events).toEqual([{ payload: { id: 'C2', name: 'random' } }]);
+    expect(events).toEqual([{ payload: { id: 'C2', name: 'random' }, key: 'C2' }]);
   });
 
   it('rejects a managed (Composio) connection — never sends the sentinel to the provider', async () => {

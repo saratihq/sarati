@@ -17,6 +17,8 @@ export const POLL_CURSOR_KEY = 'lastPoll';
 export interface ComposioTriggerItem {
   epochMilliSeconds: number;
   payload: unknown;
+  /** The item's identity at its app. */
+  key: string;
 }
 
 /** The picker row for a Composio-polled trigger; carried on the spec so the registry is the ONE source of mechanics + metadata. */
@@ -84,13 +86,13 @@ function gmailItems(data: unknown): ComposioTriggerItem[] {
   const items: ComposioTriggerItem[] = [];
   for (const message of messages) {
     if (!isRecord(message)) continue;
+    const id = typeof message.messageId === 'string' ? message.messageId : null;
     const epoch = gmailEpochMs(message);
     if (epoch === null) {
-      const id = typeof message.messageId === 'string' ? message.messageId : '?';
-      logger.warn(`gmail poll: message ${id} has no parseable timestamp — skipped`);
+      logger.warn(`gmail poll: message ${id ?? '?'} has no parseable timestamp — skipped`);
       continue;
     }
-    items.push({ epochMilliSeconds: epoch, payload: message });
+    items.push({ epochMilliSeconds: epoch, payload: message, key: id ?? JSON.stringify(message) });
   }
   items.sort((a, b) => a.epochMilliSeconds - b.epochMilliSeconds); // fire oldest first
   return items;

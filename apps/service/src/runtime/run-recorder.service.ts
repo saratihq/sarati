@@ -4,7 +4,7 @@ import { IsNull, Not, type DataSource, type EntityManager } from 'typeorm';
 
 import { errorMessage } from '../common/error-message';
 import { newId } from '../database/ids';
-import { rawQuery } from '../database/raw-query';
+import { rawMutate, rawQuery } from '../database/raw-query';
 import { TIMER_TOPIC_SQL_PREFIX } from './timer-wait';
 import type { RunSource, RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
@@ -46,6 +46,9 @@ export function isParkedStep(step: { waitingTopic: string | null; finishedAt: Da
 
 /** How every refused run's error begins; a run that executes records its own outcome over it. */
 export const REFUSED_RUN_ERROR_PREFIX = "Workflow can't run: ";
+
+// A run that took no step: its workflow never began, so nothing it did is undone or repeated.
+const NO_STEP = 'NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = runtime_runs.id)';
 
 /** An oversized stored value: the head of its JSON, plus the size it actually had. */
 export interface TruncatedValue {
@@ -148,8 +151,8 @@ export interface RunRecorder {
 
 /**
  * Persists run + per-step records. Every write is an UPSERT keyed on the scoped run id (and
- * step_key), because a DBOS crash-recovery re-executes the workflow body from the top. All writes
- * are best-effort — history must never fail a run, so errors are logged and swallowed deliberately.
+ * step_key), because a DBOS crash-recovery re-executes the workflow body from the top. Every write but
+ * a run's admission is best-effort — history must never fail a run, so errors are logged and swallowed deliberately.
  */
 @Injectable()
 export class RunRecorderService implements RunRecorder {
@@ -166,6 +169,17 @@ export class RunRecorderService implements RunRecorder {
     meta?: RunStartMeta,
   ): Promise<void> {
     await this.insertRun('runStarted', scopedRunId, runId, userId, plan, meta, null);
+  }
+
+  /** {@link runStarted} for a run being admitted: whether it recorded the run, false when a run already holds the id; throws when it can't record it. */
+  async runAdmitted(
+    scopedRunId: string,
+    runId: string,
+    userId: string,
+    plan: unknown,
+    meta?: RunStartMeta,
+  ): Promise<boolean> {
+    return this.insertRun('runAdmitted', scopedRunId, runId, userId, plan, meta, null, false);
   }
 
   /** Record a run refused before any step ran, as already failed; it replaces an earlier refusal on the id, and leaves any run on it as it was. */
@@ -187,9 +201,13 @@ export class RunRecorderService implements RunRecorder {
     plan: unknown,
     meta: RunStartMeta | undefined,
     error: string | null,
-  ): Promise<void> {
-    await this.write(op, scopedRunId, [
-      `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
+    failOpen = true,
+  ): Promise<boolean> {
+    const recorded = await this.write<unknown[]>(
+      op,
+      scopedRunId,
+      [
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
        VALUES ($1, $2, $3, $4, CAST($5 AS json),
                CASE WHEN $16::text IS NULL THEN 'running' ELSE 'error' END, $16, now(),
                CASE WHEN $16::text IS NULL THEN NULL ELSE now() END,
@@ -206,27 +224,31 @@ export class RunRecorderService implements RunRecorder {
               org_id = EXCLUDED.org_id
         WHERE runtime_runs.status = 'error' AND starts_with(runtime_runs.error, $17)
           AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
-          AND NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = runtime_runs.id)`,
-      [
-        scopedRunId,
-        runId,
-        userId,
-        planIdOf(plan),
-        cappedJson(plan),
-        meta?.workflowId ?? null,
-        meta?.source ?? null,
-        meta?.environment ?? null,
-        meta?.environmentId ?? null,
-        meta?.workflowVersionId ?? null,
-        meta?.reviewId ?? null,
-        meta?.dryRun ?? false,
-        meta?.parentRunId ?? null,
-        meta?.parentStepKey ?? null,
-        meta?.orgId ?? null,
-        error,
-        REFUSED_RUN_ERROR_PREFIX,
+          AND ${NO_STEP}
+       RETURNING id`,
+        [
+          scopedRunId,
+          runId,
+          userId,
+          planIdOf(plan),
+          cappedJson(plan),
+          meta?.workflowId ?? null,
+          meta?.source ?? null,
+          meta?.environment ?? null,
+          meta?.environmentId ?? null,
+          meta?.workflowVersionId ?? null,
+          meta?.reviewId ?? null,
+          meta?.dryRun ?? false,
+          meta?.parentRunId ?? null,
+          meta?.parentStepKey ?? null,
+          meta?.orgId ?? null,
+          error,
+          REFUSED_RUN_ERROR_PREFIX,
+        ],
       ],
-    ]);
+      failOpen,
+    );
+    return recorded?.length === 1;
   }
 
   async stepStarted(
@@ -463,10 +485,12 @@ export class RunRecorderService implements RunRecorder {
     op: string,
     scopedRunId: string,
     [sql, params]: [string, unknown[]],
+    failOpen = true,
   ): Promise<T | null> {
     try {
       return await this.dataSource.query<T>(sql, params);
     } catch (err) {
+      if (!failOpen) throw err;
       this.logger.warn(`run history ${op} failed for ${scopedRunId}: ${errorMessage(err)}`);
       return null;
     }
@@ -527,6 +551,46 @@ async function deriveRunWait(
               decided_at = GREATEST(r.decided_at, $4::timestamptz)
         WHERE r.id = $1 AND r.status IN ('running', 'waiting')`,
     [scopedRunId, TIMER_TOPIC_SQL_PREFIX, decision?.by ?? null, decision?.at ?? null],
+  );
+}
+
+/** Under {@link lockRunRow}: whether a run that took no step, ended in error or left running with no workflow, runs again from now with `plan`; a dry run, or one of another workflow or environment, does not. */
+export async function rearmUnstarted(
+  em: EntityManager,
+  scopedRunId: string,
+  plan: unknown,
+  meta: RunStartMeta,
+): Promise<boolean> {
+  // Its workflow and environment keys stay as they are, so the update never reaches either row (row 11).
+  const rearmed = await rawMutate(
+    em,
+    `UPDATE runtime_runs
+        SET status = 'running', error = NULL, outputs = NULL, finished_at = NULL, started_at = now(),
+            plan_id = $2, plan = CAST($3 AS json), source = $4, environment = $5, workflow_version_id = $6,
+            review_id = $7, ${CLEAR_SLOT}
+      WHERE id = $1 AND status IN ('error', 'running') AND NOT dry_run AND ${NO_STEP}
+        AND workflow_id IS NOT DISTINCT FROM $8 AND environment_id IS NOT DISTINCT FROM $9`,
+    [
+      scopedRunId,
+      planIdOf(plan),
+      cappedJson(plan),
+      meta.source ?? null,
+      meta.environment ?? null,
+      meta.workflowVersionId ?? null,
+      meta.reviewId ?? null,
+      meta.workflowId ?? null,
+      meta.environmentId ?? null,
+    ],
+  );
+  return rearmed === 1;
+}
+
+/** Under {@link lockRunRow}: a run whose workflow was never saved reads as refused, for `reason`, so a resend of its id takes it over. */
+export async function refuseUnstarted(em: EntityManager, scopedRunId: string, reason: string): Promise<void> {
+  await em.query(
+    `UPDATE runtime_runs SET status = 'error', error = $2, plan = NULL, outputs = NULL, finished_at = now(), ${CLEAR_SLOT}
+      WHERE id = $1 AND status = 'running' AND ${NO_STEP}`,
+    [scopedRunId, `${REFUSED_RUN_ERROR_PREFIX}${reason}`],
   );
 }
 

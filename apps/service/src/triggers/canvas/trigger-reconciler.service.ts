@@ -34,7 +34,7 @@ import {
 } from '../../providers/sdk-webhook.provider';
 import { activationError } from '../activation-error';
 import { withActivationLock } from '../activation-lock';
-import { DbActivationStore } from '../activation-store';
+import { ADMISSION_EPOCH_KEY, DbActivationStore } from '../activation-store';
 import {
   legacyRegistrationOf,
   type RegisteredWebhook,
@@ -408,6 +408,8 @@ export class TriggerReconcilerService {
         await store.put(SCHEDULE_CURSOR_KEY, now().toISOString());
         return;
       case 'registered_webhook':
+        // Before the webhook exists, so no delivery to it is named under an earlier setup's epoch.
+        await store.put(ADMISSION_EPOCH_KEY, newId());
         await this.registerWebhook(activationId, desired);
         return;
       case 'polling':

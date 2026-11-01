@@ -741,17 +741,19 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
   }, 60_000);
 
   it.each([
-    ['a run the caller waits on', 'runDurably', 'window-sync'],
-    ['a run started without waiting', 'startDurably', 'window-async'],
+    ['a run the caller waits on', '/api/runs', 'window-sync'],
+    ['a run started without waiting', '/api/runs/async', 'window-async'],
   ] as const)(
     'a cancel that lands before DBOS knows %s still stops it before any step',
-    async (_what, method, runId) => {
+    async (_what, route, runId) => {
       const engine = app.get(DbosRuntime);
       let entered = false;
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
-      const real = engine[method].bind(engine) as (...args: unknown[]) => Promise<unknown>;
-      const holding = jest.spyOn(engine, method).mockImplementationOnce((async (...args: unknown[]) => {
+      const real = engine.startDurably.bind(engine) as (...args: unknown[]) => Promise<unknown>;
+      const holding = jest.spyOn(engine, 'startDurably').mockImplementationOnce((async (
+        ...args: unknown[]
+      ) => {
         entered = true;
         await held;
         return real(...args);
@@ -759,7 +761,7 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
       try {
         const nodes = [post('first', '/first'), post('second', '/second')];
         const answer = http()
-          .post(method === 'runDurably' ? '/api/runs' : '/api/runs/async')
+          .post(route)
           .send({ plan: { id: `plan-${runId}`, nodes }, run_id: runId })
           .then((res) => res);
         for (let i = 0; i < 200 && !entered; i++) await pause(25);

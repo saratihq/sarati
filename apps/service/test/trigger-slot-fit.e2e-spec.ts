@@ -1879,7 +1879,7 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
       }
       return found;
     }) as unknown as typeof manager.findOne);
-    const dispatched = jest.spyOn(app.get(RunsService), 'runExecutable');
+    const dispatched = jest.spyOn(app.get(RunsService), 'admit');
     const checkouts = jest.spyOn(shared, 'connect');
     const BUSY = 914_601;
     let busy: Array<Promise<unknown>> = [];

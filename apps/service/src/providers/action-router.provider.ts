@@ -264,7 +264,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     await input.store.put(POLL_CURSOR_KEY, newest);
     return items
       .filter((item) => item.epochMilliSeconds > lastPoll)
-      .map((item) => ({ payload: item.payload }));
+      .map((item) => ({ payload: item.payload, key: item.key }));
   }
 
   // The account decided for the step went before its rail ran: worded as the decision would, where the run is.

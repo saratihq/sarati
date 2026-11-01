@@ -104,6 +104,11 @@ export class SdkWebhookProvider {
     return isSdkWebhookTrigger(type);
   }
 
+  /** The key the trigger dedupes an event of its delivery by, or null when it keeps none. */
+  eventKey(type: string, event: unknown): string | null {
+    return this.require(type).dedupeKey?.(event) ?? null;
+  }
+
   /** Whether a failed delete of this trigger's webhook reaches the caller; Linear's never does. */
   reportsFailedDelete(type: string): boolean {
     return !UNREPORTED_DELETE_FAILURES.has(type);
