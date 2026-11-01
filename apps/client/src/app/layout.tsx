@@ -1,16 +1,9 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { preload } from "react-dom";
 import { ClerkProvider } from "@clerk/nextjs";
 import { AppProviders } from "@/components/AppProviders";
 import { clerkEnabled, clerkPublishableKey } from "@/lib/config";
 import "./globals.css";
-
-// The only family the design system loads; globals.css sets it as the default body font.
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-});
 
 // No `title` here: <DocumentTitle /> owns the tab title.
 export const metadata: Metadata = {
@@ -22,6 +15,7 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  preload("/fonts/inter/v20/latin.woff2", { as: "font", type: "font/woff2" });
   return (
     // Headless Clerk only — the auth UI is hand-built; no Clerk-rendered components anywhere.
     <ClerkProvider
@@ -36,7 +30,7 @@ export default function RootLayout({
         hardcoding it would pin every visitor to dark. That pre-hydration mutation is why
         `suppressHydrationWarning` is required.
       */}
-      <html lang="en" className={inter.variable} suppressHydrationWarning>
+      <html lang="en" suppressHydrationWarning>
         <body>
           <AppProviders>{children}</AppProviders>
         </body>

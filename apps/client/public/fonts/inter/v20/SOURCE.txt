@@ -1,0 +1,19 @@
+Inter 4.001 (variable, wght 100-900), the seven subset files Google Fonts serves for
+https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap
+fetched 2026-11-01 with the user agent next/font/google sends. Byte-identical to the files
+next/font/google emitted into .next/static/media before this copy replaced it.
+Declared in apps/client/src/app/inter.css with Google's unicode-range for each file.
+
+Files here are served with an immutable cache header: new bytes go in a new version directory.
+
+file               bytes  sha256                                                            source
+cyrillic-ext.woff2 25844  fccca918fea40089dacadc7045861314d1a6bc91f1f323cc1eeb22ebcdb321b5  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2JL7W0Q5n-wU.woff2
+cyrillic.woff2     18744  aebf2ab4a4ce6810d73c1ac7be7cafb4e5ec4cee2d6db5fb3e09691747ec4bd6  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7W0Q5n-wU.woff2
+greek-ext.woff2    11272  a2e2c783ca6f9c20486e81e72a279203e86730bbf8f01ff6a5ee9dbd09e1c271  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2ZL7W0Q5n-wU.woff2
+greek.woff2        19044  46dd4cdca58c26ae87cc6927657bf83b2e8abfc39ffd0ab176e301a8d28d22bf  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1pL7W0Q5n-wU.woff2
+vietnamese.woff2   10280  8db00ff46c67b22cda8bed865acf7077651cac8d2841d5b40980556b48961931  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa2pL7W0Q5n-wU.woff2
+latin-ext.woff2    85272  a28eb6d3ccb534ae0c94ca999371df024aab60b08c3c8a5720ee9e32fa0faaa2  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa25L7W0Q5n-wU.woff2
+latin.woff2        48432  c940764593d0fe5d596be327ca7558855e018039fb78509aa21921fd3644c3e4  https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7W0Q5nw.woff2
+
+License: SIL Open Font License 1.1, OFL.txt, from https://github.com/google/fonts/blob/main/ofl/inter/OFL.txt
+(sha256 5b9321a4298cfeb6b34354164a1c3afc3db114569984c502b9b35d988fd58c57).

@@ -102,7 +102,7 @@ terms.
 ## Scope
 
 This is a [fair-code](https://faircode.io) license. It governs this repository except
-for the two carve-outs below.
+for the three carve-outs below.
 
 **The commercial edition.** `apps/service/src/ee/` is the commercial (cloud) edition
 and may carry separate terms. Everything else is the open core governed by this
@@ -112,6 +112,11 @@ license, and the build enforces the boundary: the core never imports from `ee`.
 [`sarati-mcp`](https://www.npmjs.com/package/sarati-mcp) — is licensed under the MIT
 License instead, so it can be embedded in any MCP client. Its terms are in
 [`apps/service/packages/mcp-bridge/LICENSE`](apps/service/packages/mcp-bridge/LICENSE).
+
+**The Inter typeface.** `apps/client/public/fonts/inter/` holds Inter, Copyright 2020
+The Inter Project Authors, which is licensed under the SIL Open Font License 1.1
+instead. Its terms are in
+[`apps/client/public/fonts/inter/v20/OFL.txt`](apps/client/public/fonts/inter/v20/OFL.txt).
 
 Licensor contact for anything license-related: <licensing@sarati.io>.
 

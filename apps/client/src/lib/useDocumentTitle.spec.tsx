@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import { DocumentTitle } from "@/components/DocumentTitle";
 import { useDocumentTitle } from "@/lib/useDocumentTitle";
 
-vi.mock("next/font/google", () => ({ Inter: () => ({ variable: "font-inter" }) }));
 vi.mock("@clerk/nextjs", () => ({ ClerkProvider: ({ children }: { children: ReactNode }) => children }));
 
 function Page({ parts }: { parts: Array<string | null | undefined> }) {
