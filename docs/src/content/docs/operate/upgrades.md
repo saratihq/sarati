@@ -148,10 +148,13 @@ describes, and the installer warns when it starts such a version.
 
 ### v0.2.27
 
-**Five containers: re-run the installer.** The stack file changed — `docker/Caddyfile` now leaves
-the authorization code and state of an OAuth or single sign-on callback out of the proxy's log, and
-only the installer refreshes it — so `docker compose pull` alone is not enough this time. One
-container needs only the new image.
+**Five containers: re-run the installer.** The stack file changed: with the new `docker/Caddyfile`,
+the proxy logs each request as its time, status and visitor's address alone — never the address asked
+for, its headers or where it was redirected, which can carry an invite link, a webhook address or a
+sign-in callback's code. Only the installer refreshes that file, and it restarts the proxy to load it,
+so `docker compose pull` alone is not enough this time. One container gets the same from the new
+image. Lines the proxy wrote before go with the container it replaces, unless Docker sends its logs
+somewhere else, where they still hold those addresses.
 
 #### Sign in through your own identity provider, and invites for one address
 

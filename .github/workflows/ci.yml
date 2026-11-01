@@ -107,6 +107,8 @@ jobs:
           echo "stack up: service, agent and client all reachable through the proxy"
       - name: Rate limits count per visitor through the real proxy, and a visitor cannot name their own address
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-client-address.sh compose
+      - name: The proxy logs a request as its time, status and visitor, never its address
+        run: SARATI_CHECK_THROWAWAY=1 sh docker/check-proxy-log.sh compose
       - name: The one-container install runs in production mode, on its own database and on yours
         run: |
           # Assembled FROM the images above, and ENV does not carry over: without its own
@@ -143,5 +145,7 @@ jobs:
           echo "one-container install: production mode, on its bundled database and on your own"
       - name: The one-container install counts limits per visitor, and only its own proxy reaches the service
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-client-address.sh one one-bundled
+      - name: The one-container proxy logs a request as its time, status and visitor, never its address
+        run: SARATI_CHECK_THROWAWAY=1 sh docker/check-proxy-log.sh one one-bundled
       - if: failure()
         run: docker compose logs --no-color | tail -100

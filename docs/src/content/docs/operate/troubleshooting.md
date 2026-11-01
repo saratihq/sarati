@@ -638,17 +638,26 @@ installer.
 ## Reading the logs
 
 ```bash
-docker logs -f sarati
-```
-
-Under compose, per service:
-
-```bash
-cd sarati && docker compose logs -f service
+cd sarati && docker compose logs -f sarati
 ```
 
 ```bash
-docker compose logs --since 10m service
+docker compose logs --since 10m sarati
 ```
+
+The one container's log holds every part of it together: the service, the agent, the client, the
+bundled database and the proxy. On a five-container install each part is its own container, so the
+service's log is `docker compose logs -f service`; running it by hand without the installer, it is
+`docker logs -f sarati`.
 
 Turn up detail with `LOG_LEVEL=debug` in `.env`.
+
+The proxy logs each request as its time, its status and the visitor's address alone — not the address
+asked for, its headers or where it was redirected, since invite links, webhook addresses and sign-in
+callbacks carry secrets. A request it cannot pass on gets a second line with the reason, cut the same
+way. With one container those lines are in `cd sarati && docker compose logs sarati`, beside the
+service's own; with five, they are in `cd sarati && docker compose logs proxy`.
+
+The service's own request log prints each path with every query value, and the secret part of an
+invite, webhook, catch or chat address, as `[REDACTED]`; it shows a referring page as its origin alone,
+and the `Authorization` and `Cookie` headers as `[REDACTED]`.
