@@ -5,7 +5,7 @@ import { Logger } from '@nestjs/common';
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { DeterminismError, type Lane, type Outcome } from '../providers/durable-step';
-import { PARK_DELAY_ABOVE_MS, timerTopicFor } from '../runtime/timer-wait';
+import { PARK_DELAY_ABOVE_MS, timerTopicFor, WAKE_POLL_MS } from '../runtime/timer-wait';
 
 /**
  * The DBOS calls a sequenced run issues; each reserves its function ids synchronously, when it is called. Every
@@ -24,7 +24,6 @@ export interface SequencedOps {
 
 /** A delay longer than this parks on a recv, which notices a cancel within one poll; a shorter one sleeps. */
 export const RECV_DELAY_ABOVE_MS = 10_000;
-const POLL_MS = 10_000;
 const TURN_WARN_AFTER_MS = 30_000;
 
 /** Glue a wait or a delay runs in its lane's turn when it parks and when it is over; neither should throw. */
@@ -245,7 +244,7 @@ export class RunSequencer {
         ? this.issue(name, true, () =>
             this.ops.recv(
               timerTopicFor(key),
-              { deadlineEpochMS: head.deadline, pollingIntervalMs: POLL_MS },
+              { deadlineEpochMS: head.deadline, pollingIntervalMs: WAKE_POLL_MS },
               name,
             ),
           )

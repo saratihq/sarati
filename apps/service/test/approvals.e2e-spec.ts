@@ -270,6 +270,26 @@ describe('runs history + approvals (e2e, isolated DB, mock auth)', () => {
     expect(detail.body.status).toBe('completed');
   }, 20_000);
 
+  it('a wait whose timeout is longer than one timer can hold stays parked, and still takes its event', async () => {
+    const month = 30 * 24 * 3_600_000;
+    const pending = http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: approvalIr('approve', month), run_id: 'appr-month' })
+      .then((r) => r);
+
+    const waiting = await awaitWaiting('appr-month');
+    expect(Date.parse(waiting.timeout_at as string) - Date.now()).toBeGreaterThan(month - 60_000);
+    expect((await http().get('/api/runs/appr-month').expect(200)).body.status).toBe('waiting');
+
+    await http()
+      .post('/api/runs/appr-month/events')
+      .send({ topic: 'approve', payload: { decision: 'approved' } })
+      .expect(200);
+    const result = await pending;
+    expect(result.status).toBe(201);
+    expect(result.body.outputs.approval).toEqual({ decision: 'approved' });
+  });
+
   it('says a decision overtaken by a cancel met a cancelled run, and leaves nothing parked on it', async () => {
     const pending = http()
       .post('/api/runs/from-ir')

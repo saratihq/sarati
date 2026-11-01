@@ -1,10 +1,11 @@
-import { PassThroughDurableStep, type DurableStep } from './durable-step';
+import { PassThroughDurableStep, type DurableStep, type ParkedTimer, type Pause } from './durable-step';
 
 /** The in-process substrate's primitives a test replaces, to see what a run sends through them or to answer it. */
 export interface SubstratePrimitives {
   run?: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
   sleep?: (name: string, ms: number) => Promise<void>;
   receive?: (name: string, topic: string, timeoutMs: number) => Promise<unknown>;
+  timer?: (pause: Pause, topic: string) => ParkedTimer;
 }
 
 /** Test support: today's in-process substrate, with the primitives given replaced. */
@@ -22,6 +23,10 @@ export function substrate(primitives: SubstratePrimitives): DurableStep {
       return primitives.receive
         ? (primitives.receive(name, topic, timeoutMs) as Promise<T | null>)
         : super.receive<T>(name, topic, timeoutMs);
+    }
+
+    protected override armTimer(pause: Pause, topic: string): ParkedTimer {
+      return primitives.timer ? primitives.timer(pause, topic) : super.armTimer(pause, topic);
     }
   })();
 }

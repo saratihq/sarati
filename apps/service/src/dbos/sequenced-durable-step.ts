@@ -54,11 +54,12 @@ export class SequencedDurableStep extends DbosDurableStep {
 
   override async delay(pause: Pause, hooks: ParkHooks): Promise<Date | null> {
     const deadline = await this.sequencer.delay(pause.stepKey, pause.ms, {
-      parked: async () => {
+      parked: async (due) => {
         await hooks.parked({
           topic: timerTopicFor(pause.stepKey),
           deliveryTopic: null,
           durationMs: pause.ms,
+          due: new Date(due),
         });
       },
       resumed: () => hooks.resumed(false),
@@ -79,6 +80,7 @@ export class SequencedDurableStep extends DbosDurableStep {
             topic: wait.topic,
             deliveryTopic: wait.deliveryTopic,
             durationMs: wait.timeoutMs,
+            due: null,
           });
         },
         resumed: (answered) => hooks.resumed(answered),

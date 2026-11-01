@@ -397,6 +397,7 @@ describe('DagInterpreter (gating scheduler)', () => {
           const cancelled = substrate({
             sleep: () => Promise.resolve(),
             receive: () => Promise.reject(new Error('Workflow has been cancelled')),
+            timer: () => ({ due: null, fired: Promise.reject(new Error('Workflow has been cancelled')) }),
           });
           const slowPark = (): Promise<null> => new Promise((r) => setTimeout(() => r(null), 50));
           await expect(
@@ -415,7 +416,7 @@ describe('DagInterpreter (gating scheduler)', () => {
       },
     );
 
-    it('reports a replayed timer as due when it first parked, not a fresh wait from now', async () => {
+    it('reports a replayed timer whose deadline its substrate cannot read as due when it first parked, not a fresh wait from now', async () => {
       const firstParked = new Date('2026-10-09T09:00:00.000Z');
       const finished: Record<string, unknown> = {};
       const recorder = {
@@ -427,7 +428,7 @@ describe('DagInterpreter (gating scheduler)', () => {
       } as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
       const woke = substrate({
         sleep: () => Promise.resolve(),
-        receive: () => Promise.resolve(null),
+        timer: () => ({ due: null, fired: Promise.resolve(null) }),
       });
       await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
         externalUserId: 'u',
@@ -436,6 +437,35 @@ describe('DagInterpreter (gating scheduler)', () => {
         recorder,
       });
       expect(finished.pause).toEqual({ slept_until: firstParked.toISOString() });
+    });
+
+    it('records a timer due when its substrate armed it, and reports that one, whatever history answers', async () => {
+      const armed = new Date('2026-10-09T09:01:01.000Z');
+      const parkedUntil: unknown[] = [];
+      const finished: Record<string, unknown> = {};
+      const recorder = {
+        ...recorderInto([]),
+        stepWaiting: (...args: unknown[]) => {
+          parkedUntil.push(args[5]);
+          return Promise.resolve(new Date('2026-10-09T09:00:01.000Z'));
+        },
+        stepFinished: (_runId: string, stepKey: string, output: unknown) => {
+          finished[stepKey] = output;
+          return Promise.resolve();
+        },
+      } as unknown as Parameters<typeof interpreter.run>[1]['recorder'];
+      const woke = substrate({
+        sleep: () => Promise.resolve(),
+        timer: () => ({ due: armed, fired: Promise.resolve(null) }),
+      });
+      await interpreter.run(plan([{ kind: 'delay', id: 'pause', ms: 61_000, guards: [] }]), {
+        externalUserId: 'u',
+        durable: woke,
+        runId: 'run-1',
+        recorder,
+      });
+      expect(parkedUntil).toEqual([armed]);
+      expect(finished.pause).toEqual({ slept_until: armed.toISOString() });
     });
   });
 

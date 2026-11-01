@@ -598,6 +598,7 @@ export abstract class BasePlanInterpreter {
           park.topic,
           park.durationMs,
           park.deliveryTopic,
+          park.due,
         )) ?? null,
       resumed: async (answered) => {
         await record?.recorder.stepResumed(record.runId, stepKey, answered);

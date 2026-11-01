@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
@@ -8,8 +11,9 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { eventTopicFor } from '../src/runtime/event-wait';
 import { RunRecorderService } from '../src/runtime/run-recorder.service';
+import { PARK_DELAY_ABOVE_MS } from '../src/runtime/timer-wait';
 import { listenOnLoopback } from './support/listen';
-import { holdResume, reached } from './support/lock-probes';
+import { deferred, holdResume, pause, reached, type Deferred } from './support/lock-probes';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** One wait in a run: on `topic` it waits on a person, without one it sleeps on its own clock. */
@@ -66,6 +70,7 @@ const irLoop = {
 };
 
 const APPROVAL_WINDOW_MS = 10 * 60_000;
+const PARK_HELD_MS = 3_000;
 
 /** An authored workflow whose waits are unconnected roots — the shape the canvas saves — run through from-ir. */
 const authored: Rail = {
@@ -701,6 +706,131 @@ describe.each([authored, durable])('waits parked at once: $name (e2e, isolated D
     expect(refused.status).toBe(400);
     expect(refused.body.detail).toContain('topics starting "orchestr:wait:" are reserved');
   });
+
+  it(
+    'never wakes a Wait step before the time its history says it sleeps until, which is the deadline it parked on, even when its start or park is written late or its park not at all',
+    async () => {
+      const asks = new Map<string, { arrived: Deferred; answer: Deferred }>();
+      const fixture = createServer((req, res) => {
+        const ask = asks.get(req.url ?? '');
+        ask?.arrived.resolve();
+        void ask?.answer.promise.then(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{}');
+        });
+      });
+      await new Promise<void>((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+      const base = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}`;
+
+      // The step's start is held by its foreign-key check, which a FOR UPDATE blocks; its park by the run's row lock, which a FOR SHARE blocks.
+      const HOLDS = {
+        start: { lock: 'FOR UPDATE', blocked: /^\s*INSERT INTO runtime_run_steps/ },
+        park: { lock: 'FOR SHARE', blocked: /FROM runtime_runs WHERE id = \$1 FOR NO KEY UPDATE/ },
+      };
+
+      // One of the step's history writes waits on a lock a second connection holds on its run row, and is then let through or cancelled.
+      const held = async (
+        runId: string,
+        write: keyof typeof HOLDS,
+        lost = false,
+      ): Promise<{ run: Promise<Response>; parkedUntil: number | null }> => {
+        const ask = { arrived: deferred(), answer: deferred() };
+        asks.set(`/${runId}`, ask);
+        const run = http()
+          .post('/api/runs')
+          .send({
+            run_id: runId,
+            plan: {
+              id: `plan-${runId}`,
+              nodes: [
+                {
+                  kind: 'action',
+                  id: 'ask',
+                  actionId: 'http.send_request',
+                  props: { method: 'GET', url: `${base}/${runId}` },
+                },
+                { kind: 'delay', id: 'pause', ms: PARK_DELAY_ABOVE_MS + 1_000 },
+              ],
+            },
+          })
+          .then((res) => res);
+        await reached(ask.arrived.promise, `${runId}'s step before its wait`, 15_000);
+        const holder = new Client({ connectionString: process.env.DATABASE_URL });
+        await holder.connect();
+        try {
+          await holder.query('BEGIN');
+          const { rows: locked } = await holder.query<{ holder: number }>(
+            `SELECT pg_backend_pid() AS holder FROM runtime_runs WHERE run_id = $1 ${HOLDS[write].lock}`,
+            [runId],
+          );
+          ask.answer.resolve();
+          // Read outside the holder's transaction, which would keep one snapshot of pg_stat_activity throughout.
+          const [blocked] = await eventually(
+            async () =>
+              (
+                await db.query<{ pid: number; query: string }>(
+                  `SELECT pid, query FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`,
+                  [locked[0]!.holder],
+                )
+              ).rows,
+            (rows) => rows.length === 1,
+            `${runId}'s ${write} held on its row`,
+          );
+          expect(blocked!.query).toMatch(HOLDS[write].blocked);
+          await pause(PARK_HELD_MS);
+          if (lost) await holder.query(`SELECT pg_cancel_backend($1)`, [blocked!.pid]);
+          await holder.query('COMMIT');
+        } finally {
+          await holder.end();
+        }
+        if (lost) return { run, parkedUntil: null };
+        const [parked] = await eventually(
+          async () =>
+            (
+              await db.query<{ until: Date }>(
+                `SELECT s.waiting_timeout_at AS until FROM runtime_run_steps s JOIN runtime_runs r ON r.id = s.run_id
+                  WHERE r.run_id = $1 AND s.step_key = 'pause' AND s.waiting_timeout_at IS NOT NULL`,
+                [runId],
+              )
+            ).rows,
+          (rows) => rows.length === 1,
+          `${runId}'s park written`,
+        );
+        return { run, parkedUntil: parked!.until.getTime() };
+      };
+
+      const sleptAndWoke = async (runId: string): Promise<{ due: number; woke: number }> => {
+        const detail = await http().get(`/api/runs/${runId}`).expect(200);
+        const paused = (detail.body.steps as Array<Record<string, unknown>>).find(
+          (s) => s.step_key === 'pause',
+        );
+        expect(paused).toMatchObject({ kind: 'delay', status: 'completed' });
+        return {
+          due: Date.parse((paused!.output as { slept_until: string }).slept_until),
+          woke: Date.parse(paused!.finished_at as string),
+        };
+      };
+
+      try {
+        const startLate = await held('start-late', 'start');
+        const parkLate = await held('park-late', 'park');
+        const parkLost = await held('park-lost', 'park', true);
+        for (const { run } of [startLate, parkLate, parkLost]) expect((await run).status).toBe(201);
+
+        const startedLate = await sleptAndWoke('start-late');
+        const writtenLate = await sleptAndWoke('park-late');
+        const neverWritten = await sleptAndWoke('park-lost');
+        expect(startedLate.due).toBe(startLate.parkedUntil);
+        expect(writtenLate.due).toBe(parkLate.parkedUntil);
+        for (const { due, woke } of [startedLate, writtenLate, neverWritten]) {
+          expect(woke).toBeGreaterThanOrEqual(due);
+        }
+      } finally {
+        await new Promise<void>((resolve) => fixture.close(() => resolve()));
+      }
+    },
+    PARK_DELAY_ABOVE_MS + 90_000,
+  );
 
   it(
     'wakes the timer on its own, and the run completes with the decision',
