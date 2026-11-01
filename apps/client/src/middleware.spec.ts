@@ -1,3 +1,4 @@
+import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
 import { NextRequest, type NextFetchEvent } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -37,4 +38,22 @@ describe("middleware: the sign-in bounce", () => {
       if (returnTo !== null) expect(new URL(returnTo, ORIGIN).origin).toBe(ORIGIN);
     },
   );
+});
+
+describe("middleware: the vendored fonts", () => {
+  async function runsOn(url: string): Promise<boolean> {
+    const { config } = await import("@/middleware");
+    return unstable_doesMiddlewareMatch({ config, url });
+  }
+
+  it.each(["/fonts", "/fonts/", "/fonts/inter/v20", "/fonts/inter/v20/OFL.txt", "/fonts/inter/v20/latin.woff2"])(
+    "never answers %s, which is cached immutable, with a sign-in redirect",
+    async (url) => {
+      expect(await runsOn(url)).toBe(false);
+    },
+  );
+
+  it.each(["/fontsx", "/fonts-admin", "/workflows/42/overview", "/"])("still gates %s", async (url) => {
+    expect(await runsOn(url)).toBe(true);
+  });
 });

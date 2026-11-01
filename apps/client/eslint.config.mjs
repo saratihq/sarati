@@ -26,6 +26,16 @@ const eslintConfig = defineConfig([
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
       ],
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: ["next/font/google", "@next/font/google"].map((name) => ({
+            name,
+            message:
+              "It downloads the font from Google during next build, which then fails without Google access; vendor it under public/fonts and declare it in src/app/inter.css.",
+          })),
+        },
+      ],
     },
   },
   {
