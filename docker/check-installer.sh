@@ -121,19 +121,19 @@ answers() {
     sleep 2
   done
 }
-# callback <name> <port> <tag> sends a request carrying a callback's code and state through that install's proxy and prints the access log line it left.
-callback() {
-  # A route every version answers with no redirect, whose logged Location would repeat the query past the filter.
-  curl -s -o /dev/null "http://localhost:$2/api/health?code=oauth-code-$3&state=oauth-state-$3&probe=$3" || fail "the proxy of $1 did not answer"
+# logs_code <name> <port> <tag> sends a sign-in callback's code through that install's proxy, and fails unless its log shows it.
+logs_code() {
+  curl -s -o /dev/null "http://localhost:$2/api/health?code=oauth-code-$3&state=oauth-state-$3" || fail "the proxy of $1 did not answer"
   id=$(on "$1" ps -q proxy)
   i=0
-  until line=$(docker logs "$id" 2>&1 | grep -F "probe=$3"); do
+  until docker logs "$id" 2>&1 | grep -qF "oauth-code-$3"; do
     i=$((i + 1))
-    [ "$i" -lt 30 ] || fail "the proxy of $1 logged no request tagged $3"
+    [ "$i" -lt 30 ] || return 1
     sleep 1
   done
-  printf '%s\n' "$line"
 }
+# proxy_log <name> fails unless that install's proxy logs each request as its time, status and visitor alone.
+proxy_log() { (cd "$work/$1" && SARATI_CHECK_THROWAWAY=1 sh "$root/docker/check-proxy-log.sh" compose); }
 started() { docker inspect --format '{{ .State.StartedAt }}' "$1"; }
 image() { docker inspect --format '{{ .Image }}' "$1"; }
 # still <name> <proxy id> <its image id> <why> fails with why unless that install still runs that proxy.
@@ -242,15 +242,13 @@ echo '--- five containers, left on an earlier docker/Caddyfile by the installer 
 # v0.2.26's stack definition is that installer's but for a docker/Caddyfile that logs a sign-in callback's code and state.
 installed_by "$work/stuck.sh" caddy 8199 COMPOSE_PROJECT_NAME=check-caddy SARATI_STACK=compose SARATI_REF=v0.2.26
 cp "$work/caddy/docker/Caddyfile" "$work/v0.2.26.Caddyfile"
-logged=$(callback caddy 8199 old)
-printf '%s\n' "$logged" | grep -qF oauth-code-old || fail "the proxy did not start on v0.2.26's docker/Caddyfile, so this does not reproduce the upgrade"
+logs_code caddy 8199 old || fail "the proxy did not start on v0.2.26's docker/Caddyfile, so this does not reproduce the upgrade"
 was=$(on caddy ps -q proxy)
 img=$(image "$was")
 installed_by "$work/stuck.sh" caddy - SARATI_REF=$stuck
 grep -qF 'delete code' "$work/caddy/docker/Caddyfile" || fail "the installer from before did not fetch $stuck's docker/Caddyfile"
 still caddy "$was" "$img" 'the installer from before restarted the proxy, so this does not reproduce the stuck upgrade'
-logged=$(callback caddy 8199 stuck)
-printf '%s\n' "$logged" | grep -qF oauth-code-stuck || fail 'the proxy already drops the code, so this does not reproduce the stuck upgrade'
+logs_code caddy 8199 stuck || fail 'the proxy already drops the code, so this does not reproduce the stuck upgrade'
 
 echo '--- ...upgraded by this one'
 run_installer caddy -
@@ -258,8 +256,7 @@ says 'Restarted the proxy, so it runs the docker/Caddyfile just fetched.' 'the i
 proxy=$(on caddy ps -q proxy)
 [ "$proxy" != "$was" ] || fail 'the installer left the proxy running the docker/Caddyfile it started with'
 [ "$(loaded "$proxy")" = "$(cksum < "$work/caddy/docker/Caddyfile")" ] || fail 'the proxy is not labelled with the checksum of docker/Caddyfile'
-logged=$(callback caddy 8199 new)
-! printf '%s\n' "$logged" | grep -qF -e oauth-code-new -e oauth-state-new || fail "the running proxy still logs a callback's code or state, so it did not load the new docker/Caddyfile: $logged"
+proxy_log caddy || fail "the running proxy logs more than each request's time, status and visitor, so it did not load the new docker/Caddyfile"
 
 echo '--- ...re-run with nothing changed'
 since=$(started "$proxy")
@@ -288,16 +285,14 @@ echo '--- ...edited and restarted by hand, then re-run'
 cp "$work/v0.2.26.Caddyfile" "$work/caddy/docker/Caddyfile"
 on caddy restart proxy >/dev/null
 answers 8199
-logged=$(callback caddy 8199 edit)
-printf '%s\n' "$logged" | grep -qF oauth-code-edit || fail 'the proxy restarted by hand did not load the edited docker/Caddyfile, so this does not reproduce a hand edit'
+logs_code caddy 8199 edit || fail 'the proxy restarted by hand did not load the edited docker/Caddyfile, so this does not reproduce a hand edit'
 was=$proxy
 run_installer caddy -
 says 'Restarted the proxy, so it runs the docker/Caddyfile just fetched.' 'the installer did not say it restarted a proxy running a hand-edited docker/Caddyfile'
 proxy=$(on caddy ps -q proxy)
 [ "$proxy" != "$was" ] || fail 'the installer left the proxy running a hand-edited docker/Caddyfile'
 [ "$(loaded "$proxy")" = "$(cksum < "$work/caddy/docker/Caddyfile")" ] || fail 'the installer did not label the proxy with the checksum of the docker/Caddyfile it fetched over a hand edit'
-logged=$(callback caddy 8199 fixed)
-! printf '%s\n' "$logged" | grep -qF -e oauth-code-fixed -e oauth-state-fixed || fail "the proxy still logs a callback's code or state, so it kept the hand-edited docker/Caddyfile: $logged"
+proxy_log caddy || fail "the proxy logs more than each request's time, status and visitor, so it kept the hand-edited docker/Caddyfile"
 
 echo '--- ...refused where Docker left a directory for a missing docker/Caddyfile'
 mv "$work/caddy/docker/Caddyfile" "$work/caddy.Caddyfile"

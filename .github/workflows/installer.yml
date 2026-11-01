@@ -10,6 +10,7 @@ on:
       - docker-compose.single.yaml
       - docker/Caddyfile
       - docker/check-installer.sh
+      - docker/check-proxy-log.sh
       - .github/workflows/installer.yml
   pull_request:
     paths:
@@ -18,6 +19,7 @@ on:
       - docker-compose.single.yaml
       - docker/Caddyfile
       - docker/check-installer.sh
+      - docker/check-proxy-log.sh
       - .github/workflows/installer.yml
   workflow_dispatch:
 

@@ -96,8 +96,11 @@ SARATI_TRUSTED_PROXIES=173.245.48.0/20 103.21.244.0/22 2400:cb00::/32
 `cloudflared` connects to Sarati itself, so tunnel requests arrive from wherever `cloudflared` runs —
 not from Cloudflare's ranges, which change nothing here. Cloudflare has already put the visitor on
 `X-Forwarded-For`; list the address Sarati sees `cloudflared` connect from. To find it, send one request
-through the tunnel and read `remote_ip` on its line in the proxy's log: `cd sarati && docker compose
-logs proxy` for five containers, `cd sarati && docker compose logs sarati` for one.
+through the tunnel and read `client_ip` on the newest `handled request` line of the proxy's log: while
+`SARATI_TRUSTED_PROXIES` is empty, that is the address that connected. The log is `cd sarati && docker
+compose logs proxy` for five containers, and `cd sarati && docker compose logs sarati` for one, where
+lines from `127.0.0.1` are the container checking its own health. Once the address is listed, the same
+line shows each visitor's own address.
 
 With `cloudflared` on the same machine as Docker, that is Docker's gateway address, which every other
 connection to the published port from that machine shares — and anything arriving from a listed

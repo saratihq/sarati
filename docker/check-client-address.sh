@@ -111,6 +111,14 @@ if [ "$mode" = compose ]; then
   visitor v-edge-d
   expect 'with the edge listed, a spoofer behind it is still throttled' "$(signins v-edge-c http://v-edge:8080 7 spoof)" "$THROTTLED"
   expect 'with the edge listed, each visitor behind it has their own limit' "$(signins v-edge-d http://v-edge:8080 1)" '401'
+  behind="\"client_ip\": \"$(address v-edge-d)\""
+  i=0
+  until docker logs "$(docker compose ps -q proxy)" 2>&1 | grep -qF "$behind"; do
+    i=$((i + 1))
+    [ "$i" -le 10 ] || { echo '::error::the proxy did not log the visitor behind the listed edge as its client'; exit 1; }
+    sleep 1
+  done
+  echo 'ok: with the edge listed, the proxy logs the visitor behind it as the client'
 else
   # Only the bundled proxy reaches the service and the composer inside the container.
   for port in 8001 8010; do

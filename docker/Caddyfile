@@ -10,6 +10,32 @@
 		trusted_proxies static {$SARATI_TRUSTED_PROXIES}
 		trusted_proxies_strict
 	}
+	# Requests and their errors are logged as time, status and visitor alone: an address or header can carry an invite, webhook or sign-in secret.
+	log {
+		output stdout
+		format filter {
+			wrap console
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>proto delete
+				request>method delete
+				request>host delete
+				request>uri delete
+				request>headers delete
+				request>transfer_encoding delete
+				request>tls delete
+				bytes_read delete
+				user_id delete
+				duration delete
+				size delete
+				resp_headers delete
+				write_error delete
+				err_id delete
+				err_trace delete
+			}
+		}
+	}
 }
 
 :8080 {
@@ -46,17 +72,5 @@
 	}
 
 	encode gzip
-	log {
-		output stdout
-		# An OAuth or single sign-on callback's query carries its authorization code and state.
-		format filter {
-			wrap console
-			fields {
-				request>uri query {
-					delete code
-					delete state
-				}
-			}
-		}
-	}
+	log
 }
