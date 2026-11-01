@@ -49,6 +49,8 @@ export interface ServiceProcess {
   listeningPorts(): Promise<number[]>;
   /** Kill it with SIGKILL, as a crash would, and wait for it to be gone. */
   crash(): Promise<void>;
+  /** Send it SIGTERM, as a container stop does; resolves once it has exited. */
+  terminate(): Promise<void>;
 }
 
 interface ServiceOptions {
@@ -104,6 +106,10 @@ export async function startService(
     listeningPorts: () => tcpPortsListenedOnBy(child.pid),
     crash: async () => {
       if (child.exitCode === null) child.kill('SIGKILL');
+      await exited;
+    },
+    terminate: async () => {
+      if (child.exitCode === null) child.kill('SIGTERM');
       await exited;
     },
   };

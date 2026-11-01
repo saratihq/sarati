@@ -59,6 +59,10 @@ These strings are written into saved data, issued tokens, live cookies or the da
 - The `--orchestr-*` CSS custom properties — the client's token names.
 - The `{{$account.*}}` reference and its field names (`email`, `handle`, `id`, `name`) — in every
   saved workflow that uses them.
+- The `nameBasedId` namespace and derivation (`apps/service/src/database/ids.ts`) and what a trigger
+  run is named by (a poll's or registered webhook's: the activation id, its `admission.epoch` store
+  value and the event's key; a Composio delivery's: the activation id and its `webhook-id`) — in every
+  keyed trigger run's id; changing any of them runs a resent delivery again.
 - The `orchestr:timer:` waiting-topic prefix — in `runtime_run_steps.waiting_topic`, the run's kept
   `runtime_runs.waiting_topic` slot, and the DBOS recv topic of every in-flight timed wait.
 - The delivery topic `orchestr:wait:<step key>` — in `runtime_run_steps.delivery_topic` and the DBOS

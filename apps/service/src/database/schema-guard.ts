@@ -197,6 +197,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM pg_constraint WHERE conname='organizations_personal_owner_member_fkey' AND to_regclass('public.uq_org_members_personal_org') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname='organizations_personal_owner_check' AND contype='t') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='org_members_claim_personal_org')",
   },
+  {
+    migration: '045_composio_delivery_admitted.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_name='composio_webhook_deliveries' AND column_name='admitted_at'",
+  },
 ];
 
 /**

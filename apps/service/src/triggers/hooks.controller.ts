@@ -11,7 +11,7 @@ import { TriggersService, type InboundWebhook } from './triggers.service';
 
 /**
  * Public webhook intake — NO auth guard: the unguessable path is the capability token.
- * The run is fire-and-forget (202 + run_id); poll run history for the outcome.
+ * The 202 (+ run_id) is answered once the run is durably started; poll run history for the outcome.
  */
 @Controller(HOOKS_PREFIX)
 export class HooksController {

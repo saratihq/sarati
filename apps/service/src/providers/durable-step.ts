@@ -173,7 +173,7 @@ export abstract class PlainDurableStep implements DurableStep {
       (await hooks.parked({ topic, deliveryTopic: null, durationMs: pause.ms })) ??
       new Date(Date.now() + pause.ms);
     try {
-      await sleeping;
+      await this.parkedOn(sleeping);
     } finally {
       await hooks.resumed(false);
     }
@@ -186,12 +186,17 @@ export abstract class PlainDurableStep implements DurableStep {
     await hooks.parked({ topic: wait.topic, deliveryTopic: wait.deliveryTopic, durationMs: wait.timeoutMs });
     let answered = false;
     try {
-      const payload = await pending;
+      const payload = await this.parkedOn(pending);
       answered = payload !== null;
       return payload ?? null;
     } finally {
       await hooks.resumed(answered);
     }
+  }
+
+  /** A lane's wait on a park whose history is written: nothing it does goes on until the park ends. */
+  protected parkedOn<T>(wait: Promise<T>): Promise<T> {
+    return wait;
   }
 }
 
@@ -199,7 +204,36 @@ export abstract class PlainDurableStep implements DurableStep {
 export class PassThroughDurableStep extends PlainDurableStep {
   private readonly waiters = new Map<string, (value: unknown) => void>();
   private readonly onCancel = new Set<() => void>();
+  private readonly nested = new Set<PassThroughDurableStep>();
   private cancelled = false;
+  private liveLanes = 0;
+  private waitingLanes = 0;
+
+  /** Whether the run is parked: it has lanes, and each waits on a park, on other lanes, or on a run nested in it that is parked. */
+  parked(): boolean {
+    const parkedNests = [...this.nested].filter((run) => run.parked()).length;
+    return this.liveLanes > 0 && this.waitingLanes + parkedNests === this.liveLanes;
+  }
+
+  override root<T>(fn: () => Promise<T>): Promise<T> {
+    return this.lane(fn);
+  }
+
+  override spawn(fn: () => Promise<unknown>): Lane {
+    return super.spawn(() => this.lane(fn));
+  }
+
+  override joinAny(lanes: readonly Lane[]): Promise<{ lane: Lane; outcome: Outcome }> {
+    return this.waiting(super.joinAny(lanes));
+  }
+
+  override joinAll(lanes: readonly Lane[]): Promise<Outcome[]> {
+    return this.waiting(super.joinAll(lanes));
+  }
+
+  protected override parkedOn<T>(wait: Promise<T>): Promise<T> {
+    return this.waiting(wait);
+  }
 
   override async run<T>(_name: string, fn: () => Promise<T>): Promise<T> {
     if (this.cancelled) throw new RunCancelledError();
@@ -266,10 +300,30 @@ export class PassThroughDurableStep extends PlainDurableStep {
     const cascade = (): void => nested.cancel();
     if (this.cancelled) nested.cancel();
     this.onCancel.add(cascade);
+    this.nested.add(nested);
     try {
       return await run(nested);
     } finally {
       this.onCancel.delete(cascade);
+      this.nested.delete(nested);
+    }
+  }
+
+  private async lane<T>(fn: () => Promise<T>): Promise<T> {
+    this.liveLanes++;
+    try {
+      return await fn();
+    } finally {
+      this.liveLanes--;
+    }
+  }
+
+  private async waiting<T>(wait: Promise<T>): Promise<T> {
+    this.waitingLanes++;
+    try {
+      return await wait;
+    } finally {
+      this.waitingLanes--;
     }
   }
 

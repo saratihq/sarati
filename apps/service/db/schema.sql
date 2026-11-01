@@ -505,7 +505,8 @@ CREATE TABLE public.users (
 CREATE TABLE public.composio_webhook_deliveries (
     webhook_id text NOT NULL,
     trigger_id text,
-    received_at timestamp with time zone DEFAULT now() NOT NULL
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    admitted_at timestamp with time zone DEFAULT now()
 );
 
 

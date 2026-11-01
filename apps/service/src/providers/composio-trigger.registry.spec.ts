@@ -43,7 +43,7 @@ describe('composio-trigger.registry — gmail.gmail_new_email_received', () => {
     });
   });
 
-  it('extracts items oldest-first regardless of fetch order (Composio scrambles it)', () => {
+  it('extracts items oldest-first regardless of fetch order (Composio scrambles it), each keyed by its message id', () => {
     const items = spec.extractItems({
       messages: [
         { messageId: 'b', messageTimestamp: '2026-07-12T15:35:20Z' },
@@ -52,20 +52,24 @@ describe('composio-trigger.registry — gmail.gmail_new_email_received', () => {
       ],
     });
     expect(items.map((i) => (i.payload as { messageId: string }).messageId)).toEqual(['c', 'a', 'b']);
+    expect(items.map((i) => i.key)).toEqual(['c', 'a', 'b']);
     expect(items[0]!.epochMilliSeconds).toBe(Date.parse('2026-07-12T14:50:06Z'));
   });
 
-  it('falls back to a raw internalDate epoch and skips unparseable messages', () => {
+  it('falls back to a raw internalDate epoch and skips unparseable messages, keying one with no id by its content', () => {
     const items = spec.extractItems({
       messages: [
         { messageId: 'raw', internalDate: '1780000000000' },
+        { internalDate: '1780000000001' },
         { messageId: 'broken', messageTimestamp: 'not-a-date' },
         { messageId: 'empty' },
         'not-an-object',
       ],
     });
-    expect(items).toHaveLength(1);
-    expect(items[0]!.epochMilliSeconds).toBe(1_780_000_000_000);
+    expect(items.map((i) => [i.epochMilliSeconds, i.key])).toEqual([
+      [1_780_000_000_000, 'raw'],
+      [1_780_000_000_001, '{"internalDate":"1780000000001"}'],
+    ]);
   });
 
   it('degrades an unexpected envelope to no items (never throws)', () => {

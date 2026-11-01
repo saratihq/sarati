@@ -12,7 +12,6 @@ import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { LIVE_RUNS_PER_HOUR } from '../src/mcp/live-run-consent.service';
-import { RunsService } from '../src/runs/runs.service';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -31,7 +30,6 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
   let hitUrl: string;
   let hitServer: Server;
   let posts = 0;
-  let started: jest.SpiedFunction<RunsService['runExecutable']>;
 
   const userId = randomUUID();
   const orgId = randomUUID();
@@ -155,14 +153,11 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
-    started = jest.spyOn(app.get(RunsService), 'runExecutable');
     await listenOnLoopback(app);
     baseUrl = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
   }, 40_000);
 
   afterAll(async () => {
-    // A run handed back as a handle is still going; the database must outlive it.
-    await Promise.allSettled(started.mock.results.map((result) => result.value));
     await app.close();
     await db.end();
     await new Promise<void>((resolve, reject) => hitServer.close((e) => (e ? reject(e) : resolve())));

@@ -168,6 +168,25 @@ describe('runs endpoint (e2e, isolated DB, mock auth)', () => {
     expect(mine?.version_number).toBeNull(); // direct runs carry no workflow version
   });
 
+  it('a run id already used is refused 409 run_exists, running nothing again: its steps are recorded once', async () => {
+    const plan = {
+      id: 'once',
+      nodes: [
+        { kind: 'action', id: 'only', actionId: 'text.concat', props: { texts: ['x'], separator: '' } },
+      ],
+    };
+    await request(app.getHttpServer()).post('/api/runs').send({ plan, run_id: 'reused-run' }).expect(201);
+    const again = await request(app.getHttpServer())
+      .post('/api/runs')
+      .send({ plan, run_id: 'reused-run' })
+      .expect(409);
+    expect(again.body.code).toBe('run_exists');
+
+    const detail = await request(app.getHttpServer()).get('/api/runs/reused-run').expect(200);
+    expect(detail.body.status).toBe('completed');
+    expect((detail.body.steps as Array<Record<string, unknown>>).map((s) => s.node_id)).toEqual(['only']);
+  });
+
   it('run history: an oversized step output is capped ALONE — the rest of the map survives, with a head', async () => {
     const big = 'x'.repeat(20_000);
     const plan = {

@@ -46,8 +46,9 @@ curl -X POST http://localhost:8080/api/hooks/<workflow-id>/production \
 {"status":"accepted","fired":1,"run_id":"13000cf9-…","run_ids":["13000cf9-…"]}
 ```
 
-The response is an acknowledgement, not the workflow's output. `202` means the run started. To see
-what it produced, open [Runs](/run/runs/).
+The response is an acknowledgement, not the workflow's output. `202` is sent once the run is
+recorded and started durably, so a restart after it does not lose the run. To see what it produced,
+open [Runs](/run/runs/).
 
 Other answers:
 
@@ -57,6 +58,8 @@ Other answers:
 | `202` with `"fired": 0` | Accepted, but nothing ran: a duplicate delivery, or a handshake. Not an error. |
 | `415` | Sarati can't read the body: its `Content-Type`, `charset` or `Content-Encoding` is not one of those below. Nothing ran. See [A webhook returns 415](/operate/troubleshooting/#a-webhook-returns-415). |
 | `400 The request body is not valid JSON` | Sent as JSON, but it does not parse. Nothing ran. |
+| `422 Workflow can't run: …` | The version live in that environment can't run. Nothing ran. |
+| `500` | Sarati could not start the run, for example because its database was unreachable. Send the delivery again: it is not treated as a duplicate, and nothing it already started runs twice. |
 
 ### What the run receives
 
@@ -126,6 +129,13 @@ it: the body at `body`, and an object's fields beside it. No sender handy? Paste
 instead.
 
 Catching a sample does not run the workflow.
+
+## Schedules and polled app triggers
+
+A schedule, or an app trigger that checks a feed, moves on (past the time it fired, or past the items
+it found) only once each run it starts is recorded and started. A check that fails part of the way is
+made again, and a run it had already started does not run twice. The items one check finds each start
+their own run, and those runs go on side by side.
 
 ## Changing a live app trigger
 

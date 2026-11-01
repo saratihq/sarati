@@ -2,7 +2,7 @@ import { Column, Entity, PrimaryColumn } from 'typeorm';
 
 /**
  * The inbound idempotency ledger for at-least-once Composio deliveries: the intake claims the id
- * BEFORE firing, and a conflict must be acked without re-running the workflow.
+ * BEFORE firing, and a conflict on a claim whose runs are admitted is acked without re-running the workflow.
  */
 @Entity('composio_webhook_deliveries')
 export class ComposioWebhookDeliveryEntity {
@@ -16,4 +16,8 @@ export class ComposioWebhookDeliveryEntity {
 
   @Column({ name: 'received_at', type: 'timestamptz' })
   receivedAt!: Date;
+
+  /** When every run the delivery starts was admitted; null while a claim is still being admitted, so its resend runs them again. */
+  @Column({ name: 'admitted_at', type: 'timestamptz', nullable: true })
+  admittedAt!: Date | null;
 }

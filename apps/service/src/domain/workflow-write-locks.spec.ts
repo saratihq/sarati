@@ -18,6 +18,8 @@ const SCHEMA = join(SERVICE, 'db', 'schema.sql');
 const CREATES = 'creates the workflow, which nothing else can reach before it commits';
 const ACTIVATION =
   "an activation's own row or store, under its advisory lock; a workflow delete is refused while any activation is left";
+const ACTIVATION_EPOCH =
+  "an activation's own store, one autocommit insert that keeps the first epoch written, under its advisory lock from a poll and under none from a webhook delivery; a workflow delete is refused while any activation is left";
 const ACTIVATION_RECORD =
   "an activation's own row, written only over the row as it read it (its xmin); a workflow delete is refused while any activation is left";
 const ACTIVATION_FAILURE =
@@ -69,6 +71,10 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
   'service:triggers/activation-store.ts#clear#runtime_activation_store': {
     in: 'autocommit',
     why: ACTIVATION,
+  },
+  'service:triggers/activation-store.ts#admissionEpoch#runtime_activation_store': {
+    in: 'autocommit',
+    why: ACTIVATION_EPOCH,
   },
   'service:triggers/triggers.service.ts#fireComposioActivation#runtime_trigger_activations': {
     in: 'autocommit',
@@ -126,6 +132,8 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
     why: RUN_LOCK,
   },
   'service:runs/runs.service.ts#cancelRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runs/runs.service.ts#rearmIfNeverStarted#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runs/runs.service.ts#refuseIfNeverStarted#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:dbos/recovery-guard.ts#admit#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#chargeSubWorkflowCall#runtime_runs': {
     in: 'transaction',

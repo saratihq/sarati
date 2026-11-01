@@ -70,20 +70,26 @@ describe('DBOS durable execution (Phase 1b)', () => {
 
   it('memoizes completed steps: a same-id replay does not re-fire the action', async () => {
     const runId = `run-${randomBytes(4).toString('hex')}`;
-    const first = await runtime.runDurably(runPlanToDag(plan()), { externalUserId: 'u', runId });
-    const replay = await runtime.runDurably(runPlanToDag(plan()), { externalUserId: 'u', runId }); // same id → recovery/replay
+    const first = await (
+      await runtime.startDurably(runPlanToDag(plan()), { externalUserId: 'u', runId })
+    ).result();
+    const replay = await (
+      await runtime.startDurably(runPlanToDag(plan()), { externalUserId: 'u', runId })
+    ).result(); // same id → recovery/replay
 
-    expect(requestCount).toBe(1); // hit exactly once despite two runDurably calls
+    expect(requestCount).toBe(1); // hit exactly once despite two starts
     expect(replay).toEqual(first); // replay returns the checkpointed result
     expect((first.outputs.call as { status: number }).status).toBe(200);
   }, 30_000);
 
   it('a distinct run id executes fresh', async () => {
     const before = requestCount;
-    await runtime.runDurably(runPlanToDag(plan()), {
-      externalUserId: 'u',
-      runId: `run-${randomBytes(4).toString('hex')}`,
-    });
+    await (
+      await runtime.startDurably(runPlanToDag(plan()), {
+        externalUserId: 'u',
+        runId: `run-${randomBytes(4).toString('hex')}`,
+      })
+    ).result();
     expect(requestCount).toBe(before + 1);
   }, 30_000);
 
@@ -93,7 +99,9 @@ describe('DBOS durable execution (Phase 1b)', () => {
       id: 'hitl-plan',
       nodes: [{ kind: 'waitForEvent', id: 'approval', topic: 'approve', timeoutMs: 20_000 }],
     };
-    const runPromise = runtime.runDurably(runPlanToDag(hitlPlan), { externalUserId: 'u', runId });
+    const runPromise = runtime
+      .startDurably(runPlanToDag(hitlPlan), { externalUserId: 'u', runId })
+      .then((run) => run.result());
     // Resume it — retry until the workflow exists in DBOS, then send exactly once.
     for (let i = 0; i < 50; i++) {
       try {

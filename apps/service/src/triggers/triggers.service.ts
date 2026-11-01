@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { Pool } from 'pg';
-import { In } from 'typeorm';
+import { In, IsNull } from 'typeorm';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import type { Principal } from '../auth/principal';
@@ -13,7 +13,7 @@ import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
 import type { EnvConfig } from '../config/env.config';
 import { ConnectionsService } from '../connections/connections.service';
-import { isIdShape, newId, now } from '../database/ids';
+import { isIdShape, nameBasedId, newId, now } from '../database/ids';
 import { rawMutate, rawQuery } from '../database/raw-query';
 import { ComposioWebhookDeliveryEntity } from '../database/entities/composio-webhook-delivery.entity';
 import { EnvironmentEntity } from '../database/entities/environment.entity';
@@ -26,7 +26,7 @@ import { EnvironmentsService } from '../environments/environments.service';
 import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
 import { ifActivationUnlocked } from './activation-lock';
-import { DbActivationStore } from './activation-store';
+import { ADMISSION_EPOCH_KEY, DbActivationStore, HeldWritesStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
 import { type ActivationKind, applyFinished, triggerPropsOf } from './canvas/trigger-activation';
 import { firesWhileHeld, heldBackBySlot } from './canvas/trigger-kind';
@@ -39,6 +39,7 @@ import {
   type ManagedIntegrationProvider,
   type TriggerEvent,
 } from '../providers/managed-integration-provider';
+import type { ProviderStore } from '../providers/provider-store';
 import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import {
   SdkWebhookProvider,
@@ -48,7 +49,7 @@ import {
 import { AgentStepBus, channelKey } from '../runtime/agent-step-bus';
 import type { DagPlan } from '../runtime/dag-plan';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
-import { RunsService } from '../runs/runs.service';
+import { type AdmittedRun, isRunExists, type RunDispatchOptions, RunsService } from '../runs/runs.service';
 import { extractChatReply } from '../runtime/terminal-output';
 import { SCHEDULE_CURSOR_KEY, dueAt, parseScheduleProps } from './schedule';
 import {
@@ -101,14 +102,6 @@ interface ActivationTarget {
   env: EnvironmentEntity;
   versionId: string;
   ir: WorkflowIR;
-}
-
-// What one locked poll yields: its events, to fire on the version live when they were polled, which holds the trigger.
-interface PolledEvents {
-  row: RuntimeTriggerActivationEntity;
-  target: ActivationTarget;
-  plan: DagPlan;
-  events: TriggerEvent[];
 }
 
 /** Composio orphan reaper (backstop): run at the sweep cadence, not every poll tick. */
@@ -217,9 +210,10 @@ export class TriggersService {
       }
     }
 
-    const runId = newId();
-    this.fireEnvVersionPlan(wf, resolved, ir, coerceWebhookBody(inbound.body), runId, 'webhook');
-    return { runIds: [runId] };
+    const plan = this.webhookPlan(wf, ir);
+    return {
+      runIds: [await this.admitWebhookRun(wf, resolved, plan, coerceWebhookBody(inbound.body), newId())],
+    };
   }
 
   /**
@@ -312,10 +306,14 @@ export class TriggersService {
     }
 
     const store = new DbActivationStore(this.dataSource, row.id);
+    // Read before the secret, so a delivery that secret verifies is named under the setup the secret belongs to.
+    const epoch = await store.admissionEpoch();
     const [secret, registration] = await Promise.all([
       store.get<string>(WEBHOOK_SECRET_KEY),
       store.get<unknown>(WEBHOOK_REGISTRATION_KEY).then(webhookRegistrationOf),
     ]);
+    // The SDK's dedupe mark lands only once every event's run is admitted, so a delivery that fails is resent whole.
+    const delivery = new HeldWritesStore(store);
 
     let events: unknown[];
     try {
@@ -325,7 +323,7 @@ export class TriggersService {
         props: triggerPropsOf(node),
         // A held trigger's account isn't active, so nothing is sent with it (#11).
         auth: row.connectionId && !row.held ? { connectionId: row.connectionId } : null,
-        store,
+        store: delivery,
         // Only read by enable/disable (registration), never by verify/transform.
         webhookUrl: '',
         secret: secret ?? '',
@@ -339,11 +337,17 @@ export class TriggersService {
     // A delivery can legitimately yield zero events (deduped / handshake / unmatched) or
     // several. Report what actually ran — a minted id for a run nobody dispatched is a lie
     // the caller cannot tell from a real one.
-    const runIds = events.map((payload) => {
-      const eventRunId = newId();
-      this.fireEnvVersionPlan(wf, resolved, ir, coerceWebhookBody(payload), eventRunId, 'webhook');
-      return eventRunId;
-    });
+    const runIds: string[] = [];
+    if (events.length > 0) {
+      const plan = this.webhookPlan(wf, ir);
+      for (const payload of events) {
+        // An event its trigger keys is run under an id of its own, so a resend admits it once.
+        const key = this.sdkWebhooks.eventKey(node.node_type, payload);
+        const runId = key === null ? newId() : nameBasedId(row.id, epoch, key);
+        runIds.push(await this.admitWebhookRun(wf, resolved, plan, coerceWebhookBody(payload), runId));
+      }
+    }
+    await delivery.commit();
     return { runIds };
   }
 
@@ -380,7 +384,8 @@ export class TriggersService {
 
     // Inbound idempotency: delivery is at-least-once, so claim the id before firing.
     // Deliberately AFTER verification — an unverified delivery must not burn a genuine one's id.
-    if (!(await this.claimComposioDelivery(inbound.headers['webhook-id'], triggerId))) {
+    const webhookId = inbound.headers['webhook-id'];
+    if (!(await this.claimComposioDelivery(webhookId, triggerId))) {
       return { fired: 0, duplicate: true };
     }
 
@@ -388,7 +393,14 @@ export class TriggersService {
     const deliveryAccountId = composioDeliveryAccountId(inbound.body);
     let fired = 0;
     for (const row of verifiedRows) {
-      fired += await this.fireComposioActivation(row, payload, deliveryAccountId);
+      fired += await this.fireComposioActivation(row, payload, deliveryAccountId, webhookId ?? null);
+    }
+    if (webhookId) {
+      await this.dataSource.manager.update(
+        ComposioWebhookDeliveryEntity,
+        { webhookId, admittedAt: IsNull() },
+        { admittedAt: now() },
+      );
     }
     return { fired };
   }
@@ -415,7 +427,7 @@ export class TriggersService {
     return verified;
   }
 
-  /** Claim a delivery id — the insert IS the lock. No id → fires anyway (fail open). */
+  /** Claim a delivery id — the insert IS the lock; false once a claim of it has every run admitted. No id → fires anyway (fail open). */
   private async claimComposioDelivery(webhookId: string | undefined, triggerId: string): Promise<boolean> {
     if (!webhookId) {
       this.logger.warn('composio intake: delivery has no webhook-id — cannot dedupe, firing anyway');
@@ -425,17 +437,27 @@ export class TriggersService {
       .createQueryBuilder()
       .insert()
       .into(ComposioWebhookDeliveryEntity)
-      .values({ webhookId, triggerId, receivedAt: now() })
+      // Unadmitted until its runs are: the column's default is for a claim an earlier release makes, which fires as it claims.
+      .values({ webhookId, triggerId, receivedAt: now(), admittedAt: null })
       .orIgnore() // ON CONFLICT DO NOTHING — the loser of the race gets 0 rows.
       // RETURNING is required — without it `raw` is always [] and everything reads as a duplicate.
       .returning('webhook_id')
       .execute();
-    const claimed = (result.raw as unknown[] | undefined)?.length === 1;
-    if (!claimed) {
+    if ((result.raw as unknown[] | undefined)?.length === 1) {
+      await this.pruneComposioDeliveries();
+      return true;
+    }
+    const claim = await this.dataSource.manager.findOne(ComposioWebhookDeliveryEntity, {
+      where: { webhookId },
+    });
+    if (claim?.admittedAt) {
       this.logger.log(`composio intake: duplicate delivery ${webhookId} (${triggerId}) — acked, not fired`);
       return false;
     }
-    await this.pruneComposioDeliveries();
+    // Its claim's runs are not all admitted yet: each is admitted again under its own id, so none runs twice.
+    this.logger.log(
+      `composio intake: delivery ${webhookId} (${triggerId}) is not admitted yet — admitting its runs`,
+    );
     return true;
   }
 
@@ -457,13 +479,14 @@ export class TriggersService {
   }
 
   /**
-   * Fire ONE activation for a verified Composio delivery — resolve/compile synchronously, run fire-and-forget. Returns 1
-   * when dispatched. A failed fire is logged, and lands on `last_error` unless the row is held back, whose reason stands.
+   * Fire ONE activation for a verified Composio delivery, returning 1 once its run is admitted; one whose run or version could
+   * not be read or admitted throws. A fire that fails otherwise is logged, and lands on `last_error` unless the row is held back, whose reason stands.
    */
   private async fireComposioActivation(
     row: RuntimeTriggerActivationEntity,
     payload: unknown,
     deliveryAccountId: string | null,
+    webhookId: string | null,
   ): Promise<number> {
     // Defense in depth: never fire another connected account's event as this owner.
     if (deliveryAccountId && !(await this.activationAccountMatches(row, deliveryAccountId))) {
@@ -472,7 +495,7 @@ export class TriggersService {
       );
       return 0;
     }
-    const fired = await this.startComposioRun(row, payload);
+    const fired = await this.startComposioRun(row, payload, webhookId);
     if (fired === null) return 0;
     const outcome = fired === true ? null : activationError(fired.error);
     const em = this.dataSource.manager;
@@ -501,40 +524,35 @@ export class TriggersService {
     return fired === true ? 1 : 0;
   }
 
-  // Starts a run of the version the activation's environment points at: true, the failure, or null when that version doesn't hold the trigger.
+  // Admits a run of the version the activation's environment points at: true, why it can't run, or null when that version doesn't hold the trigger.
   private async startComposioRun(
     row: RuntimeTriggerActivationEntity,
     payload: unknown,
+    webhookId: string | null,
   ): Promise<true | { error: unknown } | null> {
-    try {
-      const { wf, env, versionId, ir } = await this.resolveActivationTarget(row);
-      if (!holdsTrigger(row, triggerOf(ir, row.triggerNodeId))) {
-        this.logger.warn(
-          `composio intake: activation ${row.id} is still to be changed at Composio — acked, not fired`,
-        );
-        return null;
-      }
-      const plan = this.compiler.compile(ir, wf.id);
-      void this.runs
-        .runExecutable(plan, {
-          externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
-          runId: newId(),
-          initialScope: { trigger: payload },
-          workflowId: wf.id,
-          workflowVersionId: versionId,
-          source: 'trigger',
-          environment: env.name,
-          environmentId: env.id,
-          orgId: wf.orgId,
-        })
-        .catch((err) =>
-          this.logger.warn(`composio intake: activation ${row.id} fired run failed: ${String(err)}`),
-        );
-      return true;
-    } catch (error) {
-      this.logger.warn(`composio intake: activation ${row.id} did not fire: ${errorMessage(error)}`);
-      return { error };
+    const target = await this.pointedTarget(row);
+    if ('missing' in target) return this.notFired(row, new Error(target.missing));
+    if (!holdsTrigger(row, triggerOf(target.ir, row.triggerNodeId))) {
+      this.logger.warn(
+        `composio intake: activation ${row.id} is still to be changed at Composio — acked, not fired`,
+      );
+      return null;
     }
+    let plan: DagPlan;
+    try {
+      plan = this.compiler.compile(target.ir, target.wf.id);
+    } catch (error) {
+      return this.notFired(row, error);
+    }
+    // One run per activation per delivery, so a resend admits each exactly once.
+    const runId = webhookId ? nameBasedId(row.id, webhookId) : newId();
+    await this.admitActivationRun(row, target, plan, runId, payload);
+    return true;
+  }
+
+  private notFired(row: RuntimeTriggerActivationEntity, error: unknown): { error: unknown } {
+    this.logger.warn(`composio intake: activation ${row.id} did not fire: ${errorMessage(error)}`);
+    return { error };
   }
 
   /**
@@ -660,25 +678,48 @@ export class TriggersService {
     });
     if (!polled) return 0;
     // Only awaiting a run happens outside the lock (a run can wait for days); every write to the activation's store stays inside it.
-    await this.fireEvents(polled);
-    return polled.events.length;
+    for (const run of polled) {
+      await run
+        .outcome()
+        .catch((err) => this.logger.warn(`activation ${loaded.id}: fired run failed: ${String(err)}`));
+    }
+    return polled.length;
   }
 
-  private async pollLockedActivation(row: RuntimeTriggerActivationEntity): Promise<PolledEvents | null> {
+  private async pollLockedActivation(row: RuntimeTriggerActivationEntity): Promise<AdmittedRun[] | null> {
     const em = this.dataSource.manager;
     try {
       const target = await this.resolveActivationTarget(row);
       // A pointer moved and its reconcile has yet to run: the live version does not hold this trigger.
       if (!holdsTrigger(row, triggerOf(target.ir, row.triggerNodeId))) return null;
       const plan = this.compiler.compile(target.ir, target.wf.id);
-      const store = new DbActivationStore(this.dataSource, row.id);
+      const activationStore = new DbActivationStore(this.dataSource, row.id);
+      // Minted straight to the store, so the poll after a failed one names its runs alike.
+      const epoch = await activationStore.admissionEpoch();
+      // The cursor moves only once every event's run is admitted, so a poll that fails part-way yields them again, each run admitted once.
+      const store = new HeldWritesStore(activationStore);
       const events = await this.pollableEvents(row, store, target.wf);
+      const admitted: AdmittedRun[] = [];
+      for (const event of events) {
+        admitted.push(
+          await this.admitActivationRun(
+            row,
+            target,
+            plan,
+            nameBasedId(row.id, epoch, event.key),
+            event.payload,
+          ),
+        );
+      }
+      // The last write, so the epoch moves only with the cursor: a key the trigger later yields again names a new run.
+      if (events.length > 0) await store.put(ADMISSION_EPOCH_KEY, newId());
+      await store.commit();
       await em.update(
         RuntimeTriggerActivationEntity,
         { id: row.id },
         { lastPolledAt: now(), lastError: null },
       );
-      return { row, target, plan, events };
+      return admitted;
     } catch (err) {
       await em.update(
         RuntimeTriggerActivationEntity,
@@ -689,22 +730,37 @@ export class TriggersService {
     }
   }
 
-  private async fireEvents({ row, target, plan, events }: PolledEvents): Promise<void> {
-    const { wf, env, versionId } = target;
-    for (const event of events) {
-      await this.runs
-        .runExecutable(plan, {
-          externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
-          runId: newId(),
-          initialScope: { trigger: event.payload },
-          workflowId: wf.id,
-          workflowVersionId: versionId,
-          source: 'trigger',
-          environment: env.name,
-          environmentId: env.id,
-          orgId: wf.orgId,
-        })
-        .catch((err) => this.logger.warn(`activation ${row.id}: fired run failed: ${String(err)}`));
+  // A run an activation's trigger fired, of the version its environment points at.
+  private admitActivationRun(
+    row: RuntimeTriggerActivationEntity,
+    { wf, env, versionId }: ActivationTarget,
+    plan: DagPlan,
+    runId: string,
+    payload: unknown,
+  ): Promise<AdmittedRun> {
+    return this.admitEvent(plan, {
+      externalUserId: row.connectionOwnerUserId ?? wf.userId ?? '',
+      runId,
+      initialScope: { trigger: payload },
+      workflowId: wf.id,
+      workflowVersionId: versionId,
+      source: 'trigger',
+      environment: env.name,
+      environmentId: env.id,
+      orgId: wf.orgId,
+    });
+  }
+
+  // An event whose id already holds a run it cannot start again was admitted before, so it is acknowledged, not refused.
+  private async admitEvent(
+    plan: DagPlan,
+    opts: RunDispatchOptions & { runId: string },
+  ): Promise<AdmittedRun> {
+    try {
+      return await this.runs.admit(plan, opts);
+    } catch (err) {
+      if (!isRunExists(err)) throw err;
+      return { runId: opts.runId, outcome: () => Promise.reject(err) };
     }
   }
 
@@ -714,7 +770,7 @@ export class TriggersService {
    */
   private async pollableEvents(
     row: RuntimeTriggerActivationEntity,
-    store: DbActivationStore,
+    store: ProviderStore,
     wf: WorkflowEntity,
   ): Promise<TriggerEvent[]> {
     if (row.kind === ORCHESTR_SCHEDULE_KIND) return this.scheduleActivationEvents(row, store);
@@ -739,7 +795,7 @@ export class TriggersService {
   /** A schedule activation's due tick — over the activation store (the canvas schedule). */
   private async scheduleActivationEvents(
     row: RuntimeTriggerActivationEntity,
-    store: DbActivationStore,
+    store: ProviderStore,
   ): Promise<TriggerEvent[]> {
     const schedule = parseScheduleProps(row.props);
     const cursor = await store.get<string>(SCHEDULE_CURSOR_KEY);
@@ -748,7 +804,8 @@ export class TriggersService {
     const scheduledAt = dueAt(schedule, lastFire, nowTs);
     if (!scheduledAt) return [];
     await store.put(SCHEDULE_CURSOR_KEY, nowTs.toISOString());
-    return [{ payload: { scheduled_at: scheduledAt.toISOString(), timezone: schedule.timezone } }];
+    const tick = scheduledAt.toISOString();
+    return [{ payload: { scheduled_at: tick, timezone: schedule.timezone }, key: tick }];
   }
 
   /**
@@ -827,35 +884,36 @@ export class TriggersService {
     return ir.nodes.find((n) => n.node_type === INCOMING_CHAT_PUBLIC) ?? null;
   }
 
-  /** Fire-and-forget an env-pinned version for a webhook delivery — env slots threaded when scoped. */
-  private fireEnvVersionPlan(
+  // The env-pinned version a webhook delivery runs; one that can't compile refuses the delivery, since no run of it could start.
+  private webhookPlan(wf: WorkflowEntity, ir: WorkflowIR): DagPlan {
+    try {
+      return this.compiler.compile(ir, wf.id);
+    } catch (err) {
+      this.logger.warn(`workflow-env webhook ${wf.id}: its pinned version can't run: ${errorMessage(err)}`);
+      throw new DomainError(`Workflow can't run: ${errorMessage(err)}`, 422);
+    }
+  }
+
+  // Admits a webhook delivery's run of an env-pinned version, env slots threaded when scoped; its outcome lands on the run.
+  private async admitWebhookRun(
     wf: WorkflowEntity,
     resolved: { versionId: string; environmentId: string | null; environment: string },
-    ir: WorkflowIR,
+    plan: DagPlan,
     eventPayload: unknown,
     runId: string,
-    source: 'webhook' | 'trigger',
-  ): void {
-    void (async () => {
-      try {
-        const plan = this.compiler.compile(ir, wf.id);
-        await this.runs.runExecutable(plan, {
-          externalUserId: wf.userId ?? '',
-          runId,
-          initialScope: { trigger: eventPayload },
-          workflowId: wf.id,
-          workflowVersionId: resolved.versionId,
-          source,
-          ...(resolved.environmentId
-            ? { environment: resolved.environment, environmentId: resolved.environmentId, orgId: wf.orgId }
-            : {}),
-        });
-      } catch (err) {
-        this.logger.warn(
-          `workflow-env webhook ${wf.id}/${resolved.environment}: fire ${runId} failed: ${String(err)}`,
-        );
-      }
-    })();
+  ): Promise<string> {
+    await this.admitEvent(plan, {
+      externalUserId: wf.userId ?? '',
+      runId,
+      initialScope: { trigger: eventPayload },
+      workflowId: wf.id,
+      workflowVersionId: resolved.versionId,
+      source: 'webhook',
+      ...(resolved.environmentId
+        ? { environment: resolved.environment, environmentId: resolved.environmentId, orgId: wf.orgId }
+        : {}),
+    });
+    return runId;
   }
 
   /**
