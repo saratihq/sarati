@@ -1,4 +1,4 @@
-import { PARK_DELAY_ABOVE_MS, timerTopicFor } from '../runtime/timer-wait';
+import { PARK_DELAY_ABOVE_MS, timerTopicFor, WAKE_POLL_MS } from '../runtime/timer-wait';
 
 /** A concurrent branch of a run, from {@link DurableStep.spawn}. */
 export interface Lane {
@@ -29,11 +29,19 @@ export interface Park {
   topic: string;
   deliveryTopic: string | null;
   durationMs: number;
+  /** The deadline its substrate armed it to, which history records over any earlier one; null when it cannot know it. */
+  due: Date | null;
+}
+
+/** A parked delay's timer, armed: `due` is null when the substrate cannot know the deadline it fires at. */
+export interface ParkedTimer {
+  due: Date | null;
+  fired: Promise<unknown>;
 }
 
 /** The run-history writes around a wait or a delay that parks; neither should throw. */
 export interface ParkHooks {
-  /** Once it parks: resolves to when it is due, or null when no history keeps it. */
+  /** Once it parks: resolves to when history keeps it due, or null when no history keeps it. */
   parked(park: Park): Promise<Date | null>;
   /** Once it is over: `answered` when it took an event. */
   resumed(answered: boolean): Promise<void>;
@@ -54,7 +62,7 @@ export interface DurableStep {
   joinAny(lanes: readonly Lane[]): Promise<{ lane: Lane; outcome: Outcome }>;
   /** Every one of `lanes`' outcomes, in their order, once all have ended. */
   joinAll(lanes: readonly Lane[]): Promise<Outcome[]>;
-  /** Pause durably; one that parks resolves to when it was due, and one that does not to null. */
+  /** Pause durably; one that parks resolves to when it was due, and one that does not, or whose due nothing kept, to null. */
   delay(pause: Pause, hooks: ParkHooks): Promise<Date | null>;
   /** Suspend durably until an event arrives, or the wait times out (→ null). */
   waitForEvent<T = unknown>(wait: EventWait, hooks: ParkHooks): Promise<T | null>;
@@ -137,6 +145,8 @@ export abstract class PlainDurableStep implements DurableStep {
   abstract sleep(name: string, ms: number): Promise<void>;
   /** Suspend durably until an event is delivered to `topic`, or `timeoutMs` elapses (→ null). */
   abstract receive<T = unknown>(name: string, topic: string, timeoutMs: number): Promise<T | null>;
+  /** Arm a parked delay's timer on `topic`, which nobody can send to. */
+  protected abstract armTimer(pause: Pause, topic: string): ParkedTimer;
   abstract waitInStep(ms: number): Promise<void>;
   abstract throwIfCancelled(): void;
   abstract cancelSeenOnRow(): Error;
@@ -164,26 +174,29 @@ export abstract class PlainDurableStep implements DurableStep {
       await this.sleep(pause.name, pause.ms);
       return null;
     }
-    // A long delay parks, out of the in-flight cap; nobody can send to a timer topic, so its own timeout is the wake.
+    // A long delay parks, out of the in-flight cap.
     const topic = timerTopicFor(pause.stepKey);
-    const sleeping = this.receive(pause.name, topic, pause.ms);
+    const timer = this.armTimer(pause, topic);
     // Handled at once: a cancel can reject it while the park below is still being written.
-    sleeping.catch(() => undefined);
-    const due =
-      (await hooks.parked({ topic, deliveryTopic: null, durationMs: pause.ms })) ??
-      new Date(Date.now() + pause.ms);
+    timer.fired.catch(() => undefined);
+    const kept = await hooks.parked({ topic, deliveryTopic: null, durationMs: pause.ms, due: timer.due });
     try {
-      await this.parkedOn(sleeping);
+      await this.parkedOn(timer.fired);
     } finally {
       await hooks.resumed(false);
     }
-    return due;
+    return timer.due ?? kept;
   }
 
   async waitForEvent<T = unknown>(wait: EventWait, hooks: ParkHooks): Promise<T | null> {
     const pending = this.receive<T>(wait.name, wait.deliveryTopic ?? wait.topic, wait.timeoutMs);
     pending.catch(() => undefined);
-    await hooks.parked({ topic: wait.topic, deliveryTopic: wait.deliveryTopic, durationMs: wait.timeoutMs });
+    await hooks.parked({
+      topic: wait.topic,
+      deliveryTopic: wait.deliveryTopic,
+      durationMs: wait.timeoutMs,
+      due: null,
+    });
     let answered = false;
     try {
       const payload = await this.parkedOn(pending);
@@ -246,14 +259,19 @@ export class PassThroughDurableStep extends PlainDurableStep {
 
   override receive<T = unknown>(_name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return this.pause<T | null>((wake) => {
-      const timer = setTimeout(() => wake(null), timeoutMs);
+      const disarm = timerAt(Date.now() + timeoutMs, () => wake(null));
       const receiver = (value: unknown): void => wake(value as T);
       this.waiters.set(topic, receiver);
       return () => {
-        clearTimeout(timer);
+        disarm();
         if (this.waiters.get(topic) === receiver) this.waiters.delete(topic);
       };
     });
+  }
+
+  protected override armTimer(pause: Pause, _topic: string): ParkedTimer {
+    const due = Date.now() + pause.ms;
+    return { due: new Date(due), fired: this.pause<void>((wake) => timerAt(due, () => wake())) };
   }
 
   override waitInStep(ms: number): Promise<void> {
@@ -349,4 +367,14 @@ export class PassThroughDurableStep extends PlainDurableStep {
       this.onCancel.add(abort);
     });
   }
+}
+
+// Fired by the wall clock `due` is on, read at least once a poll, never by a timer alone, which can run ahead of it or behind it; returns how to disarm it.
+function timerAt(due: number, fire: () => void): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  const arm = (): void => {
+    timer = setTimeout(() => (Date.now() < due ? arm() : fire()), Math.min(due - Date.now(), WAKE_POLL_MS));
+  };
+  arm();
+  return () => clearTimeout(timer);
 }

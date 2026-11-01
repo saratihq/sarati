@@ -5,11 +5,14 @@ import { join } from 'node:path';
 
 import { Client } from 'pg';
 
+import { ir, irEdge, irNode } from './support/golden-docs';
 import { LEGACY_BUILD, restoreGoldenHistory } from './support/golden-history';
+import { deploy } from './support/golden-outcome';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const MOCK_USER_ID = '00000000-0000-0000-0000-000000000001';
 const WINDOW_MS = 10 * 60_000;
+const PARKED_WAIT_MINUTES = 1.0625;
 
 interface Parked {
   step_key: string;
@@ -1085,4 +1088,56 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
     );
     expect((await json('/api/runs/never-resumed')).status).toBe('cancelled');
   }, 120_000);
+
+  it('shows a called run that a crash ran again asleep until the deadline its Wait parked on again, which is when it wakes', async () => {
+    const childId = await deploy(
+      url(''),
+      ir(
+        [
+          irNode('trigger', 'orchestr:tool_trigger', { tool_name: 'nap', description: 'Sleeps', inputs: [] }),
+          irNode('pause', 'orchestr:wait_for_duration', { amount: PARKED_WAIT_MINUTES, unit: 'minutes' }),
+        ],
+        [irEdge('trigger', 'pause')],
+      ),
+    );
+    const caller = ir([irNode('call', 'orchestr:call_workflow', { workflow_id: childId })], []);
+    expect(
+      (await post('/api/runs/from-ir', { run_id: 'call-again', await_ms: 0, workflow_ir: caller })).ok,
+    ).toBe(true);
+    const [firstPark] = await eventually(
+      async () =>
+        (
+          await db.query<{ run_id: string; waiting_timeout_at: Date }>(
+            `SELECT r.run_id, s.waiting_timeout_at FROM runtime_runs r JOIN runtime_run_steps s ON s.run_id = r.id
+              WHERE r.workflow_id = $1 AND s.step_key = 'pause' AND s.waiting_timeout_at IS NOT NULL`,
+            [childId],
+          )
+        ).rows,
+      (rows) => rows.length === 1,
+      'the called run parked',
+    );
+
+    await crash();
+    await boot();
+    const pauseOf = (detail: Record<string, unknown>): Record<string, unknown> | undefined =>
+      (detail.steps as Array<Record<string, unknown>>).find((s) => s.step_key === 'pause');
+    const untilOf = (waiting: unknown): unknown => (waiting as { until?: unknown } | null)?.until;
+    const shown: Array<{ run: unknown; step: unknown }> = [];
+    const giveUpAt = Date.now() + 3 * 60_000;
+    let detail = await json(`/api/runs/${firstPark!.run_id}`);
+    while (['running', 'waiting'].includes(detail.status as string) && Date.now() < giveUpAt) {
+      if (detail.status === 'waiting') {
+        shown.push({ run: untilOf(detail.waiting), step: untilOf(pauseOf(detail)?.waiting) });
+      }
+      await new Promise((r) => setTimeout(r, 250));
+      detail = await json(`/api/runs/${firstPark!.run_id}`);
+    }
+    expect(detail.status).toBe('completed');
+    const paused = pauseOf(detail)!;
+    const sleptUntil = (paused.output as { slept_until: string }).slept_until;
+    expect(Date.parse(sleptUntil)).toBeGreaterThan(firstPark!.waiting_timeout_at.getTime());
+    expect(shown.at(-1)).toEqual({ run: sleptUntil, step: sleptUntil });
+    expect(Date.parse(paused.finished_at as string)).toBeGreaterThanOrEqual(Date.parse(sleptUntil));
+    await completed('call-again');
+  }, 240_000);
 });

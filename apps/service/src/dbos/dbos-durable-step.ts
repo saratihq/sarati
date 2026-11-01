@@ -9,6 +9,7 @@ import {
   type EventWait,
   type Lane,
   type Outcome,
+  type ParkedTimer,
   type ParkHooks,
   type Pause,
 } from '../providers/durable-step';
@@ -43,6 +44,11 @@ export class DbosDurableStep extends PlainDurableStep {
   /** DBOS durable receive: resumed by `DBOS.send(runId, payload, topic)` (DbosRuntime.sendEvent). */
   override receive<T = unknown>(_name: string, topic: string, timeoutMs: number): Promise<T | null> {
     return DBOS.recv<T>(topic, timeoutMs / 1000);
+  }
+
+  // A replay keeps the end the receive's first execution recorded, which it cannot read, so history dates it.
+  protected override armTimer(pause: Pause, topic: string): ParkedTimer {
+    return { due: null, fired: this.receive(pause.name, topic, pause.ms) };
   }
 
   // A step's body may not call DBOS, and DBOS raises a cancel only at its next call.

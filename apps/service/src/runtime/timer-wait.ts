@@ -37,3 +37,6 @@ export const TIMER_TOPIC_SQL_PREFIX = TIMER_TOPIC_PREFIX;
 
 /** Below this a delay just sleeps in place: parking costs two writes and buys nothing. */
 export const PARK_DELAY_ABOVE_MS = 60_000;
+
+/** How often a parked wait reads the wall clock, so one whose deadline a suspend or a clock step passed wakes within a poll. */
+export const WAKE_POLL_MS = 10_000;

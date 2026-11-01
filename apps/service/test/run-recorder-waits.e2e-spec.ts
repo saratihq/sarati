@@ -88,6 +88,30 @@ describe('run recorder waits (e2e, isolated DB)', () => {
     expect((await step('r-fresh', 'approve')).waiting_timeout_at).toEqual(due);
   });
 
+  it('parks a timer until the deadline its substrate armed, moves it to the one a re-run arms, and a replay that arms none keeps it', async () => {
+    const timer = 'orchestr:timer:pause';
+    await start('r-armed', 'pause', 5_000);
+    const { started_at } = await step('r-armed', 'pause');
+    const armed = new Date(Date.now() + 61_000);
+    expect(await recorder.stepWaiting('r-armed', 'pause', timer, 61_000, null, armed)).toEqual(armed);
+    expect(await step('r-armed', 'pause')).toMatchObject({
+      waiting_topic: timer,
+      waiting_since: started_at,
+      waiting_timeout_at: armed,
+    });
+
+    const rearmed = new Date(armed.getTime() + 5_000);
+    expect(await recorder.stepWaiting('r-armed', 'pause', timer, 61_000, null, rearmed)).toEqual(rearmed);
+    expect(await step('r-armed', 'pause')).toMatchObject({
+      waiting_since: started_at,
+      waiting_timeout_at: rearmed,
+    });
+    expect((await run('r-armed')).status).toBe('waiting');
+
+    expect(await recorder.stepWaiting('r-armed', 'pause', timer, 61_000)).toEqual(rearmed);
+    expect((await step('r-armed', 'pause')).waiting_timeout_at).toEqual(rearmed);
+  });
+
   it('gives a wait no earlier version recorded the deadline its step started with, not a fresh window', async () => {
     await start('r-upgraded', 'second', 20 * 60_000);
     const { started_at } = await step('r-upgraded', 'second');

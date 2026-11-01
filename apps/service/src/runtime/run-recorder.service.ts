@@ -121,13 +121,14 @@ export interface RunRecorder {
   stepAttempts(scopedRunId: string, stepKey: string, attempts: number): Promise<void>;
   /** Record a step's non-fatal honesty warnings (e.g. a `{{ref}}` that resolved to nothing); never fails it. */
   stepWarnings(scopedRunId: string, stepKey: string, warnings: string[]): Promise<void>;
-  /** Park a step on `topic` for `durationMs` from its start, keeping any park it already has; resolves to its deadline. */
+  /** Park a step on `topic` until `due`, else keeping the deadline a park on `topic` already has, else for `durationMs` from its start; resolves to its deadline. */
   stepWaiting(
     scopedRunId: string,
     stepKey: string,
     topic: string,
     durationMs: number,
     deliveryTopic?: string | null,
+    due?: Date | null,
   ): Promise<Date | null>;
   /** The step's wait ended; `answered` when the run took an event, which credits its claim's decider on this step. */
   stepResumed(scopedRunId: string, stepKey: string, answered?: boolean): Promise<void>;
@@ -321,15 +322,17 @@ export class RunRecorderService implements RunRecorder {
     topic: string,
     durationMs: number,
     deliveryTopic: string | null = null,
+    due: Date | null = null,
   ): Promise<Date | null> {
-    // Anchored on the step's own start, so a replay or an upgrade reports the deadline the engine keeps.
+    // The deadline its substrate armed, else the one a park on this topic already keeps, else its step's start plus the window.
     const rows = await this.writeWait<Array<{ due: Date | null }>>('stepWaiting', scopedRunId, (em) =>
       em.query(
         `WITH parked AS (
            UPDATE runtime_run_steps
               SET waiting_since = CASE WHEN waiting_topic = $3 THEN waiting_since ELSE started_at END,
-                  waiting_timeout_at = CASE WHEN waiting_topic = $3 THEN waiting_timeout_at
-                                            ELSE started_at + make_interval(secs => $4::double precision / 1000) END,
+                  waiting_timeout_at = COALESCE($6::timestamptz,
+                                                CASE WHEN waiting_topic = $3 THEN waiting_timeout_at
+                                                     ELSE started_at + make_interval(secs => $4::double precision / 1000) END),
                   delivery_topic = $5,
                   waiting_topic = $3
             WHERE run_id = $1 AND step_key = $2 AND finished_at IS NULL AND resumed_at IS NULL
@@ -337,10 +340,10 @@ export class RunRecorderService implements RunRecorder {
          )
          SELECT COALESCE(
                   (SELECT waiting_timeout_at FROM parked),
-                  (SELECT started_at + make_interval(secs => $4::double precision / 1000)
+                  (SELECT COALESCE($6::timestamptz, started_at + make_interval(secs => $4::double precision / 1000))
                      FROM runtime_run_steps WHERE run_id = $1 AND step_key = $2)
                 ) AS due`,
-        [scopedRunId, stepKey, topic, durationMs, deliveryTopic],
+        [scopedRunId, stepKey, topic, durationMs, deliveryTopic, due],
       ),
     );
     return rows?.[0]?.due ?? null;
