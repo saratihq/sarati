@@ -28,8 +28,8 @@ export const useAuth = create<AuthState>((set) => ({
       const result = await api.authMe();
       set({ user: result.user, isProfileLoading: false });
     } catch {
-      // 401s redirect globally in the api client; anything else leaves the profile empty, not blocked.
-      set({ user: null, isProfileLoading: false });
+      // A failure never erases a profile another load already set.
+      set({ isProfileLoading: false });
     }
   },
 

@@ -61,6 +61,33 @@ async function copyLink(link: string) {
   }
 }
 
+// A retry refused at once would otherwise flash the loader too briefly to see it ran.
+const RETRY_MIN_LOADER_MS = 500;
+
+function OrgsNotLoaded({ failed, retried, onRetry }: { failed: boolean; retried: boolean; onRetry: () => void }) {
+  if (!failed) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <SaratiLoader size={48} />
+      </div>
+    );
+  }
+  return (
+    <div role="alert" className="flex flex-col items-center justify-center gap-3 py-20 text-center">
+      <h2 className="text-[15px] font-semibold m-0" style={{ color: "var(--orchestr-ink)" }}>
+        Couldn't load your workspaces
+      </h2>
+      <p className="text-[13px] m-0" style={{ color: "var(--orchestr-ink-muted)" }}>
+        Sarati's server didn't answer as expected. Try again in a moment.
+      </p>
+      {/* A retry unmounts the button behind the loader, so a failed one hands focus back. */}
+      <Button variant="secondary" size="sm" className="mt-1" autoFocus={retried} onClick={onRetry}>
+        Try again
+      </Button>
+    </div>
+  );
+}
+
 export default function OrganizationSettingsPage() {
   useDocumentTitle("Organization");
   const router = useRouter();
@@ -69,14 +96,21 @@ export default function OrganizationSettingsPage() {
   const orgsLoaded = useOrgs((s) => s.loaded);
   const fetchOrgs = useOrgs((s) => s.fetchOrgs);
   const activeOrg = useOrgs(activeOrgOf);
-
+  const [attempt, setAttempt] = useState(0);
+  const [failedAttempt, setFailedAttempt] = useState<number | null>(null);
 
   // Deep links land here without the Layout shell, so both stores may be cold.
   useEffect(() => {
-    fetchOrgs({ force: true });
-    if (!me) loadMe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only warm-up
-  }, []);
+    let live = true;
+    const shown = attempt > 0 ? new Promise((resolve) => setTimeout(resolve, RETRY_MIN_LOADER_MS)) : null;
+    void Promise.all([fetchOrgs({ force: true }), shown]).then(() => {
+      if (live && !useOrgs.getState().loaded) setFailedAttempt(attempt);
+    });
+    if (!useAuth.getState().user) void loadMe();
+    return () => {
+      live = false;
+    };
+  }, [attempt, fetchOrgs, loadMe]);
 
   return (
     <div className="min-h-screen" style={{ background: "var(--orchestr-surface)" }}>
@@ -84,9 +118,11 @@ export default function OrganizationSettingsPage() {
 
       <div className="max-w-[720px] mx-auto py-10 px-4">
         {!orgsLoaded ? (
-          <div className="flex items-center justify-center py-20">
-            <SaratiLoader size={48} />
-          </div>
+          <OrgsNotLoaded
+            failed={failedAttempt === attempt}
+            retried={attempt > 0}
+            onRetry={() => setAttempt((n) => n + 1)}
+          />
         ) : !activeOrg || activeOrg.is_personal ? (
           /* Personal workspace — nothing to manage; offer the upgrade path. */
           <div className="rounded-xl p-6 text-center" style={sectionCardStyle()}>
