@@ -147,9 +147,9 @@ jobs:
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-client-address.sh one one-bundled
       - name: The one-container proxy logs a request as its time, status and visitor, never its address
         run: SARATI_CHECK_THROWAWAY=1 sh docker/check-proxy-log.sh one one-bundled
-      - name: Stopping the one-container install stops its service at once, even with a request held open through its proxy
+      - name: Stopping the one-container install stops its service at once, even with a stream held open through its proxy
         run: |
-          # The proxy stops with the service, so a request held open through it is cut by the service's own stop, not the proxy's kill.
+          # The proxy stops with the service, so a stream held open through it is ended by the service's own stop, not cut by the proxy's kill.
           cd "$RUNNER_TEMP"
           docker run -d --name one-stop -p 8095:8080 sarati-one:ci
           for i in $(seq 1 90); do
@@ -158,43 +158,51 @@ jobs:
           done
           curl -fsS http://localhost:8095/api/ready >/dev/null \
             || { echo "::error::the one-container install to stop does not come up"; docker logs one-stop 2>&1 | tail -60; exit 1; }
-          # A raw request whose chunked body never comes, so it stays open through the proxy until a stop cuts it.
+          # A live chat event stream, read raw: one that ends cleanly has its closing chunk, one cut by a kill does not.
           python3 - >held-status 2>held.log <<'PY' &
-          import socket, sys
+          import socket, sys, time
           s = socket.create_connection(("127.0.0.1", 8095), timeout=10)
-          s.sendall(b"POST /api/health HTTP/1.1\r\nHost: localhost:8095\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
-          print("sent", file=sys.stderr, flush=True)
-          s.settimeout(45)
-          head = b""
+          s.sendall(b"GET /api/chat/00000000-0000-4000-8000-000000000000/production/events?session_id=held HTTP/1.1\r\nHost: localhost:8095\r\nAccept: text/event-stream\r\n\r\n")
+          s.settimeout(60)
+          data = body = b""
           try:
-              while b"\r\n" not in head:
+              while b"\r\n\r\n" not in data:
                   chunk = s.recv(4096)
                   if not chunk:
                       break
-                  head += chunk
+                  data += chunk
+              head, _, body = data.partition(b"\r\n\r\n")
+              print(head.split(b"\r\n", 1)[0].decode(), file=sys.stderr, flush=True)
+              while not (body == b"0\r\n\r\n" or body.endswith(b"\r\n0\r\n\r\n")):
+                  chunk = s.recv(4096)
+                  if not chunk:
+                      break
+                  body += chunk
           except OSError:
               pass
-          line = head.split(b"\r\n", 1)[0].split()
-          print(line[1].decode() if len(line) > 1 and line[0].startswith(b"HTTP/") else "000")
+          ended = body == b"0\r\n\r\n" or body.endswith(b"\r\n0\r\n\r\n")
+          print("ended" if ended else "cut", int(time.time()))
           PY
           held=$!
           for i in $(seq 1 50); do
-            grep -q '^sent' held.log && break
+            grep -q '^HTTP/' held.log && break
             sleep 0.1
           done
-          grep -q '^sent' held.log || { echo "::error::the held request was never sent"; cat held.log; exit 1; }
+          grep -q '^HTTP/1.1 200' held.log || { echo "::error::the held stream never opened"; cat held.log; exit 1; }
           sleep 1
-          test ! -s held-status || { echo "::error::the held request was answered before the stop (got '$(cat held-status)')"; exit 1; }
+          test ! -s held-status || { echo "::error::the held stream ended before the stop ($(cat held-status))"; exit 1; }
           began=$(date +%s)
           docker stop -t 30 one-stop
           took=$(( $(date +%s) - began ))
           wait "$held" || true
           docker logs one-stop >one-stop.log 2>&1
-          test "$(cat held-status)" = 502 \
-            || { echo "::error::the held request was not cut by the service's stop (got '$(cat held-status)')"; cat held.log; tail -60 one-stop.log; exit 1; }
+          read -r how at <held-status || true
+          test "$how" = ended \
+            || { echo "::error::the held stream was cut, not ended by the service's stop (got '$(cat held-status)')"; cat held.log; tail -60 one-stop.log; exit 1; }
+          test $(( at - began )) -le 5 || { echo "::error::the held stream ended $(( at - began ))s into the stop"; exit 1; }
           grep -q 'database system is shut down' one-stop.log \
             || { echo "::error::Postgres did not shut down cleanly"; tail -60 one-stop.log; exit 1; }
           test "$took" -lt 20 || { echo "::error::the stop took ${took}s"; exit 1; }
-          echo "one-container stop: the held request cut by the service's stop, Postgres shut down cleanly, in ${took}s"
+          echo "one-container stop: the held stream ended by the service's stop $(( at - began ))s in, Postgres shut down cleanly, in ${took}s"
       - if: failure()
         run: docker compose logs --no-color | tail -100
