@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -8,6 +8,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
@@ -17,6 +18,7 @@ import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const SECRET_KEY = 'an-e2e-secret-key-for-environments-sessions';
 
 /** Two managed Gmail accounts: the author's personal one and the staging slot's. */
 const CA_PERSONAL = 'ca_env_personal';
@@ -97,7 +99,7 @@ const notFoundText = (name: string): string =>
     : `This workspace has no environment named '${name}' — create it under Integrations → Environments first`;
 
 /** Environments as first-class rows, end to end against a stubbed Composio transport. */
-describe('environments (e2e, isolated DB, org owner + member via API keys, stubbed Composio)', () => {
+describe('environments (e2e, isolated DB, org owner + member signed in, stubbed Composio)', () => {
   let app: INestApplication;
   let db: Client;
   let composioStub: Server;
@@ -108,9 +110,9 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
   const userB = randomUUID(); // plain org member
   const personalA = randomUUID();
   const personalB = randomUUID();
-  const keyA = 'ork_e2e_envown_aaaaaaaaaaaaaaaaaaaaaaaa';
-  const keyB = 'ork_e2e_envmem_bbbbbbbbbbbbbbbbbbbbbbbb';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
+  // Each acts in several workspaces, which only a signed-in session does: a key acts in one.
+  let sessionA = '';
+  let sessionB = '';
 
   let orgId = '';
   let prodId = '';
@@ -126,8 +128,8 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
   let slotConnId = ''; // managed gmail — assigned to staging's slot
   let envHookPath = ''; // /api/hooks/<gmailWf>/staging — the staging-pinned fire URL
 
-  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
-  const asB = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyB}`);
+  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionA}`);
+  const asB = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionB}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
 
   beforeAll(async () => {
@@ -146,12 +148,8 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
       { id: personalA, userId: userA, name: 'Env Owner A' },
       { id: personalB, userId: userB, name: 'Env Member B' },
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
-              (gen_random_uuid(), $4, 'b', $5, $6, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12), userB, hash(keyB), keyB.slice(0, 12)],
-    );
+    sessionA = (await mintSession(userA, SECRET_KEY)).token;
+    sessionB = (await mintSession(userB, SECRET_KEY)).token;
 
     // Stubbed Composio: typed execution + account status — no real network.
     composioStub = createServer((req, res) => {
@@ -195,6 +193,8 @@ describe('environments (e2e, isolated DB, org owner + member via API keys, stubb
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
+    process.env.LOCAL_AUTH_ENABLED = 'true';
+    process.env.SECRET_KEY = SECRET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
     process.env.COMPOSIO_BASE_URL = `http://127.0.0.1:${(composioStub.address() as AddressInfo).port}`;

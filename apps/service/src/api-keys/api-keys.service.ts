@@ -115,7 +115,7 @@ export class ApiKeysService {
   /** Verify a key → owner, scopes, and issuing org. All three are needed to limit it. */
   async verify(
     plaintext: string,
-  ): Promise<{ userId: string; scopes: string[] | null; orgId: string | null } | null> {
+  ): Promise<{ userId: string; scopes: string[] | null; orgId: string } | null> {
     if (!plaintext.startsWith(PREFIX)) return null;
     const row = await this.dataSource.manager.findOne(ApiKeyEntity, {
       where: { keyHash: hashKey(plaintext) },
@@ -129,6 +129,6 @@ export class ApiKeysService {
       { lastUsedAt: now() },
     );
     if (!res.affected) return null;
-    return { userId: row.userId, scopes: row.scopes, orgId: row.orgId ?? null };
+    return { userId: row.userId, scopes: row.scopes, orgId: row.orgId };
   }
 }

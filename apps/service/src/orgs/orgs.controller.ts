@@ -86,7 +86,9 @@ export class OrgsController {
   @Scope('workflow:read')
   @Get()
   async list(@Req() req: Request): Promise<{ orgs: OrgSummary[] }> {
-    return { orgs: await this.mgmt.listOrgs(requirePrincipal(req).user.id) };
+    const principal = requirePrincipal(req);
+    const orgs = await this.mgmt.listOrgs(principal.user.id);
+    return { orgs: orgs.filter((org) => reachesOrg(principal, org.id)) };
   }
 
   @Scope('org:manage')

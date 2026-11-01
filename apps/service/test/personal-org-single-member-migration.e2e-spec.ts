@@ -17,12 +17,14 @@ const M044 = readFileSync(
   join(__dirname, '..', 'db', 'migrations', '044_personal_org_single_member.sql'),
   'utf8',
 );
+const M046 = readFileSync(join(__dirname, '..', 'db', 'migrations', '046_api_keys_pinned.sql'), 'utf8');
 
 const TABLES = ['organizations', 'org_members'];
 
 /** Takes a database built from `schema.sql` back to the shape 044 finds on an earlier version's. */
 async function undo044(db: Client): Promise<void> {
   for (const statement of [
+    `ALTER TABLE api_keys ALTER COLUMN org_id DROP NOT NULL`,
     `DROP TRIGGER organizations_personal_owner_check ON organizations`,
     `DROP TRIGGER org_members_claim_personal_org ON org_members`,
     `DROP FUNCTION check_personal_owner(), claim_personal_org()`,
@@ -465,6 +467,7 @@ describe('migration 044: a personal workspace keeps exactly one member, its owne
       (await sql(`SELECT org_id FROM workflows WHERE id = $1`, [id])).rows[0]!.org_id as string;
 
     beforeAll(async () => {
+      await sql(M046);
       restoreEnv = snapshotEnv();
       app = await bootSsoApp(databaseUrl, { LOCAL_AUTH_ENABLED: 'true' });
     }, 30_000);
@@ -476,12 +479,13 @@ describe('migration 044: a personal workspace keeps exactly one member, its owne
 
     it('lands a former member of another’s personal workspace in their own, without a header, as its owner, and pins their new key there', async () => {
       const bo = await session(b);
-      for (const bearer of [bo, keys.bUnpinned]) {
+      const home = { id: pb, name: 'Bo', is_personal: true, role: 'owner' };
+      for (const [bearer, orgs] of [
+        [bo, [home, { id: shared, name: 'Team', is_personal: false, role: 'member' }]],
+        [keys.bUnpinned, [home]],
+      ] as const) {
         const listed = await as(bearer, from(app).get('/api/orgs')).expect(200);
-        expect(listed.body.orgs).toEqual([
-          { id: pb, name: 'Bo', is_personal: true, role: 'owner' },
-          { id: shared, name: 'Team', is_personal: false, role: 'member' },
-        ]);
+        expect(listed.body.orgs).toEqual(orgs);
         for (let i = 0; i < 5; i++) {
           const mine = await as(bearer, from(app).get('/api/workflows')).expect(200);
           expect(mine.body.workflows.map((w: { id: string }) => w.id)).toEqual([ids.bWorkflowInPb]);

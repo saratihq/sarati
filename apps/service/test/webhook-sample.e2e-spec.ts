@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -8,6 +8,8 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import type { EnvConfig } from '../src/config/env.config';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -60,7 +62,6 @@ describe('a pasted webhook sample is the trigger a webhook run of the same body 
   const userId = randomUUID();
   const fullKey = 'ork_e2e_webhooksample_full_aaaaaaaa';
   const readKey = 'ork_e2e_webhooksample_read_aaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const paste = (text: string, key = fullKey): request.Test =>
     http()
@@ -95,19 +96,6 @@ describe('a pasted webhook sample is the trigger a webhook run of the same body 
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'paste@e2e.local', 'Paste', now(), now())`,
       [userId],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, scopes, created_at)
-       VALUES (gen_random_uuid(), $1, 'full', $2, $3, NULL, now()),
-              (gen_random_uuid(), $1, 'read', $4, $5, $6::json, now())`,
-      [
-        userId,
-        hash(fullKey),
-        fullKey.slice(0, 12),
-        hash(readKey),
-        readKey.slice(0, 12),
-        JSON.stringify(['workflow:read']),
-      ],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -123,13 +111,9 @@ describe('a pasted webhook sample is the trigger a webhook run of the same body 
     await app.init();
     await listenOnLoopback(app);
 
-    orgId = (
-      await http()
-        .post('/api/orgs')
-        .set('Authorization', `Bearer ${fullKey}`)
-        .send({ name: 'Acme' })
-        .expect(201)
-    ).body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userId, 'Acme')).id;
+    await insertApiKey(db, userId, orgId, { key: fullKey });
+    await insertApiKey(db, userId, orgId, { key: readKey, scopes: ['workflow:read'] });
     const deployed = await http()
       .post('/api/deploy')
       .set('Authorization', `Bearer ${fullKey}`)

@@ -11,6 +11,7 @@ import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
 import { ConnectionsService } from '../src/connections/connections.service';
 import type { WorkflowIR } from '../src/ir/models';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import {
   AGENT_MODEL_CALL,
@@ -23,6 +24,7 @@ import {
 import { MAX_SUB_WORKFLOW_DEPTH, MAX_SUB_WORKFLOW_INVOCATIONS } from '../src/runtime/base-plan-interpreter';
 import { RunsService } from '../src/runs/runs.service';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -267,7 +269,6 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
   const otherUserId = randomUUID(); // owns a cross-org workflow the caller may NOT call
   const subOwnerId = randomUUID(); // a DIFFERENT user who owns an in-org sub-workflow (run-as-caller isolation)
   const keyA = 'ork_e2e_subwf_aaaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
   const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
 
@@ -300,10 +301,6 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'caller-subwf@e2e.local', 'Caller', now(), now())`,
       [callerId],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [callerId, hash(keyA), keyA.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -326,7 +323,8 @@ describe('sub-workflow-as-tool — runner + node (e2e, isolated DB)', () => {
     await listenOnLoopback(app);
 
     // Org (caller = owner) → deploy the sub-workflows (each promoted to production).
-    orgId = (await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201)).body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(callerId, 'Acme')).id;
+    await insertApiKey(db, callerId, orgId, { key: keyA });
     echoWfId = await deploy(echoDoc());
     stripeWfId = await deploy(stripeDoc());
     unpromotedWfId = await deploy(echoDoc());

@@ -9,8 +9,9 @@ export class ApiKeyEntity {
   @Column({ name: 'user_id', type: 'uuid' })
   userId!: string;
 
-  @Column({ name: 'org_id', type: 'uuid', nullable: true })
-  orgId!: string | null;
+  /** The one org the key acts in (constitution row 24). */
+  @Column({ name: 'org_id', type: 'uuid' })
+  orgId!: string;
 
   @Column({ type: 'varchar', length: 120 })
   name!: string;

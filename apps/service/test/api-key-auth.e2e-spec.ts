@@ -17,6 +17,7 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
   let app: INestApplication;
   let db: Client;
   const userId = randomUUID();
+  const keysOrg = randomUUID();
   const goodKey = 'ork_live_test_key_value_1234567890';
   const revokedKey = 'ork_revoked_key_value_0987654321';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
@@ -32,10 +33,18 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
       [userId],
     );
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'active', $2, 'ork_live_tes', now()),
-              (gen_random_uuid(), $1, 'revoked', $3, 'ork_revoked_', now())`,
-      [userId, hash(goodKey), hash(revokedKey)],
+      `INSERT INTO organizations (id, name, is_personal, created_at, updated_at) VALUES ($1, 'Keys', false, now(), now())`,
+      [keysOrg],
+    );
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(), $1, $2, 'owner', now())`,
+      [keysOrg, userId],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'active', $3, 'ork_live_tes', now()),
+              (gen_random_uuid(), $1, $2, 'revoked', $4, 'ork_revoked_', now())`,
+      [userId, keysOrg, hash(goodKey), hash(revokedKey)],
     );
     await db.query(`UPDATE api_keys SET revoked_at = now() WHERE key_hash = $1`, [hash(revokedKey)]);
 
@@ -112,9 +121,9 @@ describe('API-key authentication (e2e, isolated DB, no mock auth)', () => {
   it('a SCOPED key is held to its scopes, and an unscoped route denies', async () => {
     const readKey = 'ork_scoped_read_only_key_00000001';
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, scopes, created_at)
-       VALUES (gen_random_uuid(), $1, 'read-only', $2, 'ork_scoped_r', $3::json, now())`,
-      [userId, hash(readKey), JSON.stringify(['workflow:read'])],
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'read-only', $3, 'ork_scoped_r', $4::json, now())`,
+      [userId, keysOrg, hash(readKey), JSON.stringify(['workflow:read'])],
     );
 
     // Held scope → allowed.

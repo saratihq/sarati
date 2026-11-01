@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,8 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -327,10 +329,6 @@ describe('migration 006 derives environments once (scratch DBs)', () => {
         [user],
       );
       await insertPersonalOrgs(db, { id: randomUUID(), userId: user, name: 'Derived' });
-      await db.query(
-        `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
-        [user, createHash('sha256').update(key, 'utf8').digest('hex'), key.slice(0, 12)],
-      );
       process.env.DATABASE_URL = url;
       process.env.PGBOSS_ENABLED = 'false';
       process.env.MOCK_AUTH = 'false';
@@ -345,12 +343,8 @@ describe('migration 006 derives environments once (scratch DBs)', () => {
 
     it('a restart brings back no environment or slot its owner removed, whatever cluster connections still name', async () => {
       await boot();
-      const created = await http()
-        .post('/api/orgs')
-        .set('Authorization', `Bearer ${key}`)
-        .send({ name: 'Restarts' })
-        .expect(201);
-      const org = created.body.id as string;
+      const org = (await app!.get(OrgManagementService).createOrg(user, 'Restarts')).id;
+      await insertApiKey(db, user, org, { key });
       await as(http().post('/api/environments'), org).send({ name: 'qa' }).expect(201);
       const [staging, qa, production] = await insertClusters(db, user, org, ['staging', 'qa', 'production']);
       const envId = async (name: string): Promise<string> =>

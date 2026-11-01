@@ -60,22 +60,22 @@ A missing scope is refused by name, so the fix is obvious:
 {"detail":"This API key is missing the \"workflow:write\" scope."}
 ```
 
-A key made in v0.2.27 or later is personal: it acts only in your personal workspace, the
-organization it is minted for. A team organization's workflows answer `404` as if they did not
-exist, even ones you can open yourself. Its organization routes refuse, and so do creating an
-organization and accepting an invite into one:
+A key acts only in the one workspace it is made for: your personal workspace. A request with it acts
+there, with or without `X-Org-Id`; one whose `X-Org-Id` names another workspace is refused, a team
+organization you belong to included. That organization's workflows answer `404` as if they did not
+exist, even ones you can open yourself, and so does a workflow in no workspace at all. Its
+organization routes refuse, and so do creating an organization and accepting an invite into one:
 
 ```json
 {"detail":"This API key is scoped to a different organization"}
 ```
 
-So on such a key, `org:manage` changes only your own keys under **Settings → Platform keys**.
+`GET /api/orgs` with a key lists only its workspace. So on a key, `org:manage` changes only your own
+keys under **Settings → Platform keys**. Work in a team organization signed in.
 
-A key made earlier is pinned the same way unless your account had no personal workspace when it was
-made. One that is not pinned reaches every workspace you belong to, and with `org:manage` it can
-create and join organizations and manage each team organization you are in as far as your role there
-allows: rename or delete it, and change its platform keys, members and invites. The list does not
-show which keys are pinned, so revoke a key made earlier and make a new one to be sure.
+An earlier version could leave a key with no workspace, reaching every one its owner belonged to.
+Upgrading to v0.2.27 gives each such key its owner's personal workspace —
+[what changes](/operate/upgrades/#every-api-key-acts-in-one-workspace).
 
 ## Revoke
 

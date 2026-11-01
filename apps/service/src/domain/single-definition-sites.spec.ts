@@ -39,6 +39,8 @@ const SINGLE_DEFINITION = [
   { symbol: 'holdsTrigger', definedIn: 'triggers/canvas/activation-row.ts' },
   { symbol: 'servedWebhookUrl', definedIn: 'triggers/canvas/webhook-url.ts' },
   { symbol: 'sameWebhookIntake', definedIn: 'triggers/canvas/webhook-url.ts' },
+  // Constitution #24 — which orgs a principal reaches: a key only the one it is issued for.
+  { symbol: 'reachesOrg', definedIn: 'auth/principal.ts' },
 ] as const;
 
 // Calls whose direct arguments are SQL or query criteria: a raw query, the raw-query helpers, and TypeORM's query builder and criteria methods.
@@ -103,7 +105,7 @@ function literalText(node: ts.Node): string | undefined {
   return undefined;
 }
 
-const keyName = (name: ts.PropertyName): string => name.getText().replace(/[[\]'"`]/g, '');
+const keyName = (name: ts.PropertyName | ts.BindingName): string => name.getText().replace(/[[\]'"`]/g, '');
 const LOGICAL = new Set([
   ts.SyntaxKind.AmpersandAmpersandToken,
   ts.SyntaxKind.BarBarToken,
@@ -194,6 +196,31 @@ const asksPersonalByMembership = (text: string): boolean =>
   nodesNaming(text, 'is_personal', 'isPersonal').some((node) =>
     /\borg_members\b|\bOrgMemberEntity\b/.test(enclosingQuery(node).getText()),
   );
+
+// Whether `node` reads a key's org: `.keyOrgId` (or `?.`), `['keyOrgId']`, or a destructuring of it.
+function readsKeyOrgId(node: ts.Node): boolean {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text === 'keyOrgId';
+  if (ts.isElementAccessExpression(node)) {
+    const key = node.argumentExpression;
+    return ts.isStringLiteralLike(key) && key.text === 'keyOrgId';
+  }
+  return (
+    ts.isBindingElement(node) &&
+    ts.isObjectBindingPattern(node.parent) &&
+    keyName(node.propertyName ?? node.name) === 'keyOrgId'
+  );
+}
+
+function keyOrgIdReads(text: string): number {
+  const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
+  let reads = 0;
+  const visit = (node: ts.Node): void => {
+    if (readsKeyOrgId(node)) reads += 1;
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+  return reads;
+}
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -379,6 +406,43 @@ describe('vault: one definition site per load-bearing question', () => {
 
     expect(byOwner).toEqual(['orgs/orgs.service.ts']);
     expect(byMembership).toEqual([]);
+  });
+
+  /** Constitution #24: no file but `auth/principal.ts` reads `keyOrgId`; a reach re-decided from `activeOrgId` is caught only by row 24's e2e tests. */
+  it('only reachesOrg reads keyOrgId — by property, element or destructuring', () => {
+    const readers = sources()
+      .filter((f) => keyOrgIdReads(f.text) > 0)
+      .map((f) => f.rel);
+
+    expect(readers).toEqual(['auth/principal.ts']);
+  });
+
+  /** Constitution #24: the guard above sees every way of reading `keyOrgId`, and not writing it, typing it or mentioning it. */
+  it('finds keyOrgId read by property, optional chain, element or destructuring, and not written, typed or mentioned', () => {
+    const named = [
+      'const org = p.keyOrgId;',
+      'const org = p?.keyOrgId;',
+      "const org = p['keyOrgId'];",
+      'const org = p[`keyOrgId`];',
+      'const org = (p as ApiKeyPrincipal).keyOrgId;',
+      'const { keyOrgId } = p;',
+      'const { keyOrgId: org } = p;',
+      "const { 'keyOrgId': org } = p;",
+      "const { ['keyOrgId']: org } = p;",
+      'function reach({ keyOrgId }: ApiKeyPrincipal, id: string) { return keyOrgId === id; }',
+    ];
+    const unnamed = [
+      'const principal = { kind: "api_key", keyOrgId: apiKey.orgId };',
+      'const principal = { keyOrgId };',
+      'type T = { keyOrgId: string };',
+      "type K = ApiKeyPrincipal['keyOrgId'];",
+      '// keyOrgId',
+      "logger.warn('keyOrgId missing');",
+      'const [keyOrgId] = pair;',
+    ];
+
+    expect(named.filter((source) => keyOrgIdReads(source) !== 1)).toEqual([]);
+    expect(unnamed.filter((source) => keyOrgIdReads(source) !== 0)).toEqual([]);
   });
 
   /** Constitution #18: every rail that runs a step in-process asks the rule, so no rail decides an account itself. */

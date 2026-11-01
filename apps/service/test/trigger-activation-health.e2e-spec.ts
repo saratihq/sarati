@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,12 +7,14 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import {
   MANAGED_INTEGRATION_PROVIDER,
   type ManagedIntegrationProvider,
 } from '../src/providers/managed-integration-provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -73,8 +75,6 @@ describe('trigger activation health (e2e, mocked provider)', () => {
   const personalB = randomUUID();
   const keyB = 'ork_e2e_trighealth_bbbbbbbbbbbbbbbbbb';
 
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
-
   let orgId = '';
   let wfId = '';
 
@@ -89,20 +89,17 @@ describe('trigger activation health (e2e, mocked provider)', () => {
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
 
-    for (const [userId, personalOrgId, email, key] of [
-      [userA, personalA, 'health-owner@e2e.local', keyA],
-      [userB, personalB, 'health-other@e2e.local', keyB],
+    for (const [userId, personalOrgId, email] of [
+      [userA, personalA, 'health-owner@e2e.local'],
+      [userB, personalB, 'health-other@e2e.local'],
     ] as const) {
       await db.query(
         `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, 'Health', now(), now())`,
         [userId, email],
       );
       await insertPersonalOrgs(db, { id: personalOrgId, userId: userId, name: 'Health Org' });
-      await db.query(
-        `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-        [userId, hash(key), key.slice(0, 12)],
-      );
     }
+    await insertApiKey(db, userB, personalB, { key: keyB });
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -123,8 +120,8 @@ describe('trigger activation health (e2e, mocked provider)', () => {
     jest.spyOn(provider, 'disableTrigger').mockResolvedValue(undefined);
     pollSpy = jest.spyOn(provider, 'pollTrigger').mockResolvedValue([]);
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
 
     // The env slot must be present, or a missing-slot error would mask the poll failure.
     const deployed = await asA(

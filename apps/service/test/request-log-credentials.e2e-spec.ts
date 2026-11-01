@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { Client } from 'pg';
 
+import { mintSession } from '../src/auth/local/local-session';
 import { bootService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -19,6 +20,7 @@ interface Sent {
 }
 
 const REDACTED = '[REDACTED]';
+const SECRET_KEY = 'an-e2e-secret-key-for-request-log-sessions';
 
 const hash = (key: string): string => createHash('sha256').update(key, 'utf8').digest('hex');
 
@@ -34,7 +36,8 @@ describe('the service log never prints a credential a request carried in its URL
   const owner = randomUUID();
   const joiner = randomUUID();
   const ownerKey = `ork_e2e_owner_${randomBytes(12).toString('hex')}`;
-  const joinerKey = `ork_e2e_joiner_${randomBytes(12).toString('hex')}`;
+  let ownerSession = '';
+  let joinerSession = '';
   const hookWorkflow = randomUUID();
   const chatWorkflow = randomUUID();
   const chatSession = `session-${randomBytes(12).toString('hex')}`;
@@ -97,14 +100,22 @@ describe('the service log never prints a credential a request carried in its URL
       { id: personalJoiner, userId: joiner, name: 'Joiner' },
     );
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'owner', $2, $3, now()), (gen_random_uuid(), $4, 'joiner', $5, $6, now())`,
-      [owner, hash(ownerKey), ownerKey.slice(0, 12), joiner, hash(joinerKey), joinerKey.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'owner', $3, $4, now())`,
+      [owner, personalOwner, hash(ownerKey), ownerKey.slice(0, 12)],
     );
+    ownerSession = (await mintSession(owner, SECRET_KEY)).token;
+    joinerSession = (await mintSession(joiner, SECRET_KEY)).token;
     service = await bootService({
       service: THIS_SERVICE,
       databaseUrl,
-      env: { MOCK_AUTH: 'false', CLERK_ISSUER: '', LOG_LEVEL: 'info' },
+      env: {
+        MOCK_AUTH: 'false',
+        CLERK_ISSUER: '',
+        LOG_LEVEL: 'info',
+        LOCAL_AUTH_ENABLED: 'true',
+        SECRET_KEY,
+      },
     });
   }, 90_000);
 
@@ -114,12 +125,12 @@ describe('the service log never prints a credential a request carried in its URL
   }, 30_000);
 
   it('an invite is created, previewed from its join page, fails while its table is unreachable, and is accepted', async () => {
-    const org = await send('POST', '/api/orgs', '/api/orgs', { key: ownerKey, body: { name: 'Acme' } });
+    const org = await send('POST', '/api/orgs', '/api/orgs', { key: ownerSession, body: { name: 'Acme' } });
     expect(org.status).toBe(201);
     const orgId = ((await org.json()) as { id: string }).id;
 
     const invite = await send('POST', `/api/orgs/${orgId}/invites`, `/api/orgs/${orgId}/invites`, {
-      key: ownerKey,
+      key: ownerSession,
       body: { email: 'joiner@log-e2e.local', role: 'owner' },
     });
     expect(invite.status).toBe(201);
@@ -146,7 +157,7 @@ describe('the service log never prints a credential a request carried in its URL
       'POST',
       `/api/orgs/invites/${inviteToken}/accept`,
       `/api/orgs/invites/${REDACTED}/accept`,
-      { key: joinerKey },
+      { key: joinerSession },
     );
     expect(accept.status).toBe(200);
     expect(await accept.json()).toEqual({ org_id: orgId, name: 'Acme' });
@@ -214,7 +225,8 @@ describe('the service log never prints a credential a request carried in its URL
       chatWorkflow,
       chatSession,
       ownerKey,
-      joinerKey,
+      ownerSession,
+      joinerSession,
     ]) {
       expect(log).not.toContain(credential);
     }

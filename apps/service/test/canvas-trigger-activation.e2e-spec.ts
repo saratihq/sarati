@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,7 +7,9 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -61,7 +63,6 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
   const userA = randomUUID();
   const personalA = randomUUID();
   const keyA = 'ork_e2e_canvastrig_aaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -81,11 +82,6 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
       [userA],
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Owner Canvas' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -100,8 +96,8 @@ describe('canvas-node trigger activation (e2e, isolated DB)', () => {
     await app.init();
     await listenOnLoopback(app);
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
   }, 30_000);
 
   afterAll(async () => {

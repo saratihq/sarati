@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -8,6 +8,8 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -89,7 +91,6 @@ describe('env slot preflight (e2e, isolated DB)', () => {
 
   const userId = randomUUID();
   const key = 'ork_e2e_slotpre_aaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
   const as = (r: request.Test): request.Test =>
     r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', orgId);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
@@ -111,10 +112,6 @@ describe('env slot preflight (e2e, isolated DB)', () => {
     );
     const personal = randomUUID();
     await insertPersonalOrgs(db, { id: personal, userId: userId, name: 'Personal' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
-      [userId, hash(key), key.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -145,12 +142,8 @@ describe('env slot preflight (e2e, isolated DB)', () => {
       })
     ).id;
 
-    const org = await http()
-      .post('/api/orgs')
-      .set('Authorization', `Bearer ${key}`)
-      .send({ name: 'Acme' })
-      .expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userId, 'Acme')).id;
+    await insertApiKey(db, userId, orgId, { key });
 
     // Creating is NOT gated — only asserting "run this here" is.
     const deployed = await as(http().post('/api/deploy').send({ workflow_json: irDoc() })).expect(201);

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -11,9 +11,11 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { SDK_POLLING_FETCH } from '../src/providers/sdk-polling.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { insertPersonalOrgs } from './support/personal-org';
@@ -152,9 +154,11 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
   const userA = randomUUID();
   const personalA = randomUUID();
   const keyA = 'ork_e2e_jira_aaaaaaaaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
+  const keysIn = new Map<string, string>();
+  const asIn = (org: string, r: request.Test): request.Test =>
+    r.set('Authorization', `Bearer ${keysIn.get(org)!}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
 
   const siteFetch: FetchLike = (input, init) => guardedFetch(String(input).replace(SITE, jiraOrigin), init);
@@ -213,10 +217,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       [userA],
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Jira' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
+    await insertApiKey(db, userA, personalA, { key: keyA });
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -250,8 +251,8 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
   });
 
   async function workspace(name: string): Promise<{ org: string; production: string }> {
-    const created = await asA(http().post('/api/orgs').send({ name })).expect(201);
-    const org = created.body.id as string;
+    const org = (await app.get(OrgManagementService).createOrg(userA, name)).id;
+    keysIn.set(org, await insertApiKey(db, userA, org));
     const env = await db.query<{ id: string }>(
       `SELECT id FROM environments WHERE org_id = $1 AND lower(name) = 'production'`,
       [org],
@@ -265,7 +266,8 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
   }
 
   async function assignSlot(org: string, production: string, connectionId: string): Promise<void> {
-    await asA(
+    await asIn(
+      org,
       http()
         .put(`/api/environments/${production}/slots/jira`)
         .set('X-Org-Id', org)
@@ -274,16 +276,17 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
   }
 
   async function deploy(org: string, doc: Record<string, unknown>): Promise<string> {
-    const res = await asA(
+    const res = await asIn(
+      org,
       http().post('/api/deploy').set('X-Org-Id', org).send({ workflow_json: doc }),
     ).expect(201);
     return res.body.workflow_id as string;
   }
 
-  async function awaitRun(runId: string): Promise<Record<string, unknown>> {
+  async function awaitRun(org: string, runId: string): Promise<Record<string, unknown>> {
     let run: Record<string, unknown> = {};
     for (let i = 0; i < 50; i++) {
-      run = (await asA(http().get(`/api/runs/${runId}`)).expect(200)).body as Record<string, unknown>;
+      run = (await asIn(org, http().get(`/api/runs/${runId}`)).expect(200)).body as Record<string, unknown>;
       if (run.status === 'completed' || run.status === 'error') break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -330,7 +333,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
       expect(await activationError(wfId)).toBeNull();
       const runs = await triggerRuns(wfId);
       expect(runs).toHaveLength(1);
-      const run = await awaitRun(runs[0]!);
+      const run = await awaitRun(org, runs[0]!);
       expect(run.status).toBe('completed');
       expect((run.outputs as Record<string, unknown>).announce).toBe('new: ENG-2');
     });
@@ -390,7 +393,7 @@ describe('Jira connections on both rails (e2e, loopback Jira + Composio)', () =>
 
     async function fire(wfId: string): Promise<Record<string, unknown>> {
       const fired = await http().post(`/api/hooks/${wfId}/production`).send({}).expect(202);
-      return awaitRun(fired.body.run_id as string);
+      return awaitRun(org, fired.body.run_id as string);
     }
 
     it.each(['', 'acme.atlassian.net', 'http://acme.atlassian.net'])(

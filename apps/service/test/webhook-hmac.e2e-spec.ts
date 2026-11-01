@@ -1,4 +1,4 @@
-import { createHash, createHmac } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
@@ -8,6 +8,8 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -59,7 +61,6 @@ describe('webhook HMAC verification (e2e, isolated DB)', () => {
   const userA = randomUUID();
   const personalA = randomUUID();
   const keyA = 'ork_e2e_hmac_aaaaaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
   const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   let orgId = '';
@@ -83,10 +84,6 @@ describe('webhook HMAC verification (e2e, isolated DB)', () => {
       [userA],
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'HMAC' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -100,8 +97,8 @@ describe('webhook HMAC verification (e2e, isolated DB)', () => {
     await app.init();
     await listenOnLoopback(app);
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
     const deployed = await asA(
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: webhookDoc() }),
     ).expect(201);
