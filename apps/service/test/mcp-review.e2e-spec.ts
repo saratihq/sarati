@@ -500,7 +500,7 @@ describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
     expect(text).toContain('not found');
   });
 
-  // Last: the real merge mutates. Runs on the deploy key, because no MCP-issuable scope reaches it.
+  // Last: the real merge mutates. Runs on the deploy key over REST, because no MCP tool merges.
   it('the probe told the truth — the real merge reaches the same verdict on both pairs', async () => {
     const conflicted = await request(app.getHttpServer())
       .post(`/api/workflows/${wfId}/reviews/${conflictReviewId}/merge`)

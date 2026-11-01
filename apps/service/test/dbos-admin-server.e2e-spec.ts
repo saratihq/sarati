@@ -120,7 +120,7 @@ describe('DBOS without its admin server (e2e)', () => {
     service = await bootService({ service: THIS_SERVICE, databaseUrl });
 
     expect(await bootLog()).toContain(
-      "Runs an earlier version started, in flight at boot: 1 can resume, 1 can't be resumed safely and will fail, 0 had already ended",
+      "Runs v0.2.24 or earlier started, in flight at boot: 1 can resume, 1 can't be resumed safely and will fail, 0 had already ended",
     );
     expect(
       await eventually(

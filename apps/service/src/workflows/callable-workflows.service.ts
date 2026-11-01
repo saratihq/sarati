@@ -22,14 +22,7 @@ interface PublishedRow {
   document: Record<string, unknown> | null;
 }
 
-/**
- * Which of an org's workflows can be called: the ones whose PRODUCTION-live
- * version carries an `orchestr:tool_trigger` declaring a name and description. Built from
- * environment pointers, so committing never changes what is callable — only publishing does.
- *
- * One answer for every caller that needs it: the MCP tool list, and the editor's picker, which
- * must offer what will actually work rather than let an author discover the refusal at run time.
- */
+/** Which of an org's workflows can be called: those whose production-live version has an `orchestr:tool_trigger` with a description and a usable tool name — the one source for the editor's picker and the MCP tool list, which also drops a name two of them share. */
 @Injectable()
 export class CallableWorkflowsService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}

@@ -251,7 +251,9 @@ describe('Platform MCP create surface (e2e, real client, isolated DB)', () => {
     });
     const out = result.structuredContent ?? {};
     expect(out.is_live).toBe(false);
-    expect(String(out.next_step)).toContain('Nothing runs yet');
+    expect(String(out.next_step)).toContain(
+      'Not live yet: no trigger fires it and no published-tool or sub-workflow call reaches it',
+    );
 
     const wfId = String(out.workflow_id);
     const [wf] = await rows<{ active_version_id: string | null }>(

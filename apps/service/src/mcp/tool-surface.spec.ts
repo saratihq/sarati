@@ -111,8 +111,7 @@ describe('MCP tool surface', () => {
     for (const tool of byName) expect(API_SCOPES).toContain(tool.scope);
   });
 
-  /** No v1 tool deploys, promotes, merges or runs — those routes are annotated so no MCP key holds them. */
-  it('grants no tool a scope that could move what is live', () => {
+  it('grants no tool workflow:deploy, connection:write, org:manage or key:manage', () => {
     for (const tool of byName) {
       expect(['workflow:deploy', 'connection:write', 'org:manage', 'key:manage']).not.toContain(tool.scope);
     }

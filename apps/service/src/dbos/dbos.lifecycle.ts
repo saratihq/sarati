@@ -39,17 +39,17 @@ export class DbosLifecycle implements OnApplicationBootstrap, OnApplicationShutd
     this.logger.log(`DBOS launched (appVersion=${applicationVersion}, executorId=${executorId})`);
   }
 
-  // Counted before launch starts recovering them, so the counts cover every run in flight; each is judged again then.
+  // Counted before launch starts recovering them, so the counts cover every legacy-engine run this launch recovers; each is judged again then.
   private async logRunsInFlight(): Promise<void> {
     if (!this.guard) return;
     try {
       const { resume, fail, ended } = await this.guard.legacyRuns();
       this.logger.log(
-        `Runs an earlier version started, in flight at boot: ${resume} can resume, ${fail} can't be resumed safely and will fail, ${ended} had already ended`,
+        `Runs v0.2.24 or earlier started, in flight at boot: ${resume} can resume, ${fail} can't be resumed safely and will fail, ${ended} had already ended`,
       );
     } catch (err) {
       this.logger.warn(
-        `Couldn't judge the runs an earlier version started, in flight at boot: ${errorMessage(err)}`,
+        `Couldn't judge the runs v0.2.24 or earlier started, in flight at boot: ${errorMessage(err)}`,
       );
     }
   }

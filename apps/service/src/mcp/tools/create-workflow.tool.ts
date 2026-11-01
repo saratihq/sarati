@@ -32,7 +32,7 @@ const Output = z.object({
     .describe('Always 1 — the first version of the branch. Numbers are per-branch, never global.'),
   is_live: z
     .literal(false)
-    .describe('A new workflow runs nowhere: no environment points at it and no trigger fires.'),
+    .describe('Always false: no environment points at a new workflow, so no trigger fires it.'),
   ref_warnings: z.array(z.string()).describe('Data references that will not resolve at run time.'),
   next_step: z.string(),
 });
@@ -43,7 +43,7 @@ export class CreateWorkflowTool implements McpTool {
   readonly scope: ApiScope = 'workflow:write';
   readonly title = 'Create a workflow';
   readonly description =
-    'Create a new workflow as a draft. It is saved, not live: nothing runs until a human publishes it. Version 1 lands on the default branch through the same commit path and author-time gate as every later version, so a document that would be refused at commit is refused here.';
+    'Create a new workflow as a draft. It is saved, not live: no trigger fires it and no published-tool or sub-workflow call reaches it until it is published or promoted, which no MCP tool does; a test run (orchestr_test_workflow) can still run it on demand. Version 1 lands on the default branch through the same commit path and author-time gate as every later version, so a document that would be refused at commit is refused here.';
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {
@@ -78,7 +78,7 @@ export class CreateWorkflowTool implements McpTool {
       version_number: created.version.versionNumber,
       is_live: false,
       ref_warnings: created.refWarnings,
-      next_step: `Saved as version ${created.version.versionNumber} on '${created.branchName}'. Nothing runs yet: making it live is a separate act a person takes in Sarati, and no MCP tool can move an environment pointer.`,
+      next_step: `Saved as version ${created.version.versionNumber} on '${created.branchName}'. Not live yet: no trigger fires it and no published-tool or sub-workflow call reaches it until it is published or promoted, and no MCP tool can move an environment pointer.`,
     };
   }
 }

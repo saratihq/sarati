@@ -10,6 +10,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { seedDefaultEnvironments } from '../src/environments/default-environments';
+import { LIVE_RUNS_PER_HOUR } from '../src/mcp/live-run-consent.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -267,4 +268,74 @@ describe('workflow-as-tool over MCP (e2e, real client, isolated DB)', () => {
     expect(names).toContain('greet_person');
     await client.close();
   });
+
+  it('a published tool spends the one per-person live-run budget a live test run spends, across all of their keys', async () => {
+    const spender = randomUUID();
+    const [testing, invoking] = ['ork_wt_spend_test_eeeeeeeeeeeeeeee', 'ork_wt_spend_invk_ffffffffffffffff'];
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1,'spender@e2e.local','Spender',now(),now())`,
+      [spender],
+    );
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at) VALUES (gen_random_uuid(),$1,$2,'member',now())`,
+      [orgId, spender],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id,user_id,org_id,name,key_hash,prefix,scopes,created_at)
+       VALUES (gen_random_uuid(),$1,$2,'testing',$3,'ork_wt_spend',$5,now()),
+              (gen_random_uuid(),$1,$2,'invoking',$4,'ork_wt_spend',$6,now())`,
+      [
+        spender,
+        orgId,
+        hash(testing),
+        hash(invoking),
+        JSON.stringify(['workflow:invoke', 'workflow:read', 'run:dry', 'run:execute']),
+        JSON.stringify(['workflow:invoke']),
+      ],
+    );
+    const spenderRuns = async (): Promise<number> =>
+      (
+        await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM runtime_runs WHERE user_id = $1`, [
+          spender,
+        ])
+      ).rows[0]!.n;
+    const tested = { workflow_ir: toolDoc('scratch '), trigger_payload: { who: 'tester' } };
+
+    const clients: Record<string, Client> = {};
+    try {
+      clients.testing = await connect(testing);
+      clients.invoking = await connect(invoking);
+
+      const dry = await clients.testing.callTool({ name: 'orchestr_test_workflow', arguments: tested });
+      const token = (dry.structuredContent as Record<string, unknown>).confirmation_token;
+      const live = await clients.testing.callTool({
+        name: 'orchestr_test_workflow',
+        arguments: { ...tested, dry_run: false, confirmation_token: token },
+      });
+      expect(live.isError).toBeFalsy();
+      expect((live.structuredContent as Record<string, unknown>).dry_run).toBe(false);
+      for (let i = 1; i < LIVE_RUNS_PER_HOUR; i++) {
+        const greeted = await clients.testing.callTool({
+          name: 'greet_person',
+          arguments: { who: `caller ${i}` },
+        });
+        if (greeted.isError)
+          throw new Error(`call ${i} refused: ${JSON.stringify(greeted.structuredContent)}`);
+      }
+
+      const before = await spenderRuns();
+      const refused = await clients.invoking.callTool({
+        name: 'greet_person',
+        arguments: { who: 'one too many' },
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toMatchObject({
+        code: 'live_run_budget_exhausted',
+        error: `You have fired ${LIVE_RUNS_PER_HOUR} live runs through MCP in the last hour, across all of your keys and sessions, which is the limit for one person. Dry runs are unaffected.`,
+      });
+      expect(await spenderRuns()).toBe(before);
+    } finally {
+      await Promise.all(Object.values(clients).map((client) => client.close()));
+    }
+  }, 60_000);
 });

@@ -28,7 +28,7 @@ import { activationError } from './activation-error';
 import { ifActivationUnlocked } from './activation-lock';
 import { DbActivationStore } from './activation-store';
 import { actualOf, holdsTrigger, triggerOf } from './canvas/activation-row';
-import { applyFinished, triggerPropsOf } from './canvas/trigger-activation';
+import { type ActivationKind, applyFinished, triggerPropsOf } from './canvas/trigger-activation';
 import { firesWhileHeld, heldBackBySlot } from './canvas/trigger-kind';
 import { servedWebhookUrl } from './canvas/webhook-url';
 import { webhookRegistrationOf } from './registered-webhook';
@@ -127,8 +127,7 @@ export interface ActivationHealth {
   environment_id: string;
   /** Public trigger type (`orchestr:webhook`, `orchestr:schedule`, `rss.new-item`, …). */
   trigger_type: string;
-  /** Activation kind: `webhook` | `chat` | `registered_webhook` | `polling` | `schedule` | `composio_subscription`. */
-  kind: string;
+  kind: ActivationKind;
   /** `false` only when an operator paused it (desired-present but not firing). */
   active: boolean;
   /** Held back or held by its environment's slot, so nothing is stood up, polled or changed at its app for it; `last_error` says why and what fixes it. */

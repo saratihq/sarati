@@ -133,7 +133,7 @@ export class GetRunTool implements McpTool {
   readonly scope: ApiScope = 'workflow:read';
   readonly title = 'Get a run';
   readonly description =
-    'Run status, per-step log — each answered wait names who answered it — the failing node and any warnings — and, for a waiting run, whether it resumes on its own, waits for someone to answer it, or has a decision on its way. A run is readable only by the credential that owns it — org-wide reach belongs to a human session, not to a key.';
+    "Run status, per-step log — each answered wait names who answered it — the failing node and any warnings — and, for a waiting run, whether it resumes on its own, waits for someone to answer it, or has a decision on its way. A key reads only runs recorded as its holder's, in a workspace the key reaches — whether one of their keys or sessions started the run or a trigger fired it as them. Reach over other members' runs belongs to a signed-in session, not to a key.";
   readonly inputSchema = Input;
   readonly outputSchema = Output;
   readonly annotations = {

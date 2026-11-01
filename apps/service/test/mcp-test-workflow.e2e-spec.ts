@@ -6,10 +6,15 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Client as PgClient } from 'pg';
+import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
+import { LIVE_RUNS_PER_HOUR } from '../src/mcp/live-run-consent.service';
+import { RunsService } from '../src/runs/runs.service';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 interface ToolCall {
@@ -26,11 +31,13 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
   let hitUrl: string;
   let hitServer: Server;
   let posts = 0;
+  let started: jest.SpiedFunction<RunsService['runExecutable']>;
 
   const userId = randomUUID();
   const orgId = randomUUID();
   const dryKey = 'ork_tw_dry_key_aaaaaaaaaaaaaaaaaaaa';
   const liveKey = 'ork_tw_live_key_bbbbbbbbbbbbbbbbbb';
+  const secretKey = 'an-e2e-secret-key-for-mcp-test-workflow-sessions';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const doc = (text: string): Record<string, unknown> => ({
@@ -52,28 +59,42 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     metadata: {},
   });
 
-  async function connect(key: string): Promise<Client> {
+  async function connect(key: string, headers: Record<string, string> = {}): Promise<Client> {
     const client = new Client({ name: 'tw-e2e', version: '1.0.0' });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
-        requestInit: { headers: { Authorization: `Bearer ${key}` } },
+        requestInit: { headers: { ...headers, Authorization: `Bearer ${key}` } },
       }),
     );
     return client;
   }
 
+  async function callOn(client: Client, args: Record<string, unknown>): Promise<ToolCall> {
+    const result = await client.callTool({ name: 'orchestr_test_workflow', arguments: args });
+    return {
+      ok: !result.isError,
+      data: (result.structuredContent ?? {}) as Record<string, unknown>,
+      text: ((result.content as { text?: string }[])[0]?.text ?? '').slice(0, 300),
+    };
+  }
+
   async function call(key: string, args: Record<string, unknown>): Promise<ToolCall> {
     const client = await connect(key);
     try {
-      const result = await client.callTool({ name: 'orchestr_test_workflow', arguments: args });
-      return {
-        ok: !result.isError,
-        data: (result.structuredContent ?? {}) as Record<string, unknown>,
-        text: ((result.content as { text?: string }[])[0]?.text ?? '').slice(0, 300),
-      };
+      return await callOn(client, args);
     } finally {
       await client.close();
     }
+  }
+
+  async function fireLive(client: Client, text: string): Promise<ToolCall> {
+    const dry = await callOn(client, { workflow_ir: doc(text) });
+    if (!dry.ok) throw new Error(`dry run refused: ${dry.text}`);
+    return callOn(client, {
+      workflow_ir: doc(text),
+      dry_run: false,
+      confirmation_token: dry.data.confirmation_token,
+    });
   }
 
   beforeAll(async () => {
@@ -128,16 +149,20 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
     process.env.DBOS_ENABLED = 'false';
+    process.env.SECRET_KEY = secretKey;
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
+    started = jest.spyOn(app.get(RunsService), 'runExecutable');
     await listenOnLoopback(app);
     baseUrl = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
   }, 40_000);
 
   afterAll(async () => {
+    // A run handed back as a handle is still going; the database must outlive it.
+    await Promise.allSettled(started.mock.results.map((result) => result.value));
     await app.close();
     await db.end();
     await new Promise<void>((resolve, reject) => hitServer.close((e) => (e ? reject(e) : resolve())));
@@ -328,4 +353,69 @@ describe('orchestr_test_workflow (e2e, real MCP client, isolated DB)', () => {
     expect(tools.map((t) => t.name)).not.toContain('orchestr_test_workflow');
     await client.close();
   });
+
+  it('caps live runs per person across all of their keys, sessions and workspaces, and leaves another person theirs', async () => {
+    const spender = randomUUID();
+    const bystander = randomUUID();
+    const spenderPersonal = randomUUID();
+    const [first, theirs] = ['ork_tw_spend_one_eeeeeeeeeeeeeeeee', 'ork_tw_bystander_gggggggggggggggg'];
+    const scopes = ['workflow:read', 'run:dry', 'run:execute'];
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at)
+       VALUES ($1,'spender@e2e.local','Spender',now(),now()), ($2,'bystander@e2e.local','Bystander',now(),now())`,
+      [spender, bystander],
+    );
+    await insertPersonalOrgs(db, { id: spenderPersonal, userId: spender, name: 'Spender' });
+    await db.query(
+      `INSERT INTO org_members (id, org_id, user_id, role, created_at)
+       VALUES (gen_random_uuid(),$1,$2,'member',now()), (gen_random_uuid(),$1,$3,'member',now())`,
+      [orgId, spender, bystander],
+    );
+    await db.query(
+      `INSERT INTO api_keys (id,user_id,org_id,name,key_hash,prefix,scopes,created_at)
+       VALUES (gen_random_uuid(),$1,$3,'first',$4,'ork_tw_spend',$6,now()),
+              (gen_random_uuid(),$2,$3,'theirs',$5,'ork_tw_bysta',$6,now())`,
+      [spender, bystander, orgId, hash(first), hash(theirs), JSON.stringify(scopes)],
+    );
+    const session = (await mintSession(spender, secretKey)).token;
+    const issued = await request(app.getHttpServer())
+      .post('/api/api-keys')
+      .set('Authorization', `Bearer ${session}`)
+      .send({ name: 'second', scopes })
+      .expect(201);
+    const second = issued.body.key as string;
+    const pinned = await db.query<{ org_id: string }>(`SELECT org_id FROM api_keys WHERE id = $1`, [
+      issued.body.id,
+    ]);
+    expect(pinned.rows[0]?.org_id).toBe(spenderPersonal);
+
+    const clients: Record<string, Client> = {};
+    try {
+      clients.first = await connect(first);
+      clients.session = await connect(session, { 'X-Org-Id': orgId });
+      clients.second = await connect(second);
+      clients.theirs = await connect(theirs);
+
+      posts = 0;
+      for (let i = 0; i < LIVE_RUNS_PER_HOUR; i++) {
+        const fired = await fireLive(i % 2 === 0 ? clients.first : clients.session, `spend ${i}`);
+        if (!fired.ok) throw new Error(`live run ${i} refused: ${fired.text}`);
+      }
+      expect(posts).toBe(LIVE_RUNS_PER_HOUR);
+
+      const refused = await fireLive(clients.second, 'one too many');
+      expect(refused.ok).toBe(false);
+      expect(refused.data).toMatchObject({
+        code: 'live_run_budget_exhausted',
+        error: `You have fired ${LIVE_RUNS_PER_HOUR} live runs through MCP in the last hour, across all of your keys and sessions, which is the limit for one person. Dry runs are unaffected.`,
+      });
+      expect(posts).toBe(LIVE_RUNS_PER_HOUR);
+
+      const elsewhere = await fireLive(clients.theirs, 'someone else');
+      expect(elsewhere.ok).toBe(true);
+      expect(posts).toBe(LIVE_RUNS_PER_HOUR + 1);
+    } finally {
+      await Promise.all(Object.values(clients).map((client) => client.close()));
+    }
+  }, 60_000);
 });

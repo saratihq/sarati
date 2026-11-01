@@ -44,7 +44,18 @@ describe("ApiKeysSettings", () => {
     expect(await screen.findByRole("checkbox", { name: "Read workflows" })).toBeInTheDocument();
     // An unlabelled scope still renders, so a server addition is never silently unofferable.
     expect(screen.getByRole("checkbox", { name: "some:future:scope" })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "Manage the organization" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "Manage your platform keys (Composio, Anthropic)" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names what org:manage reaches on a pinned key, its holder's platform keys, never an organization", async () => {
+    render(<ApiKeysSettings />);
+
+    expect(
+      await screen.findByRole("checkbox", { name: "Manage your platform keys (Composio, Anthropic)" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/organization/i)).not.toBeInTheDocument();
   });
 
   it("says a dry-run key's reads are real, never that it changes nothing", async () => {

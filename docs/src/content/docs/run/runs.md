@@ -49,9 +49,9 @@ Over the API the run carries `dry_run: true`, and each such step's output carrie
 Runs are durable. If the engine is killed or redeployed mid-flight, the run resumes when it comes
 back instead of being orphaned.
 
-A run this version starts resumes where it was, parallel branches included: no step that had
+A run v0.2.25 or later started resumes where it was, parallel branches included: no step that had
 finished runs again, except in a workflow it was calling, which runs again from its start if the call
-had not finished. The exception is a run an earlier version started that resuming could leave with a
+had not finished. The exception is a run v0.2.24 or earlier started that resuming could leave with a
 step's result or a decision in the wrong place. As it resumes it ends in `error` with a message saying
 why, each ending "so it can't be resumed safely — run it again.":
 
@@ -68,7 +68,7 @@ None of its steps runs again, its waits leave the inbox, and a decision it had n
 recorded on its wait, with who made it, but not applied. Each step it had under way ends in `error`
 saying *Stopped when the service did — the run can't be resumed safely*, and none of them is named
 as the step that failed. Run the workflow again. A run that stopped before any of this resumes as
-usual; [Upgrades](/operate/upgrades/#upgrade) says how to list the runs an earlier version started
+usual; [Upgrades](/operate/upgrades/#upgrade) says how to list the runs v0.2.24 or earlier started
 that would end this way.
 
 Killing the service outright during a ten-second HTTP step:
@@ -121,7 +121,7 @@ Every wait or delay the run is parked on ends and says *Cancelled before it fini
 decision someone sent that the run had not yet taken is dropped. One the run had already taken
 stands, and its wait records who made it. On a durable run
 (the default) that can take up to about ten seconds, so a delay with less than that left simply runs
-out. A run an earlier version started is slower to stop: there a delay of a minute or less runs out
+out. A run v0.2.24 or earlier started is slower to stop: there a delay of a minute or less runs out
 first.
 On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
 workflow the run is calling; a durable run's called workflow finishes first.

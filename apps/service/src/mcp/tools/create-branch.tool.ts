@@ -42,7 +42,9 @@ const Output = z.object({
     ),
   is_live: z
     .literal(false)
-    .describe('A branch is never live. Nothing committed here runs until it is merged and published.'),
+    .describe(
+      'Always false. Only a promotion makes what you commit here live: until then no trigger fires it and no published-tool or sub-workflow call reaches it. Staging and custom environments take a version of this branch directly; production and uat take only a default-branch version, so it reaches them once merged and a default-branch version carrying the merge is promoted. No MCP tool merges or promotes. A test run (orchestr_test_workflow with this branch, or Test this branch on its review) can still run its head on demand.',
+    ),
   next_step: z.string(),
 });
 
@@ -89,7 +91,7 @@ export class CreateBranchTool implements McpTool {
       fork_point: forkPoint,
       next_version_number: 1,
       is_live: false,
-      next_step: `Commit your changes to '${branch.name}', then open a review so a person can merge and publish them.`,
+      next_step: `Commit your changes to '${branch.name}', then open a review: merging and promoting are separate acts that no MCP tool performs.`,
     };
   }
 }
