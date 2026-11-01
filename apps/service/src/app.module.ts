@@ -5,6 +5,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 
+import { AppLifecycle } from './app.lifecycle';
 import { AuthModule } from './auth/auth.module';
 import { LocalAuthModule } from './auth/local/local-auth.module';
 import { OidcSignInModule } from './auth/oidc/oidc-sign-in.module';
@@ -113,6 +114,7 @@ import { rateLimitKey } from './common/rate-limit-key';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_PIPE, useValue: new ValidationPipe({ whitelist: true, transform: true }) },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
+    AppLifecycle,
   ],
 })
 export class AppModule {}

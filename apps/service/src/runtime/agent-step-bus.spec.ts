@@ -81,6 +81,22 @@ describe('AgentStepBus', () => {
     expect(seen.map((s) => s.step.step_index)).toEqual([0, 1, 0, 1]); // payload index still per-invocation
   });
 
+  it('ends every open stream as the service starts to stop, and opens no channel for a later subscription', async () => {
+    const bus = new AgentStepBus();
+    const open = [
+      firstValueFrom(bus.subscribe('s1').pipe(toArray())),
+      firstValueFrom(bus.subscribe('s2').pipe(toArray())),
+    ];
+    bus.publish('s1', step(0, 'model'));
+
+    bus.onModuleDestroy();
+
+    expect(await Promise.all(open)).toEqual([[seq(1, step(0, 'model'))], []]);
+    expect(bus.openSessionCount).toBe(0);
+    await expect(firstValueFrom(bus.subscribe('s1').pipe(toArray()))).resolves.toEqual([]);
+    expect(bus.openSessionCount).toBe(0);
+  });
+
   it('channelKey scopes a session id to its workflow+env (canonicalizing prod→production)', () => {
     expect(channelKey('wf1', 'production', 's')).toBe('wf1:production:s');
     // Same session id, different workflow → different channel (no cross-read).

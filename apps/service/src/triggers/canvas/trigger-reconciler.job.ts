@@ -26,18 +26,16 @@ export class TriggerReconcilerJob implements OnModuleInit {
     this.reconciler.registerInline();
 
     try {
-      const on = await this.jobs.register(async (boss) => {
-        await boss.createQueue(RECONCILE_QUEUE);
+      const on = await this.jobs.register(async (queues) => {
+        await queues.createQueue(RECONCILE_QUEUE);
         // `short` keeps one waiting job per singleton key; createQueue leaves an existing queue's policy as it was.
-        await boss.updateQueue(RECONCILE_QUEUE, { name: RECONCILE_QUEUE, policy: 'short' });
-        await boss.work<{ workflowId: string }>(RECONCILE_QUEUE, async ([job]) => {
+        await queues.updateQueue(RECONCILE_QUEUE, { name: RECONCILE_QUEUE, policy: 'short' });
+        await queues.work<{ workflowId: string }>(RECONCILE_QUEUE, async ([job]) => {
           if (job?.data?.workflowId) await this.reconciler.reconcile(job.data.workflowId);
         });
-        await boss.createQueue(RECONCILE_SWEEP_QUEUE);
-        await boss.work(RECONCILE_SWEEP_QUEUE, async () => {
-          await this.reconciler.sweepAll();
-        });
-        await boss.schedule(RECONCILE_SWEEP_QUEUE, SWEEP_CRON);
+        await queues.createQueue(RECONCILE_SWEEP_QUEUE);
+        await queues.work(RECONCILE_SWEEP_QUEUE, (_jobs, signal) => this.reconciler.sweepAll(signal));
+        await queues.schedule(RECONCILE_SWEEP_QUEUE, SWEEP_CRON);
       });
       this.logger.log(
         on

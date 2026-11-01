@@ -275,8 +275,8 @@ export class TriggerReconcilerService {
     this.logger.warn(`activation ${op} ${activationKeyString(key)} failed: ${errorMessage(err)}`);
   }
 
-  /** The periodic safety net: reconcile every workflow with an env pointer, an activation or a pending webhook delete. */
-  async sweepAll(): Promise<void> {
+  /** The periodic safety net: reconcile every workflow with an env pointer, an activation or a pending webhook delete; `signal` ends it between workflows. */
+  async sweepAll(signal?: AbortSignal): Promise<void> {
     const em = this.dataSource.manager;
     const rows = await rawQuery<{ workflow_id: string }>(
       em,
@@ -286,15 +286,22 @@ export class TriggerReconcilerService {
        UNION
        SELECT DISTINCT workflow_id FROM trigger_retired_webhooks`,
     );
+    let swept = 0;
     for (const { workflow_id } of rows) {
+      if (signal?.aborted) break;
       try {
         // The sweep is the ONLY caller that runs the self-heal re-verify pass.
         await this.reconcile(workflow_id, { selfHeal: true });
       } catch (err) {
         this.logger.error(`reconcile sweep of ${workflow_id} failed: ${errorMessage(err)}`);
       }
+      swept += 1;
     }
-    if (rows.length > 0) this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
+    if (swept < rows.length) {
+      this.logger.log(`trigger reconcile sweep: stopped after ${swept} of ${rows.length} workflow(s)`);
+    } else if (rows.length > 0) {
+      this.logger.log(`trigger reconcile sweep: ${rows.length} workflow(s)`);
+    }
   }
 
   /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or that listens as its slot, as every registered webhook does, so its account's status and its webhook's URL are judged afresh after a stretch no build of this one saw. */

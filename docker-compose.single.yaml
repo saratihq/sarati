@@ -10,6 +10,8 @@ services:
   sarati:
     image: ghcr.io/saratihq/sarati:${SARATI_VERSION:-latest}
     restart: unless-stopped
+    # Supervisord gives the service 15 s, then Postgres 10 s, before killing either.
+    stop_grace_period: 30s
     # Every documented setting reaches the product by being in .env. The keys are NOT here: the
     # container generates them into the volume below, beside the database they decrypt.
     env_file: [.env]

@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 
 import type { ConfigService } from '@nestjs/config';
 
+import { ShutdownDeadline } from '../src/common/shutdown-deadline';
 import type { EnvConfig } from '../src/config/env.config';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
 import type { ManagedIntegrationProvider } from '../src/providers/managed-integration-provider';
@@ -49,6 +50,7 @@ describe('DBOS durable execution (Phase 1b)', () => {
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
     dbos = await launchThrowawayDbos('orchestr-e2e');
+    runtime.launched();
   }, 60_000);
 
   afterAll(async () => {
@@ -165,7 +167,13 @@ describe('DBOS durable execution (Phase 1b)', () => {
     const config = {
       get: () => ({ dbosEnabled: true }),
     } as unknown as ConfigService<{ env: EnvConfig }, true>;
-    const runs = new RunsService(new DagInterpreter(sdkProvider()), new RuntimeCompiler(), runtime, config);
+    const runs = new RunsService(
+      new DagInterpreter(sdkProvider()),
+      new RuntimeCompiler(),
+      runtime,
+      config,
+      new ShutdownDeadline(),
+    );
     const runId = `scoped-${randomBytes(4).toString('hex')}`;
 
     const before = requestCount;
@@ -192,7 +200,13 @@ describe('DBOS durable execution (Phase 1b)', () => {
     const config = {
       get: () => ({ dbosEnabled: true }),
     } as unknown as ConfigService<{ env: EnvConfig }, true>;
-    const runs = new RunsService(new DagInterpreter(sdkProvider()), new RuntimeCompiler(), runtime, config);
+    const runs = new RunsService(
+      new DagInterpreter(sdkProvider()),
+      new RuntimeCompiler(),
+      runtime,
+      config,
+      new ShutdownDeadline(),
+    );
     const runId = `sleep-${randomBytes(4).toString('hex')}`;
     const scoped = `alice:${runId}`;
     const sleepPlan: RunPlan = { id: 'sleep-plan', nodes: [{ kind: 'delay', id: 'pause', ms: 61_000 }] };

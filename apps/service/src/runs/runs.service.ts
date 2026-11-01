@@ -7,6 +7,7 @@ import { LessThan, type DataSource, type EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { SHUTDOWN_WAIT_MS, ShutdownDeadline, ShuttingDown, untilStopping } from '../common/shutdown-deadline';
 import { nodeIdProblem, validateAuthoredIr } from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import type { EnvConfig } from '../config/env.config';
@@ -281,14 +282,13 @@ function runPlanIds(nodes: RunNode[]): string[] {
   return nodes.flatMap((node) => [node.id, ...childLists(node).flatMap(runPlanIds)]);
 }
 
-// How long shutdown waits for in-process runs to end or park: inside the 10 s a container stop allows by default.
-const SHUTDOWN_WAIT_MS = 8_000;
 const SHUTDOWN_POLL_MS = 25;
 
 /** A run recorded and started on its rail; `outcome` settles as it ends, answered as a synchronous caller is. */
 export interface AdmittedRun {
   runId: string;
-  outcome: () => Promise<RunResult>;
+  /** Once `signal` aborts, the wait rejects with {@link ShuttingDown} and reads nothing more; the run goes on. */
+  outcome: (signal?: AbortSignal) => Promise<RunResult>;
 }
 
 interface InProcessRun {
@@ -322,12 +322,16 @@ export class RunsService implements OnApplicationShutdown {
   private readonly waiters = new Map<string, PassThroughDurableStep>();
   /** Top-level in-process runs in flight, by scoped run id: what shutdown waits for. */
   private readonly inProcess = new Map<string, InProcessRun>();
+  /** Admissions under way: shutdown waits for each before DBOS stops. */
+  private readonly admitting = new Set<Promise<AdmittedRun>>();
+  private stopping = false;
 
   constructor(
     private readonly interpreter: DagInterpreter,
     private readonly compiler: RuntimeCompiler,
     private readonly dbos: DbosRuntime,
     config: ConfigService<{ env: EnvConfig }, true>,
+    private readonly deadline: ShutdownDeadline,
     @InjectDataSource() @Optional() private readonly dataSource?: DataSource,
     @Optional() private readonly recorder?: RunRecorderService,
     @Optional() private readonly agentStepBus?: AgentStepBus,
@@ -347,8 +351,19 @@ export class RunsService implements OnApplicationShutdown {
     return (await this.admit(plan, opts)).outcome();
   }
 
-  /** Record a run and start it on its rail — a durable one's workflow persisted, so a crash after this resumes it; an id already holding a run starts nothing new. */
-  async admit(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
+  /** Record a run and start it on its rail — a durable one's workflow persisted, so a crash after this resumes it; an id already holding a run starts nothing new, and none is admitted once shutdown has begun. */
+  admit(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
+    if (this.stopping) return Promise.reject(new ShuttingDown());
+    const admitting = this.admitNow(plan, opts);
+    this.admitting.add(admitting);
+    const forget = (): void => {
+      this.admitting.delete(admitting);
+    };
+    void admitting.then(forget, forget);
+    return admitting;
+  }
+
+  private async admitNow(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
     const runId = opts.runId ?? randomUUID();
     const scoped = this.scopedRunId(opts.externalUserId, runId);
     const meta: RunStartMeta = {
@@ -380,10 +395,10 @@ export class RunsService implements OnApplicationShutdown {
           chatChannelKey: opts.chatChannelKey,
         });
       const durable = await this.startDurable(scoped, recorded ? null : { runId, plan, meta }, start);
-      return { runId, outcome: () => this.settle(durable.result(), scoped, runId) };
+      return { runId, outcome: (signal) => this.settle(durable.result(), scoped, runId, signal) };
     }
     const running = this.inProcess.get(scoped);
-    if (running) return { runId, outcome: () => running.outcome };
+    if (running) return { runId, outcome: (signal) => untilStopping(running.outcome, signal) };
     if (!recorded) return { runId, outcome: () => Promise.reject(alreadyRan(runId)) };
     const durable = new PassThroughDurableStep();
     const outcome = this.settle(this.runInProcess(plan, scoped, opts, durable), scoped, runId);
@@ -392,7 +407,7 @@ export class RunsService implements OnApplicationShutdown {
       this.inProcess.delete(scoped);
     };
     void outcome.then(forget, forget);
-    return { runId, outcome: () => outcome };
+    return { runId, outcome: (signal) => untilStopping(outcome, signal) };
   }
 
   // `unrecorded` when a run already held the id: one that failed before it ever started runs again.
@@ -411,7 +426,8 @@ export class RunsService implements OnApplicationShutdown {
     try {
       return await start();
     } catch (err) {
-      await this.refuseIfNeverStarted(em, scoped, err);
+      // A stop before DBOS launched leaves the run as a crash would, for the next boot to re-arm.
+      if (!(err instanceof ShuttingDown)) await this.refuseIfNeverStarted(em, scoped, err);
       throw err;
     }
   }
@@ -449,16 +465,23 @@ export class RunsService implements OnApplicationShutdown {
   }
 
   // The run's outcome as its caller is answered; on both rails the run's row decides whether a cancel landed.
-  private async settle(running: Promise<RunResult>, scoped: string, runId: string): Promise<RunResult> {
+  private async settle(
+    running: Promise<RunResult>,
+    scoped: string,
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<RunResult> {
+    const ended = await untilStopping(
+      running.then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error }),
+      ),
+      signal,
+    );
     try {
-      let result: RunResult;
-      try {
-        result = await running;
-      } catch (err) {
-        throw (await this.cancelled(scoped)) ? new RunCancelledError() : err;
-      }
+      if ('error' in ended) throw (await this.cancelled(scoped)) ? new RunCancelledError() : ended.error;
       if (await this.cancelled(scoped)) throw new RunCancelledError();
-      return { ...result, run_id: runId };
+      return { ...ended.result, run_id: runId };
     } catch (err) {
       throw await this.failureOf(err, scoped, runId);
     }
@@ -510,22 +533,29 @@ export class RunsService implements OnApplicationShutdown {
     }
   }
 
-  /** Waits, within {@link SHUTDOWN_WAIT_MS}, for every in-process run to end or park; it never cancels one. */
+  /** Refuses admissions from now on, waits for those under way, then, until the shutdown deadline, for every in-process run to end or park; it never cancels one. */
   async onApplicationShutdown(): Promise<void> {
+    this.stopping = true;
+    if (this.admitting.size > 0) {
+      this.logger.log(`Shutting down: waiting for ${this.admitting.size} run admission(s) under way`);
+      // Unbounded: an admission waits on no run, and a stop's kill turns a longer one into the crash it survives.
+      await Promise.allSettled(this.admitting);
+    }
     const going = (): string[] =>
       [...this.inProcess].filter(([, run]) => !run.durable.parked()).map(([scoped]) => scoped);
     if (going().length === 0) return;
+    const ms = this.deadline.remainingMs();
     this.logger.log(
-      `Shutting down: waiting up to ${SHUTDOWN_WAIT_MS} ms for ${going().length} in-process run(s) to end or park`,
+      `Shutting down: waiting up to ${ms} ms for ${going().length} in-process run(s) to end or park`,
     );
-    const deadline = Date.now() + SHUTDOWN_WAIT_MS;
-    while (going().length > 0 && Date.now() < deadline) {
+    const until = Date.now() + ms;
+    while (going().length > 0 && Date.now() < until) {
       await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_POLL_MS));
     }
     const left = going();
     if (left.length > 0) {
       this.logger.warn(
-        `Shutting down: stopped waiting for in-process run(s) still going after ${SHUTDOWN_WAIT_MS} ms: ${left.join(', ')}`,
+        `Shutting down: stopped waiting for in-process run(s) still going ${SHUTDOWN_WAIT_MS} ms into the stop: ${left.join(', ')}`,
       );
     }
   }
@@ -638,10 +668,7 @@ export class RunsService implements OnApplicationShutdown {
     return (await this.startIr(ir, opts)).outcome();
   }
 
-  /**
-   * Run a WorkflowIR with a BOUNDED wait: the full result when it settles inside
-   * `awaitMs`, else a handle — the run goes on, and `GET /api/runs/:run_id` reports it.
-   */
+  /** Run a WorkflowIR with a BOUNDED wait: its result when it settles inside `awaitMs`, else a handle, at once if the service starts to stop; the run goes on. */
   async runFromIrBounded(ir: WorkflowIR, opts: IrRunOptions & { awaitMs: number }): Promise<RunOutcome> {
     const { runId, outcome } = await this.startIr(ir, opts);
     return this.settleWithin(outcome(), runId, opts.awaitMs);
@@ -701,24 +728,24 @@ export class RunsService implements OnApplicationShutdown {
     }
   }
 
-  /**
-   * Await a run for at most `awaitMs`. Past that the caller takes a handle and the run continues
-   * unattended — its outcome lands on the run row, which is what the poll reads.
-   */
+  // Past `awaitMs`, or once the service starts to stop, the caller takes a handle; the run's outcome lands on its row, which a poll reads.
   private async settleWithin(
     pending: Promise<RunResult>,
     runId: string,
     awaitMs: number,
   ): Promise<RunOutcome> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const elapsed = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), awaitMs);
-    });
+    const stopping = this.deadline.signal;
+    let handBack!: () => void;
+    const handedBack = new Promise<null>((resolve) => (handBack = () => resolve(null)));
+    const timer = setTimeout(handBack, awaitMs);
+    stopping.addEventListener('abort', handBack);
+    if (stopping.aborted) handBack();
     try {
-      const settled = await Promise.race([pending.then((result) => ({ result })), elapsed]);
+      const settled = await Promise.race([pending.then((result) => ({ result })), handedBack]);
       if (settled) return settled.result;
     } finally {
       clearTimeout(timer);
+      stopping.removeEventListener('abort', handBack);
     }
     pending.catch((err: unknown) => {
       this.logger.warn(`Run ${runId} failed after its bounded wait elapsed: ${errorMessage(err)}`);

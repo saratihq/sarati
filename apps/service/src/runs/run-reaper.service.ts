@@ -96,7 +96,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   /** One sweep, returning how many rows were reaped; both callers tolerate a throw (never on a request path). */
-  async reapStale(): Promise<ReapResult> {
+  async reapStale(signal?: AbortSignal): Promise<ReapResult> {
     const seconds = this.maxSeconds;
     if (seconds <= 0) return { crashedRuns: 0, timedOutWaits: 0, orphanSteps: 0, strandedDecisions: 0 };
     const em = this.dataSource.manager;
@@ -129,7 +129,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
       [seconds],
     );
 
-    const strandedDecisions = await this.reapStrandedDecisions(seconds);
+    const strandedDecisions = await this.reapStrandedDecisions(seconds, signal);
 
     return { crashedRuns, timedOutWaits, orphanSteps, strandedDecisions };
   }
@@ -173,7 +173,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   // (D) a decision past its wait's window by the max, on a run this instance can no longer resume: credit it and end the run.
-  private async reapStrandedDecisions(seconds: number): Promise<number> {
+  private async reapStrandedDecisions(seconds: number, signal: AbortSignal | undefined): Promise<number> {
     const em = this.dataSource.manager;
     const held = await rawQuery<{ id: string }>(
       em,
@@ -186,6 +186,8 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
     const dbosEnabled = this.config.get('env', { infer: true }).dbosEnabled;
     let reaped = 0;
     for (const { id } of held) {
+      // A stop leaves the rest to the next boot's reap rather than ask a DBOS about to stop.
+      if (signal?.aborted) break;
       if (dbosEnabled && (await this.dbos.canResume(id))) continue;
       reaped += await em.transaction(async (tx) => {
         await lockRunRow(tx, id);

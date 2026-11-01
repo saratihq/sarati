@@ -3,6 +3,8 @@
 
 # The client is the peer, or the right-most address a proxy in SARATI_TRUSTED_PROXIES vouches for; sent on alone.
 {
+	# Past the service's 8 s stop deadline, so what it answers gets through; before supervisord's 10 s kill.
+	grace_period 9s
 	servers {
 		trusted_proxies static {$SARATI_TRUSTED_PROXIES}
 		trusted_proxies_strict

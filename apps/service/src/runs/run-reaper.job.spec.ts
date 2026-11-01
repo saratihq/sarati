@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type PgBoss from 'pg-boss';
 
+import { ShutdownDeadline } from '../common/shutdown-deadline';
 import type { EnvConfig } from '../config/env.config';
 import { JobRegistry } from '../jobs/jobs.module';
 import { RunReaperJob } from './run-reaper.job';
@@ -12,7 +13,7 @@ describe('RunReaperJob', () => {
     let tick: (() => Promise<void>) | undefined;
     const boss = {
       createQueue: jest.fn().mockResolvedValue(undefined),
-      work: jest.fn((_queue: string, handler: () => Promise<void>) => {
+      work: jest.fn((_queue: string, _options: PgBoss.WorkOptions, handler: () => Promise<void>) => {
         tick = handler;
         return Promise.resolve('worker');
       }),
@@ -26,7 +27,9 @@ describe('RunReaperJob', () => {
     } as unknown as RunReaperService;
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
 
-    await new RunReaperJob(new JobRegistry(boss), config, reaper).onModuleInit();
+    const registry = new JobRegistry(boss, new ShutdownDeadline());
+    await new RunReaperJob(registry, config, reaper).onModuleInit();
+    await registry.start();
     await expect(tick!()).rejects.toThrow('deadlock detected');
 
     expect(logged).toHaveBeenCalledWith('run reap failed: deadlock detected');
