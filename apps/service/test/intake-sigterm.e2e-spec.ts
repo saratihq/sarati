@@ -171,7 +171,11 @@ describe('webhook deliveries across a SIGTERM (e2e, real DBOS, child process)', 
           (s) => s === 'completed',
         ),
       ).toBe('completed');
-      expect(await workflowStatus(runId)).toBe('SUCCESS');
+      await eventually(
+        'its workflow succeed',
+        () => workflowStatus(runId),
+        (s) => s === 'SUCCESS',
+      );
     } finally {
       await locker.end();
     }
@@ -215,7 +219,11 @@ describe('webhook deliveries across a SIGTERM (e2e, real DBOS, child process)', 
         (s) => s === 'completed',
       ),
     ).toBe('completed');
-    expect(await workflowStatus(runId)).toBe('SUCCESS');
+    await eventually(
+      'its workflow succeed',
+      () => workflowStatus(runId),
+      (s) => s === 'SUCCESS',
+    );
   }, 120_000);
 
   it('a run killed between its record and its workflow save, reaped while the service was down, runs once when its id is sent again', async () => {

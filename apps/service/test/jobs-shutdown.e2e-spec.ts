@@ -211,6 +211,14 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
       )
     ).rows;
 
+  // A run's history says it completed from inside its workflow, a moment before DBOS records the workflow's end.
+  const endedStatus = (runId: string) =>
+    eventually(
+      'DBOS record the run’s end',
+      () => workflowStatus(runId),
+      (rows) => rows[0]?.status !== 'PENDING',
+    );
+
   // A hold on `runtime_runs` that an admission's insert waits on; idempotent release.
   const holdRunInserts = async () => {
     const locker = new Client({ connectionString: databaseUrl });
@@ -765,7 +773,7 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
       () => runsOf(wf),
       (rows) => rows[0]?.status === 'completed',
     );
-    expect(await workflowStatus(run!.id)).toEqual([{ status: 'SUCCESS' }]);
+    expect(await endedStatus(run!.id)).toEqual([{ status: 'SUCCESS' }]);
     const after = await activationOf(activation);
     expect(after.last_error).toBeNull();
     expect(after.cursor).not.toBe(lastFire);
@@ -821,7 +829,7 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
         (rows) => rows[0]?.status === 'completed',
       );
       expect(await runsOf(wf)).toHaveLength(1);
-      expect(await workflowStatus(run!.id)).toEqual([{ status: 'SUCCESS' }]);
+      expect(await endedStatus(run!.id)).toEqual([{ status: 'SUCCESS' }]);
       expect((await activationOf(activation)).cursor).not.toBe(lastFire);
       await eventually(
         'the left job complete',
