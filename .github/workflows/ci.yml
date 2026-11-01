@@ -158,26 +158,40 @@ jobs:
           done
           curl -fsS http://localhost:8095/api/ready >/dev/null \
             || { echo "::error::the one-container install to stop does not come up"; docker logs one-stop 2>&1 | tail -60; exit 1; }
-          mkfifo held-body
-          exec 3<>held-body
-          # `-T .` reads the never-ending body without blocking, so curl still sees the answer.
-          curl -sS -v --max-time 45 -o /dev/null -w '%{http_code}' -X POST -T . -H 'content-type: application/json' -H 'Expect:' \
-            http://localhost:8095/api/health <held-body >held-status 2>held-curl.log &
+          # A raw request whose chunked body never comes, so it stays open through the proxy until a stop cuts it.
+          python3 - >held-status 2>held.log <<'PY' &
+          import socket, sys
+          s = socket.create_connection(("127.0.0.1", 8095), timeout=10)
+          s.sendall(b"POST /api/health HTTP/1.1\r\nHost: localhost:8095\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+          print("sent", file=sys.stderr, flush=True)
+          s.settimeout(45)
+          head = b""
+          try:
+              while b"\r\n" not in head:
+                  chunk = s.recv(4096)
+                  if not chunk:
+                      break
+                  head += chunk
+          except OSError:
+              pass
+          line = head.split(b"\r\n", 1)[0].split()
+          print(line[1].decode() if len(line) > 1 and line[0].startswith(b"HTTP/") else "000")
+          PY
           held=$!
           for i in $(seq 1 50); do
-            grep -q '^> POST /api/health' held-curl.log && break
+            grep -q '^sent' held.log && break
             sleep 0.1
           done
-          grep -q '^> POST /api/health' held-curl.log \
-            || { echo "::error::the held request never left curl"; cat held-curl.log; exit 1; }
+          grep -q '^sent' held.log || { echo "::error::the held request was never sent"; cat held.log; exit 1; }
           sleep 1
+          test ! -s held-status || { echo "::error::the held request was answered before the stop (got '$(cat held-status)')"; exit 1; }
           began=$(date +%s)
           docker stop -t 30 one-stop
           took=$(( $(date +%s) - began ))
           wait "$held" || true
           docker logs one-stop >one-stop.log 2>&1
           test "$(cat held-status)" = 502 \
-            || { echo "::error::the held request was not cut by the service's stop (got '$(cat held-status)')"; cat held-curl.log; tail -60 one-stop.log; exit 1; }
+            || { echo "::error::the held request was not cut by the service's stop (got '$(cat held-status)')"; cat held.log; tail -60 one-stop.log; exit 1; }
           grep -q 'database system is shut down' one-stop.log \
             || { echo "::error::Postgres did not shut down cleanly"; tail -60 one-stop.log; exit 1; }
           test "$took" -lt 20 || { echo "::error::the stop took ${took}s"; exit 1; }
