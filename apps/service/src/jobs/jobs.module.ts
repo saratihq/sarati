@@ -62,6 +62,16 @@ export interface JobQueues {
   work<T extends object = object>(name: string, handler: JobHandler<T>): Promise<void>;
 }
 
+async function settlesWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeUp = new Promise<false>((resolve) => (timer = setTimeout(resolve, ms, false)));
+  try {
+    return await Promise.race([work.then(() => true), timeUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // pg-boss counts a retry at every fetch of a job after its first, so a copy keeps only the retries the job had left.
 function sentAs(job: PgBoss.JobWithMetadata): PgBoss.SendOptions {
   return {
@@ -130,10 +140,7 @@ export class JobRegistry implements BeforeApplicationShutdown {
     this.logger.log(
       `Shutting down: waiting up to ${ms} ms for ${this.inFlight.size} job(s) in flight: ${this.running()}`,
     );
-    let timer: NodeJS.Timeout | undefined;
-    const timeUp = new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)));
-    await Promise.race([Promise.allSettled(this.inFlight.keys()), timeUp]);
-    clearTimeout(timer);
+    await settlesWithin(Promise.allSettled(this.inFlight.keys()), ms);
     if (this.inFlight.size > 0) {
       this.logger.warn(
         `Shutting down: stopped waiting for job(s) still running ${SHUTDOWN_WAIT_MS} ms into the stop: ${this.running()}`,
@@ -227,7 +234,7 @@ export class JobsLifecycle implements OnModuleInit, OnApplicationShutdown {
     this.logger.log('pg-boss started (schema: pgboss)');
   }
 
-  /** Stops pg-boss once, however often asked: a job still running at the stop's deadline, or 1 s on if that has passed, is failed for pg-boss to retry, and its database closes once no fetch, job or hand-back is left. */
+  /** Stops pg-boss once, however often asked: it waits, until the stop's deadline and no longer, for every job and hand-back still running, fails each one still running then for pg-boss to retry, and closes its database once no fetch, job or hand-back is left. */
   stop(): Promise<void> {
     if (!this.boss || !this.db) return Promise.resolve();
     this.stopped ??= this.stopNow(this.boss, this.db);
@@ -235,42 +242,40 @@ export class JobsLifecycle implements OnModuleInit, OnApplicationShutdown {
   }
 
   private async stopNow(boss: PgBoss, db: JobsDatabase): Promise<void> {
-    const ms = Math.max(1_000, this.deadline.remainingMs());
-    const until = Date.now() + ms;
     try {
-      await boss.stop({ graceful: true, close: false, timeout: ms });
+      await this.quiet(() => this.registry.pending(), this.deadline);
+      // pg-boss's own graceful wait gives a running job at least 1 s, checked every 500 ms, so it would outlast the deadline.
+      await boss.stop({ graceful: false, close: false });
     } finally {
-      await this.closeOnceQuiet(db, until);
+      await this.closeOnceQuiet(db);
     }
   }
 
-  private async closeOnceQuiet(db: JobsDatabase, until: number): Promise<void> {
-    const quiet = this.quiet(db);
-    let timer: NodeJS.Timeout | undefined;
-    const timeUp = new Promise<false>((resolve) => (timer = setTimeout(resolve, until - Date.now(), false)));
-    const inTime = await Promise.race([quiet.then(() => true), timeUp]);
-    clearTimeout(timer);
-    if (!inTime) {
-      this.logger.warn(
-        `Shutting down: pg-boss's database stays open past the stop's deadline for ${db.pending().length} query(s) still at it and the job(s) still running (${this.registry.running() || 'none'}); it closes once they end`,
-      );
-    }
-    const closed = quiet
-      .then(() => db.close())
-      .catch((err: unknown) => this.logger.error(`pg-boss's database did not close: ${errorMessage(err)}`));
-    if (inTime) await closed;
+  private async closeOnceQuiet(db: JobsDatabase): Promise<void> {
+    const left = (): Promise<unknown>[] => [...db.pending(), ...this.registry.pending()];
+    const close = (): Promise<void> =>
+      db
+        .close()
+        .catch((err: unknown) => this.logger.error(`pg-boss's database did not close: ${errorMessage(err)}`));
+    if (await this.quiet(left, this.deadline)) return close();
+    this.logger.warn(
+      `Shutting down: pg-boss's database stays open past the stop's deadline for ${db.pending().length} query(s) still at it and the job(s) still running (${this.registry.running() || 'none'}); it closes once they end`,
+    );
+    void this.quiet(left).then(close);
   }
 
-  // A fetch that returns a job starts its handler, and a handler that ends starts pg-boss's completing query, each before a tick passes.
-  private async quiet(db: JobsDatabase): Promise<void> {
+  // A fetch that returns a job starts its handler, and a handler that ends starts pg-boss's completing query and clears its worker's jobs, each before a tick passes.
+  private async quiet(left: () => Promise<unknown>[], deadline?: ShutdownDeadline): Promise<boolean> {
     for (;;) {
-      const pending = [...db.pending(), ...this.registry.pending()];
-      if (pending.length > 0) {
-        await Promise.allSettled(pending);
+      const running = left();
+      if (running.length > 0) {
+        const settled = Promise.allSettled(running);
+        if (!deadline) await settled;
+        else if (!(await settlesWithin(settled, deadline.remainingMs()))) return false;
         continue;
       }
       await new Promise((resolve) => setImmediate(resolve));
-      if (db.pending().length + this.registry.pending().length === 0) return;
+      if (left().length === 0) return true;
     }
   }
 

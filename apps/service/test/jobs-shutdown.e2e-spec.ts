@@ -18,7 +18,7 @@ import { SchemaGuard } from '../src/database/schema-guard';
 import { DbosLifecycle } from '../src/dbos/dbos.lifecycle';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
 import type { WorkflowIR } from '../src/ir/models';
-import { JobRegistry, PG_BOSS } from '../src/jobs/jobs.module';
+import { JobRegistry, JobsLifecycle, PG_BOSS } from '../src/jobs/jobs.module';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
@@ -35,6 +35,7 @@ const HELD_QUEUE = 'e2e-held';
 const LATE_QUEUE = 'e2e-late';
 const SHORT_QUEUE = 'e2e-short';
 const FETCHED_QUEUE = 'e2e-fetched';
+const FETCHED_LATER_QUEUE = 'e2e-fetched-later';
 const SHUT_OUT =
   /Driver not Connected|Connection terminated|Cannot use a pool|DBOS\.launch|could not be started/;
 const JOBS_WAITED_ON = /^log: Shutting down: waiting up to \d+ ms for \d+ job\(s\) in flight: /;
@@ -962,7 +963,7 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
     const took = Date.now() - began;
     app = undefined;
 
-    expect(took).toBeLessThan(9_500);
+    expect(took).toBeLessThan(8_500);
     expect(lines).toContain(
       `warn: Shutting down: stopped waiting for job(s) still running 8000 ms into the stop: ${HELD_QUEUE}`,
     );
@@ -1004,7 +1005,7 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
     const closing = app.close().then(() => (closed = true));
     app = undefined;
     await reached(dbosStopping.promise, 'DBOS’s stop', 15_000);
-    expect(atDbosStop!.ms).toBeLessThan(9_500);
+    expect(atDbosStop!.ms).toBeLessThan(8_500);
     expect(atDbosStop!.job).toBe('retry');
     await new Promise((r) => setTimeout(r, 500));
     expect(closed).toBe(false);
@@ -1324,12 +1325,11 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
       }),
     );
     await reached(fetching.promise, 'the fetch of the queue', 10_000);
-    // pg-boss's stop queues its shutdown in a setImmediate before any I/O, so two ticks on it has kept or closed its database.
     const stop = boss.stop.bind(boss);
     const stopped = deferred();
     jest.spyOn(boss, 'stop').mockImplementation((options) => {
       const stopping = stop(options);
-      setImmediate(() => setImmediate(stopped.resolve));
+      void stopping.then(stopped.resolve, stopped.resolve);
       return stopping;
     });
 
@@ -1349,6 +1349,97 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
     expect(lines).toContain(
       `log: Shutting down: handed ${FETCHED_QUEUE} job ${fetchedLate} back to its queue as job ${after[1]!.id}`,
     );
+  }, 60_000);
+
+  it('a hand-back still running as pg-boss’s stop begins, before the deadline, is waited for, and so is one that starts while it waits, so each job handed back completes and its copy waits, keeping its retries', async () => {
+    app = await boot({ dbos: false });
+    const boss = app.get<PgBoss>(PG_BOSS);
+    const registry = app.get(JobRegistry);
+    const queues = [FETCHED_QUEUE, FETCHED_LATER_QUEUE];
+    await registry.register(async (jobs) => {
+      for (const queue of queues) await jobs.createQueue(queue);
+    });
+    const handed: string[] = [];
+    for (const queue of queues) handed.push((await boss.send(queue, { n: queue }, { retryLimit: 2 }))!);
+    const fetch = { reached: deferred(), release: released() };
+    const laterFetch = { reached: deferred(), release: released() };
+    const fetches = new Map<unknown, typeof fetch>([
+      [FETCHED_QUEUE, fetch],
+      [FETCHED_LATER_QUEUE, laterFetch],
+    ]);
+    const copying = deferred();
+    const copyRelease = released();
+    const laterCopyRelease = released();
+    const completeRelease = released();
+    const pgboss = boss.getDb();
+    const execute = pgboss.executeSql.bind(pgboss);
+    jest.spyOn(pgboss, 'executeSql').mockImplementation(async (text, values) => {
+      const held = text.includes('SKIP LOCKED') ? fetches.get(values[0]) : undefined;
+      if (held) {
+        fetches.delete(values[0]);
+        held.reached.resolve();
+        await held.release.promise;
+      } else if (text.includes('INSERT INTO') && values[1] === FETCHED_QUEUE) {
+        copying.resolve();
+        await copyRelease.promise;
+      } else if (text.includes('INSERT INTO') && values[1] === FETCHED_LATER_QUEUE) {
+        copyRelease.resolve();
+        await laterCopyRelease.promise;
+      } else if (text.includes('SET completed_on') && values[0] === FETCHED_QUEUE) {
+        laterCopyRelease.resolve();
+        await completeRelease.promise;
+      } else if (text.includes('SET completed_on') && values[0] === FETCHED_LATER_QUEUE) {
+        await completeRelease.promise;
+      }
+      return execute(text, values);
+    });
+    // A job pg-boss fails as it stops is failed before its completion, which is held until pg-boss has stopped.
+    const stopBoss = boss.stop.bind(boss);
+    jest.spyOn(boss, 'stop').mockImplementation((options) => {
+      const stopping = stopBoss(options);
+      void stopping.then(completeRelease.resolve, completeRelease.resolve);
+      return stopping;
+    });
+    let ran = 0;
+    await registry.register(async (jobs) => {
+      for (const queue of queues) {
+        await jobs.work(queue, () => {
+          ran += 1;
+          return Promise.resolve();
+        });
+      }
+    });
+    await reached(fetch.reached.promise, 'the fetch of the queue', 10_000);
+    await reached(laterFetch.reached.promise, 'the fetch of the later queue', 10_000);
+    const drain = registry.beforeApplicationShutdown.bind(registry);
+    jest.spyOn(registry, 'beforeApplicationShutdown').mockImplementation(async () => {
+      await drain();
+      fetch.release.resolve();
+      await reached(copying.promise, 'the first hand-back’s copy', 10_000);
+    });
+    const stopJobs = JobsLifecycle.prototype.stop;
+    jest.spyOn(JobsLifecycle.prototype, 'stop').mockImplementation(function (this: JobsLifecycle) {
+      const stopping = stopJobs.call(this);
+      laterFetch.release.resolve();
+      return stopping;
+    });
+
+    await app.close();
+    app = undefined;
+
+    expect(ran).toBe(0);
+    const kept = { retry_limit: 2, retry_count: 0, singleton_key: null };
+    for (const [i, queue] of queues.entries()) {
+      const after = await jobsOf(queue);
+      expect(after).toEqual([
+        { id: handed[i], state: 'completed', data: { n: queue }, ...kept },
+        { id: expect.any(String), state: 'created', data: { n: queue }, ...kept },
+      ]);
+      expect(lines).toContain(
+        `log: Shutting down: handed ${queue} job ${handed[i]} back to its queue as job ${after[1]!.id}`,
+      );
+    }
+    expect(lines.filter((line) => line.includes('stays open past'))).toEqual([]);
   }, 60_000);
 
   it.each([
