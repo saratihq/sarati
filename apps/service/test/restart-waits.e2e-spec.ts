@@ -939,12 +939,82 @@ describe('waits across a crash and a reboot (e2e, child process, DBOS on, mock a
       'both workflows ended',
     );
     expect(workflows.rows.map((w) => [w.status, /Run already ended/.test(w.error ?? '')])).toEqual([
-      ['ERROR', true],
+      ['SUCCESS', false],
       ['ERROR', true],
     ]);
     expect(workflows.rows.map((w, i) => Number(w.recovery_attempts) > attempts[i]!)).toEqual([true, true]);
     expect(await history()).toEqual(before);
     expect((await db.query(`SELECT 1 FROM runtime_blobs WHERE run_id = ANY($1)`, [ids])).rows).toEqual([]);
+  }, 120_000);
+
+  it('ends a run killed after it completed, before DBOS recorded that, as it completed: its workflow succeeds with no write to it, and its id answers what it recorded', async () => {
+    const runKey = `${MOCK_USER_ID}:end-unrecorded`;
+    const plan = {
+      id: 'plan-end-unrecorded',
+      nodes: [{ kind: 'waitForEvent', id: 'approve', topic: 'approval', timeoutMs: WINDOW_MS }],
+    };
+    expect((await post('/api/runs/async', { run_id: 'end-unrecorded', plan })).status).toBe(201);
+    await eventually(
+      () => parkedIn('end-unrecorded'),
+      (p) => p.length === 1,
+      'the approval parked',
+    );
+    const sysUrl = new URL(databaseUrl);
+    sysUrl.pathname = `${sysUrl.pathname}_dbos`;
+    const holder = new Client({ connectionString: sysUrl.toString() });
+    await holder.connect();
+    try {
+      // Held, DBOS can't record the workflow's end on its status row: the run completes, and the kill lands before DBOS records that.
+      await holder.query('BEGIN');
+      await holder.query(`SELECT 1 FROM dbos.workflow_status WHERE workflow_uuid = $1 FOR NO KEY UPDATE`, [
+        runKey,
+      ]);
+      expect(
+        (await post('/api/runs/end-unrecorded/events', { topic: 'approval', payload: { ok: true } })).status,
+      ).toBe(200);
+      await eventually(
+        () => db.query(`SELECT status FROM runtime_runs WHERE id = $1`, [runKey]),
+        (res) => res.rows[0]?.status === 'completed',
+        'the run completed',
+      );
+      await crash();
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+    const workflow = (): Promise<{ status: string }[]> =>
+      dbos
+        .query<{ status: string }>(`SELECT status FROM dbos.workflow_status WHERE workflow_uuid = $1`, [
+          runKey,
+        ])
+        .then((res) => res.rows);
+    expect(await workflow()).toEqual([{ status: 'PENDING' }]);
+    const history = async (): Promise<unknown[]> =>
+      (
+        await db.query(
+          `SELECT r.status, r.error, r.outputs::text, r.finished_at::text, r.decided_by, s.step_key,
+                  s.status AS step, s.output::text AS step_output, s.finished_at::text AS step_finished
+             FROM runtime_runs r JOIN runtime_run_steps s ON s.run_id = r.id WHERE r.id = $1`,
+          [runKey],
+        )
+      ).rows;
+    const before = await history();
+
+    await boot();
+    expect(
+      await eventually(workflow, (rows) => rows[0]?.status !== 'PENDING', 'the recovered workflow ending'),
+    ).toEqual([{ status: 'SUCCESS' }]);
+    expect(await history()).toEqual(before);
+    const resent = await post('/api/runs', { run_id: 'end-unrecorded', plan });
+    expect([resent.status, await resent.json()]).toEqual([
+      201,
+      {
+        planId: 'plan-end-unrecorded',
+        outputs: { approve: { ok: true } },
+        trace: [],
+        run_id: 'end-unrecorded',
+      },
+    ]);
   }, 120_000);
 
   it('ends a run holding a decision its workflow can no longer resume, keeping who decided, and leaves one it can resume', async () => {

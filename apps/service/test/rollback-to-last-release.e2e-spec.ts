@@ -1,6 +1,6 @@
 import { PARK_DELAY_ABOVE_MS } from '../src/runtime/timer-wait';
 import { lastRelease } from './support/earlier-build';
-import { MOCK_USER_ID, rollbackSuite } from './support/rollback';
+import { MOCK_USER_ID, rollbackSuite, type RunRow } from './support/rollback';
 
 const WINDOW_MS = 10 * 60_000;
 const PARKED_DELAY_MS = PARK_DELAY_ABOVE_MS + 1_000;
@@ -33,7 +33,7 @@ describe(`a run this version starts, across a rollback to ${LAST_RELEASE.tag} an
       ).rows.map((r) => [r.step_key, r.decided_by]),
     );
 
-  it('carries on there — decided, woken and its in-flight step run once more — and is picked up where it was on coming back', async () => {
+  it('carries on there — decided, woken and its in-flight step run once more — and is picked up where it was on coming back, a run killed there as it completed ending as it completed', async () => {
     const approve = (id: string, topic: string) => ({
       kind: 'waitForEvent',
       id,
@@ -97,22 +97,35 @@ describe(`a run this version starts, across a rollback to ${LAST_RELEASE.tag} an
       'fanned fork|1/finance',
       'untouched approve',
     ]);
-    await decide('decided', 'approval', 'approve');
-    await decide('fanned', 'legal', 'fork|0/legal');
-    const there = await eventually(
-      runs,
-      (now) =>
-        now.decided?.status === 'completed' &&
-        now.called?.status === 'completed' &&
-        now.timed?.status === 'completed',
-      `the decided run, the called run and the Wait step finishing on ${LAST_RELEASE.tag}`,
-      PARKED_DELAY_MS / 100,
-    );
-    expect(there.decided!.decided_by).toBe(MOCK_USER_ID);
-    expect(calls).toBe(2);
-    expect(await forkDeciders()).toEqual({ 'fork|0/legal': MOCK_USER_ID, 'fork|1/finance': null });
-    expect(there).toMatchObject({ untouched: { status: 'waiting' }, fanned: { status: 'waiting' } });
-    await service.crash();
+    // Held, DBOS can't record the decided run's end on its status row: the run completes there, and the kill lands before DBOS records that.
+    const holder = await rollback.systemDb();
+    let there: Record<string, RunRow>;
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT 1 FROM dbos.workflow_status WHERE workflow_uuid = $1 FOR NO KEY UPDATE`, [
+        `${MOCK_USER_ID}:decided`,
+      ]);
+      await decide('decided', 'approval', 'approve');
+      await decide('fanned', 'legal', 'fork|0/legal');
+      there = await eventually(
+        runs,
+        (now) =>
+          now.decided?.status === 'completed' &&
+          now.called?.status === 'completed' &&
+          now.timed?.status === 'completed',
+        `the decided run, the called run and the Wait step finishing on ${LAST_RELEASE.tag}`,
+        PARKED_DELAY_MS / 100,
+      );
+      expect(there.decided!.decided_by).toBe(MOCK_USER_ID);
+      expect(calls).toBe(2);
+      expect(await forkDeciders()).toEqual({ 'fork|0/legal': MOCK_USER_ID, 'fork|1/finance': null });
+      expect(there).toMatchObject({ untouched: { status: 'waiting' }, fanned: { status: 'waiting' } });
+      await service.crash();
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+    }
+    expect((await workflows()).decided).toBe('PENDING');
 
     await rollback.boot('this');
     await decide('untouched', 'approval', 'approve');

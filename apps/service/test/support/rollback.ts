@@ -29,6 +29,8 @@ export interface RollbackSuite {
   migrate: (build: 'this' | 'earlier') => Promise<string>;
   /** The app database. */
   db: () => Client;
+  /** A new connection to DBOS's system database, there once a build has booted, for the caller to end. */
+  systemDb: () => Promise<Client>;
   /** The fixture's address for `path`. */
   fixtureUrl: (path: string) => string;
   /** POST `body` as JSON to `path` on the service booted last. */
@@ -102,6 +104,7 @@ export function rollbackSuite(sha: string, onRequest: RequestListener): Rollback
       return `${stdout}${stderr}`;
     },
     db: () => db!,
+    systemDb: () => connectSystemDatabase(databaseUrl),
     fixtureUrl: (path) => `http://127.0.0.1:${(fixture.address() as AddressInfo).port}${path}`,
     post: (path, body) =>
       fetch(`${service!.base}${path}`, {

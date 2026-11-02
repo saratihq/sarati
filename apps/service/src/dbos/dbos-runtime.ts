@@ -7,7 +7,7 @@ import type { DagPlan } from '../runtime/dag-plan';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import { RunRecorderService } from '../runtime/run-recorder.service';
 import type { RunResult, RunStatus } from '../runtime/run-plan';
-import { DbosDurableStep, RowGatedDurableStep } from './dbos-durable-step';
+import { DbosDurableStep, RowGatedDurableStep, RunAlreadyEnded } from './dbos-durable-step';
 import { RecoveryGuard } from './recovery-guard';
 import { RUN_PLAN_V2_WORKFLOW, RUN_PLAN_WORKFLOW, RUN_PLAN_WORKFLOWS } from './run-plan-workflow';
 import { SequencedDurableStep, dbosOps } from './sequenced-durable-step';
@@ -56,11 +56,17 @@ async function runPlan(
       await guard.admit(runId!, checkpointed, () => gated.admit());
     }
   };
-  await enter().catch(async (err: unknown) => {
+  try {
+    await enter();
+  } catch (err) {
     // It never reaches the plan, whose end is what drops a run's file blobs.
     await interpreter.cleanupBlobs(runId!);
+    // Only its own workflow completes a run: this one ran to its end, and its process stopped before DBOS recorded that.
+    if (err instanceof RunAlreadyEnded && err.status === 'completed' && recorder) {
+      return { planId: args.plan.id, outputs: await recorder.runOutputs(runId!), trace: [] };
+    }
     throw err;
-  });
+  }
   return interpreter.run(args.plan, {
     externalUserId: args.externalUserId,
     durable: gated ?? substrate,
