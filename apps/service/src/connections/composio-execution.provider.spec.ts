@@ -8,7 +8,10 @@ import { DomainError } from '../common/domain-error';
 import type { EnvConfig } from '../config/env.config';
 import { ComposioProvider } from './composio.provider';
 import { ComposioExecutionProvider } from './composio-execution.provider';
+import type { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
+
+const noCharge = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
 
 /** Any scope will do here — the tests are about behaviour, not about whose key it is. */
 const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
@@ -80,8 +83,11 @@ describe('ComposioExecutionProvider (stubbed Composio)', () => {
     const config = {
       get: () => ({ composioBaseUrl: baseUrl }) as Partial<EnvConfig>,
     } as unknown as ConfigService<{ env: EnvConfig }, true>;
-    const keys = { composioApiKey: () => Promise.resolve('test-key') } as unknown as PlatformKeysService;
-    const composio = new ComposioProvider({} as DataSource, config, keys);
+    const keys = {
+      composioApiKey: () => Promise.resolve('test-key'),
+      composioPartition: () => 'project',
+    } as unknown as PlatformKeysService;
+    const composio = new ComposioProvider({} as DataSource, config, keys, noCharge);
     provider = new ComposioExecutionProvider(composio);
   });
 

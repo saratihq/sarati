@@ -3,9 +3,7 @@ import type { AddressInfo } from 'node:net';
 
 import { createDirectAuth } from '@sarati/actions-sdk';
 import type { AuthHandle } from '@sarati/actions-sdk';
-import type { ConfigService } from '@nestjs/config';
 
-import type { EnvConfig } from '../config/env.config';
 import { IdempotencyHttpClient } from './idempotency-http-client';
 import { SdkActionsProvider } from './sdk-actions.provider';
 
@@ -80,10 +78,7 @@ describe('IdempotencyHttpClient (B7 durability — deterministic idempotency key
   it('SdkActionsProvider threads the step key onto a real action call (wiring)', async () => {
     const srv = await captureServer();
     try {
-      const config = {
-        get: () => ({ composioApiKey: '', composioBaseUrl: '' }) as Partial<EnvConfig>,
-      } as unknown as ConfigService<{ env: EnvConfig }, true>;
-      const provider = new SdkActionsProvider(config);
+      const provider = new SdkActionsProvider();
       await provider.runAction({
         externalUserId: 'u',
         actionId: 'http.send_request',

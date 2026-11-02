@@ -1,11 +1,14 @@
 import type { ConfigService } from '@nestjs/config';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
+import type { DataSource } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import type { ConnectionsService, ManagedConnectionRef } from '../connections/connections.service';
 import type { EnvConfig } from '../config/env.config';
 import type { AgentModelAuth, AgentProvider } from '../runtime/agent';
 import { AgentModelCallProvider } from './agent-model-call.provider';
+import { ComposioProvider } from '../connections/composio.provider';
+import { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
 
 /** A fake `fetch` returning a canned JSON response and recording each call's url/headers/body. */
@@ -44,6 +47,13 @@ function platformKeys(apiKey = 'ak_test'): PlatformKeysService {
     scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
     composioApiKey: () => Promise.resolve(apiKey),
   } as unknown as PlatformKeysService;
+}
+
+/** The scope rule and the Composio client a managed connection opens its transport through, charging nothing. */
+function managed(apiKey = 'ak_test'): [PlatformKeysService, ComposioProvider] {
+  const keys = platformKeys(apiKey);
+  const usage = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
+  return [keys, new ComposioProvider({} as DataSource, config(), keys, usage)];
 }
 
 function connections(over: {
@@ -94,7 +104,6 @@ describe('AgentModelCallProvider', () => {
       body: { choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 4, completion_tokens: 2 } },
     }));
     const provider = new AgentModelCallProvider(
-      config(),
       connections({ ref: byoRef, credential: { api_key: 'sk-openai' } }),
       impl,
     );
@@ -113,7 +122,6 @@ describe('AgentModelCallProvider', () => {
       body: { candidates: [{ content: { parts: [{ text: 'ok' }] } }] },
     }));
     const provider = new AgentModelCallProvider(
-      config(),
       connections({ ref: byoRef, credential: { api_key: 'g-key' }, provider: 'gemini' }),
       impl,
     );
@@ -135,10 +143,9 @@ describe('AgentModelCallProvider', () => {
       };
     });
     const provider = new AgentModelCallProvider(
-      config(),
       connections({ ref: managedRef, provider: 'claude' }),
       impl,
-      platformKeys(),
+      ...managed(),
     );
 
     const turn = await provider.call(req('claude', 'claude-opus-4-8'), authFor({ connectionId: 'c1' }));
@@ -154,7 +161,7 @@ describe('AgentModelCallProvider', () => {
       body: { choices: [{ message: { content: 'ok' } }] },
     }));
     const store = connections({ ref: byoRef, credential: { api_key: 'sk-only' }, own: ['only-openai'] });
-    const provider = new AgentModelCallProvider(config(), store, impl);
+    const provider = new AgentModelCallProvider(store, impl);
 
     const turn = await provider.call(req('openai', 'gpt-4o'), authFor(undefined));
 
@@ -164,7 +171,7 @@ describe('AgentModelCallProvider', () => {
   });
 
   it('fails with NO account as a 422 naming the step, the provider AND where the credential goes', async () => {
-    const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
+    const provider = new AgentModelCallProvider(connections({ ref: null }));
     const err = await provider
       .call(req('claude', 'claude-opus-4-8'), { ...authFor(undefined), stepName: 'Think it over' })
       .catch((e: unknown) => e);
@@ -178,7 +185,7 @@ describe('AgentModelCallProvider', () => {
   });
 
   it("names the right app for a provider whose platform key isn't ours to explain", async () => {
-    const provider = new AgentModelCallProvider(config(), connections({ ref: null }));
+    const provider = new AgentModelCallProvider(connections({ ref: null }));
     const err = await provider.call(req('openai', 'gpt-5'), authFor(undefined)).catch((e: unknown) => e);
     const message = (err as DomainError).message;
     expect(message).toContain('no OpenAI account to run as');
@@ -217,7 +224,7 @@ describe('AgentModelCallProvider', () => {
         }),
         environmentNameOf: jest.fn().mockResolvedValue('staging'),
       } as unknown as ConnectionsService;
-      const provider = new AgentModelCallProvider(config(), store, undefined, platformKeys());
+      const provider = new AgentModelCallProvider(store, undefined, ...managed());
 
       const err = await provider
         .call(req('claude', 'claude-opus-4-8'), {
@@ -252,7 +259,7 @@ describe('AgentModelCallProvider', () => {
           managed: false,
         }),
       } as unknown as ConnectionsService;
-      const provider = new AgentModelCallProvider(config(), store, impl);
+      const provider = new AgentModelCallProvider(store, impl);
 
       await provider.call(req('openai', 'gpt-4o'), { ...authFor({ api_key: 'sk-inline' }), ...where });
 
@@ -264,7 +271,7 @@ describe('AgentModelCallProvider', () => {
   );
 
   it('throws on an unsupported provider', async () => {
-    const provider = new AgentModelCallProvider(config(), connections({ ref: byoRef, provider: 'grok' }));
+    const provider = new AgentModelCallProvider(connections({ ref: byoRef, provider: 'grok' }));
     const err = await provider
       .call(req('grok' as AgentProvider, 'x'), authFor({ connectionId: 'c1' }))
       .catch((e: unknown) => e);

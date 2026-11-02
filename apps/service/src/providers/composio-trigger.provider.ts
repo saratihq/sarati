@@ -35,15 +35,11 @@ interface CatalogCache {
   slugByType: Map<string, string>;
 }
 
-function cacheKeyOf(scope: PlatformKeyScope): string {
-  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
-}
-
 /** The Composio trigger rail: picker projection, caching, verification and type↔slug mapping; inert for a scope with no Composio key stored. */
 @Injectable()
 export class ComposioTriggerProvider {
   private readonly logger = new Logger(ComposioTriggerProvider.name);
-  // Per-scope: a Composio key addresses one project, so one scope's catalog is not another's.
+  // Per project partition: a Composio key addresses one project, so one project's catalog is not another's.
   private readonly cache = new Map<string, CatalogCache>();
 
   constructor(
@@ -59,7 +55,7 @@ export class ComposioTriggerProvider {
   /** The projected picker rows, lazily cached; a Composio hiccup serves the stale cache (or `[]`), never throws. */
   async catalog(scope: PlatformKeyScope): Promise<ComposioProjectedCatalogEntry[]> {
     if (!(await this.isConfigured(scope))) return [];
-    const cached = this.cache.get(cacheKeyOf(scope));
+    const cached = this.cache.get(this.platformKeys.composioPartition(scope));
     if (cached && Date.now() - cached.at < cached.ttl) return cached.entries;
     try {
       const [types, managed] = await Promise.all([
@@ -68,7 +64,7 @@ export class ComposioTriggerProvider {
       ]);
       const projected = this.project(types, managed);
       if (projected.entries.length > 0) {
-        this.cache.set(cacheKeyOf(scope), projected); // a good catalog — full TTL
+        this.cache.set(this.platformKeys.composioPartition(scope), projected); // a good catalog — full TTL
         return projected.entries;
       }
       // An HTTP-200 with `items: []` is a transient blip — it must NOT overwrite a previously good cache.
@@ -81,7 +77,7 @@ export class ComposioTriggerProvider {
 
   /** Keep the last-known entries/slugs but re-check soon (short TTL) — the failed/empty-refresh path. */
   private negativeCache(scope: PlatformKeyScope): ComposioProjectedCatalogEntry[] {
-    const key = cacheKeyOf(scope);
+    const key = this.platformKeys.composioPartition(scope);
     const prev = this.cache.get(key);
     const entries = prev?.entries ?? [];
     this.cache.set(key, {
@@ -142,16 +138,15 @@ export class ComposioTriggerProvider {
   }
 
   /**
-   * Verify a delivery against THIS scope's stored webhook secret. Fails CLOSED when the scope
-   * has none — an unverifiable delivery never fires, whichever scope it claims to be for.
+   * Verify a delivery against the webhook secret of the project THIS scope's key opens. Fails CLOSED when
+   * there is none — an unverifiable delivery never fires, whichever scope it claims to be for.
    */
   async verifyWebhook(
     scope: PlatformKeyScope,
     rawBody: Buffer,
     headers: Record<string, string>,
   ): Promise<ComposioWebhookVerifyResult> {
-    const secret = (await this.platformKeys.get(scope, 'composio_webhook_secret')) ?? '';
-    return verifyComposioWebhook(rawBody, headers, secret);
+    return verifyComposioWebhook(rawBody, headers, await this.platformKeys.composioWebhookSecret(scope));
   }
 
   /**

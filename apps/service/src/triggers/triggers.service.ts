@@ -61,6 +61,7 @@ import {
 import { WebhookSecretsService } from './webhook-secrets.service';
 import { verifyWebhookSignature, type WebhookVerification } from './webhook-verify';
 import { WorkflowAccessService } from '../workflows/workflow-access.service';
+import { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** One inbound delivery as the public intake sees it (raw bytes + headers required for HMAC verify). */
@@ -165,6 +166,7 @@ export class TriggersService {
     private readonly agentStepBus: AgentStepBus,
     private readonly triggerCatalog: TriggerCatalogService,
     private readonly platformKeys: PlatformKeysService,
+    private readonly composioUsage: ComposioUsageService,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
     @Inject(PG_POOL) private readonly pool: Pool,
   ) {}
@@ -386,9 +388,9 @@ export class TriggersService {
     // Inbound idempotency: delivery is at-least-once, so claim the id before firing.
     // Deliberately AFTER verification — an unverified delivery must not burn a genuine one's id.
     const webhookId = inbound.headers['webhook-id'];
-    if (!(await this.claimComposioDelivery(webhookId, triggerId))) {
-      return { fired: 0, duplicate: true };
-    }
+    const claim = await this.claimComposioDelivery(webhookId, triggerId);
+    if (claim === 'duplicate') return { fired: 0, duplicate: true };
+    if (claim === 'new') await this.countComposioDelivery(verifiedRows);
 
     const payload = composioDeliveryPayload(inbound.body);
     const deliveryAccountId = composioDeliveryAccountId(inbound.body);
@@ -416,7 +418,7 @@ export class TriggersService {
     for (const row of rows) {
       const scope = await this.platformKeys.scopeForWorkflow(row.workflowId);
       if (!scope) continue;
-      const key = scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
+      const key = this.platformKeys.composioPartition(scope);
       let ok = decided.get(key);
       if (ok === undefined) {
         const result = await this.composioTriggers.verifyWebhook(scope, inbound.rawBody, inbound.headers);
@@ -428,11 +430,26 @@ export class TriggersService {
     return verified;
   }
 
-  /** Claim a delivery id — the insert IS the lock; false once a claim of it has every run admitted. No id → fires anyway (fail open). */
-  private async claimComposioDelivery(webhookId: string | undefined, triggerId: string): Promise<boolean> {
+  /** Each person whose account a verified delivery came for has one more trigger event this month; best-effort, never fails the intake. */
+  private async countComposioDelivery(rows: RuntimeTriggerActivationEntity[]): Promise<void> {
+    const owners = [
+      ...new Set(rows.flatMap((row) => (row.connectionOwnerUserId ? [row.connectionOwnerUserId] : []))),
+    ];
+    await this.composioUsage
+      .countTriggerEvent(owners)
+      .catch((err: unknown) =>
+        this.logger.warn(`composio intake: trigger events not counted: ${errorMessage(err)}`),
+      );
+  }
+
+  /** Claim a delivery id — the insert IS the lock: `new` for the first claim, `readmit` while a claim's runs are not all admitted, else `duplicate`. No id → `new` (fail open). */
+  private async claimComposioDelivery(
+    webhookId: string | undefined,
+    triggerId: string,
+  ): Promise<'new' | 'readmit' | 'duplicate'> {
     if (!webhookId) {
       this.logger.warn('composio intake: delivery has no webhook-id — cannot dedupe, firing anyway');
-      return true;
+      return 'new';
     }
     const result = await this.dataSource.manager
       .createQueryBuilder()
@@ -446,20 +463,20 @@ export class TriggersService {
       .execute();
     if ((result.raw as unknown[] | undefined)?.length === 1) {
       await this.pruneComposioDeliveries();
-      return true;
+      return 'new';
     }
     const claim = await this.dataSource.manager.findOne(ComposioWebhookDeliveryEntity, {
       where: { webhookId },
     });
     if (claim?.admittedAt) {
       this.logger.log(`composio intake: duplicate delivery ${webhookId} (${triggerId}) — acked, not fired`);
-      return false;
+      return 'duplicate';
     }
     // Its claim's runs are not all admitted yet: each is admitted again under its own id, so none runs twice.
     this.logger.log(
       `composio intake: delivery ${webhookId} (${triggerId}) is not admitted yet — admitting its runs`,
     );
-    return true;
+    return 'readmit';
   }
 
   /** TTL-prune the ledger. Throttled, best-effort — housekeeping must never fail an intake. */
@@ -604,29 +621,29 @@ export class TriggersService {
    * too, so an in-flight subscribe (instance created, row not yet committed) is never killed.
    */
   async reapOrphanedComposioSubscriptions(): Promise<void> {
-    // Per SCOPE: each Composio project is addressed by its own key, and we never try to delete
+    // Once per Composio PROJECT: each is addressed by its own key, and we never try to delete
     // an instance we do not hold the key for.
     this.nextComposioOrphanCandidates = new Set();
-    for (const scope of await this.composioScopes()) {
+    for (const scope of await this.composioProjects()) {
       await this.reapScope(scope);
     }
     this.composioOrphanCandidates = this.nextComposioOrphanCandidates;
   }
 
-  /** Every scope that owns a live Composio subscription — the reaper's unit of work. */
-  private async composioScopes(): Promise<PlatformKeyScope[]> {
+  /** One scope per Composio project a live subscription sits in — the reaper's unit of work. */
+  private async composioProjects(): Promise<PlatformKeyScope[]> {
     const rows: Array<{ user_id: string | null; org_id: string | null }> = await this.dataSource.query(
       `SELECT DISTINCT w.user_id, w.org_id
          FROM runtime_trigger_activations a
          JOIN workflows w ON w.id = a.workflow_id
         WHERE a.composio_trigger_instance_id IS NOT NULL AND a.paused = false`,
     );
-    const scopes: PlatformKeyScope[] = [];
+    const byProject = new Map<string, PlatformKeyScope>();
     for (const row of rows) {
-      if (row.org_id) scopes.push({ kind: 'org', orgId: row.org_id });
-      else if (row.user_id) scopes.push({ kind: 'user', userId: row.user_id });
+      const scope = await this.platformKeys.scopeForOwners(row.user_id, row.org_id);
+      if (scope) byProject.set(this.platformKeys.composioPartition(scope), scope);
     }
-    return scopes;
+    return [...byProject.values()];
   }
 
   private async reapScope(scope: PlatformKeyScope): Promise<void> {

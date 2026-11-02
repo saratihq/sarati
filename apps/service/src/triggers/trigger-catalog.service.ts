@@ -7,7 +7,7 @@ import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
 import { AGENT_TOOL_PUBLIC } from '../runtime/workflow-tool-contract';
 
 import { ORCHESTR_SCHEDULE } from './schedule';
-import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** The PUBLIC type of the native inbound-webhook trigger kind (catalog + version-doc node_type). */
 export const INCOMING_WEBHOOK_PUBLIC = 'orchestr:webhook';
@@ -127,6 +127,7 @@ export class TriggerCatalogService {
     private readonly sdkWebhooks: SdkWebhookProvider,
     private readonly sdkPolling: SdkPollingProvider,
     private readonly composioTriggers: ComposioTriggerProvider,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
   /**
@@ -143,18 +144,19 @@ export class TriggerCatalogService {
     );
   }
 
-  /** Native + SDK + Composio triggers; a first-party entry wins any public-type overlap. */
+  /** Native + SDK + Composio triggers; a first-party entry wins any public-type overlap, and the hand-polled Composio ones are left out where the instance provides its own Composio account. */
   async list(scope: PlatformKeyScope): Promise<TriggerCatalogRow[]> {
+    const handPolled = this.platformKeys.composioManagedByInstance() ? [] : composioTriggerCatalog();
     const rows: TriggerCatalogRow[] = [
       ...NATIVE_TRIGGERS.map((entry) => ({ entry, rail: 'native' as const })),
       ...this.sdkWebhooks.catalog().map((entry) => ({ entry, rail: 'sdk' as const })),
       ...this.sdkPolling.catalog().map((entry) => ({ entry, rail: 'sdk' as const })),
-      ...composioTriggerCatalog().map((entry) => ({
+      ...handPolled.map((entry) => ({
         entry: entry as unknown as Record<string, unknown>,
         rail: 'composio' as const,
       })),
     ];
-    const seen = new Set(rows.map((row) => String(row.entry.type)));
+    const seen = new Set([...rows.map((row) => String(row.entry.type)), ...composioTriggerTypes()]);
     for (const entry of await this.composioTriggers.catalog(scope)) {
       if (seen.has(entry.type)) continue;
       seen.add(entry.type);

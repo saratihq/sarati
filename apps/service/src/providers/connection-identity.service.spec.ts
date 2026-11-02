@@ -53,6 +53,19 @@ describe('ConnectionIdentityService', () => {
     expect(refreshAccount).toHaveBeenCalledTimes(2);
   });
 
+  it('never asks for a caller that may not, answering only what is stored', async () => {
+    const unasked = build({ provider: 'gmail', account: null, checkedAt: null }, () =>
+      Promise.resolve(MAILBOX),
+    );
+    await expect(unasked.identity.account(TARGET, false, false)).resolves.toBeUndefined();
+    expect(unasked.refreshAccount).not.toHaveBeenCalled();
+    const answered = build({ provider: 'gmail', account: MAILBOX, checkedAt: new Date() }, () =>
+      Promise.resolve(null),
+    );
+    await expect(answered.identity.account(TARGET, false, false)).resolves.toEqual(MAILBOX);
+    expect(answered.refreshAccount).not.toHaveBeenCalled();
+  });
+
   it('asks once for one connection however many callers wait on it', async () => {
     let answer: (identity: AccountIdentity) => void = () => undefined;
     const { identity, refreshAccount } = build(

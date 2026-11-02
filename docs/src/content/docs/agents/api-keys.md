@@ -39,6 +39,10 @@ scope strings.
 <img class="shot shot-dark" src="/shots/api-keys-dark.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
 <img class="shot shot-light" src="/shots/api-keys-light.webp" alt="The API keys panel: name, scope checkboxes, and existing keys showing only their prefix." />
 
+Loading a step's dropdown from a connected account, or asking an app again which account a connection
+is (`GET /api/connections/<id>/account?refresh=1`), sends requests on that account, so it takes
+`connection:write`; with only `connection:read` a key reads what was last stored.
+
 Testing a branch under an environment takes `workflow:deploy` as well as `run:execute` — the same
 as promoting there, since it runs the branch on that environment's accounts. On Default,
 `run:execute` is enough.

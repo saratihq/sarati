@@ -16,6 +16,7 @@ import { type ReapResult, RunReaperService } from '../src/runs/run-reaper.servic
 import { ADMISSION_EPOCH_KEY } from '../src/triggers/activation-store';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { type ComposioFixture, startComposioFixture } from './support/composio-fixture';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -113,6 +114,7 @@ describe('intake admission before acknowledgement (e2e, isolated DB, DBOS on, mo
   let db: Client;
   let dbos: Client;
   let systemUrl = '';
+  let composio: ComposioFixture;
   let closed = false;
   const admitted: string[] = [];
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
@@ -412,6 +414,8 @@ describe('intake admission before acknowledgement (e2e, isolated DB, DBOS on, mo
     process.env.MOCK_AUTH = 'true';
     process.env.DBOS_ENABLED = 'true';
     delete process.env.DBOS_SYSTEM_DATABASE_URL;
+    composio = await startComposioFixture();
+    process.env.COMPOSIO_BASE_URL = composio.origin;
     db = new Client({ connectionString: process.env.DATABASE_URL });
     await db.connect();
     await db.query(`CREATE TABLE e2e_refused_runs (workflows uuid[] NOT NULL, allowed int NOT NULL)`);
@@ -509,6 +513,8 @@ describe('intake admission before acknowledgement (e2e, isolated DB, DBOS on, mo
     process.env.DATABASE_URL = ADMIN_URL;
     process.env.MOCK_AUTH = 'false';
     process.env.DBOS_ENABLED = 'false';
+    delete process.env.COMPOSIO_BASE_URL;
+    await composio.close();
   }, 60_000);
 
   async function expectAnsweredOnlyAfter(name: IntakeName, hold: () => Promise<Hold>, key: string) {

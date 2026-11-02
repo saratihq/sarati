@@ -2,15 +2,20 @@ import { Controller, Get, HttpException, Param, Query, Req, UseGuards } from '@n
 import type { Request } from 'express';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { requirePrincipal } from '../auth/principal';
+import { principalScopes, requirePrincipal } from '../auth/principal';
 import { Scope } from '../auth/scope.decorator';
+import { missingScope } from '../auth/scope-enforcer';
+import { scopeSatisfied } from '../auth/scopes';
+import { errorMessage } from '../common/error-message';
 import { type AccountIdentity, describeAccount } from '../connections/account-identity';
 import { ConnectionsService } from '../connections/connections.service';
+import { monthlyLimitOf } from '../platform/composio-usage.service';
+import type { AccountTarget } from './account-probes';
 import { ConnectionIdentityService } from './connection-identity.service';
 
 /** What a connection is authorized against — the provider's stored answer, asked again on `?refresh=1`. */
 export interface ConnectionAccountResult {
-  /** null when the provider was not asked (no probe for this app) or would not answer. */
+  /** null when the provider was not asked (no probe for this app, or the monthly limit refused it and nothing is stored) or would not answer. */
   account: AccountIdentity | null;
   /** Plain language for the connections list; never invents an account. */
   detail: string;
@@ -37,21 +42,44 @@ export class ConnectionAccountController {
     @Query('refresh') refresh?: string,
   ): Promise<ConnectionAccountResult> {
     const principal = requirePrincipal(req);
+    const mayAsk = scopeSatisfied(principalScopes(principal), 'connection:write');
+    if (refresh === '1' && !mayAsk) {
+      throw missingScope(['connection:write'], 'asking the app again sends a request on the account');
+    }
     const userId = principal.user.id;
     const summary = (await this.connections.list(userId)).find((row) => row.id === id);
     if (!summary) throw new HttpException({ detail: 'Connection not found' }, 404);
     if (!this.identity.canProbe(summary.provider)) {
       return { account: null, detail: `Sarati cannot yet ask ${summary.provider} which account this is.` };
     }
-    const account = await this.identity.account(
-      { connectionId: id, ownerUserId: userId, provider: summary.provider, orgId: principal.activeOrgId },
-      refresh === '1',
-    );
+    const target = {
+      connectionId: id,
+      ownerUserId: userId,
+      provider: summary.provider,
+      orgId: principal.activeOrgId,
+    };
+    let account: AccountIdentity | null | undefined;
+    try {
+      account = await this.identity.account(target, refresh === '1', mayAsk);
+    } catch (err) {
+      return this.refusedByLimit(err, target);
+    }
+    if (account === undefined) {
+      return { account: null, detail: `${summary.provider} has not been asked which account this is yet.` };
+    }
     return {
       account,
       detail: account
         ? `Authorized against ${describeAccount(account)}.`
         : `${summary.provider} would not say which account this is.`,
+    };
+  }
+
+  private async refusedByLimit(err: unknown, target: AccountTarget): Promise<ConnectionAccountResult> {
+    if (!monthlyLimitOf(err)) throw err;
+    return {
+      account: (await this.identity.account(target, false, false)) ?? null,
+      detail: `Sarati didn't ask ${target.provider} which account this is: ${errorMessage(err)}.`,
     };
   }
 }

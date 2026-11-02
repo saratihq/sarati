@@ -426,6 +426,22 @@ an address that answers the request itself rather than redirecting it to another
 redirects to its `https://` form is another origin too. See
 [Private addresses](/operate/configuration/#private-addresses).
 
+## A step says the monthly limit of app actions is used up
+
+```
+The monthly limit of 500 app actions per person on this instance is used up for the account this runs as — it resets on December 1, 2026 (UTC)
+```
+
+This instance connects apps through
+[its own Composio account](/operate/configuration/#one-composio-account-for-the-whole-instance), and
+the person whose one-click account the step runs as has used every app action it allows them this
+calendar month. Nothing was sent. **Settings → Platform keys** shows how many are used and when the
+count starts again. Until then, connect the app with your own credentials if it offers that, or ask
+the operator to raise `INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON`. A step under an environment
+counts against the owner of the slot's account, so a teammate's limit can stop it too. For the same
+reason a dropdown in the step inspector says so under its text field, and checking which account a
+connection is says Sarati didn't ask the app, keeping what it said last.
+
 ## A Mailchimp or Zendesk step refuses its server prefix or subdomain
 
 ```

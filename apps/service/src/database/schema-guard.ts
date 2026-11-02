@@ -207,6 +207,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='api_keys' AND column_name='org_id' AND is_nullable='NO'",
   },
+  {
+    migration: '047_composio_usage.sql',
+    probe:
+      "SELECT 1 FROM pg_constraint WHERE conname='composio_usage_month_start' AND to_regclass('public.composio_usage') IS NOT NULL",
+  },
 ];
 
 /**

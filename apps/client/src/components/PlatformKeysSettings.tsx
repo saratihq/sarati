@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, ExternalLink } from "lucide-react";
 import * as api from "@/api/client";
-import type { PlatformKeyName, PlatformKeysResponse } from "@/api/client";
+import type { ComposioUsage, PlatformKeyName, PlatformKeysResponse } from "@/api/client";
 import { useOrgs, activeOrgOf } from "@/store/useOrgs";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { InlineError } from "@/components/ui/inline-error";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatUtcDay } from "@/lib/format";
 import { toast } from "@/lib/toast";
 import { refreshComposerAvailability } from "@/lib/useComposerAvailable";
 
@@ -58,6 +58,64 @@ const KEYS: KeyCopy[] = [
     placeholder: "sk-ant-…",
   },
 ];
+
+const COMPOSIO_KEYS: ReadonlySet<PlatformKeyName> = new Set(["composio_api_key", "composio_webhook_secret"]);
+
+function usageLine(usage: ComposioUsage): { text: string; atLimit: boolean } {
+  const resets = formatUtcDay(usage.resets_at);
+  if (usage.actions_limit === 0) {
+    return { text: `App actions are off on this instance — the count starts again ${resets} (UTC).`, atLimit: true };
+  }
+  if (usage.actions_used >= usage.actions_limit) {
+    return {
+      text: `All ${usage.actions_limit} app actions used — steps on one-click accounts stop until ${resets} (UTC).`,
+      atLimit: true,
+    };
+  }
+  return {
+    text: `You've used ${usage.actions_used} of ${usage.actions_limit} app actions this month · resets ${resets} (UTC)`,
+    atLimit: false,
+  };
+}
+
+/** The one Composio row on an instance that provides its own account: nothing to enter, and how much of this month's allowance is used. */
+function InstanceComposioRow({ usage }: { usage: ComposioUsage | null }) {
+  const line = usage ? usageLine(usage) : null;
+  return (
+    <div className="rounded-lg p-4" style={{ background: "var(--orchestr-surface)", border: "1px solid var(--orchestr-line)" }}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium m-0" style={{ color: "var(--orchestr-ink)" }}>
+            Managed connections (Composio)
+          </p>
+          <p className="text-xs mt-1 mb-0 leading-relaxed" style={{ color: "var(--orchestr-ink-muted)" }}>
+            {"This instance connects Gmail, Slack and hundreds of other apps through its own Composio account — there is nothing to add here."}
+          </p>
+        </div>
+        <span
+          className="text-[11px] font-semibold shrink-0 inline-flex items-center gap-1"
+          style={{ color: "var(--orchestr-success)" }}
+        >
+          <Check size={12} />
+          Provided by this instance
+        </span>
+      </div>
+      {line && (
+        <p
+          className="text-xs mt-3 mb-0"
+          style={{ color: line.atLimit ? "var(--orchestr-warning)" : "var(--orchestr-ink-subtle)" }}
+        >
+          {line.text}
+        </p>
+      )}
+      {usage && usage.trigger_events > 0 && (
+        <p className="text-[11px] mt-1 mb-0" style={{ color: "var(--orchestr-ink-subtle)" }}>
+          {`${usage.trigger_events} app trigger ${usage.trigger_events === 1 ? "event" : "events"} received this month`}
+        </p>
+      )}
+    </div>
+  );
+}
 
 /**
  * The two optional platform credentials for the caller's ACTIVE context — a real organization's
@@ -126,6 +184,8 @@ export default function PlatformKeysSettings() {
   const inOrg = state?.scope === "org";
   const canManage = state?.can_manage ?? false;
   const orgName = activeOrg?.name ?? "this organization";
+  const byInstance = state?.keys.composio_api_key.managed_by_instance ?? false;
+  const editable = byInstance ? KEYS.filter((key) => !COMPOSIO_KEYS.has(key.name)) : KEYS;
 
   return (
     <section className="mt-10">
@@ -157,7 +217,8 @@ export default function PlatformKeysSettings() {
         {state !== null && (
           <>
             <div className="flex flex-col gap-4">
-              {KEYS.map((key) => {
+              {byInstance && <InstanceComposioRow usage={state.composio_usage} />}
+              {editable.map((key) => {
                 const row = state.keys[key.name];
                 const open = editing === key.name;
                 return (

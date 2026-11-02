@@ -13,6 +13,8 @@ import {
   transportFailure,
 } from '@sarati/actions-sdk';
 
+import { DomainError } from '../common/domain-error';
+import { errorMessage } from '../common/error-message';
 import { composioFetch } from '../connections/composio-http';
 
 /** Headers that must not ride to the proxy — it issues its own request and attaches the real credential itself. */
@@ -37,6 +39,8 @@ export interface ComposioProxyTransportOptions {
   apiKey: string;
   /** The managed connected-account id, e.g. `ca__…`. */
   connectedAccountId: string;
+  /** Counts the request against the person it acts for before it is sent; a refusal fails it unsent and is never retried. */
+  charge: () => Promise<void>;
   baseUrl?: string;
   timeoutMs?: number;
   fetchImpl?: FetchLike;
@@ -46,6 +50,18 @@ interface ProxyEnvelope {
   data?: unknown;
   status?: number;
   headers?: Record<string, unknown>;
+}
+
+// The SDK resends any failure that is not a non-retryable ActionError, and app helpers re-wrap an http_error, so a refused charge is a provider_error.
+function uncharged(err: unknown): ActionError {
+  const refusal = err instanceof DomainError ? err : null;
+  return new ActionError({
+    code: 'provider_error',
+    message: errorMessage(err),
+    status: refusal?.status ?? 0,
+    retryable: false,
+    ...(refusal?.details ? { detail: refusal.details } : {}),
+  });
 }
 
 // fetch reports a broken connection as a TypeError whose cause says what broke.
@@ -64,6 +80,7 @@ export class ComposioProxyTransport implements Transport {
   readonly kind = 'composio-proxy';
   private readonly apiKey: string;
   private readonly connectedAccountId: string;
+  private readonly charge: () => Promise<void>;
   private readonly baseUrl: string;
   private readonly origin: string;
   private readonly timeoutMs: number;
@@ -86,6 +103,7 @@ export class ComposioProxyTransport implements Transport {
     }
     this.apiKey = options.apiKey;
     this.connectedAccountId = options.connectedAccountId;
+    this.charge = options.charge;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.origin = new URL(this.baseUrl).origin;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -95,6 +113,9 @@ export class ComposioProxyTransport implements Transport {
   async send(request: NormalizedRequest): Promise<NormalizedResponse> {
     this.assertNoBinary(request);
     const payload = this.buildPayload(request);
+    await this.charge().catch((err: unknown) => {
+      throw uncharged(err);
+    });
 
     // Compose the caller's abort signal (if any) with the timeout.
     const controller = new AbortController();

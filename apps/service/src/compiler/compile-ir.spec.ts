@@ -1,23 +1,15 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import type { ConfigService } from '@nestjs/config';
-
-import type { EnvConfig } from '../config/env.config';
 import { emptySettings, type IREdge, type IRNode, type WorkflowIR } from '../ir/models';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
 import { SdkActionsProvider } from '../providers/sdk-actions.provider';
 import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagActionNode, DagIfNode } from '../runtime/dag-plan';
 
-// A config stub for the SDK provider — http.send_request is auth `none`.
-const sdkConfig = {
-  get: () => ({ composioApiKey: '', composioBaseUrl: '' }) as Partial<EnvConfig>,
-} as unknown as ConfigService<{ env: EnvConfig }, true>;
-
 /** A full ManagedIntegrationProvider backed by the SDK actions (no triggers here). */
 function sdkProvider(): ManagedIntegrationProvider {
-  const actions = new SdkActionsProvider(sdkConfig);
+  const actions = new SdkActionsProvider();
   return {
     key: 'sdk',
     runAction: (input) => actions.runAction(input),

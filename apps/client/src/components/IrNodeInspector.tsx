@@ -321,7 +321,8 @@ function JsonParamField({
 
 /**
  * Dropdown whose options load from `POST /node-types/:type/options`, refetching when the step's
- * connection changes. Any failure degrades to the plain text field so authoring is never blocked.
+ * connection changes. Any failure degrades to the plain text field so authoring is never blocked,
+ * under the reason a disabled result gives.
  */
 function DynamicOptionsField({
   nodeType,
@@ -346,6 +347,7 @@ function DynamicOptionsField({
   connectionHint?: string;
 }) {
   const [ready, setReady] = useState<{ options: DropdownOption[]; placeholder?: string } | null>(null);
+  const [disabledReason, setDisabledReason] = useState<string | null>(null);
   useEffect(() => {
     // Deliberately no synchronous reset: the `cancelled` guard drops stale responses instead.
     let cancelled = false;
@@ -355,12 +357,16 @@ function DynamicOptionsField({
         if (cancelled) return;
         if (!res.disabled && Array.isArray(res.options) && res.options.length > 0) {
           setReady({ options: res.options, placeholder: res.placeholder });
+          setDisabledReason(null);
         } else {
           setReady(null); // disabled/empty → keep the text fallback
+          setDisabledReason(res.disabled && res.placeholder ? res.placeholder : null);
         }
       })
       .catch(() => {
-        if (!cancelled) setReady(null); // 404 / transient → text fallback
+        if (cancelled) return;
+        setReady(null); // 404 / transient → text fallback
+        setDisabledReason(null);
       });
     return () => {
       cancelled = true;
@@ -368,16 +374,17 @@ function DynamicOptionsField({
   }, [nodeType, prop, connectionId]);
 
   if (!ready) {
+    const hint = connectionHint ?? (connectionId ? disabledReason : null);
     return (
       <>
         {fallback}
-        {connectionHint && (
+        {hint && (
           <p
             className="text-[10px] m-0 mt-1 leading-snug"
             style={{ color: "var(--orchestr-ink-subtle)" }}
             data-testid={`dynamic-options-hint-${prop}`}
           >
-            {connectionHint}
+            {hint}
           </p>
         )}
       </>

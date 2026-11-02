@@ -5,6 +5,7 @@ import { ShutdownDeadline } from './common/shutdown-deadline';
 import { ENTITLEMENTS_PROVIDER, UnlimitedEntitlements } from './entitlements/entitlements';
 import { EventsService } from './events/events.service';
 import { OrgsService } from './orgs/orgs.service';
+import { ComposioUsageService } from './platform/composio-usage.service';
 import { PlatformKeysService } from './platform/platform-keys.service';
 import { PolicyService } from './policy/policy.service';
 
@@ -21,6 +22,7 @@ import { PolicyService } from './policy/policy.service';
     PolicyService,
     EncryptionService,
     PlatformKeysService,
+    ComposioUsageService,
     ShutdownDeadline,
     { provide: ENTITLEMENTS_PROVIDER, useClass: UnlimitedEntitlements },
   ],
@@ -30,6 +32,7 @@ import { PolicyService } from './policy/policy.service';
     PolicyService,
     EncryptionService,
     PlatformKeysService,
+    ComposioUsageService,
     ShutdownDeadline,
     ENTITLEMENTS_PROVIDER,
   ],

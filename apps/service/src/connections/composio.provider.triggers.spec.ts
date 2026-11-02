@@ -4,7 +4,10 @@ import { fetch } from 'undici';
 
 import type { EnvConfig } from '../config/env.config';
 import { ComposioProvider } from './composio.provider';
+import type { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
+
+const noCharge = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
 
 /** Any scope will do here — the tests are about behaviour, not about whose key it is. */
 const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
@@ -33,8 +36,11 @@ function makeProvider(): ComposioProvider {
   const config = {
     get: () => ({ composioBaseUrl: 'https://backend.composio.dev' }),
   } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const keys = { composioApiKey: () => Promise.resolve('test-key') } as unknown as PlatformKeysService;
-  return new ComposioProvider({} as DataSource, config, keys);
+  const keys = {
+    composioApiKey: () => Promise.resolve('test-key'),
+    composioPartition: () => 'project',
+  } as unknown as PlatformKeysService;
+  return new ComposioProvider({} as DataSource, config, keys, noCharge);
 }
 
 describe('ComposioProvider — trigger instances (v3, fetch mocked)', () => {

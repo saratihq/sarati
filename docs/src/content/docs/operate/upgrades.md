@@ -418,6 +418,16 @@ What a caller of the API sees change:
 - **A caught test event is the trigger as a run sees it.** `GET /api/catch/:id` returns `payload` with
   the body at `body` and an object's fields beside it, where it returned the body alone.
 
+#### A key that may only read sends nothing on an account
+
+Loading a step's dropdown from a connected account (`POST /api/node-types/<type>/options` with a
+`connection_id`) and asking an app again which account a connection is
+(`GET /api/connections/<id>/account?refresh=1`) send requests on that account, so an API key now needs
+`connection:write` for them, where `workflow:read` or `connection:read` was enough. Without it they
+answer `403` naming the scope, and nothing is sent. Such a key still loads a dropdown that needs no
+account and reads the account a connection last named; for a connection never asked, it gets
+`account: null` without Sarati asking. Signed-in sessions are unchanged.
+
 ### v0.2.26: the service opens no port but its own
 
 The service listens on its `PORT` alone. Earlier versions, with durable runs on (`DBOS_ENABLED`, the

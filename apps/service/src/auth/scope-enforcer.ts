@@ -36,10 +36,17 @@ export class ScopeEnforcer {
 
     if (required.some((scope) => scopeSatisfied(principal.scopes, scope))) return;
 
-    throw new ForbiddenException({
-      detail: required.includes(NON_GRANTABLE_SCOPE)
-        ? 'API keys cannot manage API keys. Use a signed-in session.'
-        : `This API key is missing the ${required.map((s) => `"${s}"`).join(' or ')} scope.`,
-    });
+    if (required.includes(NON_GRANTABLE_SCOPE)) {
+      throw new ForbiddenException({ detail: 'API keys cannot manage API keys. Use a signed-in session.' });
+    }
+    throw missingScope(required);
   }
+}
+
+/** A key's refusal for lacking every one of `required`, worded alike wherever it is asked; `because` says why a route asks it of only some requests. */
+export function missingScope(required: readonly ApiScope[], because?: string): ForbiddenException {
+  const named = required.map((s) => `"${s}"`).join(' or ');
+  return new ForbiddenException({
+    detail: `This API key is missing the ${named} scope${because ? `: ${because}` : ''}.`,
+  });
 }

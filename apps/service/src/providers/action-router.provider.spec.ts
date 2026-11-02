@@ -18,6 +18,7 @@ function platformKeysStub(): PlatformKeysService {
   return {
     scopeFor: (userId: string) => Promise.resolve({ kind: 'user' as const, userId }),
     composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? 'ak_test'),
+    composioManagedByInstance: () => false,
   } as unknown as PlatformKeysService;
 }
 

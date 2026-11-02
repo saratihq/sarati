@@ -197,6 +197,9 @@ const asksPersonalByMembership = (text: string): boolean =>
     /\borg_members\b|\bOrgMemberEntity\b/.test(enclosingQuery(node).getText()),
   );
 
+const parsed = (text: string): ts.SourceFile =>
+  ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
+
 // Whether `node` reads a key's org: `.keyOrgId` (or `?.`), `['keyOrgId']`, or a destructuring of it.
 function readsKeyOrgId(node: ts.Node): boolean {
   if (ts.isPropertyAccessExpression(node)) return node.name.text === 'keyOrgId';
@@ -212,14 +215,85 @@ function readsKeyOrgId(node: ts.Node): boolean {
 }
 
 function keyOrgIdReads(text: string): number {
-  const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
   let reads = 0;
   const visit = (node: ts.Node): void => {
     if (readsKeyOrgId(node)) reads += 1;
     ts.forEachChild(node, visit);
   };
-  ts.forEachChild(file, visit);
+  ts.forEachChild(parsed(text), visit);
   return reads;
+}
+
+// Every string a source spells out: its string literals, and the text parts of its templates and `+` joins.
+function spelledStrings(text: string): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    const isPart =
+      ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.PlusToken;
+    const spelled = isPart ? undefined : literalText(node);
+    if (spelled !== undefined) found.push(spelled.replace(/ \? /g, ''));
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(parsed(text), visit);
+  return found;
+}
+
+// How many times a source calls `name(…)` or `x.name(…)`, or constructs `new name(…)`.
+function callsTo(text: string, name: string): number {
+  let calls = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && callName(node) === name) calls += 1;
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name)
+      calls += 1;
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(parsed(text), visit);
+  return calls;
+}
+
+const TOOL_EXECUTE = '/api/v3/tools/execute';
+const SENDS = new Set(['send', 'request', 'composioFetch']);
+
+function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | undefined {
+  for (let at = node.parent; at; at = at.parent) {
+    if (ts.isFunctionLike(at) && 'body' in at && at.body) return at;
+  }
+  return undefined;
+}
+
+function functionLabel(fn: ts.FunctionLikeDeclaration | undefined): string {
+  if (!fn) return '<module>';
+  const name = fn.name && ts.isIdentifier(fn.name) ? fn.name.text : '<anonymous>';
+  const owner = ts.isClassLike(fn.parent) && fn.parent.name ? `${fn.parent.name.text}.` : '';
+  return `${owner}${name}`;
+}
+
+// Where a source spells a Composio tool-execution path, and whether its function charges before the request that carries it.
+function toolExecutions(text: string): Array<{ at: string; chargedFirst: boolean }> {
+  const found: Array<{ at: string; chargedFirst: boolean }> = [];
+  const visit = (node: ts.Node): void => {
+    const isPart =
+      ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.PlusToken;
+    const spelled = isPart ? undefined : literalText(node)?.replace(/ \? /g, '');
+    if (spelled?.includes(TOOL_EXECUTE)) {
+      const fn = enclosingFunction(node);
+      let sent: ts.CallExpression | undefined;
+      for (let at = node.parent; at && at !== fn; at = at.parent) {
+        if (ts.isCallExpression(at) && SENDS.has(callName(at))) sent = at;
+      }
+      const charges: ts.CallExpression[] = [];
+      const collect = (inner: ts.Node): void => {
+        if (ts.isCallExpression(inner) && callName(inner) === 'charge') charges.push(inner);
+        ts.forEachChild(inner, collect);
+      };
+      if (fn?.body) collect(fn.body);
+      const chargedFirst = sent !== undefined && charges.some((c) => c.getEnd() <= sent.getStart());
+      found.push({ at: functionLabel(fn), chargedFirst });
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(parsed(text), visit);
+  return found;
 }
 
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
@@ -393,6 +467,91 @@ describe('vault: one definition site per load-bearing question', () => {
     ]);
     expect(callers('sameWebhookIntake')).toEqual(['triggers/canvas/activation-row.ts']);
     expect(readers).toEqual(['config/env.config.ts', 'triggers/canvas/webhook-url.ts']);
+  });
+
+  /** Constitution #25: whose Composio key and webhook secret a call uses has one answer, and only one client holds the key. */
+  it('only PlatformKeysService answers which Composio key a call uses', () => {
+    const where = (found: (f: { rel: string; text: string }) => boolean): string[] =>
+      sources()
+        .filter(found)
+        .map((f) => f.rel)
+        .sort();
+    const spells = (needle: string) => (f: { text: string }) =>
+      spelledStrings(f.text).some((spelled) => spelled.includes(needle));
+    const names = (identifier: string) => (f: { text: string }) =>
+      new RegExp(`\\b${identifier}\\b`).test(f.text);
+    const calls = (name: string) => (f: { text: string }) => callsTo(f.text, name) > 0;
+
+    expect(where(spells('composio_api_key'))).toEqual(['platform/platform-keys.service.ts']);
+    expect(where(spells('composio_webhook_secret'))).toEqual(['platform/platform-keys.service.ts']);
+    expect(where(names('instanceComposioApiKey'))).toEqual([
+      'config/env.config.ts',
+      'platform/platform-keys.service.ts',
+    ]);
+    expect(where(names('instanceComposioWebhookSecret'))).toEqual([
+      'config/env.config.ts',
+      'platform/platform-keys.service.ts',
+    ]);
+    expect(where(names('instanceComposioMonthlyActionsPerPerson'))).toEqual([
+      'config/env.config.ts',
+      'platform/composio-usage.service.ts',
+    ]);
+    expect(where((f) => f.rel !== 'platform/platform-keys.service.ts' && calls('composioApiKey')(f))).toEqual(
+      ['connections/composio.provider.ts'],
+    );
+    expect(
+      where((f) => f.rel !== 'platform/platform-keys.service.ts' && calls('composioWebhookSecret')(f)),
+    ).toEqual(['providers/composio-trigger.provider.ts']);
+    expect(where(calls('composioFetch'))).toEqual([
+      'connections/composio.provider.ts',
+      'providers/composio-proxy-transport.ts',
+    ]);
+    expect(where(calls('ComposioProxyTransport'))).toEqual(['connections/composio.provider.ts']);
+    expect(where(spells('x-api-key'))).toEqual(['connections/composio-http.ts']);
+  });
+
+  /** Constitution #25: every Composio tool execution is charged to its person before it is sent, and only the ledger's service reads or writes the ledger. */
+  it('every Composio tool execution is charged before it is sent', () => {
+    const executions = sources()
+      .flatMap((f) => toolExecutions(f.text).map((e) => ({ ...e, at: `${f.rel} ${e.at}` })))
+      .sort((a, b) => a.at.localeCompare(b.at));
+    const ledger = sources()
+      .filter((f) => nodesNaming(f.text, 'composio_usage').length > 0)
+      .map((f) => f.rel);
+
+    expect(executions).toEqual([
+      { at: 'connections/composio.provider.ts ComposioProvider.executeTool', chargedFirst: true },
+      { at: 'providers/composio-proxy-transport.ts ComposioProxyTransport.send', chargedFirst: true },
+    ]);
+    expect(ledger).toEqual(['platform/composio-usage.service.ts']);
+  });
+
+  /** Constitution #25: the guard above finds a tool execution however its path is spelled, and judges its charge by where it sits. */
+  it('finds a Composio tool execution in a string, a template or a join, and calls it charged only when a charge comes first in its function', () => {
+    const uncharged = [
+      "class P { async run() { return this.send(key, 'POST', '/api/v3/tools/execute/X', {}); } }",
+      'class P { async run() { const r = await this.request(s, `/api/v3/tools/execute/${slug}`); await this.usage.charge(u); return r; } }',
+      "class P { async run() { return composioFetch(key, base + '/api/v3/tools/' + 'execute/proxy', init); } }",
+      "class P { async pay() { await this.usage.charge(u); } async run() { return this.send(key, 'POST', '/api/v3/tools/execute/X'); } }",
+      "const EXECUTE = '/api/v3/tools/execute/'; class P { async run() { await this.charge(); return this.send(key, 'POST', EXECUTE + slug); } }",
+      "class P { async run() { await this.charge(); return fetch('/api/v3/tools/execute/X'); } }",
+    ];
+    const charged = [
+      "class P { async run() { await this.usage.charge(u); return this.send(key, 'POST', `/api/v3/tools/execute/${slug}`, {}); } }",
+      'class P { async send(r) { await this.charge().catch(() => { throw r; }); return composioFetch(this.key, `${this.base}/api/v3/tools/execute/proxy`, init); } }',
+    ];
+    const unrelated = [
+      "class P { async run() { return this.send(key, 'GET', '/api/v3/tools?toolkit_slug=x'); } }",
+      '// a comment naming /api/v3/tools/execute/X',
+    ];
+
+    expect(uncharged.map((source) => toolExecutions(source).map((e) => e.chargedFirst))).toEqual(
+      uncharged.map(() => [false]),
+    );
+    expect(charged.map((source) => toolExecutions(source).map((e) => e.chargedFirst))).toEqual(
+      charged.map(() => [true]),
+    );
+    expect(unrelated.flatMap((source) => toolExecutions(source))).toEqual([]);
   });
 
   /** Constitution #22: which org is a user's personal one is answered by `OrgsService.personalOrgOf`, by the account it belongs to, never by a membership in a personal org. */

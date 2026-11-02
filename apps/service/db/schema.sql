@@ -1856,6 +1856,22 @@ CREATE TABLE public.oidc_login_states (
 
 CREATE INDEX ix_oidc_login_states_expires_at ON public.oidc_login_states USING btree (expires_at);
 
+--
+-- Name: composio_usage; Type: TABLE; Schema: public; Owner: orchestr
+--
+
+CREATE TABLE public.composio_usage (
+    user_id uuid NOT NULL,
+    month date NOT NULL,
+    actions integer DEFAULT 0 NOT NULL,
+    trigger_events integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT composio_usage_pkey PRIMARY KEY (user_id, month),
+    CONSTRAINT composio_usage_month_start CHECK (EXTRACT(day FROM month) = 1),
+    CONSTRAINT composio_usage_counts_check CHECK (actions >= 0 AND trigger_events >= 0),
+    CONSTRAINT composio_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
+);
+
 
 --
 -- PostgreSQL database dump complete

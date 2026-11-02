@@ -8,6 +8,9 @@ import { DEFAULT_DATABASE_URL } from './default-database-url';
 
 const INSECURE_SECRET_KEY = 'change-me-in-production';
 
+const DEFAULT_MONTHLY_ACTIONS_PER_PERSON = 500;
+const MAX_INT4 = 2_147_483_647;
+
 /** Where the client runs in development — the one default behind CORS, azp and the OAuth redirect. */
 const DEFAULT_CLIENT_ORIGIN = 'http://localhost:3100';
 
@@ -200,10 +203,23 @@ export class EnvConfig {
   @IsBoolean()
   mockAuth = false;
 
-  // ── Composio managed connections. The API key is set in Settings, not here. ──
+  // ── Composio managed connections: a key per person or workspace in Settings, unless this instance provides one. ──
   /** Composio API base URL — overridable so tests can point at a stub. */
   @IsString()
   composioBaseUrl = 'https://backend.composio.dev';
+
+  /** The one Composio key every person's managed connections use; empty = each person or workspace sets their own in Settings. */
+  @IsString()
+  instanceComposioApiKey = '';
+
+  /** The webhook secret of the project `instanceComposioApiKey` opens; set exactly when it is. */
+  @IsString()
+  instanceComposioWebhookSecret = '';
+
+  /** App actions each person may run through the instance's Composio key per UTC calendar month; 0 runs none. */
+  @IsInt()
+  @Min(0)
+  instanceComposioMonthlyActionsPerPerson = DEFAULT_MONTHLY_ACTIONS_PER_PERSON;
 
   /** Open-core edition flag: gates ee-only wiring, never core logic. */
   @IsIn(['oss', 'cloud'])
@@ -367,6 +383,50 @@ function applySignInDoors(cfg: EnvConfig, raw: Record<string, string | undefined
   }
 }
 
+const INSTANCE_KEY = 'INSTANCE_COMPOSIO_API_KEY';
+const INSTANCE_SECRET = 'INSTANCE_COMPOSIO_WEBHOOK_SECRET';
+const INSTANCE_CAP = 'INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON';
+
+// Values are credentials, so a refusal names the variable and never echoes what it holds.
+function instanceCredential(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? '';
+  if (/[\s\p{Cc}]/u.test(value)) {
+    throw new Error(`${name} must not contain spaces, line breaks or other control characters`);
+  }
+  return value;
+}
+
+/** The instance's own Composio account: key and webhook secret together or neither, and a whole-number monthly cap only beside them. */
+function instanceComposio(raw: Record<string, string | undefined>): {
+  instanceComposioApiKey: string;
+  instanceComposioWebhookSecret: string;
+  instanceComposioMonthlyActionsPerPerson: number;
+} {
+  const key = instanceCredential(INSTANCE_KEY, raw[INSTANCE_KEY]);
+  const secret = instanceCredential(INSTANCE_SECRET, raw[INSTANCE_SECRET]);
+  const cap = raw[INSTANCE_CAP]?.trim() ?? '';
+  if (Boolean(key) !== Boolean(secret)) {
+    throw new Error(
+      `${INSTANCE_KEY} and ${INSTANCE_SECRET} are set together or not at all — ${key ? INSTANCE_SECRET : INSTANCE_KEY} is missing`,
+    );
+  }
+  if (cap && !key) {
+    throw new Error(
+      `${INSTANCE_CAP} limits the instance's own Composio account, so it needs ${INSTANCE_KEY} and ${INSTANCE_SECRET} — without them each person uses their own key, with no limit`,
+    );
+  }
+  if (cap && (!/^\d+$/.test(cap) || Number(cap) > MAX_INT4)) {
+    throw new Error(
+      `${INSTANCE_CAP} must be a whole number of app actions from 0 to ${MAX_INT4}, got ${JSON.stringify(cap)}`,
+    );
+  }
+  return {
+    instanceComposioApiKey: key,
+    instanceComposioWebhookSecret: secret,
+    instanceComposioMonthlyActionsPerPerson: cap ? Number(cap) : DEFAULT_MONTHLY_ACTIONS_PER_PERSON,
+  };
+}
+
 /** TRUST_PROXY_HOPS, or the replaced TRUST_PROXY_HEADERS flag read as one hop; never suggests a value that shares a bucket. */
 function proxyHops(raw: Record<string, string | undefined>): number {
   const hops = raw.TRUST_PROXY_HOPS?.trim() ?? '';
@@ -432,6 +492,7 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
       composioBaseUrl: raw.COMPOSIO_BASE_URL
         ? parseApiBaseUrl('COMPOSIO_BASE_URL', raw.COMPOSIO_BASE_URL)
         : undefined,
+      ...instanceComposio(raw),
       edition: (raw.EDITION ?? 'oss').trim().toLowerCase(),
       frontendUrl: raw.FRONTEND_URL || DEFAULT_CLIENT_ORIGIN,
       throttleLimit: asInt('THROTTLE_LIMIT', raw.THROTTLE_LIMIT, 60),

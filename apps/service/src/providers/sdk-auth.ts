@@ -5,6 +5,7 @@ import {
   createDirectAuth,
   type DirectCredential,
   type FetchLike,
+  type Transport,
 } from '@sarati/actions-sdk';
 
 import { DomainError } from '../common/domain-error';
@@ -17,7 +18,12 @@ import {
   type RunAsStep,
   type RunAsWhere,
 } from '../connections/run-as-account';
-import { ComposioProxyTransport } from './composio-proxy-transport';
+
+/** Opens the managed (Composio) transport for a connected account, each request charged to `personId`; null when no Composio key serves the run. */
+export type ManagedTransportOpener = (
+  connectedAccountId: string,
+  personId: string,
+) => Promise<Transport | null>;
 
 /**
  * The ONE credential-resolution path shared by every in-process SDK rail (actions AND the agent model call) —
@@ -30,9 +36,9 @@ export interface SdkAuthContext {
   auth: unknown;
   /** The connection store; absent only in `new`-without-DI unit tests. */
   connections?: ConnectionsService;
-  composioApiKey: string;
-  composioBaseUrl: string;
-  /** Test-only fetch in place of the network hop: the SDK's SSRF-guarded one for a direct credential, `composioFetch`'s for a managed one. */
+  /** How a managed connection reaches its app; absent where no Composio client is wired. */
+  managedTransport?: ManagedTransportOpener;
+  /** Test-only fetch in place of a direct credential's network hop: the SDK's SSRF-guarded one. */
   fetchImpl?: FetchLike;
   /** The step the run-as rule decided this account for, and where it runs; absent where no step runs, e.g. an options picker. */
   decided?: { step: Pick<RunAsStep, 'name' | 'app' | 'label'>; where: RunAsWhere };
@@ -83,21 +89,15 @@ export async function resolveSdkAuthHandle(
           422,
         );
       }
-      if (!ctx.composioApiKey) {
+      // The person charged is the connection's owner, whom managedRef has just proved it belongs to.
+      const transport = await ctx.managedTransport?.(ref.connectedAccountId, ctx.externalUserId);
+      if (!transport) {
         throw new DomainError(
           'This step runs on a managed connection, but managed connections are not configured',
           422,
         );
       }
-      return createAuth(
-        scheme,
-        new ComposioProxyTransport({
-          apiKey: ctx.composioApiKey,
-          connectedAccountId: ref.connectedAccountId,
-          baseUrl: ctx.composioBaseUrl,
-          ...fetchOptions,
-        }),
-      );
+      return createAuth(scheme, transport);
     }
 
     // BYO/direct connection: decrypt and shape into an SDK DirectCredential.

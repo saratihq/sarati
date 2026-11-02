@@ -4,7 +4,9 @@ import type { Request } from 'express';
 import type { DropdownResult } from '@sarati/actions-sdk';
 
 import { AuthGuard } from '../auth/auth.guard';
-import { principalOf } from '../auth/principal';
+import { principalOf, principalScopes } from '../auth/principal';
+import { missingScope } from '../auth/scope-enforcer';
+import { scopeSatisfied } from '../auth/scopes';
 import { DomainError } from '../common/domain-error';
 import {
   toCatalogEntry,
@@ -81,6 +83,12 @@ export class NodeTypesController {
   ): Promise<DropdownResult<unknown>> {
     const principal = principalOf(req);
     if (!principal) throw new DomainError('Unauthenticated', 401);
+    if (body.connection_id && !scopeSatisfied(principalScopes(principal), 'connection:write')) {
+      throw missingScope(
+        ['connection:write'],
+        'loading options from a connected account sends requests on it',
+      );
+    }
     const opts = {
       externalUserId: principal.user.id,
       ...(body.connection_id ? { connectionId: body.connection_id } : {}),

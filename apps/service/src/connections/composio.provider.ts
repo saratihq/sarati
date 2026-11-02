@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
+import type { FetchLike } from '@sarati/actions-sdk';
 import type { DataSource, EntityManager } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
@@ -11,13 +12,10 @@ import { isRecord } from '../common/json-util';
 import type { EnvConfig } from '../config/env.config';
 import { ComposioAuthConfigEntity } from '../database/entities/composio-auth-config.entity';
 import { now } from '../database/ids';
+import { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
+import { ComposioProxyTransport } from '../providers/composio-proxy-transport';
 import { composioFetch } from './composio-http';
-
-/** Cache partition per owning scope — never share one scope's Composio project data with another. */
-function scopeKey(scope: PlatformKeyScope): string {
-  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
-}
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const TOOLKIT_CACHE_TTL_MS = 10 * 60_000;
@@ -177,16 +175,16 @@ export class ComposioRequestError extends DomainError {
 }
 
 /**
- * Thin client for Composio's v3 API — it only BROKERS auth (managed auth configs, connect links, account
- * status/deletion); execution goes through ComposioExecutionProvider. Inert until a Composio key is
- * set in Settings; the key is read per request, never snapshotted, so it takes effect immediately.
+ * The one client of Composio's v3 API: it brokers auth (managed auth configs, connect links, account status/deletion),
+ * runs tools and opens the proxy transport, charging each execution before it is sent. Inert until a Composio key serves
+ * the scope; the key is read per request, never snapshotted, so a key set in Settings takes effect immediately.
  */
 @Injectable()
 export class ComposioProvider {
   private readonly logger = new Logger(ComposioProvider.name);
   private readonly baseUrl: string;
-  // Every cache is keyed by SCOPE: a Composio key addresses one project, so one scope's
-  // catalog or account metadata must never be served to another.
+  // Every cache is keyed by the PROJECT partition: a Composio key addresses one project, so one
+  // project's catalog or account metadata must never be served to a scope another key serves.
   private readonly toolkitCache = new Map<string, { at: number; items: ComposioToolkit[] }>();
   private readonly metadataCache = new Map<string, { at: number; data: Record<string, unknown> }>();
   private readonly toolsCache = new Map<string, { at: number; items: ComposioToolDef[] }>();
@@ -194,8 +192,8 @@ export class ComposioProvider {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     config: ConfigService<{ env: EnvConfig }, true>,
-    // Optional so the provider stays `new`-able in unit tests without DI.
-    @Optional() private readonly platformKeys?: PlatformKeysService,
+    private readonly platformKeys: PlatformKeysService,
+    private readonly usage: ComposioUsageService,
   ) {
     const env = config.get('env', { infer: true });
     this.baseUrl = env.composioBaseUrl.replace(/\/+$/, '');
@@ -206,8 +204,13 @@ export class ComposioProvider {
     return (await this.apiKey(scope)) !== '';
   }
 
-  private async apiKey(scope: PlatformKeyScope): Promise<string> {
-    return (await this.platformKeys?.composioApiKey(scope)) ?? '';
+  /** The cache partition of the Composio project `scope`'s calls reach. */
+  partitionOf(scope: PlatformKeyScope): string {
+    return this.platformKeys.composioPartition(scope);
+  }
+
+  private apiKey(scope: PlatformKeyScope, em?: EntityManager): Promise<string> {
+    return this.platformKeys.composioApiKey(scope, em);
   }
 
   private async requireApiKey(scope: PlatformKeyScope): Promise<string> {
@@ -220,7 +223,7 @@ export class ComposioProvider {
 
   /** Toolkits with a Composio-managed (shared) OAuth app, cached in-process. */
   async listManagedToolkits(scope: PlatformKeyScope): Promise<ComposioToolkit[]> {
-    const cacheKey = scopeKey(scope);
+    const cacheKey = this.partitionOf(scope);
     const cached = this.toolkitCache.get(cacheKey);
     if (cached && Date.now() - cached.at < TOOLKIT_CACHE_TTL_MS) return cached.items;
     const items: ComposioToolkit[] = [];
@@ -311,7 +314,7 @@ export class ComposioProvider {
     scope: PlatformKeyScope,
     em?: EntityManager,
   ): Promise<((connectedAccountId: string) => Promise<void>) | null> {
-    const apiKey = (await this.platformKeys?.composioApiKey(scope, em)) ?? '';
+    const apiKey = await this.apiKey(scope, em);
     return apiKey ? (connectedAccountId) => this.deleteAccountWith(apiKey, connectedAccountId) : null;
   }
 
@@ -324,7 +327,7 @@ export class ComposioProvider {
     scope: PlatformKeyScope,
     connectedAccountId: string,
   ): Promise<Record<string, unknown>> {
-    const cacheKey = `${scopeKey(scope)}:${connectedAccountId}`;
+    const cacheKey = `${this.partitionOf(scope)}:${connectedAccountId}`;
     const cached = this.metadataCache.get(cacheKey);
     if (cached && Date.now() - cached.at < METADATA_CACHE_TTL_MS) return cached.data;
     const body = await this.request(
@@ -339,7 +342,7 @@ export class ComposioProvider {
 
   /** A toolkit's executable tools, cached; deprecated tools are dropped so the matcher never resolves to a dead slug. */
   async listTools(scope: PlatformKeyScope, toolkitSlug: string): Promise<ComposioToolDef[]> {
-    const cacheKey = `${scopeKey(scope)}:${toolkitSlug}`;
+    const cacheKey = `${this.partitionOf(scope)}:${toolkitSlug}`;
     const cached = this.toolsCache.get(cacheKey);
     if (cached && Date.now() - cached.at < TOOLKIT_CACHE_TTL_MS) return cached.items;
     const items: ComposioToolDef[] = [];
@@ -373,15 +376,17 @@ export class ComposioProvider {
   }
 
   /**
-   * Execute one Composio tool against a connected account; `user_id` is REQUIRED alongside `connected_account_id`.
-   * A tool that RAN but failed returns `{ successful: false, error }` on HTTP 200; transport/4xx/5xx raise via `request`.
+   * Execute one Composio tool against a connected account, charged to its owner `userId`, whom Composio REQUIRES alongside it.
+   * A tool that RAN but failed returns `{ successful: false, error }` on HTTP 200; transport/4xx/5xx raise via `send`.
    */
   async executeTool(
     scope: PlatformKeyScope,
     toolSlug: string,
     params: { connectedAccountId: string; userId: string; arguments: Record<string, unknown> },
   ): Promise<ComposioExecuteResult> {
-    const body = await this.request(scope, 'POST', `/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
+    const apiKey = await this.requireApiKey(scope);
+    await this.usage.charge(params.userId);
+    const body = await this.send(apiKey, 'POST', `/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
       connected_account_id: params.connectedAccountId,
       user_id: params.userId,
       arguments: params.arguments,
@@ -394,6 +399,24 @@ export class ComposioProvider {
       data: body.data,
       error: normalizeExecuteError(body.error),
     };
+  }
+
+  /** The proxy transport for a connected account under the key `scope` reads, each request charged to `personId`; null when no key serves it. */
+  async proxyTransportFor(
+    scope: PlatformKeyScope,
+    connectedAccountId: string,
+    personId: string,
+    fetchImpl?: FetchLike,
+  ): Promise<ComposioProxyTransport | null> {
+    const apiKey = await this.apiKey(scope);
+    if (!apiKey) return null;
+    return new ComposioProxyTransport({
+      apiKey,
+      connectedAccountId,
+      baseUrl: this.baseUrl,
+      charge: () => this.usage.charge(personId),
+      ...(fetchImpl ? { fetchImpl } : {}),
+    });
   }
 
   // ─── Trigger instances (— the managed native-subscription rail) ───

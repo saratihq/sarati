@@ -518,6 +518,7 @@ describe('Composio key stays on its origin (e2e, isolated DB, loopback Composio,
       const transport = new ComposioProxyTransport({
         apiKey: KEY,
         connectedAccountId: ACCOUNT_ID,
+        charge: () => Promise.resolve(),
         baseUrl: closed,
         fetchImpl: counting,
       });
