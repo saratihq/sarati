@@ -5,7 +5,10 @@ import { ComposioProvider } from '../connections/composio.provider';
 import { ComposioExecutionProvider } from '../connections/composio-execution.provider';
 import type { EnvConfig } from '../config/env.config';
 import { composioTriggerSpec } from './composio-trigger.registry';
+import type { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
+
+const noCharge = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
 
 const SCOPE = { kind: 'user', userId: '11111111-1111-1111-1111-111111111111' } as const;
 
@@ -29,8 +32,11 @@ const LIVE =
   // The key is stored, not env-supplied — a manual live run hands it over the same seam.
   const keys = {
     composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? ''),
+    composioPartition: () => 'project',
   } as unknown as PlatformKeysService;
-  const provider = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config, keys));
+  const provider = new ComposioExecutionProvider(
+    new ComposioProvider({} as DataSource, config, keys, noCharge),
+  );
   const spec = composioTriggerSpec('gmail.gmail_new_email_received')!;
 
   it('fetches real messages via GMAIL_FETCH_EMAILS and extracts dedupe-able items', async () => {

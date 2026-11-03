@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatDate, formatDateTime, formatDuration, humanizeKey, timeAgo } from "@/lib/format";
+import { formatDate, formatDateTime, formatDuration, formatUtcDay, humanizeKey, timeAgo } from "@/lib/format";
 
 const DASH = "—";
 
@@ -15,6 +15,23 @@ describe("formatDate", () => {
 
   it.each([null, undefined, "", "not-a-date", "2026-13-45"])("degrades to an em dash on %s", (iso) => {
     expect(formatDate(iso)).toBe(DASH);
+  });
+});
+
+describe("formatUtcDay", () => {
+  it("names the UTC day, even where the viewer's clock still reads the day before", () => {
+    const zone = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      expect(formatDate("2026-12-01T00:00:00.000Z")).toBe("Nov 30, 2026");
+      expect(formatUtcDay("2026-12-01T00:00:00.000Z")).toBe("December 1");
+    } finally {
+      process.env.TZ = zone;
+    }
+  });
+
+  it.each([null, undefined, "", "not-a-date"])("degrades to an em dash on %s", (iso) => {
+    expect(formatUtcDay(iso)).toBe(DASH);
   });
 });
 

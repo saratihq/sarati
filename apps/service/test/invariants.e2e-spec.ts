@@ -12,8 +12,11 @@ import { AppModule } from '../src/app.module';
 import { KEY_SCOPED_TO_OTHER_ORG } from '../src/auth/principal';
 import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
+import { EncryptionService } from '../src/common/crypto/encryption.service';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { computeDiff } from '../src/ir/diff';
+import { utcMonthOf } from '../src/platform/composio-usage.service';
+import { PlatformKeysService } from '../src/platform/platform-keys.service';
 import type { WorkflowIR } from '../src/ir/models';
 import { OrgManagementService } from '../src/orgs/org-management.service';
 import { type AgentResult } from '../src/runtime/agent';
@@ -21,8 +24,10 @@ import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import type { DagAgentNode } from '../src/runtime/dag-plan';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
+import { composioToolFor } from '../src/providers/sdk-actions.registry';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { insertApiKey } from './support/api-keys';
+import { type ComposioFixture, startComposioFixture } from './support/composio-fixture';
 import { webhookDoc } from './support/golden-docs';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
@@ -1410,5 +1415,98 @@ describe('domain invariants (the constitution), through an API key', () => {
     await as(inTeam, http().patch(`/api/orgs/${home}`).send({ name: 'Renamed' })).expect(403);
     await as(inTeam, http().post('/api/orgs').send({ name: 'Another' })).expect(403);
     expect((await db.query(`SELECT 1 FROM organizations WHERE name = 'Another'`)).rows).toEqual([]);
+  });
+});
+
+/** Constitution #25, on its own boot: the instance provides one Composio account and a monthly limit of 1 per person. */
+describe('invariant 25: one answer for whose Composio key a call uses, and each app action charged to its account’s owner before it is sent', () => {
+  let app: INestApplication;
+  let db: Client;
+  let fixture: ComposioFixture;
+  const http = (): ReturnType<typeof request> => request(app.getHttpServer());
+
+  beforeAll(async () => {
+    fixture = await startComposioFixture();
+    const e2eUrl = await createE2eDatabase(ADMIN_URL);
+    Object.assign(process.env, {
+      DATABASE_URL: e2eUrl,
+      PGBOSS_ENABLED: 'false',
+      MOCK_AUTH: 'true',
+      COMPOSIO_BASE_URL: fixture.origin,
+      INSTANCE_COMPOSIO_API_KEY: 'ik_invariant_25',
+      INSTANCE_COMPOSIO_WEBHOOK_SECRET: 'whsec_invariant_25',
+      INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: '1',
+    });
+    try {
+      const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+      app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
+      configureApp(app);
+      await app.init();
+      await listenOnLoopback(app);
+    } finally {
+      delete process.env.INSTANCE_COMPOSIO_API_KEY;
+      delete process.env.INSTANCE_COMPOSIO_WEBHOOK_SECRET;
+      delete process.env.INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON;
+    }
+    db = new Client({ connectionString: e2eUrl });
+    await db.connect();
+  }, 30_000);
+
+  afterAll(async () => {
+    await db.end();
+    await app.close();
+    await fixture.close();
+    process.env.DATABASE_URL = ADMIN_URL;
+    process.env.MOCK_AUTH = 'false';
+    delete process.env.COMPOSIO_BASE_URL;
+  });
+
+  it('invariant 25: a key stored for a scope is never used, none can be set, and the action past the limit is refused unsent', async () => {
+    const me = (await http().get('/api/auth/me').expect(200)).body.user.id as string;
+    await db.query(
+      `INSERT INTO platform_secrets (name, user_id, secret) VALUES ('composio_api_key', $1, $2)`,
+      [me, app.get(EncryptionService).encryptToken('ak_stored_for_a_scope')],
+    );
+    const keys = app.get(PlatformKeysService);
+    await expect(keys.composioApiKey({ kind: 'user', userId: me })).resolves.toBe('ik_invariant_25');
+    await expect(keys.composioWebhookSecret({ kind: 'user', userId: me })).resolves.toBe(
+      'whsec_invariant_25',
+    );
+    await http().put('/api/platform-keys/composio_api_key').send({ value: 'mine' }).expect(409);
+
+    const link = await http().post('/api/connections/managed/link').send({ app: 'trello' }).expect(201);
+    const connectionId = link.body.connection_id as string;
+    await http().get(`/api/connections/${connectionId}/status`).expect(200, { status: 'active' });
+    const step = (name: string) =>
+      http()
+        .post('/api/runs')
+        .send({
+          plan: {
+            id: `inv24-${name}`,
+            nodes: [
+              {
+                kind: 'action',
+                id: 'step',
+                actionId: 'trello.add_boards',
+                props: { name },
+                auth: { connectionId },
+              },
+            ],
+          },
+        });
+    await step('first').expect(201);
+    const refused = await step('second').expect(429);
+    expect(refused.body).toMatchObject({ code: 'composio_monthly_limit', limit: 1 });
+
+    const slug = composioToolFor('trello.add_boards')!.slug;
+    expect(new Set(fixture.arrivals.map((a) => a.key))).toEqual(new Set(['ik_invariant_25']));
+    expect(fixture.executions().map((x) => [x.call, x.body.user_id])).toEqual([
+      [`POST /api/v3/tools/execute/${slug}`, me],
+    ]);
+    const used = await db.query<{ actions: number }>(
+      `SELECT actions FROM composio_usage WHERE user_id = $1 AND month = ${utcMonthOf('now()')}`,
+      [me],
+    );
+    expect(used.rows).toEqual([{ actions: 1 }]);
   });
 });

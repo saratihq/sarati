@@ -152,6 +152,91 @@ describe('env config', () => {
     expect(() => validateEnv({ ...PROD, CLERK_API_URL: 'http://clerk-mock:8080' })).not.toThrow();
   });
 
+  describe("the instance's own Composio account", () => {
+    const KEY = 'ak_instance_sekret_value';
+    const SECRET = 'whsec_instance_sekret_value';
+    const BOTH = { INSTANCE_COMPOSIO_API_KEY: KEY, INSTANCE_COMPOSIO_WEBHOOK_SECRET: SECRET };
+    const refusal = (raw: Record<string, string>): string => {
+      try {
+        validateEnv(raw);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      throw new Error('validateEnv accepted it');
+    };
+
+    it('is off by default, with the default cap of 500 that nothing reads', () => {
+      const cfg = validateEnv({});
+      expect(cfg.instanceComposioApiKey).toBe('');
+      expect(cfg.instanceComposioWebhookSecret).toBe('');
+      expect(cfg.instanceComposioMonthlyActionsPerPerson).toBe(500);
+    });
+
+    it('reads the key and the secret trimmed, the cap as given, and 0 as a cap of none', () => {
+      const cfg = validateEnv({
+        INSTANCE_COMPOSIO_API_KEY: ` ${KEY}\n`,
+        INSTANCE_COMPOSIO_WEBHOOK_SECRET: ` ${SECRET} `,
+        INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: ' 37 ',
+      });
+      expect(cfg.instanceComposioApiKey).toBe(KEY);
+      expect(cfg.instanceComposioWebhookSecret).toBe(SECRET);
+      expect(cfg.instanceComposioMonthlyActionsPerPerson).toBe(37);
+      expect(validateEnv({ ...BOTH, INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: '0' })).toMatchObject({
+        instanceComposioMonthlyActionsPerPerson: 0,
+      });
+      expect(
+        validateEnv({ ...BOTH, INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: '2147483647' })
+          .instanceComposioMonthlyActionsPerPerson,
+      ).toBe(2_147_483_647);
+      expect(() => validateEnv({ ...PROD, ...BOTH })).not.toThrow();
+    });
+
+    it('takes the key and the secret together or not at all, naming the one missing', () => {
+      expect(refusal({ INSTANCE_COMPOSIO_API_KEY: KEY })).toBe(
+        'INSTANCE_COMPOSIO_API_KEY and INSTANCE_COMPOSIO_WEBHOOK_SECRET are set together or not at all — INSTANCE_COMPOSIO_WEBHOOK_SECRET is missing',
+      );
+      expect(refusal({ INSTANCE_COMPOSIO_WEBHOOK_SECRET: SECRET, INSTANCE_COMPOSIO_API_KEY: '  ' })).toBe(
+        'INSTANCE_COMPOSIO_API_KEY and INSTANCE_COMPOSIO_WEBHOOK_SECRET are set together or not at all — INSTANCE_COMPOSIO_API_KEY is missing',
+      );
+    });
+
+    it('refuses a cap without the key, since nothing would use it', () => {
+      expect(refusal({ INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: '100' })).toMatch(
+        /^INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON limits the instance's own Composio account, so it needs INSTANCE_COMPOSIO_API_KEY/,
+      );
+    });
+
+    it.each(['-1', '1.5', '1e3', 'abc', '2147483648', '0x10', '+5'])(
+      'refuses the cap %j, naming it',
+      (cap) => {
+        expect(refusal({ ...BOTH, INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: cap })).toBe(
+          `INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON must be a whole number of app actions from 0 to 2147483647, got ${JSON.stringify(cap)}`,
+        );
+      },
+    );
+
+    it.each([
+      ['INSTANCE_COMPOSIO_API_KEY', { ...BOTH, INSTANCE_COMPOSIO_API_KEY: `ak_in${'\u0000'}stance_sekret` }],
+      ['INSTANCE_COMPOSIO_API_KEY', { ...BOTH, INSTANCE_COMPOSIO_API_KEY: 'ak_instance sekret' }],
+      ['INSTANCE_COMPOSIO_WEBHOOK_SECRET', { ...BOTH, INSTANCE_COMPOSIO_WEBHOOK_SECRET: 'whsec_a\nsekret' }],
+    ])('refuses %s holding a space or control character, never echoing it', (name, raw) => {
+      const message = refusal(raw);
+      expect(message).toBe(`${name} must not contain spaces, line breaks or other control characters`);
+      expect(message).not.toMatch(/sekret/);
+    });
+
+    it('never echoes the key or the secret in any refusal', () => {
+      const raws: Array<Record<string, string>> = [
+        { INSTANCE_COMPOSIO_API_KEY: KEY },
+        { INSTANCE_COMPOSIO_WEBHOOK_SECRET: SECRET },
+        { ...BOTH, INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON: 'many' },
+      ];
+      for (const raw of raws) {
+        expect(refusal(raw)).not.toMatch(/sekret/);
+      }
+    });
+  });
+
   it('.env.example lists every variable validateEnv reads', () => {
     const read = new Set<string>();
     validateEnv(

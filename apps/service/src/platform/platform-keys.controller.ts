@@ -6,6 +6,7 @@ import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { Scope } from '../auth/scope.decorator';
 import { DomainError } from '../common/domain-error';
+import { type ComposioUsage, ComposioUsageService } from './composio-usage.service';
 import {
   isPlatformKeyName,
   PlatformKeysService,
@@ -26,6 +27,8 @@ interface PlatformKeysResponse {
   keys: Record<PlatformKeyName, PlatformKeyState>;
   scope: 'user' | 'org';
   can_manage: boolean;
+  /** The caller's own use of the instance's Composio account this month; null where each person or workspace uses their own key. */
+  composio_usage: ComposioUsage | null;
 }
 
 /**
@@ -39,7 +42,10 @@ interface PlatformKeysResponse {
 export class PlatformKeysController {
   private readonly logger = new Logger(PlatformKeysController.name);
 
-  constructor(private readonly keys: PlatformKeysService) {}
+  constructor(
+    private readonly keys: PlatformKeysService,
+    private readonly usage: ComposioUsageService,
+  ) {}
 
   @Scope('org:manage')
   @Get()
@@ -49,6 +55,7 @@ export class PlatformKeysController {
       keys: await this.keys.presence(scope),
       scope: scope.kind,
       can_manage: await this.keys.canManage(userId, scope),
+      composio_usage: await this.usage.usageOf(userId),
     };
   }
 
@@ -106,6 +113,8 @@ export class PlatformKeysController {
     name: string,
   ): Promise<{ scope: PlatformKeyScope; key: PlatformKeyName }> {
     const { userId, scope } = await this.context(req);
+    // A key the instance provides is nobody's to change, so a member is told that rather than to ask an admin.
+    if (isPlatformKeyName(name)) this.keys.assertWritable(name);
     if (!(await this.keys.canManage(userId, scope))) {
       throw new DomainError('Only an owner or admin of this organization can change its keys', 403);
     }

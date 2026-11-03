@@ -8,7 +8,10 @@ import type { EnvConfig } from '../config/env.config';
 import { ActionRouterProvider } from './action-router.provider';
 import type { SdkActionsProvider } from './sdk-actions.provider';
 import { isSdkActionType } from './sdk-actions.registry';
+import type { ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
+
+const noCharge = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
 
 /** Scope resolution in these tests is fixed — they exercise routing, not key ownership. */
 function platformKeysStub(): PlatformKeysService {
@@ -43,9 +46,12 @@ const ACTION_ID = 'asana.get_current_user';
   // The key is stored, not env-supplied — a manual live run hands it over the same seam.
   const keys = {
     composioApiKey: () => Promise.resolve(process.env.COMPOSIO_API_KEY ?? ''),
+    composioPartition: () => 'project',
   } as unknown as PlatformKeysService;
 
-  const composio = new ComposioExecutionProvider(new ComposioProvider({} as DataSource, config, keys));
+  const composio = new ComposioExecutionProvider(
+    new ComposioProvider({} as DataSource, config, keys, noCharge),
+  );
   // Only the DB lookup is stubbed — everything else is the production class.
   const managedRef: ManagedConnectionRef = {
     id: 'conn-live',

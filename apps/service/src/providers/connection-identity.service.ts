@@ -3,6 +3,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { errorMessage } from '../common/error-message';
 import { type AccountIdentity } from '../connections/account-identity';
 import { type ActivatedConnection, ConnectionsService } from '../connections/connections.service';
+import { monthlyLimitOf } from '../platform/composio-usage.service';
 import { accountProbeFor, type AccountTarget } from './account-probes';
 import { ActionRouterProvider } from './action-router.provider';
 
@@ -24,11 +25,16 @@ export class ConnectionIdentityService implements OnModuleInit {
     this.connections.onActivated((connection) => this.askOnActivation(connection));
   }
 
-  /** The stored answer, asking the provider when it never has been or `refresh` is set; null when it can't or won't say. */
-  async account(target: AccountTarget, refresh: boolean): Promise<AccountIdentity | null> {
+  /** The stored answer, asking the provider when `refresh` is set or, if `mayAsk`, when it never has been; null when it can't or won't say, undefined when never asked; rejects with the monthly limit's refusal, which asks nothing. */
+  async account(
+    target: AccountTarget,
+    refresh: boolean,
+    mayAsk = true,
+  ): Promise<AccountIdentity | null | undefined> {
     if (!refresh) {
       const stored = await this.connections.accountOf(target.ownerUserId, target.connectionId);
       if (stored?.checkedAt) return stored.account;
+      if (!mayAsk) return undefined;
     }
     return this.ask(target);
   }
@@ -44,6 +50,7 @@ export class ConnectionIdentityService implements OnModuleInit {
     const asking = this.router
       .refreshAccount(target)
       .catch((err: unknown) => {
+        if (monthlyLimitOf(err)) throw err;
         this.logger.warn(
           `Connection ${target.connectionId} (${target.provider}): identity probe failed: ${errorMessage(err)}`,
         );
@@ -67,7 +74,11 @@ export class ConnectionIdentityService implements OnModuleInit {
           ownerUserId: connection.ownerUserId,
           provider: connection.provider,
           orgId: connection.orgId,
-        }),
+        }).catch((err: unknown) =>
+          this.logger.warn(
+            `Connection ${connection.id} (${connection.provider}): not asked which account it is: ${errorMessage(err)}`,
+          ),
+        ),
         waited,
       ]);
     } finally {

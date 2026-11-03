@@ -96,10 +96,11 @@ function makeProvider(opts?: {
       Promise.resolve<ActiveTriggerInstance[]>([{ id: 'ti_live', connectedAccountId: 'ca_live' }]),
     ),
   };
-  // The webhook secret is stored per scope now, not read from env.
+  // The webhook secret is the scope's project's, not read from env.
   const keys = {
-    get: (_scope: unknown, name: string) =>
-      Promise.resolve(name === 'composio_webhook_secret' ? (opts?.secret ?? '') : ''),
+    composioWebhookSecret: () => Promise.resolve(opts?.secret ?? ''),
+    composioPartition: (scope: { kind: string; userId?: string; orgId?: string }) =>
+      `${scope.kind}:${scope.userId ?? scope.orgId ?? ''}`,
   } as unknown as PlatformKeysService;
   const provider = new ComposioTriggerProvider(fake as unknown as ComposioProvider, keys);
   return { provider, fake };

@@ -1,7 +1,13 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { agentModelAuth, callAgentModel, type FetchLike, HttpClient } from '@sarati/actions-sdk';
+import {
+  agentModelAuth,
+  callAgentModel,
+  type FetchLike,
+  HttpClient,
+  type Transport,
+} from '@sarati/actions-sdk';
 
+import { ComposioProvider } from '../connections/composio.provider';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   agentModelStep,
@@ -12,7 +18,6 @@ import {
   type RunAsStep,
 } from '../connections/run-as-account';
 import { PlatformKeysService } from '../platform/platform-keys.service';
-import type { EnvConfig } from '../config/env.config';
 import type { AgentModelAuth, AgentModelPort, ModelCallRequest, ModelTurn } from '../runtime/agent';
 import { resolveSdkAuthHandle } from './sdk-auth';
 
@@ -26,23 +31,24 @@ export const AGENT_MODEL_FETCH = Symbol('AGENT_MODEL_FETCH');
  */
 @Injectable()
 export class AgentModelCallProvider implements AgentModelPort {
-  private readonly composioBaseUrl: string;
   private readonly http = new HttpClient();
 
   constructor(
-    config: ConfigService<{ env: EnvConfig }, true>,
     private readonly connections: ConnectionsService,
     @Optional() @Inject(AGENT_MODEL_FETCH) private readonly fetchImpl?: FetchLike,
     @Optional() private readonly platformKeys?: PlatformKeysService,
-  ) {
-    this.composioBaseUrl = config.get('env', { infer: true }).composioBaseUrl;
-  }
+    @Optional() private readonly composio?: ComposioProvider,
+  ) {}
 
-  /** Whose Composio key brokers the model connection — the run's own scope. */
-  private async composioKeyFor(auth: AgentModelAuth): Promise<string | undefined> {
-    if (!this.platformKeys) return undefined;
+  /** The managed transport for the model connection, under the run's own scope's key. */
+  private async managedTransport(
+    auth: AgentModelAuth,
+    connectedAccountId: string,
+    personId: string,
+  ): Promise<Transport | null> {
+    if (!this.platformKeys || !this.composio) return null;
     const scope = await this.platformKeys.scopeFor(auth.externalUserId, auth.orgId ?? null);
-    return this.platformKeys.composioApiKey(scope);
+    return this.composio.proxyTransportFor(scope, connectedAccountId, personId, this.fetchImpl);
   }
 
   async call(req: ModelCallRequest, auth: AgentModelAuth): Promise<ModelTurn> {
@@ -58,8 +64,7 @@ export class AgentModelCallProvider implements AgentModelPort {
         externalUserId: resolved.externalUserId,
         auth: resolved.connection,
         connections: this.connections,
-        composioApiKey: (await this.composioKeyFor(auth)) ?? '',
-        composioBaseUrl: this.composioBaseUrl,
+        managedTransport: (accountId, personId) => this.managedTransport(auth, accountId, personId),
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
         decided: { step, where: auth },
       },

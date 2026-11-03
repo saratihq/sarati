@@ -181,7 +181,7 @@ describe('platform keys (e2e, isolated DB)', () => {
 
       const rows = await db.query(`SELECT secret FROM platform_secrets WHERE name = 'anthropic_api_key'`);
       expect(rows.rows[0].secret).not.toContain('sk-ant-plaintext-never-at-rest');
-      await expect(app.get(PlatformKeysService).get(orgScope, 'anthropic_api_key')).resolves.toBe(
+      await expect(app.get(PlatformKeysService).anthropicApiKey(orgScope)).resolves.toBe(
         'sk-ant-plaintext-never-at-rest',
       );
     });
@@ -379,12 +379,10 @@ describe('platform keys (e2e, isolated DB)', () => {
       expect(JSON.stringify(other.body)).not.toContain('members-own-key');
 
       // And the stored values really are separate rows, not one shared key.
-      await expect(app.get(PlatformKeysService).get(userScope(member), 'composio_api_key')).resolves.toBe(
+      await expect(app.get(PlatformKeysService).composioApiKey(userScope(member))).resolves.toBe(
         'members-own-key',
       );
-      await expect(
-        app.get(PlatformKeysService).get(userScope(admin), 'composio_api_key'),
-      ).resolves.toBeNull();
+      await expect(app.get(PlatformKeysService).composioApiKey(userScope(admin))).resolves.toBe('');
     });
 
     it('a member of an org uses the org key without setting anything of their own', async () => {
@@ -399,9 +397,7 @@ describe('platform keys (e2e, isolated DB)', () => {
       // The rail is on for them, in the org context, with no personal key stored.
       const caps = await as(http().get('/api/connections/capabilities'), keyMember).expect(200);
       expect(caps.body).toEqual({ managed_available: true });
-      await expect(
-        app.get(PlatformKeysService).get(userScope(member), 'composio_api_key'),
-      ).resolves.toBeNull();
+      await expect(app.get(PlatformKeysService).composioApiKey(userScope(member))).resolves.toBe('');
     });
 
     it('a user outside any org uses their own', async () => {

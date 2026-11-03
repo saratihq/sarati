@@ -1,12 +1,18 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { type AuthHandle, type AuthScheme, type DropdownResult, type FetchLike } from '@sarati/actions-sdk';
+import {
+  type AuthHandle,
+  type AuthScheme,
+  type DropdownResult,
+  type FetchLike,
+  type Transport,
+} from '@sarati/actions-sdk';
 
 import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
+import { ComposioProvider } from '../connections/composio.provider';
 import { ConnectionsService } from '../connections/connections.service';
 import { actionStep, noAccountMessage } from '../connections/run-as-account';
-import type { EnvConfig } from '../config/env.config';
+import { monthlyLimitOf } from '../platform/composio-usage.service';
 import { sdkAction, isSdkActionType } from './sdk-actions.registry';
 import { IdempotencyHttpClient } from './idempotency-http-client';
 import { DryRunHttpClient } from './dry-run-http-client';
@@ -26,17 +32,14 @@ export const SDK_ACTIONS_FETCH = Symbol('SDK_ACTIONS_FETCH');
 @Injectable()
 export class SdkActionsProvider {
   private readonly logger = new Logger(SdkActionsProvider.name);
-  private readonly composioBaseUrl: string;
 
   constructor(
-    config: ConfigService<{ env: EnvConfig }, true>,
     // Optional so the provider stays `new`-able in unit tests without DI.
     @Optional() private readonly connections?: ConnectionsService,
     @Optional() @Inject(SDK_ACTIONS_FETCH) private readonly fetchImpl?: FetchLike,
     @Optional() private readonly platformKeys?: PlatformKeysService,
-  ) {
-    this.composioBaseUrl = config.get('env', { infer: true }).composioBaseUrl;
-  }
+    @Optional() private readonly composio?: ComposioProvider,
+  ) {}
 
   /** Whether `type` is one of OUR actions — the router's ours-first gate. */
   has(type: string): boolean {
@@ -86,19 +89,19 @@ export class SdkActionsProvider {
     } catch (err) {
       // A loader needing another prop's value (or a transient fetch failure) must not block the inspector.
       this.logger.warn(`Options loader ${type}.${propName} failed, degrading to text: ${String(err)}`);
-      return { options: [], disabled: true, placeholder: 'Type a value' };
+      return { options: [], disabled: true, placeholder: placeholderAfter(err) };
     }
   }
 
-  /** The opaque {@link AuthHandle} the action runs on — the shared credential path, {@link resolveSdkAuthHandle}. */
-  /** Whose Composio key this action runs on — the run's own scope, never a shared one. */
-  private async composioKeyFor(input: {
-    externalUserId: string;
-    orgId?: string | null;
-  }): Promise<string | undefined> {
-    if (!this.platformKeys) return undefined;
-    const scope = await this.platformKeys.scopeFor(input.externalUserId, input.orgId ?? null);
-    return this.platformKeys.composioApiKey(scope);
+  /** The managed transport this action's owner context opens: the key their scope reads, as the run's own scope always has. */
+  private async managedTransport(
+    owner: { externalUserId: string; orgId?: string | null },
+    connectedAccountId: string,
+    personId: string,
+  ): Promise<Transport | null> {
+    if (!this.platformKeys || !this.composio) return null;
+    const scope = await this.platformKeys.scopeFor(owner.externalUserId, owner.orgId ?? null);
+    return this.composio.proxyTransportFor(scope, connectedAccountId, personId, this.fetchImpl);
   }
 
   private async authFor(
@@ -114,8 +117,7 @@ export class SdkActionsProvider {
         externalUserId: owner.externalUserId,
         auth,
         ...(this.connections ? { connections: this.connections } : {}),
-        composioApiKey: (await this.composioKeyFor(owner)) ?? '',
-        composioBaseUrl: this.composioBaseUrl,
+        managedTransport: (accountId, personId) => this.managedTransport(owner, accountId, personId),
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
         ...(decided ? { decided } : {}),
       },
@@ -127,8 +129,17 @@ export class SdkActionsProvider {
   private toStepError(actionId: string, err: unknown): DomainError {
     const message = errorMessage(err);
     this.logger.warn(`SDK action ${actionId} failed: ${message}`);
-    return new DomainError(`${actionId} failed: ${message}`, 422);
+    const limit = monthlyLimitOf(err);
+    return new DomainError(`${actionId} failed: ${message}`, limit ? 429 : 422, limit?.details);
   }
+}
+
+function placeholderAfter(err: unknown): string {
+  const limit = monthlyLimitOf(err);
+  if (!limit) return 'Type a value';
+  return limit.details.limit === 0
+    ? 'App actions are off on this instance'
+    : `App action limit reached — resets ${limit.resetsOn} (UTC)`;
 }
 
 /** A step that stopped at a state-changing request: a real outcome, never a failure. */

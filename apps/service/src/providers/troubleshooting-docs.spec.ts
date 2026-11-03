@@ -1,11 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ConfigService } from '@nestjs/config';
 import type { FetchLike } from '@sarati/actions-sdk';
 
 import type { ConnectionsService } from '../connections/connections.service';
-import type { EnvConfig } from '../config/env.config';
 import { SdkActionsProvider } from './sdk-actions.provider';
 
 const PAGE = readFileSync(
@@ -71,10 +69,7 @@ async function refusal(app: string): Promise<{ message: string; sent: string[] }
       Promise.resolve({ id: 'conn', authType: 'token', status: 'active', connectedAccountId: null }),
     getCredential: () => Promise.resolve(credential),
   } as unknown as ConnectionsService;
-  const config = {
-    get: () => ({ composioBaseUrl: 'https://backend.composio.dev' }),
-  } as unknown as ConfigService<{ env: EnvConfig }, true>;
-  const err = await new SdkActionsProvider(config, connections, fetchImpl)
+  const err = await new SdkActionsProvider(connections, fetchImpl)
     .runAction({ externalUserId: 'user-1', actionId, props, auth: { connectionId: 'conn' } })
     .catch((e: unknown) => e);
   return { message: (err as Error).message, sent };

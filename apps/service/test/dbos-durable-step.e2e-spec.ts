@@ -18,11 +18,8 @@ import type { RunPlan } from '../src/runtime/run-plan';
 import { launchThrowawayDbos, type ThrowawayDbos } from './support/dbos-system-db';
 
 // A ManagedIntegrationProvider backed by the SDK http.send_request action (auth `none`, in-process).
-const sdkConfig = {
-  get: () => ({ composioApiKey: '', composioBaseUrl: '' }) as Partial<EnvConfig>,
-} as unknown as ConfigService<{ env: EnvConfig }, true>;
 function sdkProvider(): ManagedIntegrationProvider {
-  const actions = new SdkActionsProvider(sdkConfig);
+  const actions = new SdkActionsProvider();
   return {
     key: 'sdk',
     runAction: (input) => actions.runAction(input),

@@ -129,8 +129,9 @@ the one-container image binds both to `127.0.0.1`.
 
 Three settings are **not** environment variables — the Composio API key and its webhook signing
 secret (managed connections), and the Anthropic key (the AI composer). They belong to a **user or an
-organization**, not to the instance, and are set in **Settings → Platform keys** in the running app,
-where each takes effect immediately — no restart, no redeploy.
+organization** and are set in **Settings → Platform keys** in the running app, where each takes effect
+immediately — no restart, no redeploy. The one exception is an instance that gives everyone
+[its own Composio account](#one-composio-account-for-the-whole-instance).
 
 Working inside an organization, you use that organization's keys and its owners and admins set them.
 Working outside one, you use your own. They are encrypted at rest with `FERNET_KEY`, like every stored
@@ -138,6 +139,69 @@ credential, and the API never reads any of them back.
 
 Setting `COMPOSIO_API_KEY`, `COMPOSIO_WEBHOOK_SECRET` or `ANTHROPIC_API_KEY` in `.env` does nothing.
 If you are upgrading and had them there, enter them once in Settings and delete the lines.
+
+## One Composio account for the whole instance
+
+An instance anyone can try — a public demo, a classroom — can connect everyone's apps through **one
+Composio account of its own**, so nobody needs a Composio key. Each person still adds their own
+Anthropic key in Settings if they want the AI composer.
+
+```bash
+# Both or neither — the service stops at boot naming the one missing.
+INSTANCE_COMPOSIO_API_KEY=ak_…
+INSTANCE_COMPOSIO_WEBHOOK_SECRET=whsec_…
+# App actions each person may run on it per UTC calendar month. Default 500; 0 runs none.
+INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON=500
+```
+
+With them set:
+
+- **Every connection, step and trigger uses this account.** Settings shows *Managed connections
+  (Composio) · Provided by this instance* with nothing to enter, and nobody — owner, admin or member —
+  can set or remove a Composio key there or through the API (`409`). Keys people stored earlier are
+  kept but unused, and come back if you unset the variables.
+- **Each person has a monthly allowance of app actions,** so one person cannot use up the account for
+  everyone. Every request the account sends to an app counts once, charged before it is sent to the
+  person whose connected account it runs as — a step, a test, an AI Agent's tool call, an account
+  check on connect, a dropdown in the step inspector, each page of a listing and each retry. A step
+  that runs as an [environment's slot](/run/environments/) is charged to the slot account's owner.
+  An [API key](/agents/api-keys/#scopes) spends it outside a run only if it has `connection:write`.
+  Settings shows each person their count and when it resets: midnight UTC on the first of the month.
+  Past the limit a step fails naming the limit and the reset date
+  ([the message](/operate/troubleshooting/#a-step-says-the-monthly-limit-of-app-actions-is-used-up));
+  nothing is sent. `0` turns app actions off while connecting still works. For no limit, leave the
+  variables unset instead — then each person or organization uses its own key.
+- **Trigger events are counted, not limited.** Each delivered trigger event is counted for the
+  account's owner and shown in Settings, but none is held back.
+- **Gmail's new-mail trigger is Composio's *New Gmail Message Received Trigger***
+  (`gmail.gmail_new_gmail_message`). Composio watches the inbox itself, and each mail it delivers is
+  one trigger event. Sarati's own *New Email* trigger (`gmail.gmail_new_email_received`) is not
+  offered: it asks Gmail with an app action on every poll (once a minute by default,
+  `TRIGGER_POLL_INTERVAL_SECONDS`) whether or not mail arrived — 1,440 a day, which would use up the
+  default limit in about eight hours. In a workflow that already has it, the trigger never checks, and
+  its status names the one to use instead.
+
+Set it up once:
+
+1. Use a **Composio project of its own**. Composio sends a project's trigger deliveries to one URL, so
+   another install on the same project stops receiving its own, and every connected account, Sarati
+   user id and tool call shows in that project's dashboard — say so in the instance's terms.
+2. In that project's webhook settings, send deliveries to `<PUBLIC_BASE_URL>/api/hooks/composio`, and
+   copy its signing secret into `INSTANCE_COMPOSIO_WEBHOOK_SECRET`. Keep both values only in the
+   instance's environment: anyone holding the secret can sign a delivery for every person.
+3. Size the limit against the plan. On Composio's free plan, apps signed in through Composio's own
+   OAuth apps — how Sarati connects them — share a smaller part of the monthly tool calls and trigger
+   events, requests through its proxy (most of Sarati's own actions use it) the smallest part, and the
+   plan pauses at its limit for everyone until the month turns. Check
+   [Composio's pricing](https://composio.dev/pricing) and your dashboard's usage page, then set the
+   limit so that the people you expect, times the limit, fits — or gate sign-up
+   ([`OIDC_ALLOWED_DOMAINS`](#single-sign-on) or invites), since every account gets its own allowance.
+
+Changing `INSTANCE_COMPOSIO_API_KEY` to another project, or turning it on for an install whose people
+already connected apps with their own keys, leaves those connections in the other project: each person
+connects their apps again. Turning it off does the same the other way: the connections made through
+the instance's account stay in its project, so each person connects those apps again with their own
+key.
 
 ## Integrations and auth
 

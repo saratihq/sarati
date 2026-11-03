@@ -36,6 +36,8 @@ export interface ComposioTriggerSpec {
   catalog: ComposioTriggerCatalogEntry;
   /** The exact Composio tool slug that fetches candidate items. */
   toolSlug: string;
+  /** The Composio-subscribed trigger for the same events, by its type and the name the picker shows, named where this one is not served. */
+  subscribedInstead: { type: string; name: string };
   /** Tool arguments for one poll, from the trigger's props + the current cursor. */
   buildArguments(props: ConfiguredProps, lastPollEpochMs: number): Record<string, unknown>;
   /** Items out of the tool's `data` envelope, sorted OLDEST FIRST so events fire chronologically. */
@@ -130,6 +132,7 @@ const GMAIL_NEW_EMAIL: ComposioTriggerSpec = {
     auth: 'connection',
   },
   toolSlug: 'GMAIL_FETCH_EMAILS',
+  subscribedInstead: { type: 'gmail.gmail_new_gmail_message', name: 'New Gmail Message Received Trigger' },
   buildArguments: (props, lastPollEpochMs) => {
     const query = gmailQuery(props, lastPollEpochMs);
     return {

@@ -38,11 +38,6 @@ export interface ComposioExecuteInput {
  * `{successful,data,error}` envelope back to a `RunActionResult` — runs-but-fails is a step error, never a 500.
  * The managed-connection guard lives in the router; only managed rows reach here.
  */
-/** Cache partition per owning scope — one scope's tool matches must not serve another. */
-function scopeCacheKey(scope: PlatformKeyScope): string {
-  return scope.kind === 'user' ? `u:${scope.userId}` : `o:${scope.orgId}`;
-}
-
 @Injectable()
 export class ComposioExecutionProvider {
   private readonly logger = new Logger(ComposioExecutionProvider.name);
@@ -205,7 +200,7 @@ export class ComposioExecutionProvider {
     actionName: string,
   ): Promise<ToolMatch | null> {
     const toolkit = toComposioSlug(appSlug);
-    const key = `${scopeCacheKey(scope)}␟${toolkit}␟${actionName}`;
+    const key = `${this.composio.partitionOf(scope)}␟${toolkit}␟${actionName}`;
     const cached = this.toolCache.get(key);
     if (cached !== undefined) return cached;
     const tools = await this.composio.listTools(scope, toolkit);

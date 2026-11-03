@@ -37,7 +37,7 @@ export class InternalPlatformKeysController {
     await this.requireInternalCaller(req);
     const principal = requirePrincipal(req);
     const scope = await this.keys.scopeFor(principal.user.id, principal.activeOrgId);
-    return { api_key: await this.keys.get(scope, 'anthropic_api_key') };
+    return { api_key: await this.keys.anthropicApiKey(scope) };
   }
 
   private async requireInternalCaller(req: Request): Promise<void> {

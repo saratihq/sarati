@@ -190,6 +190,31 @@ describe("the step's account, as the run would decide it", () => {
     expect(useWorkflow.getState().dirty).toBe(false);
   });
 
+  it("a dropdown its account can't load says why under the text field it falls back to", async () => {
+    catalogEntry.mockResolvedValue({
+      type: "gmail.send_email",
+      name: "Send email",
+      category: "gmail",
+      description: "Send an email.",
+      auth: "connection",
+      parameters: { label: { type: "DROPDOWN", label: "Label", required: true } },
+    } as NodeTypeEntry);
+    loadNodeTypeOptions.mockResolvedValue({
+      options: [],
+      disabled: true,
+      placeholder: "App action limit reached — resets December 1, 2026 (UTC)",
+    });
+    runAsAccounts.mockResolvedValue({ steps: [answer({})] });
+    openStep({});
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dynamic-options-hint-label")).toHaveTextContent(
+        "App action limit reached — resets December 1, 2026 (UTC)",
+      ),
+    );
+    expect(screen.getByRole("textbox", { name: "label" })).toHaveValue("");
+  });
+
   it("with several accounts it asks for a pick, and a pick by hand is an ordinary edit that arms Save", async () => {
     runAsAccounts.mockResolvedValue({
       steps: [answer({ state: "several", connection_id: null, accounts: [work.id, mine.id], message: "pick one" })],

@@ -2006,6 +2006,17 @@ export type PlatformKeyName = "composio_api_key" | "composio_webhook_secret" | "
 export interface PlatformKeyState {
   present: boolean;
   updated_at: string | null;
+  /** Provided by this instance for everyone: shown as set, never editable. */
+  managed_by_instance: boolean;
+}
+
+/** Your own use of the instance's Composio account this UTC calendar month. */
+export interface ComposioUsage {
+  actions_used: number;
+  actions_limit: number;
+  trigger_events: number;
+  /** Midnight UTC on the first of next month, when the count starts again. */
+  resets_at: string;
 }
 
 export interface PlatformKeysResponse {
@@ -2014,6 +2025,8 @@ export interface PlatformKeysResponse {
   scope: "user" | "org";
   /** Whether THIS caller may change them — false for a plain member of the active org. */
   can_manage: boolean;
+  /** Null unless this instance provides its own Composio account. */
+  composio_usage: ComposioUsage | null;
 }
 
 export async function listPlatformKeys(): Promise<PlatformKeysResponse> {

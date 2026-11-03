@@ -3,9 +3,12 @@ import { join } from 'node:path';
 
 import type { ConfigService } from '@nestjs/config';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
+import type { DataSource } from 'typeorm';
 
+import { ComposioProvider } from '../connections/composio.provider';
 import type { ConnectionsService } from '../connections/connections.service';
 import type { EnvConfig } from '../config/env.config';
+import type { ComposioUsageService } from '../platform/composio-usage.service';
 import type { PlatformKeysService } from '../platform/platform-keys.service';
 import { SdkActionsProvider } from './sdk-actions.provider';
 
@@ -61,7 +64,9 @@ async function refuses(instanceUrl: string): Promise<boolean> {
     scopeFor: (userId: string) => Promise.resolve({ kind: 'user', userId }),
     composioApiKey: () => Promise.resolve('ak_test'),
   } as unknown as PlatformKeysService;
-  const outcome = await new SdkActionsProvider(config, connections, composioReachingOnlySite, platformKeys)
+  const usage = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
+  const composio = new ComposioProvider({} as DataSource, config, platformKeys, usage);
+  const outcome = await new SdkActionsProvider(connections, composioReachingOnlySite, platformKeys, composio)
     .runAction({
       externalUserId: 'user-1',
       actionId: 'jira.get_issue',

@@ -15,6 +15,13 @@ export function formatDate(iso: string | null | undefined): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+/** "December 1" on the UTC calendar — a day the server counts in UTC, never shifted into the viewer's zone. */
+export function formatUtcDay(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return DASH;
+  return d.toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
+}
+
 /** "Oct 9, 3:05 PM" — a moment that is minutes or days away. */
 export function formatDateTime(iso: string | null | undefined): string {
   const d = parse(iso);

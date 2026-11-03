@@ -26,6 +26,7 @@ import {
   validatedAppSlug,
 } from './sdk-actions.registry';
 import { SdkActionsProvider } from './sdk-actions.provider';
+import { monthlyLimitOf } from '../platform/composio-usage.service';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 import type {
   ManagedIntegrationProvider,
@@ -34,6 +35,13 @@ import type {
   TriggerEvent,
   TriggerInput,
 } from './managed-integration-provider';
+
+function pollNotServed(triggerType: string, spec: ComposioTriggerSpec): DomainError {
+  return new DomainError(
+    `Use "${spec.subscribedInstead.name}" (${spec.subscribedInstead.type}) instead: this instance doesn't run "${spec.catalog.name}" (${triggerType}), which would spend one of the account owner's monthly app actions on every poll, whether or not anything arrived. Composio checks the app for the one to use, and each event it delivers counts as a trigger event, not an app action`,
+    422,
+  );
+}
 
 /** Picks each action's rail in the static order marked in `route`; only a MANAGED connection takes Composio. */
 @Injectable()
@@ -105,8 +113,11 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
         provider: stored.provider,
         orgId: input.orgId ?? null,
       }).catch((err: unknown) => {
+        const limit = monthlyLimitOf(err);
         throw new DomainError(
           `Sarati couldn't ask ${stored.provider} which account this step runs as: ${errorMessage(err)}`,
+          limit ? 429 : 400,
+          limit?.details,
         );
       }));
     const props = fillAccountRefs(input.props, (field) => accountValue(account, field, stored.provider));
@@ -214,12 +225,13 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
     return Promise.resolve();
   }
 
-  /** The Composio poll route, or null → unsupported: needs BOTH a registry spec and a MANAGED connection. */
+  /** The Composio poll route, or null → unsupported: needs BOTH a registry spec and a MANAGED connection; refused where the instance provides its own Composio account. */
   private async composioTriggerRoute(
     input: TriggerInput,
   ): Promise<{ spec: ComposioTriggerSpec; ref: ManagedConnectionRef } | null> {
     const spec = composioTriggerSpec(input.triggerId);
     if (!spec) return null;
+    if (this.platformKeys.composioManagedByInstance()) throw pollNotServed(input.triggerId, spec);
     const ref = await this.managedRefOf(input.externalUserId, input.auth);
     return ref?.authType === 'managed' ? { spec, ref } : null;
   }

@@ -1,11 +1,14 @@
 import type { ConfigService } from '@nestjs/config';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
+import type { DataSource } from 'typeorm';
 
 import { DomainError } from '../common/domain-error';
 import type { ConnectionsService, ManagedConnectionRef } from '../connections/connections.service';
 import type { EnvConfig } from '../config/env.config';
 import { SdkActionsProvider } from './sdk-actions.provider';
 import { sdkCatalogEntries } from './sdk-actions.registry';
+import { ComposioProvider } from '../connections/composio.provider';
+import { ComposioCapReached, ComposioUsageService } from '../platform/composio-usage.service';
 import { PlatformKeysService } from '../platform/platform-keys.service';
 
 interface FetchCall {
@@ -48,6 +51,13 @@ function platformKeys(apiKey = 'ak_test'): PlatformKeysService {
   } as unknown as PlatformKeysService;
 }
 
+/** The scope rule and the Composio client a managed connection opens its transport through, charging nothing. */
+function managed(apiKey = 'ak_test'): [PlatformKeysService, ComposioProvider] {
+  const keys = platformKeys(apiKey);
+  const usage = { charge: () => Promise.resolve() } as unknown as ComposioUsageService;
+  return [keys, new ComposioProvider({} as DataSource, config(), keys, usage)];
+}
+
 function connections(over: { ref?: ManagedConnectionRef | null; credential?: unknown }): ConnectionsService {
   return {
     managedRef: jest.fn().mockResolvedValue(over.ref ?? null),
@@ -82,7 +92,7 @@ const TYPED_BASIC: Record<string, { actionId: string; props: Record<string, unkn
 
 describe('SdkActionsProvider', () => {
   it('has() recognises our SDK action types and rejects others', () => {
-    const provider = new SdkActionsProvider(config());
+    const provider = new SdkActionsProvider();
     expect(provider.has('gmail.get_profile')).toBe(true);
     expect(provider.has('gmail.send_email')).toBe(true);
     expect(provider.has('sheets.insert_row')).toBe(true);
@@ -97,7 +107,7 @@ describe('SdkActionsProvider', () => {
       expect(url).toContain('/api/v3/tools/execute/proxy');
       return { status: 200, body: { data: GMAIL_PROFILE, status: 200, headers: {} } };
     });
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
+    const provider = new SdkActionsProvider(connections({ ref: managedRef }), impl, ...managed());
 
     const result = await provider.runAction({
       externalUserId: 'user-1',
@@ -117,7 +127,6 @@ describe('SdkActionsProvider', () => {
       return { status: 200, body: GMAIL_PROFILE };
     });
     const provider = new SdkActionsProvider(
-      config(),
       connections({
         ref: { id: 'conn-2', authType: 'oauth2', status: 'active', connectedAccountId: null },
         credential: { access_token: 'tok_direct' },
@@ -143,7 +152,7 @@ describe('SdkActionsProvider', () => {
       status: 200,
       body: { data: { error: 'Expected OAuth 2 access token' }, status: 401, headers: {} },
     }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
+    const provider = new SdkActionsProvider(connections({ ref: managedRef }), impl, ...managed());
 
     const err = await provider
       .runAction({
@@ -159,7 +168,7 @@ describe('SdkActionsProvider', () => {
   });
 
   it('errors 404 when the referenced connection does not exist', async () => {
-    const provider = new SdkActionsProvider(config(), connections({ ref: null }));
+    const provider = new SdkActionsProvider(connections({ ref: null }));
     const err = await provider
       .runAction({
         externalUserId: 'user-1',
@@ -173,7 +182,7 @@ describe('SdkActionsProvider', () => {
   });
 
   it('fails a step handed NO account as a 422 that names the step and the app', async () => {
-    const provider = new SdkActionsProvider(config(), connections({ ref: null }));
+    const provider = new SdkActionsProvider(connections({ ref: null }));
     const err = await provider
       .runAction({
         externalUserId: 'user-1',
@@ -206,13 +215,12 @@ describe('SdkActionsProvider', () => {
   ])('names what %s needs, not "attach a connection"', async (_case, actionId, props, credential, reason) => {
     const { impl, calls } = fakeFetch(() => ({ status: 200, body: {} }));
     const provider = new SdkActionsProvider(
-      config(),
       connections({
         ref: { id: 'conn-x', authType: 'token', status: 'active', connectedAccountId: null },
         credential,
       }),
       impl,
-      platformKeys(),
+      ...managed(),
     );
     const run = (stepName?: string) =>
       provider
@@ -251,13 +259,12 @@ describe('SdkActionsProvider', () => {
         body: { id: '1', key: 'ENG-1', fields: {}, lists: [], tickets: [], next_page: null },
       }));
       const provider = new SdkActionsProvider(
-        config(),
         connections({
           ref: { id: 'conn-b', authType: 'token', status: 'active', connectedAccountId: null },
           credential: { username, password: 'tok' },
         }),
         impl,
-        platformKeys(),
+        ...managed(),
       );
       await provider.runAction({
         externalUserId: 'user-1',
@@ -283,7 +290,7 @@ describe('SdkActionsProvider', () => {
         headers: {},
       },
     }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
+    const provider = new SdkActionsProvider(connections({ ref: managedRef }), impl, ...managed());
     const result = await provider.loadOptions('gmail.list_messages', 'labelIds', {
       externalUserId: 'user-1',
       connectionId: 'conn-1',
@@ -297,11 +304,31 @@ describe('SdkActionsProvider', () => {
 
   it('loadOptions degrades to a disabled result when the loader cannot run', async () => {
     const { impl } = fakeFetch(() => ({ status: 200, body: { data: {}, status: 500, headers: {} } }));
-    const provider = new SdkActionsProvider(config(), connections({ ref: managedRef }), impl, platformKeys());
+    const provider = new SdkActionsProvider(connections({ ref: managedRef }), impl, ...managed());
     const result = await provider.loadOptions('gmail.list_messages', 'labelIds', {
       externalUserId: 'user-1',
       connectionId: 'conn-1',
     });
     expect(result.disabled).toBe(true);
+  });
+
+  it('loadOptions says when the monthly app-action limit lifts, and sends nothing', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, body: { data: {}, status: 200, headers: {} } }));
+    const keys = platformKeys();
+    const usage = {
+      charge: () => Promise.reject(new ComposioCapReached(500, '2026-12-01')),
+    } as unknown as ComposioUsageService;
+    const composio = new ComposioProvider({} as DataSource, config(), keys, usage);
+    const provider = new SdkActionsProvider(connections({ ref: managedRef }), impl, keys, composio);
+    const result = await provider.loadOptions('gmail.list_messages', 'labelIds', {
+      externalUserId: 'user-1',
+      connectionId: 'conn-1',
+    });
+    expect(result).toEqual({
+      options: [],
+      disabled: true,
+      placeholder: 'App action limit reached — resets December 1, 2026 (UTC)',
+    });
+    expect(calls).toEqual([]);
   });
 });

@@ -43,6 +43,25 @@ one stay there and stop working, so connect those apps again.
 Without a key, managed connections are simply absent: built-in actions and bring-your-own auth work
 exactly as before.
 
+### On an instance that provides its own Composio account
+
+Some instances — a public one to try Sarati on, say — connect everyone's apps through
+[one Composio account of their own](/operate/configuration/#one-composio-account-for-the-whole-instance).
+There is no Composio key to add: **Settings → Platform keys** shows *Provided by this instance*, and
+one-click sign-in is simply there.
+
+Each person may run a set number of **app actions** a month on it, shown in Settings with the date
+the count starts again (midnight UTC on the first). Every request a one-click account sends to its
+app counts once, against the account's owner: a step, a test or dry run, an AI Agent's tool call, the
+account check when you connect, a dropdown loading in the step inspector, each page of a long
+listing. Once they are used up, steps on one-click accounts fail naming the limit and the reset
+date until the month turns, and a dropdown in the step inspector says so under its text field;
+bring-your-own connections and steps that need no account carry on.
+
+App triggers cost no app actions there: each event one delivers counts as a trigger event. For new
+Gmail mail that means Composio's **New Gmail Message Received Trigger** — Sarati's own **New Email**
+trigger, which asks Gmail every minute, is not offered on such an instance.
+
 ## Using one in a step
 
 A step that needs an account runs as one, decided when it runs:
@@ -154,8 +173,13 @@ Composio sends every trigger event in a project to that one URL, so each Sarati 
 receives app triggers needs a Composio project of its own.
 
 A delivery is verified against the secret of whichever user or organization owns the workflow it is
-for. Without that secret stored, deliveries are rejected rather than run.
+for — on an instance that provides its own Composio account, against that account's. Without a
+secret, deliveries are rejected rather than run.
 
-Polling triggers need none of this — they reach out rather than being pushed to. Your own `curl` to
-a [webhook trigger](/build/triggers/) also works without a tunnel, because it is on the same
-machine.
+Polling triggers need none of this — they reach out rather than being pushed to. Gmail's **New
+Email** is one: on a one-click account it asks Gmail through your Composio project on every poll
+(once a minute by default, `TRIGGER_POLL_INTERVAL_SECONDS`), whether or not mail arrived — 1,440 tool
+calls a day against the project's monthly allowance. Composio's **New Gmail Message Received
+Trigger** is pushed instead — so it needs the public URL above — and costs one trigger event per mail.
+Your own `curl` to a [webhook trigger](/build/triggers/) also works without a tunnel, because it is on
+the same machine.
