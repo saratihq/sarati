@@ -13,6 +13,8 @@ import { configureApp } from '../src/bootstrap';
 import { DbosRuntime } from '../src/dbos/dbos-runtime';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
+import * as recorderModule from '../src/runtime/run-recorder.service';
+import { RunRecorderService } from '../src/runtime/run-recorder.service';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -444,6 +446,213 @@ describe('cancel a durable run (e2e, isolated DB, DBOS on, mock auth)', () => {
       called: row.rows[0].status,
       afterCalls: hitsOn('/parent-after'),
     }).toEqual({ refused: [409, 'called_run'], answer: 201, called: 'completed', afterCalls: 1 });
+  }, 60_000);
+
+  it('cancelling a durable run while a sub-workflow it called is in flight cancels that sub-workflow too, so its next step never runs', async () => {
+    const child = (
+      await http()
+        .post('/api/deploy')
+        .send({
+          workflow_json: doc(
+            [
+              node('trigger', 'orchestr:tool_trigger', {
+                tool_name: 'gated_twice',
+                description: 'gated, then a step after the gate',
+                inputs: [{ name: 'q', type: 'string', description: 'unused', required: false }],
+              }),
+              node('gate', 'http.send_request', { method: 'POST', url: `${base}/gate-called`, body: {} }),
+              node('next', 'http.send_request', { method: 'POST', url: `${base}/called-next`, body: {} }),
+            ],
+            [edge('trigger', 'gate'), edge('gate', 'next')],
+          ),
+        })
+        .expect(201)
+    ).body.workflow_id as string;
+    const answer = http()
+      .post('/api/runs/from-ir')
+      .send({
+        run_id: 'caller-cancelled',
+        workflow_ir: doc(
+          [
+            node('call', 'orchestr:call_workflow', { workflow_id: child }),
+            node('after', 'http.send_request', { method: 'POST', url: `${base}/caller-after`, body: {} }),
+          ],
+          [edge('call', 'after')],
+        ),
+      })
+      .then((res) => res);
+    await untilHit('/gate-called');
+
+    await cancel('caller-cancelled').expect(200);
+    openGate();
+    const res = await answer;
+
+    const called = await db.query<{ status: string }>(
+      `SELECT r.status FROM runtime_runs r JOIN runtime_runs p ON p.id = r.parent_run_id WHERE p.run_id = $1`,
+      ['caller-cancelled'],
+    );
+    expect({
+      answer: [res.status, res.body.code],
+      called: called.rows.map((r) => r.status),
+      next: hitsOn('/called-next'),
+      after: hitsOn('/caller-after'),
+    }).toEqual({ answer: [409, 'run_cancelled'], called: ['cancelled'], next: 0, after: 0 });
+  }, 60_000);
+
+  it('a cancel that lands as a durable run starts the workflow it calls still reaches that workflow, so none of its steps runs', async () => {
+    const child = (
+      await http()
+        .post('/api/deploy')
+        .send({
+          workflow_json: doc(
+            [
+              node('trigger', 'orchestr:tool_trigger', {
+                tool_name: 'called_as_cancelled',
+                description: 'two steps',
+                inputs: [{ name: 'q', type: 'string', description: 'unused', required: false }],
+              }),
+              node('one', 'http.send_request', { method: 'POST', url: `${base}/starting-one`, body: {} }),
+              node('two', 'http.send_request', { method: 'POST', url: `${base}/starting-two`, body: {} }),
+            ],
+            [edge('trigger', 'one'), edge('one', 'two')],
+          ),
+        })
+        .expect(201)
+    ).body.workflow_id as string;
+    const runs = app.get(RunsService);
+    const nested = runs.runSubWorkflowNested.bind(runs);
+    let entered!: () => void;
+    const starting = new Promise<void>((resolve) => (entered = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    // Held as the call step hands the called run over, before anything of it is recorded or registered.
+    const handOver = jest.spyOn(runs, 'runSubWorkflowNested').mockImplementation(async (...args) => {
+      entered();
+      await released;
+      return nested(...args);
+    });
+    try {
+      const answer = http()
+        .post('/api/runs/from-ir')
+        .send({
+          run_id: 'cancelled-as-called',
+          workflow_ir: doc(
+            [
+              node('call', 'orchestr:call_workflow', { workflow_id: child }),
+              node('after', 'http.send_request', { method: 'POST', url: `${base}/starting-after`, body: {} }),
+            ],
+            [edge('call', 'after')],
+          ),
+        })
+        .then((res) => res);
+      await starting;
+
+      await cancel('cancelled-as-called').expect(200);
+      release();
+      const res = await answer;
+
+      const called = await db.query<{ status: string }>(
+        `SELECT r.status FROM runtime_runs r JOIN runtime_runs p ON p.id = r.parent_run_id WHERE p.run_id = $1`,
+        ['cancelled-as-called'],
+      );
+      expect({
+        answer: [res.status, res.body.code],
+        called: called.rows.map((r) => r.status),
+        steps: ['/starting-one', '/starting-two', '/starting-after'].map(hitsOn),
+      }).toEqual({ answer: [409, 'run_cancelled'], called: ['cancelled'], steps: [0, 0, 0] });
+    } finally {
+      release();
+      handOver.mockRestore();
+    }
+  }, 60_000);
+
+  it('a cancel that commits as the workflow a durable run calls registers still reaches it: read under the run’s lock, never before the cancel commits', async () => {
+    const child = (
+      await http()
+        .post('/api/deploy')
+        .send({
+          workflow_json: doc(
+            [
+              node('trigger', 'orchestr:tool_trigger', {
+                tool_name: 'registered_as_cancelled',
+                description: 'two steps',
+                inputs: [{ name: 'q', type: 'string', description: 'unused', required: false }],
+              }),
+              node('one', 'http.send_request', { method: 'POST', url: `${base}/registering-one`, body: {} }),
+              node('two', 'http.send_request', { method: 'POST', url: `${base}/registering-two`, body: {} }),
+            ],
+            [edge('trigger', 'one'), edge('one', 'two')],
+          ),
+        })
+        .expect(201)
+    ).body.workflow_id as string;
+    const recorder = app.get(RunRecorderService);
+    const record = recorder.runStarted.bind(recorder);
+    const listTree = recorderModule.descendantsInFlight;
+    let recording!: () => void;
+    const childRecording = new Promise<void>((resolve) => (recording = resolve));
+    let letRecord!: () => void;
+    const recordChild = new Promise<void>((resolve) => (letRecord = resolve));
+    let listed!: () => void;
+    const treeListed = new Promise<void>((resolve) => (listed = resolve));
+    let commit!: () => void;
+    const commitCancel = new Promise<void>((resolve) => (commit = resolve));
+    // The called run is recorded only once the cancel has listed its tree, and the cancel commits only once the called run waits on a lock.
+    const started = jest.spyOn(recorder, 'runStarted').mockImplementation(async (...args) => {
+      if (args[4]?.parentRunId) {
+        recording();
+        await recordChild;
+      }
+      return record(...args);
+    });
+    const tree = jest.spyOn(recorderModule, 'descendantsInFlight').mockImplementation(async (tx, id) => {
+      const ids = await listTree(tx, id);
+      listed();
+      await commitCancel;
+      return ids;
+    });
+    try {
+      const answer = http()
+        .post('/api/runs/from-ir')
+        .send({
+          run_id: 'cancelled-as-registered',
+          workflow_ir: doc(
+            [
+              node('call', 'orchestr:call_workflow', { workflow_id: child }),
+              node('after', 'http.send_request', {
+                method: 'POST',
+                url: `${base}/registering-after`,
+                body: {},
+              }),
+            ],
+            [edge('call', 'after')],
+          ),
+        })
+        .then((res) => res);
+      await childRecording;
+      const cancelled = cancel('cancelled-as-registered').then((res) => res);
+      await treeListed;
+      letRecord();
+      await untilBlocked('%runtime_runs%');
+      commit();
+
+      expect((await cancelled).status).toBe(200);
+      const res = await answer;
+      const called = await db.query<{ status: string }>(
+        `SELECT r.status FROM runtime_runs r JOIN runtime_runs p ON p.id = r.parent_run_id WHERE p.run_id = $1`,
+        ['cancelled-as-registered'],
+      );
+      expect({
+        answer: [res.status, res.body.code],
+        called: called.rows.map((r) => r.status),
+        steps: ['/registering-one', '/registering-two', '/registering-after'].map(hitsOn),
+      }).toEqual({ answer: [409, 'run_cancelled'], called: ['cancelled'], steps: [0, 0, 0] });
+    } finally {
+      letRecord();
+      commit();
+      started.mockRestore();
+      tree.mockRestore();
+    }
   }, 60_000);
 
   it.each([

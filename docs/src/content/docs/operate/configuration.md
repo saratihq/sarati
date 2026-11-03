@@ -51,8 +51,9 @@ PUBLIC_BASE_URL=https://your-tunnel.example.com
 # trace | debug | info | warn | error. Empty → info.
 LOG_LEVEL=
 
-# How long a run may stay in flight since it started or last resumed from a wait before it is
-# declared dead. 0 disables the reaper.
+# How long a run nothing on this instance holds may stay in flight since it started or last resumed
+# from a wait before it is declared dead. 0 turns that off; a run past RUN_MAX_ACTIVE_SECONDS is
+# still stopped.
 RUN_MAX_DURATION_SECONDS=3600
 
 # Schedule and polling cadence. 0 disables; pg-boss will not go below 60.
@@ -69,6 +70,54 @@ MAX_REQUEST_BODY_BYTES=2097152
 
 # The Claude model the AI composer calls — change it when your Anthropic key cannot use this one.
 COMPOSER_MODEL=claude-opus-4-8
+```
+
+## Run limits
+
+Every run runs within limits, so one workflow can't run forever or take an instance over. The
+defaults leave a normal install alone; lower them on an instance strangers can use. Each number
+applies per workspace, `0` turns that limit off, and none may be more than `2147483647`. Every
+organization is a workspace with numbers of its own, and anyone signed in can create organizations,
+so the workspace limits bound what runs at once in one workspace, not what one person runs.
+
+| Variable | Default | What it limits |
+|---|---|---|
+| `RUN_MAX_STEPS` | `250000` | Steps one run may take: every action, Code step, AI Agent model or tool call and sub-workflow call, the steps of every workflow it calls included. |
+| `RUN_MAX_LOOP_ROUNDS` | `250000` | Loop rounds one run may take: a **Loop**'s items plus its while rounds, over every loop in the run. |
+| `RUN_MAX_ACTIVE_SECONDS` | `86400` | Seconds a run may stay in flight, counted from its start, the last time it came back from waiting, or the service's last start, whichever is latest — so a restart, like the end of a wait, starts its clock again. Time the whole run is parked — on an approval, or a long **Wait**, a **Wait** in a workflow it calls included — never counts, and nor does time the service is down. A branch parked beside a busy one doesn't stop the clock. |
+| `WORKSPACE_MAX_RUNNING_RUNS` | `1000` | Runs one workspace may have running at once. A run with a branch busy beside a parked one is running. |
+| `WORKSPACE_MAX_UNFINISHED_RUNS` | `10000` | Runs one workspace may have running or waiting — on an approval or a timer — at once. |
+
+- **A run past one of its limits ends** in `error`, reading *Run limit reached:* and naming the limit
+  and the variable that raises it. The step that would have crossed it does nothing, and no error
+  output or *Continue* absorbs it. A run takes the limits in force when it started, and keeps them
+  through a restart. A workflow another run calls counts toward that run's steps and time, so its
+  history names the run that called it.
+- **A run past its time** is ended at its next step, or by the reaper within five minutes when a step
+  is still in flight. The step in flight finishes, because a request that has gone out can't be taken
+  back; nothing after it starts.
+- **A run the workspace has no room for** is refused before anything is recorded: the caller gets
+  `429` with a `Retry-After` header, a webhook is answered `429`, and a schedule or polling trigger
+  keeps its place and takes the event on its next poll. A Composio event several workspaces' triggers
+  share still runs in every workspace with room; the one without shows why on its trigger and runs
+  when Composio sends the event again. A branch test needs room for both of its runs, or runs
+  neither, and a live run over MCP that is refused costs none of the caller's hourly live runs. A run
+  another run calls is never counted or refused.
+- **A run that can't survive a restart** — a dry run, a run that ran while `DBOS_ENABLED=false`, a
+  run whose start was not yet saved to DBOS, or any run when the service starts again with DBOS off —
+  and was going when the service stopped is ended as it starts again, so it holds no place in its
+  workspace.
+
+For an instance open to anyone, something like this — and, since every person can make workspaces
+that each get these numbers, gate sign-up too ([`OIDC_ALLOWED_DOMAINS`](#single-sign-on) or invites):
+
+```bash
+RUN_MAX_STEPS=1000
+RUN_MAX_LOOP_ROUNDS=1000
+RUN_MAX_ACTIVE_SECONDS=600
+WORKSPACE_MAX_RUNNING_RUNS=3
+WORKSPACE_MAX_UNFINISHED_RUNS=20
+RUN_MAX_DURATION_SECONDS=900
 ```
 
 ## Behind another proxy

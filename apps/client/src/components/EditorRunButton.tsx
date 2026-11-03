@@ -17,7 +17,7 @@ const RUN_POLL_MS = 3000;
 const RUN_POLL_CAP_MS = 5 * 60_000;
 
 interface RunView {
-  status: "running" | "waiting" | "completed" | "failed" | "cancelled";
+  status: "running" | "waiting" | "completed" | "failed" | "cancelled" | "refused";
   dry: boolean;
   /** What a waiting run waits for, as the service reports it. */
   waiting?: api.RunWaiting | null;
@@ -33,6 +33,7 @@ const VIEW_META: Record<RunView["status"], { label: string; color: string }> = {
   completed: { label: "Completed", color: "var(--orchestr-success)" },
   failed: { label: "Failed", color: "var(--orchestr-danger)" },
   cancelled: { label: "Cancelled", color: "var(--orchestr-ink-muted)" },
+  refused: { label: "Not started", color: "var(--orchestr-warning)" },
 };
 
 // A dry run sent nothing, so it never borrows the word or the green of a run that did.
@@ -121,13 +122,7 @@ export default function EditorRunButton() {
       });
       settle(runId, { status: "completed", dry, outputs: res.outputs, trace: res.trace });
     } catch (e) {
-      const cancelled = e instanceof api.ApiError && e.code === "run_cancelled";
-      settle(
-        runId,
-        cancelled
-          ? { status: "cancelled", dry }
-          : { status: "failed", dry, error: e instanceof Error ? e.message : "Run failed" },
-      );
+      settle(runId, failedView(e, dry));
     }
   };
 
@@ -232,7 +227,7 @@ export default function EditorRunButton() {
             </pre>
           )}
 
-          {workflowId && view.status !== "running" && view.status !== "waiting" && (
+          {workflowId && view.status !== "running" && view.status !== "waiting" && view.status !== "refused" && (
             <p className="text-[11px] m-0 mt-2">
               <Link
                 href={`/workflows/${workflowId}/runs`}
@@ -247,6 +242,14 @@ export default function EditorRunButton() {
       )}
     </div>
   );
+}
+
+// A run its workspace had no room for was never recorded: it did not fail, and history holds nothing of it.
+function failedView(e: unknown, dry: boolean): RunView {
+  if (e instanceof api.ApiError && e.code === "run_cancelled") return { status: "cancelled", dry };
+  const error = e instanceof Error ? e.message : "Run failed";
+  if (e instanceof api.ApiError && e.code === "workspace_run_limit") return { status: "refused", dry, error };
+  return { status: "failed", dry, error };
 }
 
 function metaOf(view: RunView): { label: string; color: string } {

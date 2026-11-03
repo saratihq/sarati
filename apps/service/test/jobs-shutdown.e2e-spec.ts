@@ -1442,101 +1442,88 @@ describe('a stop drains its jobs before DBOS stops (e2e, isolated DB, pg-boss an
     expect(lines.filter((line) => line.includes('stays open past'))).toEqual([]);
   }, 60_000);
 
-  it.each([
-    ['its head side', false],
-    ['both its sides', true],
-  ])(
-    'a review test whose admission the stopping service refuses on %s keeps no result, and leaves the merge gate as it was',
-    async (_sides, both) => {
-      app = await boot();
-      const http = () => request(app!.getHttpServer());
-      const wf = (
-        await http()
-          .post('/api/deploy')
-          .send({ workflow_json: doc('tested at the stop', { node_type: 'orchestr:trigger' }, `${base}/ok`) })
-          .expect(201)
-      ).body.workflow_id as string;
-      await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+  it('a review test whose admission the stopping service refuses records no run on either side, keeps no result, and leaves the merge gate as it was', async () => {
+    app = await boot();
+    const http = () => request(app!.getHttpServer());
+    const wf = (
       await http()
-        .post(`/api/workflows/${wf}/commit`)
-        .send({
-          workflow_ir: doc('tested at the stop', { node_type: 'orchestr:trigger' }, `${base}/ok?lane`),
-          branch: 'lane',
-        })
-        .expect(201);
+        .post('/api/deploy')
+        .send({ workflow_json: doc('tested at the stop', { node_type: 'orchestr:trigger' }, `${base}/ok`) })
+        .expect(201)
+    ).body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({
+        workflow_ir: doc('tested at the stop', { node_type: 'orchestr:trigger' }, `${base}/ok?lane`),
+        branch: 'lane',
+      })
+      .expect(201);
+    await http()
+      .patch(`/api/workflows/${wf}/branches/main/protection`)
+      .send({ is_protected: true })
+      .expect(200);
+    const review = (
       await http()
-        .patch(`/api/workflows/${wf}/branches/main/protection`)
-        .send({ is_protected: true })
-        .expect(200);
-      const review = (
-        await http()
-          .post(`/api/workflows/${wf}/reviews`)
-          .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
-          .expect(201)
-      ).body.id as string;
+        .post(`/api/workflows/${wf}/reviews`)
+        .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+        .expect(201)
+    ).body.id as string;
 
-      const runs = app.get(RunsService);
-      const runsStopping = deferred();
-      const held = (plan: unknown): boolean => both || JSON.stringify(plan).includes('ok?lane');
-      const arrived = { held: 0, admitted: deferred() };
-      const admit = runs.admit.bind(runs);
-      jest.spyOn(runs, 'admit').mockImplementation(async (plan, opts) => {
-        if (!held(plan)) {
-          const admitting = admit(plan, opts);
-          void admitting.then(arrived.admitted.resolve, () => undefined);
-          return admitting;
-        }
-        arrived.held += 1;
-        await runsStopping.promise;
-        return admit(plan, opts);
-      });
-      const reviewTest = app.get(ReviewTestService);
-      const testBranch = reviewTest.testBranch.bind(reviewTest);
-      let tested: Promise<unknown> | undefined;
-      jest.spyOn(reviewTest, 'testBranch').mockImplementation((...args) => (tested = testBranch(...args)));
-      const stop = runs.onApplicationShutdown.bind(runs);
-      jest.spyOn(runs, 'onApplicationShutdown').mockImplementation(async () => {
-        const stopping = stop();
-        runsStopping.resolve();
-        await tested?.catch(() => undefined);
-        return stopping;
-      });
+    const runs = app.get(RunsService);
+    const runsStopping = deferred();
+    const arrived = { held: 0 };
+    const admitTogether = runs.admitTogether.bind(runs);
+    jest.spyOn(runs, 'admitTogether').mockImplementation(async (group) => {
+      if (!group.some(({ opts }) => opts.source === 'review_test')) return admitTogether(group);
+      arrived.held += 1;
+      await runsStopping.promise;
+      return admitTogether(group);
+    });
+    const reviewTest = app.get(ReviewTestService);
+    const testBranch = reviewTest.testBranch.bind(reviewTest);
+    let tested: Promise<unknown> | undefined;
+    jest.spyOn(reviewTest, 'testBranch').mockImplementation((...args) => (tested = testBranch(...args)));
+    const stop = runs.onApplicationShutdown.bind(runs);
+    jest.spyOn(runs, 'onApplicationShutdown').mockImplementation(async () => {
+      const stopping = stop();
+      runsStopping.resolve();
+      await tested?.catch(() => undefined);
+      return stopping;
+    });
 
-      const port = (app.getHttpServer().address() as AddressInfo).port;
-      const testing = send({
-        host: '127.0.0.1',
-        port,
-        method: 'POST',
-        path: `/api/workflows/${wf}/reviews/${review}/test`,
-        headers: { 'content-type': 'application/json' },
-      });
-      testing.on('error', () => undefined);
-      testing.end(JSON.stringify({ trigger_payload: {} }));
-      if (!both) await reached(arrived.admitted.promise, 'the base side’s admission', 10_000);
-      await eventually(
-        'the held sides at their admission',
-        () => arrived.held,
-        (n) => n === (both ? 2 : 1),
-      );
-      // Its caller gone, the review test outlives the HTTP server's close.
-      app.get(ShutdownDeadline).signal.addEventListener('abort', () => testing.destroy());
+    const port = (app.getHttpServer().address() as AddressInfo).port;
+    const testing = send({
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path: `/api/workflows/${wf}/reviews/${review}/test`,
+      headers: { 'content-type': 'application/json' },
+    });
+    testing.on('error', () => undefined);
+    testing.end(JSON.stringify({ trigger_payload: {} }));
+    await eventually(
+      'both sides at their one admission',
+      () => arrived.held,
+      (n) => n === 1,
+    );
+    // Its caller gone, the review test outlives the HTTP server's close.
+    app.get(ShutdownDeadline).signal.addEventListener('abort', () => testing.destroy());
 
-      await app.close();
-      app = undefined;
+    await app.close();
+    app = undefined;
 
-      expect(
-        (await db.query(`SELECT verdict FROM review_test_results WHERE review_id = $1`, [review])).rows,
-      ).toEqual([]);
-      expect((await db.query(`SELECT status FROM runtime_runs WHERE review_id = $1`, [review])).rows).toEqual(
-        both ? [] : [{ status: 'completed' }],
-      );
-      app = await boot();
-      const shown = (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body;
-      expect({ blocked: shown.merge_blocked_by_test, lastTest: shown.last_test }).toEqual({
-        blocked: null,
-        lastTest: null,
-      });
-    },
-    60_000,
-  );
+    expect(
+      (await db.query(`SELECT verdict FROM review_test_results WHERE review_id = $1`, [review])).rows,
+    ).toEqual([]);
+    expect((await db.query(`SELECT status FROM runtime_runs WHERE review_id = $1`, [review])).rows).toEqual(
+      [],
+    );
+    app = await boot();
+    const shown = (await http().get(`/api/workflows/${wf}/reviews/${review}`).expect(200)).body;
+    expect({ blocked: shown.merge_blocked_by_test, lastTest: shown.last_test }).toEqual({
+      blocked: null,
+      lastTest: null,
+    });
+  }, 60_000);
 });

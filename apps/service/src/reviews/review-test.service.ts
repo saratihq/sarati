@@ -135,10 +135,14 @@ export class ReviewTestService {
     const payload =
       opts.triggerPayload !== undefined ? opts.triggerPayload : await this.defaultPayload(opts, workflowId);
 
-    const [base, head] = await Promise.all([
-      this.runSide(baseIr, payload, wf, reviewId, opts, environment),
-      this.runSide(headIr, payload, wf, reviewId, opts, environment),
-    ]);
+    const [base, head] = (await this.runSides(
+      [baseIr, headIr],
+      payload,
+      wf,
+      reviewId,
+      opts,
+      environment,
+    )) as [SideRun, SideRun];
     // A cancelled run neither passed nor failed, so the test has no result to keep or to gate a merge on.
     if (base.cancelled || head.cancelled) {
       throw new DomainError('The test was cancelled before it finished, so it has no result', 409, {
@@ -225,40 +229,52 @@ export class ReviewTestService {
     return version.workflowJson as unknown as WorkflowIR;
   }
 
-  /** Run one side, catching a step failure so `Promise.all` sees a result rather than a rejection. */
-  private async runSide(
-    ir: WorkflowIR,
+  // Run the sides, admitted as one so none runs unless every one may, each side's failure caught as its result.
+  private async runSides(
+    irs: WorkflowIR[],
     payload: unknown,
     wf: WorkflowEntity,
     reviewId: string,
     opts: TestBranchOptions,
     environment: NamedEnvironment | null,
-  ): Promise<SideRun> {
-    const runId = randomUUID();
-    try {
-      const result = await this.runs.runFromIr(ir, {
-        externalUserId: opts.principal.user.id,
-        activeOrgId: opts.principal.activeOrgId,
-        runId,
-        workflowId: wf.id,
-        source: 'review_test',
-        reviewId,
-        environment: environment?.name ?? null,
-        environmentId: environment?.id ?? null,
-        orgId: wf.orgId,
-        initialScope: payload !== undefined ? { trigger: payload } : undefined,
-      });
-      return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
-    } catch (err) {
-      if (err instanceof ShuttingDown) throw err;
-      return {
-        runId,
-        status: 'error',
-        outputs: null,
-        error: errorMessage(err),
-        cancelled: isRunCancelled(err),
-      };
-    }
+  ): Promise<SideRun[]> {
+    const runIds = irs.map(() => randomUUID());
+    const started = await this.runs.startIrTogether(
+      irs.map((ir, i) => ({
+        ir,
+        opts: {
+          externalUserId: opts.principal.user.id,
+          activeOrgId: opts.principal.activeOrgId,
+          runId: runIds[i],
+          workflowId: wf.id,
+          source: 'review_test' as const,
+          reviewId,
+          environment: environment?.name ?? null,
+          environmentId: environment?.id ?? null,
+          orgId: wf.orgId,
+          initialScope: payload !== undefined ? { trigger: payload } : undefined,
+        },
+      })),
+    );
+    return Promise.all(
+      started.map(async (side, i): Promise<SideRun> => {
+        const runId = runIds[i]!;
+        try {
+          if ('error' in side) throw side.error;
+          const result = await side.run.outcome();
+          return { runId, status: 'completed', outputs: result.outputs, error: null, cancelled: false };
+        } catch (err) {
+          if (err instanceof ShuttingDown) throw err;
+          return {
+            runId,
+            status: 'error',
+            outputs: null,
+            error: errorMessage(err),
+            cancelled: isRunCancelled(err),
+          };
+        }
+      }),
+    );
   }
 
   /** Default payload: the workflow's latest completed run's trigger, else `{}`. */

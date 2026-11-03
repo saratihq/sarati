@@ -201,10 +201,6 @@ export class RunsController {
     private readonly policy: PolicyService,
   ) {}
 
-  private userId(req: Request): string {
-    return requirePrincipal(req).user.id;
-  }
-
   private access(req: Request): Promise<RunAccess> {
     return runAccessOf(requirePrincipal(req), this.policy);
   }
@@ -239,8 +235,10 @@ export class RunsController {
   @Scope('run:execute')
   @Post()
   run(@Req() req: Request, @Body() body: CreateRunDto): Promise<RunResult> {
+    const principal = requirePrincipal(req);
     return this.runs.run(body.plan, {
-      externalUserId: this.userId(req),
+      externalUserId: principal.user.id,
+      orgId: principal.activeOrgId,
       runId: this.requestedRunId(req, body.run_id),
       source: 'api',
       dryRun: body.dry_run,
@@ -271,8 +269,10 @@ export class RunsController {
   @Scope('run:execute')
   @Post('test-step')
   testStep(@Req() req: Request, @Body() body: TestStepDto): Promise<RunResult> {
+    const principal = requirePrincipal(req);
     return this.runs.testStep(body.node, body.sample_scope ?? {}, {
-      externalUserId: this.userId(req),
+      externalUserId: principal.user.id,
+      activeOrgId: principal.activeOrgId,
     });
   }
 
@@ -285,8 +285,10 @@ export class RunsController {
       body.workflow_id && body.session_id
         ? channelKey(body.workflow_id, AGENT_TEST_ENV, body.session_id)
         : null;
+    const principal = requirePrincipal(req);
     return this.runs.testAgent(body.workflow_ir as unknown as WorkflowIR, body.node_id, {
-      externalUserId: this.userId(req),
+      externalUserId: principal.user.id,
+      activeOrgId: principal.activeOrgId,
       input: body.input,
       sampleScope: body.sample_scope ?? {},
       chatChannelKey,

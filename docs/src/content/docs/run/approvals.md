@@ -139,4 +139,4 @@ it, and the wait is no longer in the inbox.
 
 When `timeout_ms` passes, the wait ends rather than hanging forever. A run whose worker died while
 waiting is [reaped](/run/runs/#when-a-worker-dies) rather than left in limbo. So is a run holding a
-decision it can no longer resume to take: it ends in an error that names who decided.
+decision it can no longer resume to take: it ends in `error`, still naming who decided.

@@ -177,6 +177,14 @@ export function claimLeads(claimed: RuntimeRunStepEntity[]): RuntimeRunStepEntit
   return [...groups.values()].map((g) => g.sort(byAge)[0]!);
 }
 
+/** The latest of `claims`: the decision a run that ends unable to take any is credited with. */
+export function latestClaim(claims: RuntimeRunStepEntity[]): RuntimeRunStepEntity | undefined {
+  return claims.reduce<RuntimeRunStepEntity | undefined>(
+    (last, claim) => (last && last.claimedAt! >= claim.claimedAt! ? last : claim),
+    undefined,
+  );
+}
+
 /** Whether a decision sent now still reaches the wait before it gives up — later, a copy would answer the next wait on the topic. */
 export function stillInTime(wait: RuntimeRunStepEntity): boolean {
   const due = wait.waitingTimeoutAt?.getTime();

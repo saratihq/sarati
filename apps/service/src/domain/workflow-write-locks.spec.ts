@@ -28,6 +28,8 @@ const ENV_POINTERS =
   "an environment's pointers: it locks the env row or only the pointer rows, never a workflow row, and a workflow delete is refused while any pointer is left";
 const RUN_HISTORY =
   "one statement on a run's history row; a workflow delete only clears its workflow_id, and it holds no lock before its foreign-key check";
+const RUN_ADMISSION =
+  "runs admitted together: their inserts' foreign-key checks take their workflow and environment rows KEY SHARE, then only the workspace's admission lock, whose every holder only reads before it commits, so a workflow delete waits for it to commit, never a cycle";
 const RUN_LOCK =
   "a run's own rows under that run's row lock, taken first, updating the run's row at most once; nothing in it reaches the workflow row, so a workflow delete waiting on the run's row only waits for it to commit, never a cycle";
 const THREAD =
@@ -116,22 +118,36 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
     in: 'autocommit',
     why: ACTIVATION,
   },
-  'service:runtime/run-recorder.service.ts#insertRun#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#runStarted#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#runRefused#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#runsAdmitted#runtime_runs': {
+    in: 'transaction',
+    why: RUN_ADMISSION,
+  },
   'service:runtime/run-recorder.service.ts#stepResumed#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runtime/run-recorder.service.ts#runTreeResuming#runtime_runs': {
+    in: 'transaction',
+    why: RUN_LOCK,
+  },
   'service:runtime/run-recorder.service.ts#runFinished#runtime_runs': { in: 'autocommit', why: RUN_HISTORY },
+  'service:runtime/run-recorder.service.ts#chargeRunStep#runtime_runs': {
+    in: 'autocommit',
+    why: RUN_HISTORY,
+  },
   'service:runtime/run-recorder.service.ts#withRunLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#withWaitLock#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runtime/run-recorder.service.ts#runUnwoundByCancel#runtime_runs': {
     in: 'autocommit',
     why: RUN_HISTORY,
   },
+  'service:runs/run-reaper.service.ts#endInterruptedRuns#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runs/run-reaper.service.ts#reapCrashedRuns#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runs/run-reaper.service.ts#reapLapsedWaits#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runs/run-reaper.service.ts#reapStrandedDecisions#runtime_runs': {
     in: 'transaction',
     why: RUN_LOCK,
   },
-  'service:runs/runs.service.ts#cancelRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
+  'service:runs/runs.service.ts#endRun#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runs/runs.service.ts#rearmIfNeverStarted#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:runs/runs.service.ts#refuseIfNeverStarted#runtime_runs': { in: 'transaction', why: RUN_LOCK },
   'service:dbos/recovery-guard.ts#admit#runtime_runs': { in: 'transaction', why: RUN_LOCK },
@@ -150,12 +166,12 @@ const UNLOCKED: Record<string, { in: 'autocommit' | 'transaction'; why: string }
   'agent:composer/thread-store.ts#recordSdkSession#composer_threads': { in: 'autocommit', why: THREAD },
 };
 
-/** Helpers that send on SQL their callers wrote, judged where it is written: on the caller's first argument, or in autocommit. */
-const PASS_THROUGH: Record<string, 'first argument' | 'autocommit'> = {
-  'service:database/raw-query.ts#rawQuery': 'first argument',
-  'service:database/raw-query.ts#rawMutate': 'first argument',
-  'service:database/raw-query.ts#rawMutateReturning': 'first argument',
-  'service:runtime/run-recorder.service.ts#write': 'autocommit',
+/** Helpers that send on SQL their callers wrote, judged where it is written: on the manager its caller passes at this argument, or the parameter's default when it passes none. */
+const PASS_THROUGH: Record<string, number> = {
+  'service:database/raw-query.ts#rawQuery': 0,
+  'service:database/raw-query.ts#rawMutate': 0,
+  'service:database/raw-query.ts#rawMutateReturning': 0,
+  'service:runtime/run-recorder.service.ts#write': 4,
 };
 
 /** Members that send SQL this cannot read, and why it writes nothing under a workflow. */
@@ -690,12 +706,7 @@ function judge(app: App, guarded: Set<string>): Verdict {
       if (settled.has(key)) return;
       settled.add(key);
       for (const call of callsOf(context.fn, site)) {
-        const argument = call.arguments[context.index];
-        reach(
-          call,
-          argument ? classify(argument) : { kind: 'unknown', why: 'a call that passes no manager' },
-          table,
-        );
+        reach(call, passed(call, context.fn, context.index), table);
       }
       return;
     }
@@ -722,6 +733,12 @@ function judge(app: App, guarded: Set<string>): Verdict {
     verdict.offenders.push(`${where(site)} ${table} — ${why}`);
   };
 
+  // The manager a call hands `fn`'s parameter at `index`: its argument, else the parameter's default.
+  const passed = (call: ts.CallExpression, fn: ts.SignatureDeclaration, index: number): Context => {
+    const manager = call.arguments[index] ?? fn.parameters[index]?.initializer;
+    return manager ? classify(manager) : { kind: 'unknown', why: 'a call that passes no manager' };
+  };
+
   // Where SQL handed to a call runs: the query's own receiver, or what a pass-through helper sends it on.
   const sqlContext = (node: ts.Node): Context => {
     const holder = ts.isArrayLiteralExpression(node.parent) ? node.parent : node;
@@ -744,10 +761,10 @@ function judge(app: App, guarded: Set<string>): Verdict {
           : context;
       }
     }
-    const via = PASS_THROUGH[declarationKey(resolved(checker, call.expression)) ?? ''];
-    if (via === 'first argument' && call.arguments[0] && call.arguments[0] !== holder)
-      return classify(call.arguments[0]);
-    if (via === 'autocommit') return { kind: 'autocommit' };
+    const helper = resolved(checker, call.expression)?.valueDeclaration;
+    const at = PASS_THROUGH[declarationKey(resolved(checker, call.expression)) ?? ''];
+    if (at !== undefined && helper && ts.isFunctionLike(helper) && call.arguments[at] !== holder)
+      return passed(call, helper, at);
     return { kind: 'unknown', why: `SQL handed to ${call.expression.getText()}, which this cannot follow` };
   };
 
@@ -774,7 +791,7 @@ function judge(app: App, guarded: Set<string>): Verdict {
         node.expression.name.text === 'query' &&
         kindOf(checker, node.expression.expression, (n) => CONNECTIONS.has(n)) &&
         (!node.arguments[0] || sqlText(node.arguments[0]) === undefined) &&
-        !PASS_THROUGH[memberKey(node)]
+        !(memberKey(node) in PASS_THROUGH)
       ) {
         if (memberKey(node) in OPAQUE_READS) verdict.opaque.add(memberKey(node));
         else

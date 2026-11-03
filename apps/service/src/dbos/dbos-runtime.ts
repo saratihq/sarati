@@ -1,6 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { DBOS, Error as DbosErrors, StatusString, type WorkflowStatus } from '@dbos-inc/dbos-sdk';
 
+import type { RunLimits } from '../entitlements/run-limits';
 import type { DurableStep } from '../providers/durable-step';
 import type { RunOptions } from '../runtime/base-plan-interpreter';
 import type { DagPlan } from '../runtime/dag-plan';
@@ -34,6 +35,8 @@ interface PlanWorkflowArgs {
   chatChannelKey?: string | null;
   /** Set on every run started since waits on a shared topic receive on their own step's; absent on one recovered from before. */
   sharedTopicsByStep?: boolean;
+  /** The per-run limits it was admitted under, so a replay never asks again; absent on a run admitted before limits existed. */
+  limits?: RunLimits;
 }
 
 // One run on either engine: the row gate first, before the run writes anything, then the legacy engine's recovery guard, then the plan.
@@ -81,6 +84,7 @@ async function runPlan(
     orgId: args.orgId,
     // Checkpointed so a resume re-publishes to the same `workflow:env:session` channel.
     chatChannelKey: args.chatChannelKey,
+    limits: args.limits ?? null,
     ...engine,
   });
 }
@@ -199,6 +203,7 @@ export class DbosRuntime {
       environmentId?: string | null;
       orgId?: string | null;
       chatChannelKey?: string | null;
+      limits?: RunLimits;
     },
   ): Promise<DurableRun> {
     await this.outsideWorkflowOnceLaunched();

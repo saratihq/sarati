@@ -434,7 +434,10 @@ CREATE TABLE public.runtime_runs (
     dry_run boolean DEFAULT false NOT NULL,
     parent_run_id character varying(200),
     parent_step_key character varying(500),
-    org_id uuid
+    org_id uuid,
+    limits json,
+    steps_used integer DEFAULT 0 NOT NULL,
+    active_since timestamp with time zone
 );
 
 
@@ -1147,6 +1150,13 @@ CREATE INDEX ix_runtime_run_steps_resumed ON public.runtime_run_steps USING btre
 
 
 --
+-- Name: ix_runtime_run_steps_open; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_run_steps_open ON public.runtime_run_steps USING btree (run_id) WHERE (finished_at IS NULL);
+
+
+--
 -- Name: ix_runtime_run_steps_waiting; Type: INDEX; Schema: public; Owner: orchestr
 --
 
@@ -1179,6 +1189,13 @@ CREATE INDEX ix_runtime_runs_user_started ON public.runtime_runs USING btree (us
 --
 
 CREATE INDEX ix_runtime_runs_workflow ON public.runtime_runs USING btree (workflow_id);
+
+
+--
+-- Name: ix_runtime_runs_workspace_unfinished; Type: INDEX; Schema: public; Owner: orchestr
+--
+
+CREATE INDEX ix_runtime_runs_workspace_unfinished ON public.runtime_runs USING btree (org_id, user_id) WHERE parent_run_id IS NULL AND status IN ('running', 'waiting');
 
 
 --

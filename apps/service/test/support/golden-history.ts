@@ -141,8 +141,17 @@ function sleptUntil(row: Row, age: number): Row {
   return { ...row, output: JSON.stringify((JSON.parse(row.output as string) as number) + age) };
 }
 
+// Names only the columns the recording build wrote, so a column added since takes its default, as that build's own insert left it.
 async function insert(client: Client, table: string, rows: Row[]): Promise<void> {
-  await client.query(`INSERT INTO ${table} SELECT * FROM json_populate_recordset(NULL::${table}, $1)`, [
-    JSON.stringify(rows),
-  ]);
+  const [schema, name] = table.split('.') as [string, string];
+  const existing = new Set(await columnsOf(client, schema, name, 'true'));
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))]
+    .filter((column) => existing.has(column))
+    .map((column) => client.escapeIdentifier(column))
+    .join(', ');
+  if (columns === '') return;
+  await client.query(
+    `INSERT INTO ${table} (${columns}) SELECT ${columns} FROM json_populate_recordset(NULL::${table}, $1)`,
+    [JSON.stringify(rows)],
+  );
 }

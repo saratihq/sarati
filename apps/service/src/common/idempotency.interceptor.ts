@@ -15,7 +15,7 @@ import type { DataSource } from 'typeorm';
 import { newId, now } from '../database/ids';
 import { IdempotencyKeyEntity } from '../database/entities/idempotency-key.entity';
 import { principalOf } from '../auth/principal';
-import { shapeKnownError } from './all-exceptions.filter';
+import { retryAfterSeconds, shapeKnownError } from './all-exceptions.filter';
 import { errorMessage } from './error-message';
 
 const PG_UNIQUE_VIOLATION = '23505';
@@ -101,12 +101,9 @@ export class IdempotencyInterceptor implements NestInterceptor {
             await this.settle(userId, key, res.statusCode, body);
             return body as unknown;
           }),
-          catchError((err: unknown) => {
-            const outcome = outcomeOf(err);
-            return from(this.settle(userId, key, outcome.status, outcome.body)).pipe(
-              concatMap(() => throwError(() => err)),
-            );
-          }),
+          catchError((err: unknown) =>
+            from(this.settleFailure(userId, key, err)).pipe(concatMap(() => throwError(() => err))),
+          ),
         );
       }),
     );
@@ -132,6 +129,27 @@ export class IdempotencyInterceptor implements NestInterceptor {
           `Could not record the outcome for Idempotency-Key "${key}" (user ${userId}) — ` +
             `a retry with this key will RE-EXECUTE instead of replaying: ${errorMessage(err)}`,
         );
+      });
+  }
+
+  // A refusal that ran nothing and says when to try again frees its key, so that retry runs.
+  private settleFailure(userId: string, key: string, err: unknown): Promise<void> {
+    if (retryAfterSeconds(err) !== null) return this.release(userId, key);
+    const outcome = outcomeOf(err);
+    return this.settle(userId, key, outcome.status, outcome.body);
+  }
+
+  // Drop a pending key whose request ran nothing, so a retry with it runs.
+  private async release(userId: string, key: string): Promise<void> {
+    await this.dataSource
+      .createQueryBuilder()
+      .delete()
+      .from(IdempotencyKeyEntity)
+      .where({ userId, idempotencyKey: key, completed: false })
+      .execute()
+      .catch((err: unknown) => {
+        // Fail-open: the refusal stands; the key just stays pending, and a retry with it is answered as in progress.
+        this.logger.error(`Could not free Idempotency-Key "${key}" (user ${userId}): ${errorMessage(err)}`);
       });
   }
 

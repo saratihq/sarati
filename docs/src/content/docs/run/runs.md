@@ -123,8 +123,8 @@ stands, and its wait records who made it. On a durable run
 (the default) that can take up to about ten seconds, so a delay with less than that left simply runs
 out. A run v0.2.24 or earlier started is slower to stop: there a delay of a minute or less runs out
 first.
-On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once, and so does a
-workflow the run is calling; a durable run's called workflow finishes first.
+On a run that isn't durable (`DBOS_ENABLED=false`, or a dry run) it ends at once. A workflow the run
+is calling is cancelled with it and stops at its next step.
 
 If the engine can't be told of a durable run's cancel, the cancel answers `500` and changes nothing,
 so it is safe to try again.
@@ -132,16 +132,31 @@ so it is safe to try again.
 A run that another run's step started can't be cancelled on its own (`409`, code `called_run`).
 Cancel the run that called it.
 
+## Limits
+
+A run runs within its workspace's limits on steps, loop rounds and time in flight, and a workspace
+within its limits on runs at once — [Run limits](/operate/configuration/#run-limits) lists them. A run
+past one ends in `error`, reading *Run limit reached:*, naming the limit and the variable that raises
+it, and its step that would have crossed it reads the same. A workflow the run called reads that the
+run that called it reached the limit, since its steps and time count toward that run's. A caller waiting on its answer gets `422`
+with the code `run_limit_reached`, the `limit` it reached and its `max`. A run the workspace has no
+room for is never recorded: its caller gets `429` with the code `workspace_run_limit` and a
+`Retry-After` header.
+
 ## When a worker dies
 
 Durable resume covers a worker that comes back. A worker that does not come back would otherwise
-leave runs stuck `running` forever, so a reaper sweeps at boot and every five minutes, and moves to a
-terminal `error`:
+leave runs stuck `running` forever, so a reaper sweeps at boot and every five minutes. At boot it
+first ends, in `error`, every run that can't survive a restart — a dry run, a run that ran while DBOS
+was off, a run whose start was not yet saved to DBOS, or any run when the service starts again with
+DBOS off — that the service was running when it stopped. Each pass then stops a run running here
+past the time its limits give it, as a cancel would stop it, reading *Run limit reached:*. Then it
+moves to a terminal `error`:
 
 - a run in flight for longer than `RUN_MAX_DURATION_SECONDS` since it started or last resumed from a
-  wait. Time a run spends parked — on an approval, or on a **Wait** longer than a minute — never
-  counts. A shorter **Wait** sleeps in flight and does count, and so does a **Wait** inside a called
-  sub-workflow, against the run that called it;
+  wait, that this instance is not running and can't resume. Time a run spends parked — on an
+  approval, or on a **Wait** longer than a minute — never counts. A shorter **Wait** sleeps in flight
+  and does count, and so does a **Wait** inside a called sub-workflow, against the run that called it;
 - a run whose approval window has passed, or whose **Wait** step is past its wake by that long, with
   no decision on its way to it;
 - a run holding a decision whose wait is past its window by `RUN_MAX_DURATION_SECONDS`, when this
@@ -149,7 +164,8 @@ terminal `error`:
   they decided records them.
 
 A run with a decision on its way that can still resume is left to take it. Set
-`RUN_MAX_DURATION_SECONDS=0` to turn the reaper off.
+`RUN_MAX_DURATION_SECONDS=0` to turn off these three; a run past its time limit is still stopped,
+and a run a restart cut off is still ended.
 
 ## Nothing here yet
 

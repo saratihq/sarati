@@ -1,3 +1,6 @@
+import type { RunLimits } from '../entitlements/run-limits';
+import type { RunMeter } from './run-meter';
+
 /**
  * The seam that runs one workflow inside another — shared by BOTH callers: an AI agent
  * picking a sub-workflow tool and an authored `orchestr:call_workflow` step. A port
@@ -46,4 +49,8 @@ export interface SubWorkflowContext {
   rootRunId: string;
   /** The runs between the root and the caller, the caller last; empty when the root calls. */
   lineage: readonly string[];
+  /** The caller's per-run limits, which the child runs under too; null when it has none. */
+  limits: RunLimits | null;
+  /** The run tree's one budget, which the child's steps are charged to as well; null when it has no limits. */
+  meter: RunMeter | null;
 }

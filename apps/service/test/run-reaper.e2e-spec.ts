@@ -607,7 +607,7 @@ describe('run durability reaper (B8, e2e, isolated DB)', () => {
       text: string,
       params?: Parameters<EntityManager['query']>[1],
     ) {
-      if (/^SELECT r\.id FROM runtime_runs r WHERE/.test(text)) {
+      if (/^SELECT r\.id\b[^;]*?FROM runtime_runs r WHERE/.test(text)) {
         arrive();
         await released;
       }

@@ -241,6 +241,8 @@ const NO_HISTORY: RunRecorder = {
   runStatus: () => Promise.resolve('running'),
   chargeSubWorkflowCall: () => Promise.resolve(true),
   forgetSubWorkflowCharges: () => Promise.resolve(),
+  chargeRunStep: () => Promise.resolve(null),
+  runTreeResuming: () => Promise.resolve(),
 };
 
 function execute(trial: Trial, execution: Execution, n: number, id: string): Promise<RunResult> {

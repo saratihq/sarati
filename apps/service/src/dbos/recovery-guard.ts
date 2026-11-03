@@ -10,7 +10,7 @@ import type { EnvConfig } from '../config/env.config';
 import { rawMutateReturning } from '../database/raw-query';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import { NOT_RESUMED_STEP_ERROR } from '../runs/run-failure';
-import { claimLeads, parkedSteps } from '../runs/run-waits';
+import { claimLeads, latestClaim, parkedSteps } from '../runs/run-waits';
 import type { DagPlan } from '../runtime/dag-plan';
 import {
   MODEL_TURN,
@@ -277,10 +277,7 @@ export class RecoveryGuard implements OnModuleDestroy {
 async function endNotResumable(em: EntityManager, scopedRunId: string, message: string): Promise<boolean> {
   await lockRunRow(em, scopedRunId);
   const leads = claimLeads((await parkedSteps(em, scopedRunId)).filter((s) => s.claimedAt !== null));
-  const latest = leads.reduce<(typeof leads)[number] | undefined>(
-    (last, lead) => (last && last.claimedAt! >= lead.claimedAt! ? last : lead),
-    undefined,
-  );
+  const latest = latestClaim(leads);
   const ended = await rawMutateReturning(
     em,
     `UPDATE runtime_runs

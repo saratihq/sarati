@@ -2,7 +2,7 @@ import { Global, Module } from '@nestjs/common';
 
 import { EncryptionService } from './common/crypto/encryption.service';
 import { ShutdownDeadline } from './common/shutdown-deadline';
-import { ENTITLEMENTS_PROVIDER, UnlimitedEntitlements } from './entitlements/entitlements';
+import { ENTITLEMENTS_PROVIDER, OpenCoreEntitlements } from './entitlements/entitlements';
 import { EventsService } from './events/events.service';
 import { OrgsService } from './orgs/orgs.service';
 import { ComposioUsageService } from './platform/composio-usage.service';
@@ -24,7 +24,7 @@ import { PolicyService } from './policy/policy.service';
     PlatformKeysService,
     ComposioUsageService,
     ShutdownDeadline,
-    { provide: ENTITLEMENTS_PROVIDER, useClass: UnlimitedEntitlements },
+    { provide: ENTITLEMENTS_PROVIDER, useClass: OpenCoreEntitlements },
   ],
   exports: [
     OrgsService,

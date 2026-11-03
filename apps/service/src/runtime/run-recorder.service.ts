@@ -1,10 +1,21 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { IsNull, Not, type DataSource, type EntityManager } from 'typeorm';
 
 import { errorMessage } from '../common/error-message';
+import { RUN_ADMISSION_LOCK_SPACE } from '../database/advisory-lock-spaces';
 import { newId } from '../database/ids';
-import { rawMutate, rawQuery } from '../database/raw-query';
+import { rawMutate, rawMutateReturning, rawQuery } from '../database/raw-query';
+import {
+  RUN_ACTIVE_SECONDS,
+  RUN_LIMIT_PREFIX,
+  WORKSPACE_RUNNING_RUNS,
+  WORKSPACE_UNFINISHED_RUNS,
+  workspaceRunLimit,
+  type DecidedRunLimits,
+  type RunLimits,
+  type WorkspaceRunLimits,
+} from '../entitlements/run-limits';
 import { TIMER_TOPIC_SQL_PREFIX } from './timer-wait';
 import type { RunSource, RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
 
@@ -15,6 +26,10 @@ const MAX_STORED_JSON_CHARS = 16_000;
 const TRUNCATED_HEAD_CHARS = 2_000;
 /** What a step reads as when a cancel interrupted it, in place of the engine's own wording. */
 const CANCELLED_STEP_ERROR = 'Cancelled before it finished';
+// What a step reads as when a stop for a limit interrupted it.
+const STOPPED_STEP_ERROR = 'Stopped before it finished — the run reached a limit.';
+// A run a limit ended: final, so nothing it does afterwards rewrites it.
+const LIMIT_ENDED = `(status = 'error' AND starts_with(COALESCE(error, ''), '${RUN_LIMIT_PREFIX}'))`;
 // Ends a step's wait and leaves any claim on it for that wait's own resume to settle.
 const END_WAIT =
   'waiting_topic = NULL, waiting_since = NULL, waiting_timeout_at = NULL, delivery_topic = NULL';
@@ -29,6 +44,46 @@ export const CLEAR_SLOT =
 // The root's row is gone: a charge references it.
 function isForeignKeyViolation(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === '23503';
+}
+
+// A step `s` of run `x` that calls a run still in flight: an authored call's step, or an AI Agent's whose tool the run is.
+const CALLING = `EXISTS (SELECT 1 FROM runtime_runs c
+   WHERE c.parent_run_id = x.id AND c.status IN ('running', 'waiting')
+     AND (c.parent_step_key = s.step_key OR starts_with(c.parent_step_key, s.step_key || '#')))`;
+
+// SQL test that a lane of the run tree rooted at `alias` is in flight: a run of it with an open step neither parked nor calling a run in flight, or running between two steps.
+function treeInFlight(alias: string): string {
+  return `EXISTS (
+    WITH RECURSIVE tree AS (
+      SELECT ${alias}.id AS id, ${alias}.status AS status
+      UNION ALL
+      SELECT c.id, c.status FROM runtime_runs c JOIN tree t ON c.parent_run_id = t.id
+       WHERE c.status IN ('running', 'waiting')
+    )
+    SELECT 1 FROM tree x
+     WHERE x.status IN ('running', 'waiting')
+       AND (EXISTS (SELECT 1 FROM runtime_run_steps s
+                     WHERE s.run_id = x.id AND s.finished_at IS NULL AND s.waiting_topic IS NULL AND NOT ${CALLING})
+            OR (x.status = 'running'
+                AND NOT EXISTS (SELECT 1 FROM runtime_run_steps s WHERE s.run_id = x.id AND s.finished_at IS NULL))))`;
+}
+
+// SQL for when the run `alias`'s time in flight began: its start, the last time its whole tree came back from waiting, or `floor`, this process's start, whichever is latest.
+function activeSince(alias: string, floor: string): string {
+  return `GREATEST(${alias}.started_at, ${alias}.active_since, ${floor}::timestamptz)`;
+}
+
+/** SQL test that the run `alias` is a top-level run with a lane in flight past the time it was admitted under, counted from no earlier than `floor`. */
+export function overActiveTime(alias: string, floor: string): string {
+  return `${alias}.parent_run_id IS NULL AND ${alias}.status IN ('running', 'waiting')
+    AND (${alias}.limits ->> '${RUN_ACTIVE_SECONDS}') IS NOT NULL
+    AND ${activeSince(alias, floor)} < now() - make_interval(secs => (${alias}.limits ->> '${RUN_ACTIVE_SECONDS}')::int)
+    AND ${treeInFlight(alias)}`;
+}
+
+// SQL for a run's workspace: its workflow's org, else the org it was started in.
+function workspaceSql(workflowParam: string, orgParam: string): string {
+  return `COALESCE((SELECT org_id FROM workflows WHERE id = ${workflowParam}), ${orgParam})`;
 }
 
 /** SQL test that `alias` (a runtime_run_steps row) holds an open wait — parked, and the step not finished. */
@@ -148,7 +203,28 @@ export interface RunRecorder {
   ): Promise<boolean>;
   /** Drop every charge `runId` and the runs it called made in the tree, before it runs again in their place. */
   forgetSubWorkflowCharges(rootRunId: string, runId: string): Promise<void>;
+  /** Charge one step to its run tree's root, or answer the limit refusing it: past `maxSteps`, or in flight past `maxActiveSeconds`; throws when it can't be charged. */
+  chargeRunStep(
+    rootRunId: string,
+    maxSteps: number | null,
+    maxActiveSeconds: number | null,
+  ): Promise<'steps' | 'active_seconds' | null>;
+  /** A wait in the run tree rooted at `rootRunId` is about to end, still parked: with nothing else of the tree in flight, its time in flight starts again now; never throws. */
+  runTreeResuming(rootRunId: string): Promise<void>;
 }
+
+/** A run being admitted, as {@link RunRecorderService.runsAdmitted} records it; `meta.orgId` is its workspace. */
+export interface RunAdmission {
+  scopedRunId: string;
+  runId: string;
+  userId: string;
+  plan: unknown;
+  meta: RunStartMeta;
+  limits: DecidedRunLimits | null;
+}
+
+const hasCaps = (caps: WorkspaceRunLimits | undefined): caps is WorkspaceRunLimits =>
+  caps !== undefined && (caps[WORKSPACE_RUNNING_RUNS] !== null || caps[WORKSPACE_UNFINISHED_RUNS] !== null);
 
 /**
  * Persists run + per-step records. Every write is an UPSERT keyed on the scoped run id (and
@@ -156,8 +232,9 @@ export interface RunRecorder {
  * a run's admission is best-effort — history must never fail a run, so errors are logged and swallowed deliberately.
  */
 @Injectable()
-export class RunRecorderService implements RunRecorder {
+export class RunRecorderService implements RunRecorder, OnModuleInit {
   private readonly logger = new Logger(RunRecorderService.name);
+  private floor: Promise<Date> | null = null;
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
@@ -172,15 +249,53 @@ export class RunRecorderService implements RunRecorder {
     await this.insertRun('runStarted', scopedRunId, runId, userId, plan, meta, null);
   }
 
-  /** {@link runStarted} for a run being admitted: whether it recorded the run, false when a run already holds the id; throws when it can't record it. */
-  async runAdmitted(
-    scopedRunId: string,
-    runId: string,
-    userId: string,
-    plan: unknown,
-    meta?: RunStartMeta,
-  ): Promise<boolean> {
-    return this.insertRun('runAdmitted', scopedRunId, runId, userId, plan, meta, null, false);
+  /** {@link runStarted} for runs admitted together into one workspace: whether each recorded its run; refuses all, recording none, when it has no room. */
+  async runsAdmitted(runs: readonly RunAdmission[]): Promise<boolean[]> {
+    const [first] = runs;
+    if (!first) return [];
+    const workspace = first.meta.orgId ?? null;
+    if (runs.some((run) => (run.meta.orgId ?? null) !== workspace || run.userId !== first.userId)) {
+      throw new Error('runs admitted together are of one workspace and one caller');
+    }
+    return this.dataSource.manager.transaction(async (tx) => {
+      const recorded: boolean[] = [];
+      for (const run of runs) {
+        recorded.push(
+          await this.insertRun(
+            'runAdmitted',
+            run.scopedRunId,
+            run.runId,
+            run.userId,
+            run.plan,
+            run.meta,
+            null,
+            false,
+            run.limits?.run ?? null,
+            tx,
+          ),
+        );
+      }
+      const caps = first.limits?.workspace;
+      // Counted after the inserts, so an id already holding a run is never counted, and under the lock, so every admission counted before has committed.
+      if (recorded.includes(true) && hasCaps(caps)) {
+        await tx.query(`SELECT pg_advisory_xact_lock($1, hashtext($2::text))`, [
+          RUN_ADMISSION_LOCK_SPACE,
+          workspace ?? `user:${first.userId}`,
+        ]);
+        await assertWorkspaceRoom(tx, workspace, first.userId, caps);
+      }
+      return recorded;
+    });
+  }
+
+  /** The workspace a run of `workflowId` started in `orgId` belongs to, as its row will record it. */
+  async workspaceOf(workflowId: string | null, orgId: string | null): Promise<string | null> {
+    const [row] = await rawQuery<{ org_id: string | null }>(
+      this.dataSource.manager,
+      `SELECT ${workspaceSql('$1::uuid', '$2::uuid')} AS org_id`,
+      [workflowId, orgId],
+    );
+    return row?.org_id ?? null;
   }
 
   /** Record a run refused before any step ran, as already failed; it replaces an earlier refusal on the id, and leaves any run on it as it was. */
@@ -203,17 +318,19 @@ export class RunRecorderService implements RunRecorder {
     meta: RunStartMeta | undefined,
     error: string | null,
     failOpen = true,
+    limits: RunLimits | null = null,
+    em: EntityManager = this.dataSource.manager,
   ): Promise<boolean> {
     const recorded = await this.write<unknown[]>(
       op,
       scopedRunId,
       [
-        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id)
+        `INSERT INTO runtime_runs (id, run_id, user_id, plan_id, plan, status, error, started_at, finished_at, workflow_id, source, environment, environment_id, workflow_version_id, review_id, dry_run, parent_run_id, parent_step_key, org_id, limits)
        VALUES ($1, $2, $3, $4, CAST($5 AS json),
                CASE WHEN $16::text IS NULL THEN 'running' ELSE 'error' END, $16, now(),
                CASE WHEN $16::text IS NULL THEN NULL ELSE now() END,
                $6, $7, $8, $9, $10, $11, $12, $13, $14,
-               COALESCE((SELECT org_id FROM workflows WHERE id = $6), $15))
+               ${workspaceSql('$6', '$15')}, CAST($18 AS json))
        ON CONFLICT (id) DO UPDATE
           SET plan_id = EXCLUDED.plan_id, plan = EXCLUDED.plan, status = EXCLUDED.status,
               error = EXCLUDED.error, outputs = NULL, started_at = EXCLUDED.started_at,
@@ -222,7 +339,7 @@ export class RunRecorderService implements RunRecorder {
               environment_id = EXCLUDED.environment_id, workflow_version_id = EXCLUDED.workflow_version_id,
               review_id = EXCLUDED.review_id, dry_run = EXCLUDED.dry_run,
               parent_run_id = EXCLUDED.parent_run_id, parent_step_key = EXCLUDED.parent_step_key,
-              org_id = EXCLUDED.org_id
+              org_id = EXCLUDED.org_id, limits = EXCLUDED.limits, active_since = NULL
         WHERE runtime_runs.status = 'error' AND starts_with(runtime_runs.error, $17)
           AND COALESCE(json_typeof(runtime_runs.plan), 'null') = 'null'
           AND ${NO_STEP}
@@ -245,9 +362,11 @@ export class RunRecorderService implements RunRecorder {
           meta?.orgId ?? null,
           error,
           REFUSED_RUN_ERROR_PREFIX,
+          limits ? JSON.stringify(limits) : null,
         ],
       ],
       failOpen,
+      em,
     );
     return recorded?.length === 1;
   }
@@ -377,11 +496,11 @@ export class RunRecorderService implements RunRecorder {
   }
 
   async runFinished(scopedRunId: string, outputs: unknown, error: string | null): Promise<void> {
-    // A cancel is final: nothing the run does after it may rewrite it as completed or failed.
+    // A cancel and a limit's end are final: nothing the run does after either may rewrite it as completed or failed.
     await this.write('runFinished', scopedRunId, [
       `UPDATE runtime_runs
           SET status = $2, outputs = CAST($3 AS json), error = $4, finished_at = now(), ${CLEAR_SLOT}
-        WHERE id = $1 AND status <> 'cancelled'`,
+        WHERE id = $1 AND status <> 'cancelled' AND NOT ${LIMIT_ENDED}`,
       [scopedRunId, error === null ? 'completed' : 'error', cappedOutputsJson(outputs), error],
     ]);
     await this.clearWaits('runFinished', scopedRunId);
@@ -391,14 +510,16 @@ export class RunRecorderService implements RunRecorder {
     await this.write('runUnwoundByCancel', scopedRunId, [
       `UPDATE runtime_runs
           SET status = 'cancelled', error = NULL, finished_at = COALESCE(finished_at, now()), ${CLEAR_SLOT}
-        WHERE id = $1 AND status <> 'completed'`,
+        WHERE id = $1 AND status <> 'completed' AND NOT ${LIMIT_ENDED}`,
       [scopedRunId],
     ]);
     await this.clearWaits('runUnwoundByCancel', scopedRunId);
-    // Only the step that carried this very error: the one the cancel interrupted.
+    // Only the step that carried this very error: the one the cancel, or a stop for a limit, interrupted.
     await this.write('runUnwoundByCancel', scopedRunId, [
-      `UPDATE runtime_run_steps SET error = $3 WHERE run_id = $1 AND error = $2`,
-      [scopedRunId, unwindError, CANCELLED_STEP_ERROR],
+      `UPDATE runtime_run_steps
+          SET error = CASE WHEN EXISTS (SELECT 1 FROM runtime_runs WHERE id = $1 AND ${LIMIT_ENDED}) THEN $4 ELSE $3 END
+        WHERE run_id = $1 AND error = $2`,
+      [scopedRunId, unwindError, CANCELLED_STEP_ERROR, STOPPED_STEP_ERROR],
     ]);
   }
 
@@ -447,6 +568,64 @@ export class RunRecorderService implements RunRecorder {
         [rootRunId, runId],
       );
     });
+  }
+
+  async chargeRunStep(
+    rootRunId: string,
+    maxSteps: number | null,
+    maxActiveSeconds: number | null,
+  ): Promise<'steps' | 'active_seconds' | null> {
+    const floor = maxActiveSeconds === null ? null : await this.inFlightFloor();
+    const charged = await rawMutateReturning<{ steps_used: number }>(
+      this.dataSource.manager,
+      `UPDATE runtime_runs r SET steps_used = r.steps_used + 1
+        WHERE r.id = $1 AND ($2::int IS NULL OR r.steps_used < $2::int)
+          AND ($3::int IS NULL OR ${activeSince('r', '$4')} >= now() - make_interval(secs => $3::int))
+        RETURNING r.steps_used`,
+      [rootRunId, maxSteps, maxActiveSeconds, floor],
+    );
+    if (charged.length === 1) return null;
+    const [root] = await rawQuery<{ steps_used: number }>(
+      this.dataSource.manager,
+      `SELECT steps_used FROM runtime_runs WHERE id = $1`,
+      [rootRunId],
+    );
+    // Fails closed, as a sub-workflow charge does: a step its root has no row for is never run uncounted.
+    if (!root) throw new Error(`run ${rootRunId} has no row to charge a step to`);
+    return maxSteps !== null && root.steps_used >= maxSteps ? 'steps' : 'active_seconds';
+  }
+
+  async runTreeResuming(rootRunId: string): Promise<void> {
+    try {
+      // Under the root's own lock, as every change to a run's waits takes it first.
+      await this.dataSource.manager.transaction(async (em) => {
+        await lockRunRow(em, rootRunId);
+        await em.query(
+          `UPDATE runtime_runs r SET active_since = now()
+            WHERE r.id = $1 AND r.status IN ('running', 'waiting') AND NOT ${treeInFlight('r')}`,
+          [rootRunId],
+        );
+      });
+    } catch (err) {
+      // Fails open, as every history write does: the run goes on, its clock unmoved.
+      this.logger.warn(`run history runTreeResuming failed for ${rootRunId}: ${errorMessage(err)}`);
+    }
+  }
+
+  /** This process's start by the database's clock: time in flight never counts from before it, so a restart's downtime never does. */
+  inFlightFloor(): Promise<Date> {
+    this.floor ??= rawQuery<{ now: Date }>(this.dataSource.manager, 'SELECT now() AS now').then(
+      ([row]) => row!.now,
+      (err: unknown) => {
+        this.floor = null;
+        throw err;
+      },
+    );
+    return this.floor;
+  }
+
+  onModuleInit(): Promise<unknown> {
+    return this.inFlightFloor();
   }
 
   async runStatus(scopedRunId: string): Promise<RuntimeRunStatus | null> {
@@ -499,9 +678,10 @@ export class RunRecorderService implements RunRecorder {
     scopedRunId: string,
     [sql, params]: [string, unknown[]],
     failOpen = true,
+    em: EntityManager = this.dataSource.manager,
   ): Promise<T | null> {
     try {
-      return await this.dataSource.query<T>(sql, params);
+      return await em.query<T>(sql, params);
     } catch (err) {
       if (!failOpen) throw err;
       this.logger.warn(`run history ${op} failed for ${scopedRunId}: ${errorMessage(err)}`);
@@ -567,12 +747,13 @@ async function deriveRunWait(
   );
 }
 
-/** Under {@link lockRunRow}: whether a run that took no step, ended in error or left running with no workflow, runs again from now with `plan`; a dry run, or one of another workflow or environment, does not. */
+/** Under {@link lockRunRow}: whether a run that took no step, ended in error or left running with no workflow, runs again from now with `plan` and `limits`; a dry run, or one of another workflow or environment, does not. */
 export async function rearmUnstarted(
   em: EntityManager,
   scopedRunId: string,
   plan: unknown,
   meta: RunStartMeta,
+  limits: RunLimits | null = null,
 ): Promise<boolean> {
   // Its workflow and environment keys stay as they are, so the update never reaches either row (row 11).
   const rearmed = await rawMutate(
@@ -580,7 +761,7 @@ export async function rearmUnstarted(
     `UPDATE runtime_runs
         SET status = 'running', error = NULL, outputs = NULL, finished_at = NULL, started_at = now(),
             plan_id = $2, plan = CAST($3 AS json), source = $4, environment = $5, workflow_version_id = $6,
-            review_id = $7, ${CLEAR_SLOT}
+            review_id = $7, limits = CAST($10 AS json), active_since = NULL, ${CLEAR_SLOT}
       WHERE id = $1 AND status IN ('error', 'running') AND NOT dry_run AND ${NO_STEP}
         AND workflow_id IS NOT DISTINCT FROM $8 AND environment_id IS NOT DISTINCT FROM $9`,
     [
@@ -593,6 +774,7 @@ export async function rearmUnstarted(
       meta.reviewId ?? null,
       meta.workflowId ?? null,
       meta.environmentId ?? null,
+      limits ? JSON.stringify(limits) : null,
     ],
   );
   return rearmed === 1;
@@ -619,6 +801,62 @@ export async function recordCancel(em: EntityManager, scopedRunId: string): Prom
   await em.query(`UPDATE runtime_run_steps SET ${END_WAIT} WHERE run_id = $1 AND waiting_topic IS NOT NULL`, [
     scopedRunId,
   ]);
+}
+
+/** Under {@link lockRunRow}, once a stop is decided there: end the run as an error saying which limit, and unpark its steps. */
+export async function recordStop(em: EntityManager, scopedRunId: string, message: string): Promise<void> {
+  await em.query(
+    `UPDATE runtime_runs SET status = 'error', error = $2, finished_at = now(), ${CLEAR_SLOT}
+      WHERE id = $1 AND status IN ('running', 'waiting')`,
+    [scopedRunId, message],
+  );
+  await em.query(`UPDATE runtime_run_steps SET ${END_WAIT} WHERE run_id = $1 AND waiting_topic IS NOT NULL`, [
+    scopedRunId,
+  ]);
+}
+
+/** The runs `scopedRunId` called, and the runs they called, that are still running or waiting. */
+export async function descendantsInFlight(em: EntityManager, scopedRunId: string): Promise<string[]> {
+  const rows = await rawQuery<{ id: string }>(
+    em,
+    `WITH RECURSIVE tree AS (
+       SELECT id, status FROM runtime_runs WHERE parent_run_id = $1
+       UNION ALL
+       SELECT r.id, r.status FROM runtime_runs r JOIN tree t ON r.parent_run_id = t.id
+     )
+     SELECT id FROM tree WHERE status IN ('running', 'waiting')`,
+    [scopedRunId],
+  );
+  return rows.map((row) => row.id);
+}
+
+// Under the workspace's admission lock, with the runs just recorded among them: refuse them, rolling the inserts back, past either cap; a run counts as running while a lane of its tree is in flight.
+async function assertWorkspaceRoom(
+  em: EntityManager,
+  workspace: string | null,
+  userId: string,
+  caps: WorkspaceRunLimits,
+): Promise<void> {
+  const held = `FROM runtime_runs r
+    WHERE r.parent_run_id IS NULL AND r.status IN ('running', 'waiting')
+      AND (r.org_id = $1::uuid OR ($1::uuid IS NULL AND r.org_id IS NULL AND r.user_id = $2::uuid))`;
+  const [{ unfinished }] = (await rawQuery<{ unfinished: number }>(
+    em,
+    `SELECT count(*)::int AS unfinished ${held}`,
+    [workspace, userId],
+  )) as [{ unfinished: number }];
+  const running = caps[WORKSPACE_RUNNING_RUNS];
+  // Only once there are more unfinished runs than may run is it worth asking which are in flight.
+  if (running !== null && unfinished > running) {
+    const [{ busy }] = (await rawQuery<{ busy: number }>(
+      em,
+      `SELECT count(*)::int AS busy FROM (SELECT 1 ${held} AND ${treeInFlight('r')} LIMIT ($3::bigint + 1)) b`,
+      [workspace, userId, running],
+    )) as [{ busy: number }];
+    if (busy > running) throw workspaceRunLimit(WORKSPACE_RUNNING_RUNS, running);
+  }
+  const most = caps[WORKSPACE_UNFINISHED_RUNS];
+  if (most !== null && unfinished > most) throw workspaceRunLimit(WORKSPACE_UNFINISHED_RUNS, most);
 }
 
 /** End every wait still set on a run's steps, and any claim on them. */

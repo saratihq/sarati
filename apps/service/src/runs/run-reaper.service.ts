@@ -7,13 +7,40 @@ import { errorMessage } from '../common/error-message';
 import type { EnvConfig } from '../config/env.config';
 import { rawMutate, rawQuery } from '../database/raw-query';
 import { DbosRuntime } from '../dbos/dbos-runtime';
-import { CLEAR_CLAIM, CLEAR_SLOT, CLEAR_WAIT, lockRunRow, parkedStep } from '../runtime/run-recorder.service';
+import { RUN_ACTIVE_SECONDS } from '../entitlements/run-limits';
+import {
+  CLEAR_CLAIM,
+  CLEAR_SLOT,
+  CLEAR_WAIT,
+  lockRunRow,
+  overActiveTime,
+  parkedStep,
+  RunRecorderService,
+} from '../runtime/run-recorder.service';
 import { TIMER_TOPIC_SQL_PREFIX } from '../runtime/timer-wait';
-import { claimLeads, parkedSteps } from './run-waits';
+import { claimLeads, latestClaim, parkedSteps } from './run-waits';
+import { RunsService } from './runs.service';
 
 const REAPED_STEP_ERROR = 'Step did not complete — the run was reaped.';
+const INTERRUPTED_RUN_ERROR =
+  'The service restarted while this run was going, and nothing can resume it: it ran only inside the service (a dry run, or with DBOS off), its start was never saved to DBOS, or DBOS is off now. Run it again.';
+
+interface LiveCandidate {
+  id: string;
+  dry_run: boolean;
+  parent_run_id: string | null;
+}
+
+interface LeftGoing {
+  id: string;
+  dry_run: boolean;
+  /** Its top-level run, or null when a run on its way up has no row. */
+  root: string | null;
+}
 
 export interface ReapResult {
+  /** Live runs stopped for running past the time they were admitted under. */
+  stoppedRuns: number;
   crashedRuns: number;
   timedOutWaits: number;
   orphanSteps: number;
@@ -34,6 +61,11 @@ function crashedRun(alias: string): string {
     )))`;
 }
 
+// A run a process before this one ($1 its start) left going.
+function leftGoing(alias: string): string {
+  return `${alias}.status IN ('running', 'waiting') AND ${alias}.started_at < $1`;
+}
+
 // A wait past its window — a timer's by the max ($1 seconds, timer prefix $2) — with no decision on its way to the run.
 function lapsedWait(alias: string): string {
   return `${parkedStep(alias)} AND ${alias}.status = 'running'
@@ -49,7 +81,7 @@ function strandedClaim(alias: string): string {
     AND ${alias}.waiting_timeout_at < now() - ($1 || ' seconds')::interval`;
 }
 
-/** Moves runs a dead worker left non-terminal to a terminal `error`, and ends a run holding a decision this instance can no longer resume. Idempotent. */
+/** Stops a run running here past its time, moves runs a dead worker left non-terminal to a terminal `error`, and ends a run holding a decision this instance can no longer resume. Idempotent. */
 @Injectable()
 export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(RunReaperService.name);
@@ -59,6 +91,8 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly config: ConfigService<{ env: EnvConfig }, true>,
     private readonly dbos: DbosRuntime,
+    private readonly runs: RunsService,
+    private readonly recorder: RunRecorderService,
   ) {}
 
   private get maxSeconds(): number {
@@ -66,7 +100,7 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
   }
 
   onApplicationBootstrap(): void {
-    if (this.maxSeconds > 0) this.booting = this.bootReap();
+    this.booting = this.bootReap();
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -81,10 +115,14 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
   // Serving does not wait on it: every pass is idempotent, and each one that writes a run's row takes that run's lock first.
   private async bootReap(): Promise<void> {
     try {
+      const interrupted = await this.endInterruptedRuns();
       const r = await this.reapStale();
-      if (r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
+      if (
+        interrupted + r.stoppedRuns + r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions >
+        0
+      ) {
         this.logger.warn(
-          `boot reap: ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
+          `boot reap: ${interrupted} run(s) a restart cut off, ${r.stoppedRuns} run(s) stopped past their time limit, ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
             `${r.orphanSteps} orphan step(s), ${r.strandedDecisions} stranded decision(s) → error ` +
             `(a prior instance likely died mid-run)`,
         );
@@ -95,14 +133,16 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
     }
   }
 
-  /** One sweep, returning how many rows were reaped; both callers tolerate a throw (never on a request path). */
+  /** One sweep, returning how many rows were reaped; both callers tolerate a throw (never on a request path). RUN_MAX_DURATION_SECONDS=0 turns off all but the time stop. */
   async reapStale(signal?: AbortSignal): Promise<ReapResult> {
+    const stoppedRuns = await this.stopOverTime(signal);
     const seconds = this.maxSeconds;
-    if (seconds <= 0) return { crashedRuns: 0, timedOutWaits: 0, orphanSteps: 0, strandedDecisions: 0 };
+    if (seconds <= 0)
+      return { stoppedRuns, crashedRuns: 0, timedOutWaits: 0, orphanSteps: 0, strandedDecisions: 0 };
     const em = this.dataSource.manager;
     const cutoff = `now() - ($1 || ' seconds')::interval`;
 
-    const crashedRuns = await this.reapCrashedRuns(seconds);
+    const crashedRuns = await this.reapCrashedRuns(seconds, signal);
 
     // (B) a parked wait past its window means nothing will resume the run — unless a decision is on its way to it.
     const timedOutWaits = await this.reapLapsedWaits(seconds);
@@ -131,19 +171,100 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
 
     const strandedDecisions = await this.reapStrandedDecisions(seconds, signal);
 
-    return { crashedRuns, timedOutWaits, orphanSteps, strandedDecisions };
+    return { stoppedRuns, crashedRuns, timedOutWaits, orphanSteps, strandedDecisions };
+  }
+
+  // A live top-level run past the time it was admitted under ends through the one end a cancel takes; one nothing here holds is the crash pass's.
+  private async stopOverTime(signal: AbortSignal | undefined): Promise<number> {
+    const over = await rawQuery<LiveCandidate & { active_seconds: number }>(
+      this.dataSource.manager,
+      `SELECT r.id, r.dry_run, r.parent_run_id, (r.limits ->> '${RUN_ACTIVE_SECONDS}')::int AS active_seconds
+         FROM runtime_runs r WHERE ${overActiveTime('r', '$1')} ORDER BY r.id`,
+      [await this.recorder.inFlightFloor()],
+    );
+    let stopped = 0;
+    for (const run of over) {
+      if (signal?.aborted) break;
+      if (!(await this.runningHere(run))) continue;
+      try {
+        if (await this.runs.stopOverTime(run.id, run.active_seconds)) stopped++;
+      } catch (err) {
+        // DBOS is told first, so a stop DBOS could not be told of records nothing: the next pass tries again.
+        this.logger.warn(`run ${run.id}: not stopped past its time limit this pass: ${errorMessage(err)}`);
+      }
+    }
+    return stopped;
+  }
+
+  // A run this instance holds or will resume is not crashed, whatever its age; one DBOS cannot be asked about waits for the next pass.
+  private async runningHere(run: LiveCandidate): Promise<boolean | null> {
+    try {
+      return await this.runs.isRunningHere({
+        id: run.id,
+        dryRun: run.dry_run,
+        parentRunId: run.parent_run_id,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `run ${run.id}: left to the next reap, as DBOS could not say whether it runs: ${errorMessage(err)}`,
+      );
+      return null;
+    }
+  }
+
+  // At boot, whatever RUN_MAX_DURATION_SECONDS says: a run nothing can resume is certainly dead, so it holds no workspace's slot.
+  private async endInterruptedRuns(): Promise<number> {
+    const em = this.dataSource.manager;
+    const floor = await this.recorder.inFlightFloor();
+    const left = await rawQuery<LeftGoing>(
+      em,
+      `WITH RECURSIVE up(id, dry_run, root, parent) AS (
+         SELECT r.id, r.dry_run, r.id, r.parent_run_id FROM runtime_runs r WHERE ${leftGoing('r')}
+         UNION ALL
+         SELECT up.id, up.dry_run, p.id, p.parent_run_id
+           FROM up LEFT JOIN runtime_runs p ON p.id = up.parent WHERE up.parent IS NOT NULL
+       )
+       SELECT id, dry_run, root FROM up WHERE parent IS NULL ORDER BY id`,
+      [floor],
+    );
+    let ended = 0;
+    for (const run of left) {
+      if (!(await this.resumesNowhere(run))) continue;
+      ended += await em.transaction(async (tx) => {
+        await lockRunRow(tx, run.id);
+        return endInterruptedRun(tx, run.id, floor);
+      });
+    }
+    return ended;
+  }
+
+  // Nothing resumes a dry run, any run while DBOS is off, or a run whose top-level run DBOS holds no workflow for; one whose top-level run is unknown, or DBOS can't be asked about, is left.
+  private async resumesNowhere(run: LeftGoing): Promise<boolean> {
+    if (run.dry_run || !this.config.get('env', { infer: true }).dbosEnabled) return true;
+    if (run.root === null) return false;
+    try {
+      return !(await this.dbos.holdsWorkflow(run.root));
+    } catch (err) {
+      this.logger.warn(
+        `run ${run.id}: left going, as DBOS could not say whether it holds its tree: ${errorMessage(err)}`,
+      );
+      return false;
+    }
   }
 
   // Each pass that writes a run's row takes one run at a time, its own lock first, as every wait change takes it, and checks the run again once held.
-  private async reapCrashedRuns(seconds: number): Promise<number> {
+  private async reapCrashedRuns(seconds: number, signal: AbortSignal | undefined): Promise<number> {
     const em = this.dataSource.manager;
-    const crashed = await rawQuery<{ id: string }>(
+    const crashed = await rawQuery<LiveCandidate>(
       em,
-      `SELECT r.id FROM runtime_runs r WHERE ${crashedRun('r')} ORDER BY r.id`,
+      `SELECT r.id, r.dry_run, r.parent_run_id FROM runtime_runs r WHERE ${crashedRun('r')} ORDER BY r.id`,
       [seconds],
     );
     let reaped = 0;
-    for (const { id } of crashed) {
+    for (const run of crashed) {
+      if (signal?.aborted) break;
+      if ((await this.runningHere(run)) !== false) continue;
+      const { id } = run;
       reaped += await em.transaction(async (tx) => {
         await lockRunRow(tx, id);
         return reapCrashedRun(tx, id, seconds);
@@ -196,6 +317,33 @@ export class RunReaperService implements OnApplicationBootstrap, OnModuleDestroy
     }
     return reaped;
   }
+}
+
+// A decision on its way to the run is credited, as every end that can't take one credits it.
+async function endInterruptedRun(em: EntityManager, runId: string, floor: Date): Promise<number> {
+  const leads = claimLeads((await parkedSteps(em, runId)).filter((s) => s.claimedAt !== null));
+  const latest = latestClaim(leads);
+  const ended = await rawMutate(
+    em,
+    `UPDATE runtime_runs r
+        SET status = 'error', finished_at = now(), error = $3, ${CLEAR_SLOT},
+            decided_by = CASE WHEN $4::uuid IS NULL OR r.decided_at > $5::timestamptz THEN r.decided_by ELSE $4::uuid END,
+            decided_at = GREATEST(r.decided_at, $5::timestamptz)
+      WHERE r.id = $2 AND ${leftGoing('r')}`,
+    [floor, runId, INTERRUPTED_RUN_ERROR, latest?.claimedBy ?? null, latest?.claimedAt ?? null],
+  );
+  if (ended === 0) return 0;
+  await endParkedSteps(
+    em,
+    runId,
+    leads.map((s) => s.stepKey),
+  );
+  await em.query(
+    `UPDATE runtime_run_steps SET status = 'error', finished_at = now(), error = COALESCE(error, $2), ${CLEAR_WAIT}
+      WHERE run_id = $1 AND finished_at IS NULL`,
+    [runId, REAPED_STEP_ERROR],
+  );
+  return ended;
 }
 
 function reapCrashedRun(em: EntityManager, runId: string, seconds: number): Promise<number> {

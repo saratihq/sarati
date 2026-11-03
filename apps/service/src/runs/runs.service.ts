@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Injectable, Logger, Optional, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { LessThan, type DataSource, type EntityManager } from 'typeorm';
@@ -15,6 +15,18 @@ import { isIdShape } from '../database/ids';
 import { RuntimeRunEntity, RuntimeRunStepEntity } from '../database/entities/runtime-run.entity';
 import type { RunSource } from '../database/entities/runtime-run.entity';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
+import {
+  decideRunLimits,
+  ENTITLEMENTS_PROVIDER,
+  type EntitlementsProvider,
+} from '../entitlements/entitlements';
+import {
+  isRunLimitReached,
+  activeTimeLimitReached,
+  recordedRunLimit,
+  type DecidedRunLimits,
+  type RunLimits,
+} from '../entitlements/run-limits';
 import { isDurableCancellation, isUnknownDurableRun } from '../dbos/dbos-durable-step';
 import { DbosRuntime, type DurableRun } from '../dbos/dbos-runtime';
 import type { WorkflowIR } from '../ir/models';
@@ -25,18 +37,23 @@ import { DagInterpreter } from '../runtime/dag-interpreter';
 import type { DagAgentNode, DagPlan } from '../runtime/dag-plan';
 import { rawQuery } from '../database/raw-query';
 import {
+  descendantsInFlight,
   lockRunRow,
+  overActiveTime,
   PARKED_STEP,
   parkedStep,
   rearmUnstarted,
   recordCancel,
+  recordStop,
   REFUSED_RUN_ERROR_PREFIX,
   refuseUnstarted,
   RunRecorderService,
+  type RunAdmission,
   type RunStartMeta,
   truncatedValueOf,
   withRunLock,
 } from '../runtime/run-recorder.service';
+import type { RunMeter } from '../runtime/run-meter';
 import type { SubWorkflowRunner } from '../runtime/sub-workflow-runner';
 import { RuntimeCompiler } from '../runtime/runtime-compiler';
 import type { RunNode, RunOutcome, RunPlan, RunResult, RunStatus } from '../runtime/run-plan';
@@ -291,9 +308,37 @@ export interface AdmittedRun {
   outcome: (signal?: AbortSignal) => Promise<RunResult>;
 }
 
+type PlanAdmission = RunAdmission & { plan: DagPlan };
+
+interface PreparedAdmission {
+  opts: RunDispatchOptions;
+  admission: PlanAdmission;
+}
+
 interface InProcessRun {
   durable: PassThroughDurableStep;
   outcome: Promise<RunResult>;
+}
+
+// Under the run's lock: whether a stop still finds the run past the time it was admitted under, counted from no earlier than `floor`.
+async function stillOverTime(em: EntityManager, scoped: string, floor: Date): Promise<boolean> {
+  const rows = await rawQuery<{ id: string }>(
+    em,
+    `SELECT r.id FROM runtime_runs r WHERE r.id = $1 AND ${overActiveTime('r', '$2')}`,
+    [scoped, floor],
+  );
+  return rows.length === 1;
+}
+
+interface EndedRow {
+  status: string;
+  error: string | null;
+  limits: RunLimits | null;
+}
+
+// A run a limit ended reads so on its row whatever its workflow did after — a stop, or a refusal a crash kept DBOS from recording: its caller is told that limit.
+function limitEnded(row: EndedRow | null): DomainError | null {
+  return row?.status === 'error' ? recordedRunLimit(row.error, row.limits) : null;
 }
 
 /** The `code` a run's caller is answered with when its run id already holds a run it cannot start again. */
@@ -323,7 +368,7 @@ export class RunsService implements OnApplicationShutdown {
   /** Top-level in-process runs in flight, by scoped run id: what shutdown waits for. */
   private readonly inProcess = new Map<string, InProcessRun>();
   /** Admissions under way: shutdown waits for each before DBOS stops. */
-  private readonly admitting = new Set<Promise<AdmittedRun>>();
+  private readonly admitting = new Set<Promise<unknown>>();
   private stopping = false;
 
   constructor(
@@ -336,6 +381,7 @@ export class RunsService implements OnApplicationShutdown {
     @Optional() private readonly recorder?: RunRecorderService,
     @Optional() private readonly agentStepBus?: AgentStepBus,
     @Optional() private readonly catalog?: ComposeCatalogService,
+    @Optional() @Inject(ENTITLEMENTS_PROVIDER) private readonly entitlements?: EntitlementsProvider,
   ) {
     this.dbosEnabled = config.get('env', { infer: true }).dbosEnabled;
   }
@@ -352,9 +398,18 @@ export class RunsService implements OnApplicationShutdown {
   }
 
   /** Record a run and start it on its rail — a durable one's workflow persisted, so a crash after this resumes it; an id already holding a run starts nothing new, and none is admitted once shutdown has begun. */
-  admit(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
+  async admit(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
+    const [started] = await this.admitTogether([{ plan, opts }]);
+    if (started!.status === 'rejected') throw started!.reason;
+    return started!.value;
+  }
+
+  /** {@link admit} for runs that start together or not at all: recorded, and counted against their workspaces' caps, as one; each then starts, or fails to, on its own. */
+  admitTogether(
+    runs: ReadonlyArray<{ plan: DagPlan; opts: RunDispatchOptions }>,
+  ): Promise<Array<PromiseSettledResult<AdmittedRun>>> {
     if (this.stopping) return Promise.reject(new ShuttingDown());
-    const admitting = this.admitNow(plan, opts);
+    const admitting = this.admitNow(runs);
     this.admitting.add(admitting);
     const forget = (): void => {
       this.admitting.delete(admitting);
@@ -363,21 +418,53 @@ export class RunsService implements OnApplicationShutdown {
     return admitting;
   }
 
-  private async admitNow(plan: DagPlan, opts: RunDispatchOptions): Promise<AdmittedRun> {
-    const runId = opts.runId ?? randomUUID();
-    const scoped = this.scopedRunId(opts.externalUserId, runId);
-    const meta: RunStartMeta = {
-      workflowId: opts.workflowId ?? null,
-      workflowVersionId: opts.workflowVersionId ?? null,
-      source: opts.source ?? 'api',
-      environment: opts.environment ?? null,
-      environmentId: opts.environmentId ?? null,
-      reviewId: opts.reviewId ?? null,
-      dryRun: opts.dryRun ?? false,
-      orgId: opts.orgId ?? null,
-    };
-    const recorded =
-      (await this.recorder?.runAdmitted(scoped, runId, opts.externalUserId, plan, meta)) ?? true;
+  private async admitNow(
+    runs: ReadonlyArray<{ plan: DagPlan; opts: RunDispatchOptions }>,
+  ): Promise<Array<PromiseSettledResult<AdmittedRun>>> {
+    if (runs.length === 0) return [];
+    const prepared = await this.prepareAdmissions(runs);
+    const recorded = this.recorder
+      ? await this.recorder.runsAdmitted(prepared.map(({ admission }) => admission))
+      : prepared.map(() => true);
+    return Promise.allSettled(prepared.map((run, i) => this.startAdmitted(run, recorded[i]!)));
+  }
+
+  // What runs admitted together are admitted as: each its workspace, one for them all, and the limits asked for it there once.
+  private async prepareAdmissions(
+    runs: ReadonlyArray<{ plan: DagPlan; opts: RunDispatchOptions }>,
+  ): Promise<PreparedAdmission[]> {
+    const workspaces = await Promise.all(
+      runs.map(({ opts }) =>
+        this.recorder
+          ? this.recorder.workspaceOf(opts.workflowId ?? null, opts.orgId ?? null)
+          : Promise.resolve(opts.orgId ?? null),
+      ),
+    );
+    const limits = await this.decideLimits(workspaces[0] ?? null);
+    return runs.map(({ plan, opts }, i) => {
+      const runId = opts.runId ?? randomUUID();
+      const meta: RunStartMeta = {
+        workflowId: opts.workflowId ?? null,
+        workflowVersionId: opts.workflowVersionId ?? null,
+        source: opts.source ?? 'api',
+        environment: opts.environment ?? null,
+        environmentId: opts.environmentId ?? null,
+        reviewId: opts.reviewId ?? null,
+        dryRun: opts.dryRun ?? false,
+        orgId: workspaces[i] ?? null,
+      };
+      const scopedRunId = this.scopedRunId(opts.externalUserId, runId);
+      return { opts, admission: { scopedRunId, runId, userId: opts.externalUserId, plan, meta, limits } };
+    });
+  }
+
+  // Starts a run its admission recorded, or, `recorded` false, one whose id already held a run.
+  private async startAdmitted(
+    { opts, admission }: PreparedAdmission,
+    recorded: boolean,
+  ): Promise<AdmittedRun> {
+    const { scopedRunId: scoped, runId, plan } = admission;
+    const limits = admission.limits?.run;
     if (await this.cancelled(scoped)) {
       return { runId, outcome: () => this.settle(Promise.reject(new RunCancelledError()), scoped, runId) };
     }
@@ -393,15 +480,16 @@ export class RunsService implements OnApplicationShutdown {
           environmentId: opts.environmentId,
           orgId: opts.orgId,
           chatChannelKey: opts.chatChannelKey,
+          limits,
         });
-      const durable = await this.startDurable(scoped, recorded ? null : { runId, plan, meta }, start);
+      const durable = await this.startDurable(scoped, recorded ? null : admission, start);
       return { runId, outcome: (signal) => this.settle(durable.result(), scoped, runId, signal) };
     }
     const running = this.inProcess.get(scoped);
     if (running) return { runId, outcome: (signal) => untilStopping(running.outcome, signal) };
     if (!recorded) return { runId, outcome: () => Promise.reject(alreadyRan(runId)) };
     const durable = new PassThroughDurableStep();
-    const outcome = this.settle(this.runInProcess(plan, scoped, opts, durable), scoped, runId);
+    const outcome = this.settle(this.runInProcess(plan, scoped, opts, durable, limits), scoped, runId);
     this.inProcess.set(scoped, { durable, outcome });
     const forget = (): void => {
       this.inProcess.delete(scoped);
@@ -410,16 +498,21 @@ export class RunsService implements OnApplicationShutdown {
     return { runId, outcome: (signal) => untilStopping(outcome, signal) };
   }
 
+  // Asked once, as the run is admitted: what the run carries for its life, and the caps its workspace is held to.
+  private async decideLimits(workspace: string | null): Promise<DecidedRunLimits | null> {
+    return this.entitlements ? decideRunLimits(this.entitlements, workspace) : null;
+  }
+
   // `unrecorded` when a run already held the id: one that failed before it ever started runs again.
   private async startDurable(
     scoped: string,
-    unrecorded: { runId: string; plan: DagPlan; meta: RunStartMeta } | null,
+    unrecorded: PlanAdmission | null,
     start: () => Promise<DurableRun>,
   ): Promise<DurableRun> {
     const em = this.dataSource?.manager;
     if (!em) return start();
     if (unrecorded) {
-      const run = await this.rearmIfNeverStarted(em, scoped, unrecorded.plan, unrecorded.meta);
+      const run = await this.rearmIfNeverStarted(em, scoped, unrecorded);
       if (run === 'ended') throw alreadyRan(unrecorded.runId);
       if (run === 'held') return start();
     }
@@ -436,8 +529,7 @@ export class RunsService implements OnApplicationShutdown {
   private rearmIfNeverStarted(
     em: EntityManager,
     scoped: string,
-    plan: DagPlan,
-    meta: RunStartMeta,
+    { plan, meta, limits }: PlanAdmission,
   ): Promise<'rearmed' | 'ended' | 'held'> {
     return em.transaction(async (tx) => {
       await lockRunRow(tx, scoped);
@@ -447,7 +539,7 @@ export class RunsService implements OnApplicationShutdown {
       if (await this.dbos.holdsWorkflow(scoped)) return 'held';
       if (!['running', 'waiting', 'completed', 'error'].includes(row?.status ?? '')) return 'held';
       // One left running or waiting and refused is an in-process run or another workflow's, which no durable start may run beside.
-      return (await rearmUnstarted(tx, scoped, plan, meta)) ? 'rearmed' : 'ended';
+      return (await rearmUnstarted(tx, scoped, plan, meta, limits?.run)) ? 'rearmed' : 'ended';
     });
   }
 
@@ -479,11 +571,32 @@ export class RunsService implements OnApplicationShutdown {
       signal,
     );
     try {
-      if ('error' in ended) throw (await this.cancelled(scoped)) ? new RunCancelledError() : ended.error;
-      if (await this.cancelled(scoped)) throw new RunCancelledError();
+      const row = await this.endedRow(scoped);
+      if (row?.status === 'cancelled') throw new RunCancelledError();
+      const stopped = limitEnded(row);
+      if ('error' in ended) throw isRunLimitReached(ended.error) ? ended.error : (stopped ?? ended.error);
+      if (stopped) throw stopped;
       return { ...ended.result, run_id: runId };
     } catch (err) {
       throw await this.failureOf(err, scoped, runId);
+    }
+  }
+
+  // Read once: the row decides whether a cancel, or a stop for a limit, ended the run.
+  private async endedRow(scoped: string): Promise<EndedRow | null> {
+    const em = this.dataSource?.manager;
+    if (!em || !this.recorder) return null;
+    try {
+      const [row] = await rawQuery<EndedRow>(
+        em,
+        `SELECT status, error, limits FROM runtime_runs WHERE id = $1`,
+        [scoped],
+      );
+      return row ?? null;
+    } catch (err) {
+      // Fail open, as reading whether it was cancelled does: the run's own outcome stands.
+      this.logger.warn(`run ${scoped}: reading how it ended failed: ${errorMessage(err)}`);
+      return null;
     }
   }
 
@@ -492,6 +605,11 @@ export class RunsService implements OnApplicationShutdown {
     const details = await this.failureDetails(scoped, runId);
     if (err instanceof DomainError) {
       return new DomainError(err.message, err.status, { ...details, ...(err.details ?? {}) });
+    }
+    // By its recorded code: DBOS hands the run's caller its end as a plain error.
+    if (isRunLimitReached(err)) {
+      const refusal = (err as { details: Record<string, unknown> }).details;
+      return new DomainError(errorMessage(err), 422, { ...details, ...refusal });
     }
     if (isDurableCancellation(err)) {
       return new DomainError(`Run ${runId} was cancelled`, 409, { code: RUN_CANCELLED, ...details });
@@ -512,10 +630,12 @@ export class RunsService implements OnApplicationShutdown {
     scoped: string,
     opts: RunDispatchOptions,
     durable: PassThroughDurableStep,
+    limits: RunLimits | undefined,
   ): Promise<RunResult> {
     this.waiters.set(scoped, durable);
     try {
       return await this.interpreter.run(plan, {
+        limits,
         externalUserId: opts.externalUserId,
         runId: scoped,
         durable,
@@ -616,6 +736,10 @@ export class RunsService implements OnApplicationShutdown {
       subWorkflowRoot: string;
       /** The runs between the root and the caller, the caller last. */
       lineage: readonly string[];
+      /** The caller's per-run limits; null when it has none. */
+      limits: RunLimits | null;
+      /** The run tree's budget, which the child's steps are charged to. */
+      meter: RunMeter | null;
     },
   ): Promise<RunResult> {
     const scoped = this.scopedRunId(opts.externalUserId, opts.runId);
@@ -632,9 +756,11 @@ export class RunsService implements OnApplicationShutdown {
       parentStepKey: opts.parentStepKey,
       orgId: opts.orgId ?? null,
     });
+    const caller = this.waiters.get(opts.parentRunId);
     const run = async (durable: PassThroughDurableStep): Promise<RunResult> => {
       this.waiters.set(scoped, durable);
       try {
+        if (!caller && (await this.treeEnded(opts.subWorkflowRoot))) durable.cancel();
         return await this.interpreter.run(plan, {
           externalUserId: opts.externalUserId,
           runId: scoped,
@@ -653,14 +779,31 @@ export class RunsService implements OnApplicationShutdown {
           budgetCharged: opts.budgetCharged,
           subWorkflowRoot: opts.subWorkflowRoot,
           subWorkflowLineage: [...opts.lineage, scoped],
+          limits: opts.limits,
+          ...(opts.meter ? { meter: opts.meter } : {}),
         });
       } finally {
         this.waiters.delete(scoped);
       }
     };
-    // Part of its caller's step: an in-process caller's cancel reaches it too. A DBOS caller's does not yet.
-    const caller = this.waiters.get(opts.parentRunId);
+    // Part of its caller's step: an in-process caller's cancel reaches it here, and a durable caller's as `endRun` ends it.
     return caller ? caller.nest(run) : run(new PassThroughDurableStep());
+  }
+
+  // Read under the root's lock once the called run is registered: an end that commits first is seen here, and one after it reaches the run as `endRun` ends the tree.
+  private async treeEnded(root: string): Promise<boolean> {
+    const em = this.dataSource?.manager;
+    if (!em) return false;
+    try {
+      const [row] = await withRunLock(em, root, (tx) =>
+        rawQuery<{ status: string }>(tx, `SELECT status FROM runtime_runs WHERE id = $1`, [root]),
+      );
+      return row !== undefined && isTerminal(row.status);
+    } catch (err) {
+      // Fail open, as reading whether a run was cancelled does: the called run goes on.
+      this.logger.warn(`run ${root}: reading whether it ended failed: ${errorMessage(err)}`);
+      return false;
+    }
   }
 
   /** Compile a WorkflowIR (from generation) to a RunPlan and run it (sync). */
@@ -676,10 +819,34 @@ export class RunsService implements OnApplicationShutdown {
 
   /** Guard, compile and admit a WorkflowIR; the caller decides how long to wait on the run. */
   private async startIr(ir: WorkflowIR, opts: IrRunOptions): Promise<AdmittedRun> {
+    const { plan, dispatch } = await this.compileIr(ir, opts);
+    return this.admit(plan, dispatch);
+  }
+
+  /** {@link startIr} for WorkflowIRs that start together or not at all; each entry is its run, or why it could not compile or start, and the rest still run. */
+  async startIrTogether(
+    entries: ReadonlyArray<{ ir: WorkflowIR; opts: IrRunOptions }>,
+  ): Promise<Array<{ run: AdmittedRun } | { error: unknown }>> {
+    const compiled = await Promise.allSettled(entries.map(({ ir, opts }) => this.compileIr(ir, opts)));
+    const ready = compiled.flatMap((entry) =>
+      entry.status === 'fulfilled' ? [{ plan: entry.value.plan, opts: entry.value.dispatch }] : [],
+    );
+    const started = (await this.admitTogether(ready)).values();
+    return compiled.map((entry) => {
+      if (entry.status === 'rejected') return { error: entry.reason as unknown };
+      const run = started.next().value!;
+      return run.status === 'fulfilled' ? { run: run.value } : { error: run.reason as unknown };
+    });
+  }
+
+  private async compileIr(
+    ir: WorkflowIR,
+    opts: IrRunOptions,
+  ): Promise<{ plan: DagPlan; dispatch: RunDispatchOptions }> {
     if (opts.workflowId) await this.runnableWorkflow(opts.workflowId, opts.activeOrgId ?? null);
     const runId = opts.runId ?? randomUUID();
     const plan = await this.compile({ ir }, opts, runId);
-    return this.admit(plan, { ...opts, runId, orgId: opts.orgId ?? opts.activeOrgId ?? null });
+    return { plan, dispatch: { ...opts, runId, orgId: opts.orgId ?? opts.activeOrgId ?? null } };
   }
 
   private assertAuthored(source: PlanSource): void {
@@ -757,7 +924,7 @@ export class RunsService implements OnApplicationShutdown {
   async testStep(
     node: { id: string; node_type: string; name?: string; parameters?: Record<string, unknown> },
     sampleScope: Record<string, unknown>,
-    opts: { externalUserId: string },
+    opts: { externalUserId: string; activeOrgId?: string | null },
   ): Promise<RunResult> {
     const ir = {
       version: '1',
@@ -787,6 +954,7 @@ export class RunsService implements OnApplicationShutdown {
     }
 
     const durable = new PassThroughDurableStep();
+    const limits = (await this.decideLimits(opts.activeOrgId ?? null))?.run;
     try {
       // No recorder → the test run is transient and never written to run history.
       return await this.interpreter.run(plan, {
@@ -794,6 +962,7 @@ export class RunsService implements OnApplicationShutdown {
         runId: this.scopedRunId(opts.externalUserId, randomUUID()),
         durable,
         initialScope: sampleScope,
+        limits,
       });
     } catch (err) {
       if (err instanceof DomainError) throw err;
@@ -810,6 +979,7 @@ export class RunsService implements OnApplicationShutdown {
     nodeId: string,
     opts: {
       externalUserId: string;
+      activeOrgId?: string | null;
       input?: string;
       sampleScope?: Record<string, unknown>;
       chatChannelKey?: string | null;
@@ -839,6 +1009,7 @@ export class RunsService implements OnApplicationShutdown {
     const initialScope = { ...(opts.sampleScope ?? {}) };
     delete initialScope[nodeId]; // a prior run's own-output sample must not collide with the plan node
     try {
+      const limits = (await this.decideLimits(opts.activeOrgId ?? null))?.run;
       return await this.interpreter.run(
         { id: `${plan.id}:agent-test`, nodes: [agent] },
         {
@@ -847,6 +1018,7 @@ export class RunsService implements OnApplicationShutdown {
           durable: new PassThroughDurableStep(),
           initialScope,
           chatChannelKey: opts.chatChannelKey ?? null,
+          limits,
         },
       );
     } catch (err) {
@@ -1271,20 +1443,54 @@ export class RunsService implements OnApplicationShutdown {
         },
       );
     }
-    // Under the run's lock, so an event either lands before the cancel or finds its wait ended — never both.
-    const status = await em.transaction(async (tx): Promise<RunStatus['status']> => {
-      await lockRunRow(tx, row.id);
-      const fresh = await tx.findOne(RuntimeRunEntity, { where: { id: row.id } });
-      if (!fresh || isTerminal(fresh.status)) return fresh?.status ?? row.status;
-      // DBOS first: if it can't be told, nothing is recorded and the caller may try again.
-      if (this.dbosEnabled) await this.dbos.cancelWorkflow(row.id);
-      await recordCancel(tx, row.id);
-      return 'cancelled';
+    return { runId, status: (await this.endRun(em, row.id, { cancel: true })).status ?? row.status };
+  }
+
+  /** Whether this instance is running a top-level run, or can take it on: in process here, or a durable one DBOS will resume here. */
+  async isRunningHere(run: { id: string; dryRun: boolean; parentRunId: string | null }): Promise<boolean> {
+    if (this.waiters.has(run.id)) return true;
+    if (!this.dbosEnabled || run.dryRun || run.parentRunId) return false;
+    return this.dbos.canResume(run.id);
+  }
+
+  /** Stop a top-level run still running here past the time it was admitted under, through the one end a cancel takes; whether it stopped. */
+  async stopOverTime(scoped: string, maxSeconds: number): Promise<boolean> {
+    const em = this.dataSource?.manager;
+    if (!em || !this.recorder) return false;
+    const stop = {
+      message: activeTimeLimitReached(maxSeconds).message,
+      floor: await this.recorder.inFlightFloor(),
+    };
+    return (await this.endRun(em, scoped, { stop })).ended;
+  }
+
+  // The one end of a run, decided under its lock (a stop only while still past its time): DBOS, then its row, then once committed its tree here.
+  private async endRun(
+    em: EntityManager,
+    scoped: string,
+    end: { cancel: true } | { stop: { message: string; floor: Date } },
+  ): Promise<{ status: RunStatus['status'] | null; ended: boolean }> {
+    const stop = 'stop' in end ? end.stop : null;
+    // Under the run's lock, so an event either lands before the end or finds its wait ended — never both.
+    const outcome = await em.transaction(async (tx) => {
+      await lockRunRow(tx, scoped);
+      const fresh = await tx.findOne(RuntimeRunEntity, { where: { id: scoped } });
+      if (
+        !fresh ||
+        isTerminal(fresh.status) ||
+        (stop !== null && !(await stillOverTime(tx, scoped, stop.floor)))
+      ) {
+        return { status: fresh?.status ?? null, ended: false, tree: [] as string[] };
+      }
+      if (this.dbosEnabled) await this.dbos.cancelWorkflow(scoped);
+      if (stop !== null) await recordStop(tx, scoped, stop.message);
+      else await recordCancel(tx, scoped);
+      const status: RunStatus['status'] = stop !== null ? 'error' : 'cancelled';
+      return { status, ended: true, tree: await descendantsInFlight(tx, scoped) };
     });
-    if (status !== 'cancelled') return { runId, status };
-    // Told once committed, so an in-flight delivery reads the cancel; a dry run is in-process even with DBOS on.
-    this.waiters.get(row.id)?.cancel();
-    return { runId, status: 'cancelled' };
+    // Told once committed, so an in-flight delivery reads the end; a dry run, and a durable run's called runs, are in process.
+    if (outcome.ended) for (const id of [scoped, ...outcome.tree]) this.waiters.get(id)?.cancel();
+    return { status: outcome.status, ended: outcome.ended };
   }
 
   /** Linkage guard for a caller-started run of a workflow: it must exist AND live in the caller's active org — anything else is an indistinguishable 404. */
