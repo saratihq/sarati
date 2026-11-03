@@ -61,7 +61,7 @@ function healthView(health: TriggerActivationHealth[] | null): HealthView | null
   );
   const multiEnv = new Set(active.map((h) => h.environment)).size > 1;
   const detail = truncateError(worst.last_error ?? "");
-  const error = `Last run failed: ${multiEnv ? `${worst.environment}: ${detail}` : detail}`;
+  const error = `Trigger error: ${multiEnv ? `${worst.environment}: ${detail}` : detail}`;
   return { ...view, checked, error };
 }
 

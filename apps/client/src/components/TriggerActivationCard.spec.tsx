@@ -39,7 +39,7 @@ describe("TriggerActivationCard", () => {
     expect(screen.getByText("Not listening")).toBeTruthy();
     expect(screen.getByText(REFUSAL)).toBeTruthy();
     expect(screen.queryByText(/^Live/)).toBeNull();
-    expect(screen.queryByText(/Last run failed/)).toBeNull();
+    expect(screen.queryByText(/Trigger error/)).toBeNull();
     expect(screen.queryByText("Not polled yet")).toBeNull();
   });
 
@@ -60,7 +60,7 @@ describe("TriggerActivationCard", () => {
     expect(screen.getByText("Not listening in staging")).toBeTruthy();
     expect(screen.getByText(staging)).toBeTruthy();
     expect(screen.getByText(/^Last checked/)).toBeTruthy();
-    expect(screen.queryByText(/Last run failed/)).toBeNull();
+    expect(screen.queryByText(/Trigger error/)).toBeNull();
   });
 
   it("shows a held poll as not listening, saying it picks up from where it stopped", () => {
@@ -69,7 +69,7 @@ describe("TriggerActivationCard", () => {
     expect(screen.getByText("Not listening")).toBeTruthy();
     expect(screen.getByText(HELD_POLL)).toBeTruthy();
     expect(screen.queryByText(/^Held/)).toBeNull();
-    expect(screen.queryByText(/Last run failed/)).toBeNull();
+    expect(screen.queryByText(/Trigger error/)).toBeNull();
   });
 
   it("shows a held webhook, whose app's deliveries still run, as held and never as not listening", () => {
@@ -95,7 +95,7 @@ describe("TriggerActivationCard", () => {
     expect(screen.getByText(HELD_WEBHOOK)).toBeTruthy();
     expect(screen.queryByText(/Not listening/)).toBeNull();
     expect(screen.queryByText(/^Live/)).toBeNull();
-    expect(screen.queryByText(/Last run failed/)).toBeNull();
+    expect(screen.queryByText(/Trigger error/)).toBeNull();
   });
 
   it("names the environment a trigger is held in while it listens unheld in another", () => {
@@ -121,13 +121,13 @@ describe("TriggerActivationCard", () => {
 
     expect(screen.getByText("Not listening")).toBeTruthy();
     expect(screen.queryByText("Live")).toBeNull();
-    expect(screen.getByText(/slack refused the stand-up/)).toBeTruthy();
+    expect(screen.getByText("Trigger error: slack refused the stand-up")).toBeTruthy();
   });
 
   it("shows a listening trigger whose last poll failed as live, with the failure", () => {
     card([activation({ status: "error", last_polled_at: new Date().toISOString(), last_error: "Slack answered 500" })]);
 
     expect(screen.getByText("Live")).toBeTruthy();
-    expect(screen.getByText("Last run failed: Slack answered 500")).toBeTruthy();
+    expect(screen.getByText("Trigger error: Slack answered 500")).toBeTruthy();
   });
 });
