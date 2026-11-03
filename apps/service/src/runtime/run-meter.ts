@@ -57,7 +57,7 @@ export class InMemoryRunMeter implements RunMeter {
   }
 }
 
-/** A run's substrate with every op charged inside its own step body, and a limit's refusal fatal by its recorded code. */
+/** A run's substrate with every step charged inside its own body, and a limit's refusal fatal by its recorded code. */
 export class MeteredDurableStep implements DurableStep {
   constructor(
     private readonly inner: DurableStep,

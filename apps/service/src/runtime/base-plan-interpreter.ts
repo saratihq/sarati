@@ -124,7 +124,7 @@ export interface RunContext {
   ownErrorLanePaths: boolean;
   /** The per-run limits the run was admitted under, which every run it calls inherits; null when it has none. */
   limits: RunLimits | null;
-  /** The run tree's one budget its every op is charged to; null when the run has no limits. */
+  /** The run tree's one budget its every step is charged to; null when the run has no limits. */
   meter: RunMeter | null;
   /** This run's own loop rounds so far, counted in glue: a called run counts its own. */
   loopRounds: { used: number };

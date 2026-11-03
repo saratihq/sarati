@@ -178,12 +178,14 @@ as it would after any refusal. The upgrade adds three columns to the runs table 
   in place of `exec db psql`):
 
   ```bash
-  cd sarati && docker compose exec -T db psql -U sarati sarati -c "SELECT org_id, count(*) AS unfinished, count(*) FILTER (WHERE status = 'running') AS running FROM runtime_runs WHERE parent_run_id IS NULL AND status IN ('running', 'waiting') GROUP BY org_id ORDER BY unfinished DESC LIMIT 5"
+  cd sarati && docker compose exec -T db psql -U sarati sarati -c "SELECT org_id, CASE WHEN org_id IS NULL THEN user_id END AS user_id, count(*) AS unfinished FROM runtime_runs WHERE parent_run_id IS NULL AND status IN ('running', 'waiting') GROUP BY 1, 2 ORDER BY unfinished DESC LIMIT 5"
   ```
 
-  If one is near `10000` unfinished or `1000` running, set `WORKSPACE_MAX_UNFINISHED_RUNS` or
-  `WORKSPACE_MAX_RUNNING_RUNS` higher, or to `0`, before you upgrade, or its new runs are refused
-  until enough of those finish.
+  A run with no workspace counts toward its user's runs, so those rows name the user. One holding
+  fewer than `1000` can't be refused. One holding `1000` or more has its new runs refused while
+  `1000` of them are busy, and one holding `10000` has them all refused. If one is that high, set
+  `WORKSPACE_MAX_RUNNING_RUNS` or `WORKSPACE_MAX_UNFINISHED_RUNS` higher, or to `0`, before you
+  upgrade, or its new runs are refused until enough of those finish.
 - **A run the reaper finds past `RUN_MAX_DURATION_SECONDS` that is still running here** is no longer
   marked crashed while it goes on; it is left to finish, or stopped once past `RUN_MAX_ACTIVE_SECONDS`.
 - **Cancelling a durable run** now cancels a workflow it is calling too, which before finished first.

@@ -1,6 +1,6 @@
 import { DomainError } from '../common/domain-error';
 
-/** Every op a run tree issues, its called runs' included. */
+/** Every step a run tree runs, its called runs' included; a wait or a delay is never one. */
 export const RUN_STEPS = 'run.steps';
 /** forEach items plus while rounds, summed over every loop in one run. */
 export const RUN_LOOP_ROUNDS = 'run.loop_rounds';
