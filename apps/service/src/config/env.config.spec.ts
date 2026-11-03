@@ -237,6 +237,45 @@ describe('env config', () => {
     });
   });
 
+  it("reads each run limit's variable, falls back to its default, and refuses a negative or non-integer value, or one past what a run's row can count", () => {
+    expect(validateEnv({}).runLimits).toEqual({
+      'run.steps': 250_000,
+      'run.loop_rounds': 250_000,
+      'run.active_seconds': 86_400,
+      'workspace.running_runs': 1_000,
+      'workspace.unfinished_runs': 10_000,
+    });
+    expect(
+      validateEnv({
+        RUN_MAX_STEPS: '1000',
+        RUN_MAX_LOOP_ROUNDS: '0',
+        RUN_MAX_ACTIVE_SECONDS: ' 600 ',
+        WORKSPACE_MAX_RUNNING_RUNS: '3',
+        WORKSPACE_MAX_UNFINISHED_RUNS: '',
+      }).runLimits,
+    ).toEqual({
+      'run.steps': 1_000,
+      'run.loop_rounds': 0,
+      'run.active_seconds': 600,
+      'workspace.running_runs': 3,
+      'workspace.unfinished_runs': 10_000,
+    });
+    expect(() => validateEnv({ RUN_MAX_STEPS: '-1' })).toThrow(
+      'RUN_MAX_STEPS must be 0 (no limit) or a whole number up to 2147483647, got -1',
+    );
+    expect(validateEnv({ RUN_MAX_ACTIVE_SECONDS: '2147483647' }).runLimits['run.active_seconds']).toBe(
+      2_147_483_647,
+    );
+    for (const past of ['2147483648', '10000000000', '1e12']) {
+      expect(() => validateEnv({ RUN_MAX_ACTIVE_SECONDS: past })).toThrow(
+        `RUN_MAX_ACTIVE_SECONDS must be 0 (no limit) or a whole number up to 2147483647, got ${Number(past)}`,
+      );
+    }
+    expect(() => validateEnv({ WORKSPACE_MAX_RUNNING_RUNS: '2.5' })).toThrow(
+      'WORKSPACE_MAX_RUNNING_RUNS must be a whole number, got "2.5"',
+    );
+  });
+
   it('.env.example lists every variable validateEnv reads', () => {
     const read = new Set<string>();
     validateEnv(

@@ -413,6 +413,7 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
       asSessionA(
         http()
           .post('/api/runs')
+          .set('X-Org-Id', orgId)
           .send({ plan: { id: `plan-${runId}`, nodes: [node] }, run_id: runId }),
       ).then((r) => r);
     const getRun = async (runId: string): Promise<Record<string, unknown>> => {
@@ -473,6 +474,7 @@ describe('Platform MCP: runs + connections (e2e, real client, isolated DB)', () 
     await asSessionA(
       http()
         .post(`/api/runs/${encodeURIComponent(`${userA}:mcp-asker`)}/events`)
+        .set('X-Org-Id', orgId)
         .send({ topic: 'go', payload: { ok: true } }),
     ).expect(200);
     expect((await asker).status).toBe(201);

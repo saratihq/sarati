@@ -1,30 +1,22 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 
 import { errorMessage } from '../common/error-message';
-import type { EnvConfig } from '../config/env.config';
 import { JobRegistry } from '../jobs/jobs.module';
 import { RunReaperService } from './run-reaper.service';
 
 const QUEUE = 'run-reap';
 
-/** Schedules the run reaper on a pg-boss singleton (one instance reaps per tick); inert without pg-boss or with `RUN_MAX_DURATION_SECONDS=0`. */
+/** Schedules the run reaper on a pg-boss singleton (one instance reaps per tick); inert without pg-boss. */
 @Injectable()
 export class RunReaperJob implements OnModuleInit {
   private readonly logger = new Logger(RunReaperJob.name);
 
   constructor(
     private readonly jobs: JobRegistry,
-    private readonly config: ConfigService<{ env: EnvConfig }, true>,
     private readonly reaper: RunReaperService,
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const env = this.config.get('env', { infer: true });
-    if (env.runMaxDurationSeconds <= 0) {
-      this.logger.log('run reaper cron disabled (no pg-boss or RUN_MAX_DURATION_SECONDS=0)');
-      return;
-    }
     try {
       const on = await this.jobs.register(async (queues) => {
         await queues.createQueue(QUEUE);
@@ -44,9 +36,9 @@ export class RunReaperJob implements OnModuleInit {
   private async tick(signal: AbortSignal): Promise<void> {
     try {
       const r = await this.reaper.reapStale(signal);
-      if (r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
+      if (r.stoppedRuns + r.crashedRuns + r.timedOutWaits + r.orphanSteps + r.strandedDecisions > 0) {
         this.logger.warn(
-          `reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
+          `stopped ${r.stoppedRuns} run(s) past their time limit, reaped ${r.crashedRuns} crashed run(s), ${r.timedOutWaits} timed-out wait(s), ` +
             `${r.orphanSteps} orphan step(s), ${r.strandedDecisions} stranded decision(s)`,
         );
       }

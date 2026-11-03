@@ -162,6 +162,39 @@ so `docker compose pull` alone is not enough this time. One container gets the s
 image. Lines the proxy wrote before go with the container it replaces, unless Docker sends its logs
 somewhere else, where they still hold those addresses.
 
+#### Runs have limits
+
+Every run now runs within limits on its steps, loop rounds and time in flight, and every workspace
+within limits on runs at once — see [Run limits](/operate/configuration/#run-limits). The defaults
+leave a normal install alone, unless a workspace already holds about as many runs as they allow. A
+run past one ends reading *Run limit reached:*; a run its workspace has no room for is refused `429`
+with `Retry-After` and recorded nowhere, and a webhook, schedule or polling trigger delivers it again
+as it would after any refusal. The upgrade adds three columns to the runs table and two indexes;
+`db:migrate` runs it.
+
+- **Runs in flight across the upgrade** keep running without limits of their own, since they started
+  before there were any, but they count toward their workspace's limits on runs at once. Before
+  upgrading, see how many each workspace holds (on one container, `exec sarati psql -h 127.0.0.1`
+  in place of `exec db psql`):
+
+  ```bash
+  cd sarati && docker compose exec -T db psql -U sarati sarati -c "SELECT org_id, count(*) AS unfinished, count(*) FILTER (WHERE status = 'running') AS running FROM runtime_runs WHERE parent_run_id IS NULL AND status IN ('running', 'waiting') GROUP BY org_id ORDER BY unfinished DESC LIMIT 5"
+  ```
+
+  If one is near `10000` unfinished or `1000` running, set `WORKSPACE_MAX_UNFINISHED_RUNS` or
+  `WORKSPACE_MAX_RUNNING_RUNS` higher, or to `0`, before you upgrade, or its new runs are refused
+  until enough of those finish.
+- **A run the reaper finds past `RUN_MAX_DURATION_SECONDS` that is still running here** is no longer
+  marked crashed while it goes on; it is left to finish, or stopped once past `RUN_MAX_ACTIVE_SECONDS`.
+- **Cancelling a durable run** now cancels a workflow it is calling too, which before finished first.
+- **A dry run, a run that ran while DBOS was off, a run whose start was not yet saved to DBOS, or any
+  run when the service starts again with DBOS off,** that the service was running when it stopped is
+  now ended as it starts again, rather than left `running` until `RUN_MAX_DURATION_SECONDS` passed.
+- **`RUN_MAX_DURATION_SECONDS=0`** no longer turns the reaper off: it still runs every five minutes,
+  to stop runs past `RUN_MAX_ACTIVE_SECONDS`.
+- **Going back to v0.2.26** keeps every run: a run this version started carries on there without
+  limits, and coming back picks its limits and step count up again. A run a limit ended stays ended.
+
 #### Sign in through your own identity provider, and invites for one address
 
 People can now sign in through your own OpenID Connect provider — see

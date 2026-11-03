@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import ts from 'typescript';
 
+import { RUN_LIMITS } from '../entitlements/run-limits';
 import { ENV_NAME_SHAPE } from '../environments/env-name';
 
 /**
@@ -682,6 +683,25 @@ describe('vault: one definition site per load-bearing question', () => {
       { rel: 'environments/environments.service.ts', inserts: 1 },
     ]);
     expect(declaringShape).toEqual(['environments/env-name.ts']);
+  });
+
+  /** Constitution #26: a run's limits are asked of the entitlements seam in one place, and named in one place. */
+  it("only decideRunLimits asks the entitlements seam, and only run-limits.ts names a run limit's metric or variable", () => {
+    const askers = sources()
+      .filter((f) => /\.limitFor\s*\(/.test(f.text))
+      .map((f) => f.rel);
+    const names = Object.entries(RUN_LIMITS).flatMap(([metric, { env }]) => [`'${metric}'`, env]);
+    const namers = sources()
+      .filter((f) => names.some((name) => f.text.includes(name)))
+      .map((f) => f.rel);
+
+    expect(askers).toEqual(['entitlements/entitlements.ts']);
+    expect(
+      /export async function decideRunLimits[\s\S]*\.limitFor\s*\(/.test(
+        readFileSync(join(SRC, 'entitlements/entitlements.ts'), 'utf8'),
+      ),
+    ).toBe(true);
+    expect(namers).toEqual(['entitlements/run-limits.ts']);
   });
 
   /** Constitution #19: a recorded history is replayed as it ran, never patched into another one. */

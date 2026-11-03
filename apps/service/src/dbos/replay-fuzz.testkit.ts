@@ -2,7 +2,15 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { Error as DbosErrors } from '@dbos-inc/dbos-sdk';
 
+import { errorMessage } from '../common/error-message';
 import type { RuntimeRunStatus, RuntimeStepKind } from '../database/entities/runtime-run.entity';
+import {
+  isRunLimitReached,
+  RUN_ACTIVE_SECONDS,
+  RUN_LOOP_ROUNDS,
+  RUN_STEPS,
+  type RunLimits,
+} from '../entitlements/run-limits';
 import { DeterminismError } from '../providers/durable-step';
 import type {
   ManagedIntegrationProvider,
@@ -39,7 +47,7 @@ import {
  * sequencer; the same over today's shared sub-workflow budget, which shows what the recorded budget adds; or the v2
  * options over plain lanes with no turn, which shows what the sequencer adds.
  */
-export type Engine = 'legacy' | 'sequenced' | 'sequenced-shared' | 'unsequenced';
+export type Engine = 'legacy' | 'sequenced' | 'sequenced-shared' | 'sequenced-limited' | 'unsequenced';
 
 /** The errors a lane engine treats as fatal: raised outside step bodies, tested on the live throw. */
 export function isFuzzFatal(error: unknown): boolean {
@@ -95,6 +103,10 @@ export interface ReplayVerdict {
   stepsInFlightAtEnd: number;
   /** Step writes to the run's history issued after its terminal write. */
   writesAfterEnd: number;
+  /** Runs, of the uninterrupted one and the replay, that a run limit ended. */
+  limitEnded: number;
+  /** Whether a replay of a run that had already ended when it was killed ends as it did, at the same op or loop round. */
+  sameEnd: boolean;
 }
 
 const RESTART_AFTER_MS = 500;
@@ -130,7 +142,9 @@ export async function crashAndReplay(
   const crashed = world.start(seeded(seed * 7 + 1), 'crashed');
   let replay: Execution | undefined;
   let atCrash: ReplayVerdict['atCrash'] = { steps: [], ops: [] };
+  let endedAtCrash: Execution | null = null;
   world.clock.at(killAt, () => {
+    endedAtCrash = crashed.settled ? { ...crashed } : null;
     atCrash = {
       steps: [...world.recorder.rows.values()],
       ops: [...world.wf.rows.values()].sort((a, b) => a.id - b.id).map(recordedOp),
@@ -168,7 +182,24 @@ export async function crashAndReplay(
     atCrash,
     stepsInFlightAtEnd: firstSteps + replaySteps,
     writesAfterEnd: probe.recorder.writesAfterEnd + world.recorder.writesAfterEnd,
+    limitEnded: [first.error, replay?.error].filter(isRunLimitReached).length,
+    sameEnd: endedTheSame(endedAtCrash, replay),
   };
+}
+
+// A whole recorded history replays to the end it had: a limit's refusal at the same op, or at the same loop round.
+function endedTheSame(ended: Execution | null, replay: Execution | undefined): boolean {
+  if (!ended) return true;
+  return (
+    replay?.settled === true &&
+    replay.completed === ended.completed &&
+    errorMessage(replay.error) === errorMessage(ended.error)
+  );
+}
+
+// The small limits a `sequenced-limited` run of `seed` is admitted under, so that runs reach them often.
+function fuzzLimits(seed: number): RunLimits {
+  return { [RUN_STEPS]: 2 + (seed % 9), [RUN_LOOP_ROUNDS]: 1 + (seed % 4), [RUN_ACTIVE_SECONDS]: null };
 }
 
 function recordedOp(row: OpRow): RecordedOp {
@@ -255,7 +286,7 @@ class World {
 
   constructor(
     private readonly fuzz: FuzzPlan,
-    seed: number,
+    private readonly seed: number,
     private readonly engine: Engine,
   ) {
     this.wf = new SimWorkflow(`fuzz-${seed}`, this.clock);
@@ -314,8 +345,9 @@ class World {
       initialScope: { ...FUZZ_SCOPE, [EXECUTION]: label },
       subWorkflowBudget: { remaining: this.fuzz.budget },
       everyWaitByStep: this.engine !== 'legacy',
-      budgetCharged: this.engine === 'sequenced' || this.engine === 'unsequenced',
+      budgetCharged: ['sequenced', 'sequenced-limited', 'unsequenced'].includes(this.engine),
       ownErrorLanePaths: this.engine !== 'legacy',
+      limits: this.engine === 'sequenced-limited' ? fuzzLimits(this.seed) : null,
     });
   }
 }
@@ -479,6 +511,21 @@ class FuzzRecorder implements RunRecorder {
     private readonly send: (topic: string, payload: unknown, key: string) => void,
     private readonly cap: number,
   ) {}
+
+  /** The steps charged to the run tree: its root row's count, which a crash keeps. */
+  stepsUsed = 0;
+
+  async chargeRunStep(_root: string, maxSteps: number | null): Promise<'steps' | null> {
+    await this.write();
+    if (maxSteps !== null && this.stepsUsed >= maxSteps) return 'steps';
+    this.stepsUsed += 1;
+    return null;
+  }
+
+  // Its limits keep no time, so a wait ending moves no clock.
+  runTreeResuming(): Promise<void> {
+    return Promise.resolve();
+  }
 
   // A fuzz child's calls are keyed by its call, so a child that runs again repeats them: there is nothing to forget.
   forgetSubWorkflowCharges(): Promise<void> {

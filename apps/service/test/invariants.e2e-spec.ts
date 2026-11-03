@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
@@ -13,7 +14,13 @@ import { KEY_SCOPED_TO_OTHER_ORG } from '../src/auth/principal';
 import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
+import type { EnvConfig } from '../src/config/env.config';
 import { ConnectionsService } from '../src/connections/connections.service';
+import {
+  ENTITLEMENTS_PROVIDER,
+  OpenCoreEntitlements,
+  type EntitlementsProvider,
+} from '../src/entitlements/entitlements';
 import { computeDiff } from '../src/ir/diff';
 import { utcMonthOf } from '../src/platform/composio-usage.service';
 import { PlatformKeysService } from '../src/platform/platform-keys.service';
@@ -66,6 +73,11 @@ const gmailFetch: FetchLike = (input, init) => {
   }
   return reply(404, { error: { code: 404, message: `unexpected ${url.pathname}` } });
 };
+
+/** Workspace → the numbers a plan would set there, over the open core's answers for every other workspace. */
+const PLANNED_LIMITS = new Map<string, Record<string, number>>();
+/** Every metric the entitlements seam is asked, for which workspace, in order. */
+const ASKED_LIMITS: Array<{ orgId: string | null; metric: string }> = [];
 
 /**
  * THE CONSTITUTION (src/domain/README.md): one named test per load-bearing rule.
@@ -237,6 +249,21 @@ describe('domain invariants (the constitution)', () => {
       .useValue({
         increment: () =>
           Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
+      })
+      .overrideProvider(ENTITLEMENTS_PROVIDER)
+      .useFactory({
+        factory: (config: ConfigService<{ env: EnvConfig }, true>): EntitlementsProvider => {
+          const core = new OpenCoreEntitlements(config);
+          return {
+            allows: () => core.allows(),
+            limitFor: (orgId, metric) => {
+              ASKED_LIMITS.push({ orgId, metric });
+              const planned = orgId ? PLANNED_LIMITS.get(orgId)?.[metric] : undefined;
+              return planned === undefined ? core.limitFor(orgId, metric) : Promise.resolve(planned);
+            },
+          };
+        },
+        inject: [ConfigService],
       })
       .compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
@@ -1252,6 +1279,102 @@ describe('domain invariants (the constitution)', () => {
       ].sort((x, y) => (x.user_id < y.user_id ? -1 : 1)),
     );
   });
+
+  it("invariant 26: a run stops at its workspace's step limit, decided at admission, and an admission past its running-run limit is refused 429 recording nothing", async () => {
+    const org = (await http().post('/api/orgs').send({ name: 'Budgeted' }).expect(201)).body.id as string;
+    PLANNED_LIMITS.set(org, { 'run.steps': 2, 'workspace.running_runs': 1 });
+    const step = (id: string, parameters: Record<string, unknown>, node_type = 'text.concat') => ({
+      id,
+      name: id,
+      node_type,
+      type_version: 1,
+      parameters,
+      position: { x: 0, y: 0 },
+      metadata: {},
+    });
+    const chained = (nodes: Array<ReturnType<typeof step>>) => ({
+      version: '1',
+      name: 'budget probe',
+      description: '',
+      nodes,
+      edges: nodes.slice(1).map((n, i) => ({
+        id: `e${i}`,
+        source_node_id: nodes[i]!.id,
+        source_port: 0,
+        target_node_id: n.id,
+        target_port: 0,
+        port_type: 'main',
+      })),
+      settings: { execution_order: 'v1', extra: {} },
+      metadata: { engine: 'orchestr' },
+    });
+    const inBudget = (runId: string, doc: unknown) =>
+      http().post('/api/runs/from-ir').set('X-Org-Id', org).send({ run_id: runId, workflow_ir: doc });
+    ASKED_LIMITS.length = 0;
+
+    const stopped = await inBudget(
+      'inv26-steps',
+      chained(['a', 'b', 'c', 'd'].map((id) => step(id, { texts: [id], separator: '' }))),
+    );
+
+    expect(stopped.status).toBe(422);
+    expect(stopped.body).toMatchObject({
+      code: 'run_limit_reached',
+      limit: 'run.steps',
+      max: 2,
+      failed_node_id: 'c',
+    });
+    const row = (
+      await db.query(
+        `SELECT id, status, error, steps_used, limits, org_id FROM runtime_runs WHERE run_id = 'inv26-steps'`,
+      )
+    ).rows[0];
+    expect(row).toMatchObject({ status: 'error', error: stopped.body.detail, steps_used: 2, org_id: org });
+    expect(row.limits).toMatchObject({ 'run.steps': 2 });
+    const taken = await db.query(
+      `SELECT node_id, status FROM runtime_run_steps WHERE run_id = $1 ORDER BY node_id`,
+      [row.id],
+    );
+    expect(taken.rows).toEqual([
+      { node_id: 'a', status: 'completed' },
+      { node_id: 'b', status: 'completed' },
+      { node_id: 'c', status: 'error' },
+    ]);
+    // Decided at admission: each number asked once, and never again while the run went on.
+    expect(ASKED_LIMITS).toEqual(
+      [
+        'run.steps',
+        'run.loop_rounds',
+        'run.active_seconds',
+        'workspace.running_runs',
+        'workspace.unfinished_runs',
+      ].map((metric) => ({ orgId: org, metric })),
+    );
+
+    // Under a minute, a Wait sleeps in place: the run stays running through it, holding the workspace's one slot.
+    const holding = inBudget(
+      'inv26-holding',
+      chained([step('pause', { amount: 0.05, unit: 'minutes' }, 'orchestr:wait_for_duration')]),
+    ).then((res) => res);
+    for (let i = 0; i < 200; i++) {
+      const held = await db.query(
+        `SELECT 1 FROM runtime_runs WHERE run_id = 'inv26-holding' AND status = 'running'`,
+      );
+      if (held.rowCount === 1) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const refused = await inBudget('inv26-refused', chained([step('x', { texts: ['x'], separator: '' })]));
+
+    expect(refused.status).toBe(429);
+    expect(refused.headers['retry-after']).toBe('30');
+    expect(refused.body).toMatchObject({
+      code: 'workspace_run_limit',
+      limit: 'workspace.running_runs',
+      max: 1,
+    });
+    expect((await db.query(`SELECT 1 FROM runtime_runs WHERE run_id = 'inv26-refused'`)).rowCount).toBe(0);
+    expect((await holding).status).toBe(201);
+  }, 30_000);
 
   it('invariant 14: a tool edge binds a tool, distinct from a main edge, never collapses', () => {
     const node = (id: string, node_type: string, parameters: Record<string, unknown> = {}) => ({

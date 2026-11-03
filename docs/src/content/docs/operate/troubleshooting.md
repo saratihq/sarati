@@ -281,7 +281,38 @@ The run and the failing step both carry the reason, for example
 
 If the worker came back, it resumes on its own. If it never comes back, the reaper moves the run to
 `error` once it has been in flight for `RUN_MAX_DURATION_SECONDS` since it started or last resumed
-from a wait, within five minutes.
+from a wait, within five minutes. A run still running here is stopped instead once it is past
+`RUN_MAX_ACTIVE_SECONDS`.
+
+## A run reads "Run limit reached: …"
+
+The run reached one of its workspace's [run limits](/operate/configuration/#run-limits), and the
+message names which: its steps (`RUN_MAX_STEPS`, the steps of workflows it calls included), its loop
+rounds (`RUN_MAX_LOOP_ROUNDS`) or its time in flight (`RUN_MAX_ACTIVE_SECONDS`). Nothing after the
+step that reached it ran. On a workflow another run called, the message names that run: its steps
+and time are what reached the limit. Make the workflow do less in one run — split a long list across runs, lower
+a loop's maximum — or, on an instance you run, raise the variable it names and restart. A run keeps
+the limits it started under, so only runs started after the restart get the new number; the restart
+does start the time of every run in flight again.
+
+## A run reads "The service restarted while this run was going…"
+
+The run was a dry run, or ran while `DBOS_ENABLED=false`, so it ran inside the service process and
+nothing can pick it up after a restart; or the service stopped after recording the run but before
+saving its start to DBOS, so DBOS has nothing to resume; or the service started again with
+`DBOS_ENABLED=false`, so nothing here can resume it. The service ended it as it started again, so it
+doesn't hold a place in its workspace's [run limits](/operate/configuration/#run-limits). Run it
+again. A durable run — any run other than a dry run, started with DBOS on and saved to it — resumes
+on its own.
+
+## A run is refused: "This workspace already has … runs …"
+
+The workspace has as many runs going as its [run limits](/operate/configuration/#run-limits) allow,
+so the run was refused before anything was recorded: `429`, with a `Retry-After` header saying when to
+try again. Retry once one finishes, or cancel runs waiting on approvals you no longer need. A webhook
+sender that retries on `429` delivers again by itself; a schedule or polling trigger keeps its place
+and takes the event on its next poll. On an instance you run, `WORKSPACE_MAX_RUNNING_RUNS` and
+`WORKSPACE_MAX_UNFINISHED_RUNS` raise the limits.
 
 ## A run reads "…so it can't be resumed safely — run it again."
 
@@ -319,7 +350,8 @@ is recorded here, and the run takes it once you upgrade again.
 Someone decided, and the decision is waiting for the run to pick it up — the run is down, or catching
 up after a restart. It is sent again until the run takes it. If the run can never resume here, the
 reaper ends it once the wait is past its window by `RUN_MAX_DURATION_SECONDS`, with an error naming
-who decided; run the workflow again.
+who decided; run the workflow again. A run nothing can resume after a restart is ended as the service
+starts again instead, still naming who decided.
 
 ## The composer is not there
 

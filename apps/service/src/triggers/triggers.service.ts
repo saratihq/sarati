@@ -23,6 +23,7 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { PG_POOL } from '../database/tokens';
 import { canonicalEnvName } from '../environments/env-name';
+import { isWorkspaceRunLimit } from '../entitlements/run-limits';
 import { EnvironmentsService } from '../environments/environments.service';
 import { deepEqual, type IRNode, type WorkflowIR } from '../ir/models';
 import { activationError } from './activation-error';
@@ -395,9 +396,18 @@ export class TriggersService {
     const payload = composioDeliveryPayload(inbound.body);
     const deliveryAccountId = composioDeliveryAccountId(inbound.body);
     let fired = 0;
+    let refused: DomainError | null = null;
     for (const row of verifiedRows) {
-      fired += await this.fireComposioActivation(row, payload, deliveryAccountId, webhookId ?? null);
+      try {
+        fired += await this.fireComposioActivation(row, payload, deliveryAccountId, webhookId ?? null);
+      } catch (err) {
+        // One workspace with no room holds back only its own run: every other holder still fires.
+        if (!isWorkspaceRunLimit(err)) throw err;
+        refused ??= err;
+      }
     }
+    // Not admitted, so its resend admits the holders refused here, each under its own id, and none twice.
+    if (refused) throw refused;
     if (webhookId) {
       await this.dataSource.manager.update(
         ComposioWebhookDeliveryEntity,
@@ -516,6 +526,7 @@ export class TriggersService {
     const fired = await this.startComposioRun(row, payload, webhookId);
     if (fired === null) return 0;
     const outcome = fired === true ? null : activationError(fired.error);
+    const refused = fired !== true && isWorkspaceRunLimit(fired.error) ? fired.error : null;
     const em = this.dataSource.manager;
     try {
       // Written only over the row as read (its xmin), read again whenever another write lands first, so a hold's reason stands.
@@ -539,6 +550,7 @@ export class TriggersService {
         `composio intake: activation ${row.id}: its fire was not recorded: ${errorMessage(err)}`,
       );
     }
+    if (refused) throw refused;
     return fired === true ? 1 : 0;
   }
 
@@ -564,7 +576,12 @@ export class TriggersService {
     }
     // One run per activation per delivery, so a resend admits each exactly once.
     const runId = webhookId ? nameBasedId(row.id, webhookId) : newId();
-    await this.admitActivationRun(row, target, plan, runId, payload);
+    try {
+      await this.admitActivationRun(row, target, plan, runId, payload);
+    } catch (error) {
+      if (!isWorkspaceRunLimit(error)) throw error;
+      return this.notFired(row, error);
+    }
     return true;
   }
 

@@ -1,6 +1,14 @@
 import { Logger } from '@nestjs/common';
 
 import { errorMessage } from '../common/error-message';
+import {
+  callersRefusal,
+  forEachLimitReached,
+  RUN_LOOP_ROUNDS,
+  RUN_STEPS,
+  whileLimitReached,
+  type RunLimits,
+} from '../entitlements/run-limits';
 import { withheldDelay, withheldWait } from '../providers/dry-run-marker';
 import { PassThroughDurableStep, type DurableStep, type ParkHooks } from '../providers/durable-step';
 import type { ManagedIntegrationProvider } from '../providers/managed-integration-provider';
@@ -28,6 +36,7 @@ import { eventTopicFor } from './event-wait';
 import { assertAnswerableTopic } from './timer-wait';
 import type { RuntimeStepKind } from '../database/entities/runtime-run.entity';
 import type { RunRecorder } from './run-recorder.service';
+import { DurableRunMeter, InMemoryRunMeter, MeteredDurableStep, type RunMeter } from './run-meter';
 import type { RunResult, TraceEntry } from './run-plan';
 import type { SubWorkflowCall, SubWorkflowRunner } from './sub-workflow-runner';
 
@@ -71,6 +80,10 @@ export interface RunOptions {
   subWorkflowLineage?: readonly string[];
   /** Each error lane's steps are keyed under its source, so two copies of one handler never share a key; off only on the legacy engine. Default true. */
   ownErrorLanePaths?: boolean;
+  /** The per-run limits the run was admitted under; absent for a run admitted before limits existed, which runs without them. */
+  limits?: RunLimits | null;
+  /** The run tree's budget a nested run charges its steps to, its caller's; absent at a top level, which makes its own. */
+  meter?: RunMeter;
 }
 
 /** Threaded through the recursion so nested action ids stay durable-key-unique. */
@@ -109,6 +122,12 @@ export interface RunContext {
   subWorkflowLineage: readonly string[];
   /** Whether an error lane runs under `<path><source id>#error/` rather than its source's own path. */
   ownErrorLanePaths: boolean;
+  /** The per-run limits the run was admitted under, which every run it calls inherits; null when it has none. */
+  limits: RunLimits | null;
+  /** The run tree's one budget its every op is charged to; null when the run has no limits. */
+  meter: RunMeter | null;
+  /** This run's own loop rounds so far, counted in glue: a called run counts its own. */
+  loopRounds: { used: number };
 }
 
 // Take one call from an in-memory budget, or none once it is spent.
@@ -286,17 +305,23 @@ export abstract class BasePlanInterpreter {
     schedule: (nodes: N[], scope: Record<string, unknown>, path: string, ctx: RunContext) => Promise<void>,
     routedWaits: ReadonlySet<object> = new Set(),
   ): Promise<RunResult> {
+    const record = opts.runId && opts.recorder ? { runId: opts.runId, recorder: opts.recorder } : null;
+    const subWorkflowRoot = opts.subWorkflowRoot ?? opts.runId ?? plan.id;
+    const limits = opts.limits ?? null;
+    const meter = limits ? (opts.meter ?? this.meterFor(record, subWorkflowRoot, limits)) : null;
+    const substrate = opts.durable ?? new PassThroughDurableStep();
+    const runId = opts.runId ?? plan.id;
     const ctx: RunContext = {
-      durable: opts.durable ?? new PassThroughDurableStep(),
+      durable: meter ? new MeteredDurableStep(substrate, meter, subWorkflowRoot !== runId) : substrate,
       externalUserId: opts.externalUserId,
       environment: opts.environment ?? null,
       environmentId: opts.environmentId ?? null,
       orgId: opts.orgId ?? null,
       planId: plan.id,
-      runId: opts.runId ?? plan.id,
+      runId,
       trace: [],
       stepWarnings: new Map(),
-      record: opts.runId && opts.recorder ? { runId: opts.runId, recorder: opts.recorder } : null,
+      record,
       // A Map so membership survives a pinned `undefined`/`null` and a node id like "constructor".
       pins: opts.pins && Object.keys(opts.pins).length > 0 ? new Map(Object.entries(opts.pins)) : null,
       dryRun: opts.dryRun ?? false,
@@ -306,9 +331,12 @@ export abstract class BasePlanInterpreter {
       subWorkflowBudget: opts.subWorkflowBudget ?? { remaining: MAX_SUB_WORKFLOW_INVOCATIONS },
       routedWaits: opts.sharedTopicsByStep === false ? new Set() : routedWaits,
       budgetCharged: opts.budgetCharged === true,
-      subWorkflowRoot: opts.subWorkflowRoot ?? opts.runId ?? plan.id,
+      subWorkflowRoot,
       subWorkflowLineage: opts.subWorkflowLineage ?? [],
       ownErrorLanePaths: opts.ownErrorLanePaths !== false,
+      limits,
+      meter,
+      loopRounds: { used: 0 },
     };
     const scope: Record<string, unknown> = { ...(opts.initialScope ?? {}) };
     this.logger.log(`run plan ${plan.id}: ${plan.nodes.length} node(s)`);
@@ -337,6 +365,13 @@ export abstract class BasePlanInterpreter {
       // `schedule`, and a crash never runs `finally`, so a durable resume still finds the blobs.
       await this.cleanupBlobs(ctx.runId);
     }
+  }
+
+  // A run with history charges its tree's root row; one without, a test, counts in memory.
+  private meterFor(record: RunContext['record'], root: string, limits: RunLimits): RunMeter {
+    return record
+      ? new DurableRunMeter(record.recorder, root, limits)
+      : new InMemoryRunMeter(limits[RUN_STEPS]);
   }
 
   /** Best-effort removal of a run's file blobs; a cleanup failure never fails the run. */
@@ -407,11 +442,7 @@ export abstract class BasePlanInterpreter {
     );
   }
 
-  /**
-   * Run ONE sub-workflow as the parent's single durable checkpoint. No invocation budget is passed:
-   * an authored step's fan-out is bounded by the loop the author wrote, unlike an agent's, which is
-   * the model's choice. Depth still applies, and is what bounds an indirect cycle.
-   */
+  // One sub-workflow as the parent's single durable checkpoint: no invocation budget, unlike an agent's call; depth bounds an indirect cycle.
   private async runSubWorkflow(
     node: ExecutableCallWorkflow,
     scope: Record<string, unknown>,
@@ -439,7 +470,7 @@ export abstract class BasePlanInterpreter {
   ): Promise<unknown> {
     return ctx.durable.run(`${ctx.planId}:${stepKey}`, async () => {
       await admit?.();
-      return runner.run(call, {
+      const called = runner.run(call, {
         externalUserId: ctx.externalUserId,
         environment: ctx.environment,
         environmentId: ctx.environmentId,
@@ -453,6 +484,12 @@ export abstract class BasePlanInterpreter {
         budgetCharged: ctx.budgetCharged,
         rootRunId: ctx.subWorkflowRoot,
         lineage: ctx.subWorkflowLineage,
+        limits: ctx.limits,
+        meter: ctx.meter,
+      });
+      // Its step or time refusal is its caller's too, recorded as the caller's own outcome in the caller's words.
+      return called.catch((err: unknown) => {
+        throw callersRefusal(err, ctx.subWorkflowRoot !== ctx.runId);
       });
     });
   }
@@ -638,6 +675,12 @@ export abstract class BasePlanInterpreter {
       throw new Error(`forEach "${node.id}": items "${node.items}" did not resolve to an array`);
     }
     const items: unknown[] = resolved;
+    const max = ctx.limits?.[RUN_LOOP_ROUNDS] ?? null;
+    if (max !== null) {
+      const left = max - ctx.loopRounds.used;
+      if (items.length > left) throw forEachLimitReached(node.id, items.length, left, max);
+      ctx.loopRounds.used += items.length;
+    }
     const perIteration: Record<string, unknown>[] = [];
     for (let i = 0; i < items.length; i++) {
       const childScope: Record<string, unknown> = {
@@ -663,7 +706,12 @@ export abstract class BasePlanInterpreter {
     runBody: (childScope: Record<string, unknown>, childPath: string) => Promise<void>,
   ): Promise<void> {
     const perRound: Record<string, unknown>[] = [];
+    const max = ctx.limits?.[RUN_LOOP_ROUNDS] ?? null;
     for (let round = 0; round < node.maxIterations; round++) {
+      if (max !== null) {
+        if (ctx.loopRounds.used >= max) throw whileLimitReached(node.id, max);
+        ctx.loopRounds.used += 1;
+      }
       const childScope: Record<string, unknown> = {
         ...scope,
         [node.id]: [...perRound],

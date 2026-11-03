@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 
 import { DomainError } from '../common/domain-error';
+import { isWorkspaceRunLimit } from '../entitlements/run-limits';
 
 /** How long a dry run's confirmation stays usable — long enough to read the result, short enough to mean something. */
 const TTL_MS = 5 * 60 * 1000;
@@ -14,6 +15,9 @@ interface Consent {
   fingerprint: string;
   expiresAt: number;
 }
+
+/** Hands back what a live run spent: its consent token, or its place in the hourly budget. */
+export type LiveRunRefund = () => void;
 
 /**
  * Firing for real requires the caller to have just dry-run *this document* and to quote the token that
@@ -36,8 +40,8 @@ export class LiveRunConsentService {
     return token;
   }
 
-  /** Spend the token, or refuse with the reason. */
-  consume(userId: string, token: string | undefined, workflowIr: unknown): void {
+  /** Spend the token, or refuse with the reason; the refund puts it back. */
+  consume(userId: string, token: string | undefined, workflowIr: unknown): LiveRunRefund {
     this.expire();
     if (!token) {
       throw new DomainError(
@@ -63,10 +67,13 @@ export class LiveRunConsentService {
         { code: 'confirmation_mismatch' },
       );
     }
+    return () => {
+      this.consents.set(key, consent);
+    };
   }
 
-  /** Count a live run fired through MCP against the person's hourly budget, or refuse. */
-  chargeLiveRun(userId: string): void {
+  /** Count a live run fired through MCP against the person's hourly budget, or refuse; the refund takes it off. */
+  chargeLiveRun(userId: string): LiveRunRefund {
     const now = Date.now();
     const recent = (this.liveRuns.get(userId) ?? []).filter((at) => now - at < HOUR_MS);
     if (recent.length >= LIVE_RUNS_PER_HOUR) {
@@ -78,6 +85,21 @@ export class LiveRunConsentService {
     }
     recent.push(now);
     this.liveRuns.set(userId, recent);
+    return () => {
+      const charged = this.liveRuns.get(userId) ?? [];
+      const at = charged.indexOf(now);
+      if (at >= 0) charged.splice(at, 1);
+    };
+  }
+
+  /** Start a live run that `spent` paid for, handing all of it back when the workspace has no room for the run, which then never started. */
+  async keptIfAdmitted<T>(spent: readonly LiveRunRefund[], start: () => Promise<T>): Promise<T> {
+    try {
+      return await start();
+    } catch (err) {
+      if (isWorkspaceRunLimit(err)) for (const refund of spent) refund();
+      throw err;
+    }
   }
 
   private expire(): void {

@@ -10,7 +10,7 @@ import { RunsService } from '../../runs/runs.service';
 import type { RunHandle, RunOutcome, RunResult } from '../../runtime/run-plan';
 import { WorkflowsReadService } from '../../workflows/workflows-read.service';
 import { WorkflowAccessService } from '../../workflows/workflow-access.service';
-import { LiveRunConsentService } from '../live-run-consent.service';
+import { LiveRunConsentService, type LiveRunRefund } from '../live-run-consent.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
 /** Long enough for a real workflow to finish, short enough that the agent is not left hanging. */
@@ -119,24 +119,26 @@ export class TestWorkflowTool implements McpTool {
     const dryRun = args.dry_run !== false;
     const ir = await this.documentFor(args, ctx);
 
-    if (!dryRun) this.authorizeLiveRun(ctx, args.confirmation_token, ir);
+    const spent = dryRun ? [] : this.authorizeLiveRun(ctx, args.confirmation_token, ir);
 
-    const outcome = await this.runs.runFromIrBounded(ir as never, {
-      externalUserId: ctx.principal.user.id,
-      activeOrgId: ctx.principal.activeOrgId,
-      workflowId: args.workflow_id ?? null,
-      source: 'manual',
-      initialScope: args.trigger_payload ? { trigger: args.trigger_payload } : undefined,
-      dryRun,
-      awaitMs: args.await_ms ?? DEFAULT_AWAIT_MS,
-      authored: args.workflow_ir !== undefined,
-    });
+    const outcome = await this.consent.keptIfAdmitted(spent, () =>
+      this.runs.runFromIrBounded(ir as never, {
+        externalUserId: ctx.principal.user.id,
+        activeOrgId: ctx.principal.activeOrgId,
+        workflowId: args.workflow_id ?? null,
+        source: 'manual',
+        initialScope: args.trigger_payload ? { trigger: args.trigger_payload } : undefined,
+        dryRun,
+        awaitMs: args.await_ms ?? DEFAULT_AWAIT_MS,
+        authored: args.workflow_ir !== undefined,
+      }),
+    );
 
     return this.report(outcome, dryRun, ctx, ir);
   }
 
-  /** A live run needs the scope AND consent AND budget — refused in that order, so the reason is the first one that applies. */
-  private authorizeLiveRun(ctx: McpCallContext, token: string | undefined, ir: unknown): void {
+  // A live run needs the scope AND consent AND budget, refused in that order so the reason is the first that applies; returns what it spent.
+  private authorizeLiveRun(ctx: McpCallContext, token: string | undefined, ir: unknown): LiveRunRefund[] {
     const scopes = principalScopes(ctx.principal);
     if (!scopeSatisfied(scopes, 'run:execute')) {
       throw new DomainError(
@@ -145,8 +147,8 @@ export class TestWorkflowTool implements McpTool {
         { code: 'live_run_not_permitted' },
       );
     }
-    this.consent.consume(ctx.principal.user.id, token, ir);
-    this.consent.chargeLiveRun(ctx.principal.user.id);
+    const consented = this.consent.consume(ctx.principal.user.id, token, ir);
+    return [consented, this.consent.chargeLiveRun(ctx.principal.user.id)];
   }
 
   /** The document to run: the one given, or the head of the named workflow/branch. */

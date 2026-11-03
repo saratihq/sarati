@@ -1,9 +1,7 @@
 import { Logger } from '@nestjs/common';
-import type { ConfigService } from '@nestjs/config';
 import type PgBoss from 'pg-boss';
 
 import { ShutdownDeadline } from '../common/shutdown-deadline';
-import type { EnvConfig } from '../config/env.config';
 import { JobRegistry } from '../jobs/jobs.module';
 import { RunReaperJob } from './run-reaper.job';
 import type { RunReaperService } from './run-reaper.service';
@@ -19,16 +17,13 @@ describe('RunReaperJob', () => {
       }),
       schedule: jest.fn().mockResolvedValue(undefined),
     } as unknown as PgBoss;
-    const config = {
-      get: () => ({ runMaxDurationSeconds: 3600 }),
-    } as unknown as ConfigService<{ env: EnvConfig }, true>;
     const reaper = {
       reapStale: jest.fn().mockRejectedValue(new Error('deadlock detected')),
     } as unknown as RunReaperService;
     const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
 
     const registry = new JobRegistry(boss, new ShutdownDeadline());
-    await new RunReaperJob(registry, config, reaper).onModuleInit();
+    await new RunReaperJob(registry, reaper).onModuleInit();
     await registry.start();
     await expect(tick!()).rejects.toThrow('deadlock detected');
 

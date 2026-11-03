@@ -71,12 +71,14 @@ export class WorkflowInvokeTool {
       },
       async (args: unknown) => {
         try {
-          this.consent.chargeLiveRun(principal.user.id);
-          const outcome = await this.invoker.invoke(
-            principal,
-            tool.workflowId,
-            (args ?? {}) as Record<string, unknown>,
-            DEFAULT_AWAIT_MS,
+          const charged = this.consent.chargeLiveRun(principal.user.id);
+          const outcome = await this.consent.keptIfAdmitted([charged], () =>
+            this.invoker.invoke(
+              principal,
+              tool.workflowId,
+              (args ?? {}) as Record<string, unknown>,
+              DEFAULT_AWAIT_MS,
+            ),
           );
           this.logger.log(
             `invoked "${tool.name}" (${tool.workflowId}) as user=${principal.user.id} run=${outcome.run_id}`,

@@ -96,6 +96,21 @@ describe("EditorRunButton watching a run whose call is still open", () => {
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
+  it("a run its workspace has no room for reads Not started with the service's reason, and points at no history", async () => {
+    const reason =
+      "This workspace already has 3 runs running, the most it may run at once. Try again when one finishes; an operator can raise WORKSPACE_MAX_RUNNING_RUNS.";
+    runWorkflowIr.mockRejectedValue(new api.ApiError(reason, 429, "workspace_run_limit"));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<EditorRunButton />);
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    expect(await screen.findByText("Not started")).toBeInTheDocument();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("View in runs history →")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+  });
+
   it("a run parked on an approval says it is waiting, and keeps being watched", async () => {
     getRun.mockResolvedValue(
       watched({ status: "waiting", waiting: { kind: "event", until: "2026-10-09T10:00:00.000Z" } }),

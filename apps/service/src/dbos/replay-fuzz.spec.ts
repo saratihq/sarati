@@ -249,6 +249,48 @@ describe('crash-and-replay fuzz over SimDBOS', () => {
     expect(unsequenced.drifted).toBeGreaterThan(0);
   }, 240_000);
 
+  it.each([
+    ['killed part-way', undefined],
+    [
+      'killed once it has ended, so the replay ends where it did, at the same op and the same loop round',
+      1.5,
+    ],
+  ])(
+    'replays every plan with seeded small run limits through the sequencer with no mis-pair, %s',
+    async (_, crashAt) => {
+      const wrong: string[] = [];
+      let limitEnded = 0;
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        const verdict = await crashAndReplay(randomDagPlan(seeded(seed)), seed, 'sequenced-limited', crashAt);
+        const faults = {
+          loud: verdict.loud,
+          silent: verdict.silent,
+          reruns: verdict.reruns,
+          misdelivered: verdict.misdelivered,
+          fatalLost: verdict.fatalLost,
+          stuck: verdict.stuck,
+          diverged: verdict.diverged,
+          wrongLane: verdict.wrongLane,
+          drifted: verdict.drifted,
+          answeredNull: verdict.answeredNull,
+          inFlightAtHealthyEnd: verdict.inFlightAtHealthyEnd,
+          stepsInFlightAtEnd: verdict.stepsInFlightAtEnd,
+          writesAfterEnd: verdict.writesAfterEnd,
+          audit: verdict.firstAudit.length + verdict.replayAudit.length,
+          sameEnd: verdict.sameEnd,
+        };
+        const clean = Object.entries(faults).every(([key, value]) =>
+          key === 'sameEnd' ? value === true : value === 0 || value === false,
+        );
+        if (!clean) wrong.push(`seed ${seed}: ${JSON.stringify(faults)}`);
+        limitEnded += verdict.limitEnded;
+      }
+      expect(wrong).toEqual([]);
+      expect(limitEnded).toBeGreaterThan(SEEDS / 4);
+    },
+    240_000,
+  );
+
   it('still breaks a sequenced replay on the shared in-memory sub-workflow budget that the charged one replaces', async () => {
     const shared = await fuzz('sequenced-shared');
     expect(shared.loud + shared.diverged + shared.drifted).toBeGreaterThan(0);

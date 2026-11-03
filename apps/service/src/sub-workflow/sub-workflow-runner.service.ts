@@ -128,6 +128,8 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
       budgetCharged: ctx.budgetCharged,
       subWorkflowRoot: ctx.rootRunId,
       lineage: ctx.lineage,
+      limits: ctx.limits,
+      meter: ctx.meter,
     });
 
     // The tool result is the terminal-node output, by the SAME rule the chat intake uses —

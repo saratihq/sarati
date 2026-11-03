@@ -4,6 +4,7 @@ import { Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsString, Min, validateSync } from 'class-validator';
 
+import { RUN_LIMIT_MAX, RUN_LIMITS, type RunLimitMetric } from '../entitlements/run-limits';
 import { DEFAULT_DATABASE_URL } from './default-database-url';
 
 const INSECURE_SECRET_KEY = 'change-me-in-production';
@@ -245,6 +246,9 @@ export class EnvConfig {
 
   /** OIDC_ALLOWED_DOMAINS, lowercased; empty admits any domain. */
   oidcAllowedDomainList!: readonly string[];
+
+  /** Each run-budget metric's number from its operator variable, else its default; 0 is none. */
+  runLimits!: Readonly<Record<RunLimitMetric, number>>;
 }
 
 /** The ONE env-var truthiness rule — `1/true/yes/on` (case-insensitive); blank/unset takes the fallback. */
@@ -278,6 +282,20 @@ export function warnRetiredEnv(raw: Record<string, string | undefined>): void {
       'OIDC_ISSUER alone no longer does anything — add OIDC_CLIENT_ID and OIDC_CLIENT_SECRET for browser sign-in. An identity-provider token is not accepted as an API bearer; use an API key.',
     );
   }
+}
+
+function runLimitsOf(raw: Record<string, string | undefined>): Readonly<Record<RunLimitMetric, number>> {
+  const limits = {} as Record<RunLimitMetric, number>;
+  for (const [metric, { env, default: fallback }] of Object.entries(RUN_LIMITS) as Array<
+    [RunLimitMetric, (typeof RUN_LIMITS)[RunLimitMetric]]
+  >) {
+    const value = asInt(env, raw[env]?.trim(), fallback);
+    if (value < 0 || value > RUN_LIMIT_MAX) {
+      throw new Error(`${env} must be 0 (no limit) or a whole number up to ${RUN_LIMIT_MAX}, got ${value}`);
+    }
+    limits[metric] = value;
+  }
+  return Object.freeze(limits);
 }
 
 function oidcTrioSet(raw: Record<string, string | undefined>): boolean {
@@ -570,5 +588,6 @@ export function validateEnv(raw: Record<string, string | undefined>): EnvConfig 
 
   // Validate eagerly so a typo fails at startup, not in the browser.
   cfg.corsOriginList = Object.freeze(parseCorsOrigins(cfg.corsOrigins));
+  cfg.runLimits = runLimitsOf(raw);
   return cfg;
 }

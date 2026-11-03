@@ -59,6 +59,11 @@ These strings are written into saved data, issued tokens, live cookies or the da
 - The `--orchestr-*` CSS custom properties — the client's token names.
 - The `{{$account.*}}` reference and its field names (`email`, `handle`, `id`, `name`) — in every
   saved workflow that uses them.
+- The run-limit metric names (`run.steps`, `run.loop_rounds`, `run.active_seconds`,
+  `workspace.running_runs`, `workspace.unfinished_runs`) — keys of every budgeted run's DBOS arguments
+  and `runtime_runs.limits`, and what an `ee/` provider answers; their operator variables
+  (`RUN_MAX_STEPS`, …) in every install's `.env`; and `RUN_LIMIT_PREFIX` (`Run limit reached: `), which
+  keeps a run a limit ended final.
 - The `nameBasedId` namespace and derivation (`apps/service/src/database/ids.ts`) and what a trigger
   run is named by (a poll's or registered webhook's: the activation id, its `admission.epoch` store
   value and the event's key; a Composio delivery's: the activation id and its `webhook-id`) — in every

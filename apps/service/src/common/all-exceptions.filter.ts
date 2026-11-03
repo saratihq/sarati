@@ -40,6 +40,13 @@ export function shapeKnownError(
   return null;
 }
 
+/** Seconds a refusal that recorded nothing tells its caller to wait before trying again, or null when it says nothing of the kind. */
+export function retryAfterSeconds(exception: unknown): number | null {
+  if (!(exception instanceof DomainError) || exception.status !== 429) return null;
+  const seconds = exception.details?.retry_after_s;
+  return typeof seconds === 'number' ? seconds : null;
+}
+
 // The `http-errors` a body reader raises mark a message safe to show to the caller with `expose`.
 function isExposedClientError(exception: unknown): exception is Error & { status: number } {
   if (!(exception instanceof Error) || !('expose' in exception) || exception.expose !== true) return false;
@@ -62,6 +69,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     const known = shapeKnownError(exception);
     if (known) {
+      const retryAfter = retryAfterSeconds(exception);
+      if (retryAfter !== null) res.setHeader('Retry-After', String(retryAfter));
       res.status(known.status).json(known.body);
       return;
     }
