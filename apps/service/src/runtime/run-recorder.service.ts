@@ -463,6 +463,16 @@ export class RunRecorderService implements RunRecorder {
     }
   }
 
+  /** The outputs a run's row holds; throws when they can't be read. */
+  async runOutputs(scopedRunId: string): Promise<Record<string, unknown>> {
+    const [row] = await rawQuery<{ outputs: Record<string, unknown> | null }>(
+      this.dataSource.manager,
+      `SELECT outputs FROM runtime_runs WHERE id = $1`,
+      [scopedRunId],
+    );
+    return row?.outputs ?? {};
+  }
+
   private async clearWaits(op: string, scopedRunId: string): Promise<void> {
     try {
       await clearStepWaits(this.dataSource.manager, scopedRunId);

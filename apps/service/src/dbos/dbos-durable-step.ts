@@ -79,7 +79,10 @@ export class DbosDurableStep extends PlainDurableStep {
 
 /** A workflow entered after its run ended: it stops before running anything, so it cannot rewrite that run. */
 export class RunAlreadyEnded extends Error {
-  constructor(status: RuntimeRunStatus) {
+  constructor(
+    /** How the run ended. */
+    readonly status: RuntimeRunStatus,
+  ) {
     super(`Run already ended ${status}`);
     this.name = 'RunAlreadyEnded';
   }
