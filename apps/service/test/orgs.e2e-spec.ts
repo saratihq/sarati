@@ -8,10 +8,12 @@ import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { ComposioProvider } from '../src/connections/composio.provider';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -141,8 +143,10 @@ function approvalIr(topic: string): Record<string, unknown> {
   };
 }
 
-/** Two real users via API-key auth — MOCK_AUTH can't mint a second identity. */
-describe('organizations (e2e, isolated DB, two users via API keys)', () => {
+const SECRET_KEY = 'an-e2e-secret-key-for-organization-sessions';
+
+/** Two real users signed in, and keys of theirs — MOCK_AUTH can't mint a second identity. */
+describe('organizations (e2e, isolated DB, two users signed in and their keys)', () => {
   let app: INestApplication;
   let db: Client;
 
@@ -150,16 +154,16 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
   const userB = randomUUID();
   const personalA = randomUUID();
   const personalB = randomUUID();
-  const keyA = 'ork_e2e_owner_aaaaaaaaaaaaaaaaaaaaaaaa';
-  const keyB = 'ork_e2e_member_bbbbbbbbbbbbbbbbbbbbbbbb';
+  let sessionA = '';
+  let sessionB = '';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = ''; // "Acme" — created by A
   let betaId = ''; // second org of A, for cross-org invisibility
   let inviteToken = '';
 
-  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
-  const asB = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyB}`);
+  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionA}`);
+  const asB = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionB}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
 
   beforeAll(async () => {
@@ -178,18 +182,16 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       { id: personalA, userId: userA, name: 'Owner A' },
       { id: personalB, userId: userB, name: 'Member B' },
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
-              (gen_random_uuid(), $4, 'b', $5, $6, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12), userB, hash(keyB), keyB.slice(0, 12)],
-    );
+    sessionA = (await mintSession(userA, SECRET_KEY)).token;
+    sessionB = (await mintSession(userB, SECRET_KEY)).token;
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
+    process.env.LOCAL_AUTH_ENABLED = 'true';
+    process.env.SECRET_KEY = SECRET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
     // Per-route throttles (/api/deploy: 10 a minute) are not what this suite tests.
@@ -533,7 +535,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     expect(personal.body.is_live).toBe(true);
   });
 
-  it('a key issued for one org reaches nothing in another — not by workflow id, not by org route', async () => {
+  it('a key issued for one org reaches nothing in another — not by workflow id, not by org route, not by cluster route', async () => {
     const pinned = 'ork_e2e_pinned_pppppppppppppppppppppp';
     await db.query(
       `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
@@ -543,7 +545,14 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
         personalA,
         hash(pinned),
         pinned.slice(0, 12),
-        JSON.stringify(['workflow:read', 'workflow:write', 'workflow:deploy', 'org:manage']),
+        JSON.stringify([
+          'workflow:read',
+          'workflow:write',
+          'workflow:deploy',
+          'org:manage',
+          'connection:read',
+          'connection:write',
+        ]),
       ],
     );
     const asPinned = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${pinned}`);
@@ -559,6 +568,32 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     ).expect(404);
     const rename = await asPinned(http().patch(`/api/orgs/${orgId}`).send({ name: 'Renamed' })).expect(403);
     expect(rename.body.detail).toBe('This API key is scoped to a different organization');
+
+    const cluster = randomUUID();
+    await db.query(
+      `INSERT INTO connections (id, user_id, provider, auth_type, credential, created_at, status, org_id, environment)
+       VALUES ($1,$2,'slack','managed','enc',now(),'active',$3,'pinned-key-probe')`,
+      [cluster, userA, orgId],
+    );
+    try {
+      const teamKey = await insertApiKey(db, userA, orgId, { scopes: ['connection:read'] });
+      const seen = await http()
+        .get(`/api/orgs/${orgId}/clusters`)
+        .set('Authorization', `Bearer ${teamKey}`)
+        .expect(200);
+      expect((seen.body.clusters as Array<{ id: string }>).map((c) => c.id)).toContain(cluster);
+      for (const route of [
+        asPinned(http().get(`/api/orgs/${orgId}/clusters`)),
+        asPinned(http().delete(`/api/orgs/${orgId}/clusters/connections/${cluster}`)),
+      ]) {
+        const refused = await route.expect(403);
+        expect(refused.body.detail).toBe('This API key is scoped to a different organization');
+      }
+      const kept = await db.query(`SELECT id FROM connections WHERE id = $1`, [cluster]);
+      expect(kept.rows).toEqual([{ id: cluster }]);
+    } finally {
+      await db.query(`DELETE FROM connections WHERE id = $1`, [cluster]);
+    }
 
     // Its own org is untouched.
     const own = await asPinned(http().post('/api/deploy').send({ workflow_json: concatIr() })).expect(201);
@@ -607,6 +642,23 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
       await db.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2`, [gamma, userA]);
       await asB(http().delete(`/api/orgs/${gamma}`)).expect(200);
     }
+  });
+
+  it('a key lists only the org it is issued for, where its holder signed in lists every one', async () => {
+    const listed = async (bearer: string): Promise<Array<{ id: string; is_personal: boolean }>> =>
+      (await http().get('/api/orgs').set('Authorization', `Bearer ${bearer}`).expect(200)).body.orgs;
+    const memberships = (
+      await db.query<{ org_id: string }>(`SELECT org_id FROM org_members WHERE user_id = $1`, [userA])
+    ).rows.map((r) => r.org_id);
+    expect(memberships.length).toBeGreaterThan(2);
+
+    const home = await insertApiKey(db, userA, personalA, { scopes: ['workflow:read'] });
+    const team = await insertApiKey(db, userA, orgId, { scopes: ['workflow:read'] });
+    expect(await listed(home)).toEqual([
+      { id: personalA, name: 'Owner A', is_personal: true, role: 'owner' },
+    ]);
+    expect((await listed(team)).map((o) => [o.id, o.is_personal])).toEqual([[orgId, false]]);
+    expect((await listed(sessionA)).map((o) => o.id).sort()).toEqual([...memberships].sort());
   });
 
   it('only an owner can invite an owner', async () => {
@@ -769,16 +821,12 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
 
   it('an owner invite an admin minted before this rule cannot be redeemed, by preview, accept or sign-up', async () => {
     const userD = randomUUID();
-    const keyD = 'ork_e2e_joiner_dddddddddddddddddddddd';
     await db.query(
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'joiner-d@e2e.local', 'Joiner D', now(), now())`,
       [userD],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'd', $2, $3, now())`,
-      [userD, hash(keyD), keyD.slice(0, 12)],
-    );
-    const asD = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyD}`);
+    const sessionD = (await mintSession(userD, SECRET_KEY)).token;
+    const asD = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionD}`);
     const seedOwnerInvite = async (createdBy: string, email = 'joiner-d@e2e.local'): Promise<string> => {
       const token = `tok_${randomUUID().replace(/-/g, '')}`;
       await db.query(
@@ -872,8 +920,12 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
 
   /** Org-wide approvals are a SESSION capability (proven in mcp-runs.e2e-spec); a key reaches only its own runs. */
   it('a KEY gets no org-wide reach: another member cannot see or resume a parked run through one', async () => {
+    const keyA = await insertApiKey(db, userA, orgId);
+    const keyB = await insertApiKey(db, userB, orgId);
+    const asKeyA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
+    const asKeyB = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyB}`);
     // The run is NOT awaited — it parks on the wait node. Its owner is A.
-    const dep = await asA(
+    const dep = await asKeyA(
       http()
         .post('/api/deploy')
         .set('X-Org-Id', orgId)
@@ -881,7 +933,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     ).expect(201);
     const apprWf = dep.body.workflow_id as string;
 
-    const pending = asA(
+    const pending = asKeyA(
       http()
         .post('/api/runs/from-ir')
         .set('X-Org-Id', orgId)
@@ -892,7 +944,7 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     // The owner's own key sees it; the inbox hands back the UNIQUE handle (`<owner>:<run>`).
     let waiting: Record<string, unknown> | undefined;
     for (let i = 0; i < 100 && !waiting; i++) {
-      const res = await asA(http().get('/api/runs/waiting').set('X-Org-Id', orgId)).expect(200);
+      const res = await asKeyA(http().get('/api/runs/waiting').set('X-Org-Id', orgId)).expect(200);
       waiting = (res.body.runs as Array<Record<string, unknown>>).find((r) => r.workflow_id === apprWf);
       if (!waiting) await new Promise((r) => setTimeout(r, 50));
     }
@@ -907,21 +959,21 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     // B's KEY is in the same org and still sees nothing of A's run — with or without the org header,
     // and not even holding the exact handle (an agent loop must not harvest other members' runs).
     for (const inbox of [
-      asB(http().get('/api/runs/waiting').set('X-Org-Id', orgId)),
-      asB(http().get('/api/runs/waiting')),
+      asKeyB(http().get('/api/runs/waiting').set('X-Org-Id', orgId)),
+      asKeyB(http().get('/api/runs/waiting')),
     ]) {
       const res = await inbox.expect(200);
       expect((res.body.runs as Array<{ run_id: string }>).map((r) => r.run_id)).not.toContain(runId);
     }
-    await asB(http().post(`/api/runs/${ref}/events`).send({ topic: 'approve', payload: {} })).expect(404);
-    await asB(
+    await asKeyB(http().post(`/api/runs/${ref}/events`).send({ topic: 'approve', payload: {} })).expect(404);
+    await asKeyB(
       http().post(`/api/runs/${ref}/events`).set('X-Org-Id', orgId).send({ topic: 'approve', payload: {} }),
     ).expect(404);
-    const denied = await asB(http().get(`/api/runs/${ref}`).set('X-Org-Id', orgId)).expect(200);
+    const denied = await asKeyB(http().get(`/api/runs/${ref}`).set('X-Org-Id', orgId)).expect(200);
     expect(denied.body.status).toBe('not_found');
 
     // The owner resumes their own run.
-    await asA(
+    await asKeyA(
       http()
         .post(`/api/runs/${ref}/events`)
         .set('X-Org-Id', orgId)
@@ -932,12 +984,12 @@ describe('organizations (e2e, isolated DB, two users via API keys)', () => {
     expect(result.status).toBe(201);
     expect(result.body.outputs.approval).toEqual({ decision: 'approved' });
 
-    const detail = await asA(http().get(`/api/runs/${ref}`).set('X-Org-Id', orgId)).expect(200);
+    const detail = await asKeyA(http().get(`/api/runs/${ref}`).set('X-Org-Id', orgId)).expect(200);
     expect(detail.body.decided_by?.id).toBe(userA);
     expect(detail.body.decided_at).toBeTruthy();
 
     // Resolved → off the inbox.
-    const after = await asA(http().get('/api/runs/waiting').set('X-Org-Id', orgId)).expect(200);
+    const after = await asKeyA(http().get('/api/runs/waiting').set('X-Org-Id', orgId)).expect(200);
     expect((after.body.runs as Array<{ run_id: string }>).map((r) => r.run_id)).not.toContain('org-appr-1');
   }, 20_000);
 

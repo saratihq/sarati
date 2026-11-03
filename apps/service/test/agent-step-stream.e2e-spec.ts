@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,10 +7,12 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { AGENT_MODEL_CALL, type AgentStep } from '../src/runtime/agent';
 import { AgentStepBus } from '../src/runtime/agent-step-bus';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -95,7 +97,6 @@ describe('agent step stream — SSE side-channel (e2e, isolated DB)', () => {
 
   const userA = randomUUID();
   const keyA = 'ork_e2e_agentstream_aaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -111,11 +112,6 @@ describe('agent step stream — SSE side-channel (e2e, isolated DB)', () => {
       `INSERT INTO users (id, email, name, created_at, updated_at)
        VALUES ($1, 'owner-stream@e2e.local', 'Owner Stream', now(), now())`,
       [userA],
-    );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;
@@ -144,8 +140,8 @@ describe('agent step stream — SSE side-channel (e2e, isolated DB)', () => {
     const addr = app.getHttpServer().address() as { port: number };
     baseUrl = `http://127.0.0.1:${addr.port}`;
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
     const deployed = await asA(
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: agentChatDoc() }),
     ).expect(201);
@@ -288,7 +284,6 @@ describe('agent step stream — monotonic ids + tenant scoping (e2e, isolated DB
 
   const userA = randomUUID();
   const keyA = 'ork_e2e_agentscope_bbbbbbbbbbbbbbbbbb';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -304,11 +299,6 @@ describe('agent step stream — monotonic ids + tenant scoping (e2e, isolated DB
       `INSERT INTO users (id, email, name, created_at, updated_at)
        VALUES ($1, 'owner-scope@e2e.local', 'Owner Scope', now(), now())`,
       [userA],
-    );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;
@@ -332,8 +322,8 @@ describe('agent step stream — monotonic ids + tenant scoping (e2e, isolated DB
     const addr = app.getHttpServer().address() as { port: number };
     baseUrl = `http://127.0.0.1:${addr.port}`;
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
     const deployed = await asA(
       http().post('/api/deploy').set('X-Org-Id', orgId).send({ workflow_json: twoAgentChatDoc() }),
     ).expect(201);

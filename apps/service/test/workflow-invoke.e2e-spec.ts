@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -9,6 +9,8 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -152,7 +154,6 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
   const keyA = 'ork_e2e_invoke_aaaaaaaaaaaaaaaaaaaaaa';
   const keyB = 'ork_e2e_invoke_bbbbbbbbbbbbbbbbbbbbbb';
   const invokeOnlyKey = 'ork_e2e_invoke_only_ccccccccccccccccc';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgA = '';
   let orgB = '';
@@ -192,12 +193,6 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
               ($2, 'invoke-b@e2e.local', 'Owner B', now(), now())`,
       [userA, userB],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
-              (gen_random_uuid(), $4, 'b', $5, $6, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12), userB, hash(keyB), keyB.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -214,22 +209,13 @@ describe('workflow-as-tool invocation (e2e, isolated DB)', () => {
     await app.init();
     await listenOnLoopback(app);
 
-    orgA = (
-      await http().post('/api/orgs').set('Authorization', `Bearer ${keyA}`).send({ name: 'Acme' }).expect(201)
-    ).body.id as string;
-    orgB = (
-      await http()
-        .post('/api/orgs')
-        .set('Authorization', `Bearer ${keyB}`)
-        .send({ name: 'Globex' })
-        .expect(201)
-    ).body.id as string;
+    const orgs = app.get(OrgManagementService);
+    orgA = (await orgs.createOrg(userA, 'Acme')).id;
+    orgB = (await orgs.createOrg(userB, 'Globex')).id;
+    await insertApiKey(db, userA, orgA, { key: keyA });
+    await insertApiKey(db, userB, orgB, { key: keyB });
     // The key you paste into an agent: `workflow:invoke` and nothing else.
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, scopes, created_at)
-       VALUES (gen_random_uuid(), $1, $2, 'invoke-only', $3, $4, $5::json, now())`,
-      [userA, orgA, hash(invokeOnlyKey), invokeOnlyKey.slice(0, 12), JSON.stringify(['workflow:invoke'])],
-    );
+    await insertApiKey(db, userA, orgA, { key: invokeOnlyKey, scopes: ['workflow:invoke'] });
   }, 30_000);
 
   afterAll(async () => {

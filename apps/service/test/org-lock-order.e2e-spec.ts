@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -9,6 +9,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { fernetDecrypt, fernetEncrypt } from '../src/common/crypto/fernet';
 import { EventsService, type DomainEventInput } from '../src/events/events.service';
@@ -57,6 +58,7 @@ const HAS_WORKFLOW =
   'This organization still has 1 workflow — move or delete them before deleting the organization.';
 
 const TEST_FERNET_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+const SECRET_KEY = 'an-e2e-secret-key-for-org-lock-order-sessions';
 
 function webhookDoc(name: string): Record<string, unknown> {
   return {
@@ -103,23 +105,20 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
   const member = randomUUID();
   const joiner = randomUUID();
   const rival = randomUUID();
-  const ownerKey = 'ork_e2e_owner_lock_aaaaaaaaaaaaaaaaaaaaa';
-  const memberKey = 'ork_e2e_member_lock_bbbbbbbbbbbbbbbbbbbb';
-  const joinerKey = 'ork_e2e_joiner_lock_cccccccccccccccccccc';
-  const rivalKey = 'ork_e2e_rival_lock_dddddddddddddddddddddd';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
+  // Each acts across its orgs, creating and joining them, as only a signed-in session does.
+  const sessions = new Map<string, string>();
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const as =
-    (key: string) =>
+    (userId: string) =>
     (r: request.Test, org?: string): request.Test =>
       org
-        ? r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', org)
-        : r.set('Authorization', `Bearer ${key}`);
-  const asOwner = as(ownerKey);
-  const asMember = as(memberKey);
-  const asJoiner = as(joinerKey);
-  const asRival = as(rivalKey);
+        ? r.set('Authorization', `Bearer ${sessions.get(userId)!}`).set('X-Org-Id', org)
+        : r.set('Authorization', `Bearer ${sessions.get(userId)!}`);
+  const asOwner = as(owner);
+  const asMember = as(member);
+  const asJoiner = as(joiner);
+  const asRival = as(rival);
   const suffix = (): string => randomUUID().slice(0, 8);
 
   const { gateEmits, holdQuery, lockWaiters, deadlocks, deadlocksSince } = lockProbes(
@@ -402,27 +401,9 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
       { id: personal[2]!, userId: joiner, name: 'Joiner' },
       { id: personal[3]!, userId: rival, name: 'Rival' },
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'owner', $2, $3, now()),
-              (gen_random_uuid(), $4, 'member', $5, $6, now()),
-              (gen_random_uuid(), $7, 'joiner', $8, $9, now()),
-              (gen_random_uuid(), $10, 'rival', $11, $12, now())`,
-      [
-        owner,
-        hash(ownerKey),
-        ownerKey.slice(0, 12),
-        member,
-        hash(memberKey),
-        memberKey.slice(0, 12),
-        joiner,
-        hash(joinerKey),
-        joinerKey.slice(0, 12),
-        rival,
-        hash(rivalKey),
-        rivalKey.slice(0, 12),
-      ],
-    );
+    for (const userId of [owner, member, joiner, rival]) {
+      sessions.set(userId, (await mintSession(userId, SECRET_KEY)).token);
+    }
 
     composio = createServer((req, res) => {
       const url = req.url ?? '';
@@ -453,6 +434,8 @@ describe('every write under an org takes the org row first (e2e, isolated DB, st
     process.env.PGBOSS_ENABLED = 'false';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
+    process.env.LOCAL_AUTH_ENABLED = 'true';
+    process.env.SECRET_KEY = SECRET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
     process.env.FERNET_KEY = TEST_FERNET_KEY;
     process.env.COMPOSIO_BASE_URL = `http://127.0.0.1:${(composio.address() as AddressInfo).port}`;

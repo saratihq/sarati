@@ -7,18 +7,23 @@ import { Client } from 'pg';
 import request from 'supertest';
 import type { FetchLike, FetchLikeResponse } from '@sarati/actions-sdk';
 
+import { ApiKeysService } from '../src/api-keys/api-keys.service';
 import { AppModule } from '../src/app.module';
+import { KEY_SCOPED_TO_OTHER_ORG } from '../src/auth/principal';
 import { configureApp } from '../src/bootstrap';
 import { compileWorkflowIrDag } from '../src/compiler/compile-ir-dag';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { computeDiff } from '../src/ir/diff';
 import type { WorkflowIR } from '../src/ir/models';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { type AgentResult } from '../src/runtime/agent';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import type { DagAgentNode } from '../src/runtime/dag-plan';
 import { DagInterpreter } from '../src/runtime/dag-interpreter';
 import { SDK_ACTIONS_FETCH } from '../src/providers/sdk-actions.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
+import { insertApiKey } from './support/api-keys';
+import { webhookDoc } from './support/golden-docs';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -1323,5 +1328,87 @@ describe('domain invariants (the constitution)', () => {
         expect(ops).toContain('remove_edge');
         expect(ops).toContain('add_edge');
       });
+  });
+});
+
+/** Constitution row 24, as only an API key sees it: MOCK_AUTH, which the suite above runs under, verifies no key. */
+describe('domain invariants (the constitution), through an API key', () => {
+  let app: INestApplication;
+  let db: Client;
+  const ada = randomUUID();
+  const home = randomUUID();
+  let team = '';
+  const http = () => request(app.getHttpServer());
+  const as = (key: string, r: request.Test): request.Test => r.set('Authorization', `Bearer ${key}`);
+
+  beforeAll(async () => {
+    const e2eUrl = await createE2eDatabase(ADMIN_URL);
+    db = new Client({ connectionString: e2eUrl });
+    await db.connect();
+    await db.query(
+      `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'ada@e2e.local', 'Ada', now(), now())`,
+      [ada],
+    );
+    await insertPersonalOrgs(db, { id: home, userId: ada, name: 'Ada' });
+    process.env.DATABASE_URL = e2eUrl;
+    process.env.PGBOSS_ENABLED = 'false';
+    process.env.MOCK_AUTH = 'false';
+    process.env.CLERK_ISSUER = '';
+    process.env.THROTTLE_LIMIT = '10000';
+    process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
+    configureApp(app);
+    await app.init();
+    await listenOnLoopback(app);
+    team = (await app.get(OrgManagementService).createOrg(ada, 'Team')).id;
+  }, 30_000);
+
+  afterAll(async () => {
+    await db.end();
+    await app.close();
+    process.env.DATABASE_URL = ADMIN_URL;
+  });
+
+  it('invariant 24: an API key acts only in the one org it is issued for — never another its holder belongs to, never one it names, and the database holds no key without one', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at)
+         VALUES (gen_random_uuid(), $1, NULL, 'unpinned', 'h', 'ork_unpinned', now())`,
+        [ada],
+      ),
+    ).rejects.toThrow(/null value in column "org_id" of relation "api_keys" violates not-null constraint/);
+
+    const scopes = ['workflow:read', 'workflow:write', 'workflow:deploy', 'org:manage'];
+    const issued = (await app.get(ApiKeysService).issue(ada, 'issued', scopes)).key;
+    expect((await db.query(`SELECT org_id FROM api_keys WHERE name = 'issued'`)).rows).toEqual([
+      { org_id: home },
+    ]);
+    const inTeam = await insertApiKey(db, ada, team, { scopes });
+    const keys = [
+      [issued, home, team],
+      [inTeam, team, home],
+    ] as const;
+    const made: Record<string, string> = {};
+    for (const [key, own] of keys) {
+      const deployed = await as(key, http().post('/api/deploy'))
+        .send({ workflow_json: webhookDoc(`made in ${own}`) })
+        .expect(201);
+      made[own] = deployed.body.workflow_id as string;
+      expect((await db.query(`SELECT org_id FROM workflows WHERE id = $1`, [made[own]])).rows).toEqual([
+        { org_id: own },
+      ]);
+    }
+    for (const [key, own, other] of keys) {
+      await as(key, http().get(`/api/workflows/${made[own]}`)).expect(200);
+      await as(key, http().get(`/api/workflows/${made[other]}`)).expect(404);
+      const refused = await as(key, http().get('/api/workflows').set('X-Org-Id', other)).expect(403);
+      expect(refused.body.detail).toBe(KEY_SCOPED_TO_OTHER_ORG);
+      const orgs = (await as(key, http().get('/api/orgs')).expect(200)).body.orgs as Array<{ id: string }>;
+      expect(orgs.map((o) => o.id)).toEqual([own]);
+    }
+    await as(inTeam, http().patch(`/api/orgs/${home}`).send({ name: 'Renamed' })).expect(403);
+    await as(inTeam, http().post('/api/orgs').send({ name: 'Another' })).expect(403);
+    expect((await db.query(`SELECT 1 FROM organizations WHERE name = 'Another'`)).rows).toEqual([]);
   });
 });

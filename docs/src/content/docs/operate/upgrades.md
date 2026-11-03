@@ -126,6 +126,12 @@ versions still let an owner invite someone into it through the API, but nobody j
 invite answers `500`, and a sign-up with it makes the account and then answers `500` without
 joining. Coming back, the upgrade deletes each such invite (`044 deleted the pending invite …`).
 
+**API keys, going back to v0.2.26 or earlier.** Every key keeps the one workspace it acts in, and a
+key made there is made for its holder's personal workspace, as here, since every account has one
+after this upgrade; coming back changes no key. Those versions hold a key to its workspace less
+closely: `GET /api/orgs` with a key lists every workspace its owner belongs to, and a key with
+`org:manage` can create an organization and accept an invite into one.
+
 **Environments, going back to v0.2.26 or earlier.** Those versions make environments you didn't
 create. Every start there makes one for each name a
 [cluster connection](#an-environment-is-made-only-by-creating-it) gives that the workspace doesn't
@@ -275,6 +281,43 @@ What a caller of the API sees change:
 
 Going back to v0.2.26 or earlier still makes accounts there; what else changes for personal
 workspaces is under [Going back](#going-back).
+
+#### Every API key acts in one workspace
+
+Earlier versions left an [API key](/agents/api-keys/) with no workspace when its account had no
+personal workspace as the key was made, and such a key reached every workspace its owner belonged to.
+The upgrade gives each one its owner's personal workspace, revoked and expired keys too, and the
+database then holds no key without one. Each key it moves that still works is a warning in the
+upgrade log:
+
+```
+046 pinned API key ci (…, ork_AbCdEfGh…) of ada@example.com to their personal workspace …: it reached every organization they belong to, and now acts only there
+```
+
+To find them after upgrading:
+
+```bash
+cd sarati && docker compose logs sarati | grep '046 '
+```
+
+On a five-container install it is `docker compose logs service`; running it by hand,
+`docker logs sarati`. A second boot changes nothing and logs none of these.
+
+What a caller of the API sees change on such a key:
+
+- **A request naming another workspace in `X-Org-Id` is refused** with `403` and
+  `This API key is scoped to a different organization`, a team organization its owner belongs to
+  included, and that organization's workflows answer `404`.
+- **It no longer creates or joins an organization**, nor manages a team organization's settings,
+  members, invites or platform keys. Do that signed in.
+- **A workflow in no workspace answers `404` to it.** Only an account with no personal workspace made
+  one, on an earlier version; open it signed in.
+
+And on every key: **`GET /api/orgs` lists only the workspace the key acts in.** It listed every
+workspace its owner belongs to.
+
+Going back to v0.2.26 or earlier keeps every key in its one workspace — see
+[Going back](#going-back).
 
 #### An environment is made only by creating it
 

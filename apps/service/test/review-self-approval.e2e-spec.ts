@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -8,6 +8,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { seedDefaultEnvironments } from '../src/environments/default-environments';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -49,7 +50,6 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
   const keyOwner = 'ork_e2e_selfapp_owner_aaaaaaaaaaaa';
   const keyMember = 'ork_e2e_selfapp_member_bbbbbbbbbb';
   const keySolo = 'ork_e2e_selfapp_solo_cccccccccccc';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const asOwner = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyOwner}`);
@@ -86,23 +86,9 @@ describe('self-approval (e2e, isolated DB, two real users)', () => {
       [orgId, owner, member],
     );
     await seedDefaultEnvironments(db, orgId);
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'o', $2, $3, now()),
-              (gen_random_uuid(), $4, 'm', $5, $6, now()),
-              (gen_random_uuid(), $7, 's', $8, $9, now())`,
-      [
-        owner,
-        hash(keyOwner),
-        keyOwner.slice(0, 12),
-        member,
-        hash(keyMember),
-        keyMember.slice(0, 12),
-        soloUser,
-        hash(keySolo),
-        keySolo.slice(0, 12),
-      ],
-    );
+    await insertApiKey(db, owner, orgId, { key: keyOwner });
+    await insertApiKey(db, member, orgId, { key: keyMember });
+    await insertApiKey(db, soloUser, personalSolo, { key: keySolo });
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';

@@ -157,8 +157,8 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
     );
     await insertPersonalOrgs(db, { id: orgId, userId: userId, name: 'R' });
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userId, keyHash, keyA.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, $2, 'a', $3, $4, now())`,
+      [userId, orgId, keyHash, keyA.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;

@@ -5,7 +5,7 @@ export interface VerifiedIdentity {
   /** A pre-resolved local user id (e.g. an API key already identifies its owner). */
   userId?: string;
   /** Set only by the API-key verifier — its presence marks the caller as a key, not a session. */
-  apiKey?: { scopes: string[] | null; orgId: string | null };
+  apiKey?: { scopes: string[] | null; orgId: string };
 }
 
 export interface TokenVerifier {

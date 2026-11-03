@@ -11,6 +11,7 @@ import { AGENT_MODEL_CALL, type AgentStep } from '../src/runtime/agent';
 import { AgentStepBus } from '../src/runtime/agent-step-bus';
 import { ScriptedAgentModel } from '../src/runtime/agent.testkit';
 import { listenOnLoopback } from './support/listen';
+import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 /** A WEBHOOK-triggered agent (no chat trigger, so try-it chat can't reach it) with a tool and a reply step. */
@@ -93,6 +94,7 @@ describe('test-agent — single-agent test run (e2e, isolated DB)', () => {
   let model: ScriptedAgentModel;
 
   const userA = randomUUID();
+  const personalA = randomUUID();
   const keyA = 'ork_e2e_agenttest_aaaaaaaaaaaaaaaaa';
   const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
@@ -108,10 +110,11 @@ describe('test-agent — single-agent test run (e2e, isolated DB)', () => {
        VALUES ($1, 'owner-agenttest@e2e.local', 'Owner AgentTest', now(), now())`,
       [userA],
     );
+    await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Owner AgentTest' });
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'a', $3, $4, now())`,
+      [userA, personalA, hash(keyA), keyA.slice(0, 12)],
     );
 
     process.env.DATABASE_URL = e2eUrl;

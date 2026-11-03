@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,7 +7,9 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -117,7 +119,6 @@ describe('canvas-node chat trigger — activation + synchronous intake (e2e, iso
 
   const userA = randomUUID();
   const keyA = 'ork_e2e_chattrig_aaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -137,11 +138,6 @@ describe('canvas-node chat trigger — activation + synchronous intake (e2e, iso
        VALUES ($1, 'owner-chat@e2e.local', 'Owner Chat', now(), now())`,
       [userA],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -158,8 +154,8 @@ describe('canvas-node chat trigger — activation + synchronous intake (e2e, iso
     await app.init();
     await listenOnLoopback(app);
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
   }, 30_000);
 
   afterAll(async () => {

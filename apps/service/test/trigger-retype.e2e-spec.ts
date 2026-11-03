@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -12,6 +12,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
 import type { EnvConfig } from '../src/config/env.config';
@@ -36,6 +37,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 // An allowlisted host, so the SDK's SSRF guard skips its DNS lookup; the fetch itself is stubbed.
 const FEED_URL = 'http://localhost/retype-feed';
+const SECRET_KEY = 'an-e2e-secret-key-for-retype-sessions';
 
 function respond(
   status: number,
@@ -337,8 +339,8 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
 
   const userA = randomUUID();
   const personalA = randomUUID();
-  const keyA = 'ork_e2e_retype_aaaaaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
+  // The owner acts in several workspaces, which only a signed-in session does: a key acts in one.
+  let sessionA = '';
 
   let orgId = '';
   let createSpy: jest.SpyInstance;
@@ -347,7 +349,7 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
   const warnSpy = jest.spyOn(Logger.prototype, 'warn');
   const warnings = (since = 0): string[] => warnSpy.mock.calls.slice(since).map((call) => String(call[0]));
 
-  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
+  const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionA}`);
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const converge = (wfId: string): Promise<void> => app.get(TriggerReconcilerService).reconcile(wfId);
   const retried = (): Promise<void> => app.get(TriggerReconcilerService).retriesSettled();
@@ -683,16 +685,15 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
       [userA],
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Retype' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
+    sessionA = (await mintSession(userA, SECRET_KEY)).token;
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
     process.env.THROTTLE_LIMIT = '10000';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
+    process.env.LOCAL_AUTH_ENABLED = 'true';
+    process.env.SECRET_KEY = SECRET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })

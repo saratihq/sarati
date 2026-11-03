@@ -15,7 +15,7 @@ import type { UserEntity } from '../database/entities/user.entity';
 import { OrgsService } from '../orgs/orgs.service';
 import { InvalidTokenError, TokenExpiredError } from './auth.errors';
 import { ScopeEnforcer } from './scope-enforcer';
-import { attachPrincipal, KEY_SCOPED_TO_OTHER_ORG, type Principal } from './principal';
+import { attachPrincipal, KEY_SCOPED_TO_OTHER_ORG, reachesOrg, type Principal } from './principal';
 import { TOKEN_VERIFIERS, type TokenVerifier } from './token-verifier';
 import { UserProvisioningService } from './user-provisioning.service';
 
@@ -80,20 +80,16 @@ export class AuthGuard implements CanActivate {
     }
   }
 
-  /** Resolve the active org and attach the principal; an org-pinned key mismatch is refused, not coerced. */
+  /** Resolve the active org and attach the principal; a key acts in its own org, and another asked for is refused, not coerced. */
   private async attach(
     req: Request,
     user: UserEntity,
-    apiKey?: { scopes: string[] | null; orgId: string | null },
+    apiKey?: { scopes: string[] | null; orgId: string },
   ): Promise<Principal> {
     const raw = req.headers['x-org-id'];
-    const requested = Array.isArray(raw) ? raw[0] : raw;
+    const requested = (Array.isArray(raw) ? raw[0] : raw)?.trim();
 
-    if (apiKey?.orgId && requested?.trim() && requested.trim() !== apiKey.orgId) {
-      throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
-    }
-
-    const active = await this.orgs.resolveActiveOrg(user.id, apiKey?.orgId ?? requested);
+    const active = await this.orgs.resolveActiveOrg(user.id, apiKey ? apiKey.orgId : requested);
     const principal: Principal = apiKey
       ? {
           kind: 'api_key',
@@ -104,6 +100,7 @@ export class AuthGuard implements CanActivate {
           keyOrgId: apiKey.orgId,
         }
       : { kind: 'user', user, activeOrgId: active.orgId, activeOrgRole: active.role };
+    if (requested && !reachesOrg(principal, requested)) throw new DomainError(KEY_SCOPED_TO_OTHER_ORG, 403);
     attachPrincipal(req, principal);
     return principal;
   }

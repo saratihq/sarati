@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,12 +7,14 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import {
   MANAGED_INTEGRATION_PROVIDER,
   type ManagedIntegrationProvider,
 } from '../src/providers/managed-integration-provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -69,7 +71,6 @@ describe('canvas-node polling-trigger activation (e2e, mocked provider)', () => 
   const userA = randomUUID();
   const personalA = randomUUID();
   const keyA = 'ork_e2e_polltrig_aaaaaaaaaaaaaaaaaaaaaa';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -88,10 +89,6 @@ describe('canvas-node polling-trigger activation (e2e, mocked provider)', () => 
       [userA],
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Poll Org' });
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -112,8 +109,8 @@ describe('canvas-node polling-trigger activation (e2e, mocked provider)', () => 
     jest.spyOn(provider, 'disableTrigger').mockResolvedValue(undefined);
     pollSpy = jest.spyOn(provider, 'pollTrigger').mockResolvedValue([]);
 
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
+    await insertApiKey(db, userA, orgId, { key: keyA });
   }, 30_000);
 
   afterAll(async () => {

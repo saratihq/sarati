@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -8,8 +8,10 @@ import request from 'supertest';
 import { EntityManager } from 'typeorm';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { NOT_RESUMABLE, RecoveryGuard } from '../src/dbos/recovery-guard';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import { ReviewTestService } from '../src/reviews/review-test.service';
 import { RunReaperService } from '../src/runs/run-reaper.service';
 import { RunsService } from '../src/runs/runs.service';
@@ -20,6 +22,7 @@ import type { ReviewTestSummary } from '../src/reviews/review-test.types';
 import { BranchService } from '../src/workflows/branch.service';
 import { VersionsWriteService } from '../src/workflows/versions-write.service';
 import { WorkflowLifecycleService } from '../src/workflows/workflow-lifecycle.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { deferred, lockProbes, pause } from './support/lock-probes';
 import { insertPersonalOrgs } from './support/personal-org';
@@ -27,6 +30,7 @@ import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
 const ROUNDS = 30;
 const RACERS = 12;
+const SECRET_KEY = 'an-e2e-secret-key-for-lock-order-sessions';
 
 function webhookDoc(name: string, echo = 'title', separator = ''): Record<string, unknown> {
   return {
@@ -100,23 +104,20 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
 
   const user = randomUUID();
   const personal = randomUUID();
-  const key = 'ork_e2e_lockord_aaaaaaaaaaaaaaaaaaaaaaaa';
+  const keysIn = new Map<string, string>();
   const orgless = randomUUID();
-  const orglessKey = 'ork_e2e_orgless_cccccccccccccccccccccccc';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
+  let orglessSession = '';
 
   const http = (): ReturnType<typeof request> => request(app.getHttpServer());
   const as = (r: request.Test, org: string): request.Test =>
-    r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', org);
-  const asOrgless = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${orglessKey}`);
+    r.set('Authorization', `Bearer ${keysIn.get(org)!}`).set('X-Org-Id', org);
+  // No key reaches an org-less workflow, so its owner works on it signed in.
+  const asOrgless = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${orglessSession}`);
 
   const workspace = async (name: string): Promise<string> => {
-    const created = await http()
-      .post('/api/orgs')
-      .set('Authorization', `Bearer ${key}`)
-      .send({ name })
-      .expect(201);
-    return created.body.id as string;
+    const org = (await app.get(OrgManagementService).createOrg(user, name)).id;
+    keysIn.set(org, await insertApiKey(db, user, org));
+    return org;
   };
 
   const createEnv = async (org: string, name: string): Promise<string> => {
@@ -235,22 +236,17 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
     );
     await insertPersonalOrgs(db, { id: personal, userId: user, name: 'Lock Order' });
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
-      [user, hash(key), key.slice(0, 12)],
-    );
-    await db.query(
       `INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, 'org-less@e2e.local', 'No Org', now(), now())`,
       [orgless],
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'k', $2, $3, now())`,
-      [orgless, hash(orglessKey), orglessKey.slice(0, 12)],
-    );
+    orglessSession = (await mintSession(orgless, SECRET_KEY)).token;
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
     process.env.MOCK_AUTH = 'false';
     process.env.CLERK_ISSUER = '';
+    process.env.LOCAL_AUTH_ENABLED = 'true';
+    process.env.SECRET_KEY = SECRET_KEY;
     process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -2147,7 +2143,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${calledId}`)));
         await lockWaiters(1);
         await expect(lockedNow('runtime_runs', runId)).rejects.toMatchObject({ code: LOCK_NOT_AVAILABLE });
-        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        const orgDeleting = statusOf(as(http().delete(`/api/orgs/${org}`), org));
         await lockWaiters(2);
         await holder.query('COMMIT');
         expect(await wfDeleting).toBe(200);
@@ -2250,7 +2246,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         const first = holders.filter((h) => waiting.rows[0]!.blockers.includes(h.pid));
         expect(first).toHaveLength(1);
         for (const h of holders) if (h !== first[0]) await h.client.query('ROLLBACK');
-        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        const orgDeleting = statusOf(as(http().delete(`/api/orgs/${org}`), org));
         await lockWaiters(2);
         await first[0]!.client.query('COMMIT');
         expect({ workflow: await wfDeleting, org: await orgDeleting }).toEqual({ workflow: 200, org: 200 });
@@ -2281,7 +2277,7 @@ describe('every write under a workflow locks the workflow row first (e2e, isolat
         await holder.query('BEGIN');
         await holder.query(`SELECT 1 FROM environments WHERE id = $1 FOR KEY SHARE`, [envs[1]!.id]);
         const { rows } = await holder.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`);
-        const orgDeleting = statusOf(http().delete(`/api/orgs/${org}`).set('Authorization', `Bearer ${key}`));
+        const orgDeleting = statusOf(as(http().delete(`/api/orgs/${org}`), org));
         await lockWaiters(1);
         const wfDeleting = statusOf(asOrgless(http().delete(`/api/workflows/${callee.calledId}`)));
         await lockWaiters(2);

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -7,6 +7,8 @@ import request from 'supertest';
 
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
+import { OrgManagementService } from '../src/orgs/org-management.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -63,7 +65,6 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
   const personalB = randomUUID();
   const keyA = 'ork_e2e_owner_aaaaaaaaaaaaaaaaaaaaaaaa';
   const keyB = 'ork_e2e_member_bbbbbbbbbbbbbbbbbbbbbbbb';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
 
   let orgId = '';
   let wfId = '';
@@ -92,12 +93,6 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
       { id: personalA, userId: userA, name: 'Owner A' },
       { id: personalB, userId: userB, name: 'Member B' },
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now()),
-              (gen_random_uuid(), $4, 'b', $5, $6, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12), userB, hash(keyB), keyB.slice(0, 12)],
-    );
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -113,13 +108,14 @@ describe('env promotion (e2e, isolated DB, org owner + member via API keys)', ()
     await listenOnLoopback(app);
 
     // Org "Acme": A owns it; B is a plain member (role gate subject).
-    const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
-    orgId = org.body.id as string;
+    orgId = (await app.get(OrgManagementService).createOrg(userA, 'Acme')).id;
     await db.query(
       `INSERT INTO org_members (id, org_id, user_id, role, created_at)
        VALUES (gen_random_uuid(), $1, $2, 'member', now())`,
       [orgId, userB],
     );
+    await insertApiKey(db, userA, orgId, { key: keyA });
+    await insertApiKey(db, userB, orgId, { key: keyB });
   }, 30_000);
 
   afterAll(async () => {

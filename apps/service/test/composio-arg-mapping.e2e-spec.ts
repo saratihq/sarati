@@ -53,9 +53,9 @@ describe('composio arg-mapping (e2e, isolated DB, stubbed Composio, api-key auth
     );
     await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Argmap A' });
     await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-      [userA, hash(keyA), keyA.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, org_id, name, key_hash, prefix, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'a', $3, $4, now())`,
+      [userA, personalA, hash(keyA), keyA.slice(0, 12)],
     );
 
     composioStub = createServer((req, res) => {

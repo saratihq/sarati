@@ -15,7 +15,8 @@ export type UserPrincipal = PrincipalBase & { kind: 'user' };
 export type ApiKeyPrincipal = PrincipalBase & {
   kind: 'api_key';
   scopes: string[] | null;
-  keyOrgId: string | null;
+  /** The one org the key acts in (constitution row 24). */
+  keyOrgId: string;
 };
 
 export type Principal = UserPrincipal | ApiKeyPrincipal;
@@ -23,12 +24,12 @@ export type Principal = UserPrincipal | ApiKeyPrincipal;
 /** The refusal when a key issued for one org is used against another. */
 export const KEY_SCOPED_TO_OTHER_ORG = 'This API key is scoped to a different organization';
 
-/** Whether the principal may act in this org at all: a key issued for one org reaches nothing outside it. */
+/** Whether the principal may act in this org at all: a key acts only in the one org it is issued for (constitution row 24). */
 export function reachesOrg(principal: Principal, orgId: string | null): boolean {
-  return principal.kind !== 'api_key' || !principal.keyOrgId || principal.keyOrgId === orgId;
+  return principal.kind !== 'api_key' || principal.keyOrgId === orgId;
 }
 
-/** Whether the principal is a key pinned to one org: it reaches nothing outside it, so it never creates or joins another. */
+/** Whether the principal is held to one org, as every key is: it reaches nothing outside it, so it never creates or joins another. */
 export function isOrgPinned(principal: Principal): boolean {
   return !reachesOrg(principal, null);
 }

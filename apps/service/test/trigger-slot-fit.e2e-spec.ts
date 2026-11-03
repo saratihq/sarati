@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -13,6 +13,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { PostgresQueryRunner } from 'typeorm/driver/postgres/PostgresQueryRunner';
 
 import { AppModule } from '../src/app.module';
+import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
 import { EncryptionService } from '../src/common/crypto/encryption.service';
 import type { EnvConfig } from '../src/config/env.config';
@@ -298,9 +299,10 @@ let db: Client;
 
 const userA = randomUUID();
 const personalA = randomUUID();
-const keyA = 'ork_e2e_slotfit_aaaaaaaaaaaaaaaaaaaaaaa';
-const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
-const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${keyA}`);
+const SECRET_KEY = 'an-e2e-secret-key-for-slot-fit-sessions';
+// The owner acts in several workspaces, which only a signed-in session does: a key acts in one.
+let sessionA = '';
+const asA = (r: request.Test): request.Test => r.set('Authorization', `Bearer ${sessionA}`);
 const http = (): ReturnType<typeof request> => request(app.getHttpServer());
 
 let subscribed: jest.SpyInstance;
@@ -323,16 +325,15 @@ async function boot(pgBoss: boolean): Promise<void> {
     [userA],
   );
   await insertPersonalOrgs(db, { id: personalA, userId: userA, name: 'Slot Fit' });
-  await db.query(
-    `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at) VALUES (gen_random_uuid(), $1, 'a', $2, $3, now())`,
-    [userA, hash(keyA), keyA.slice(0, 12)],
-  );
+  sessionA = (await mintSession(userA, SECRET_KEY)).token;
 
   process.env.DATABASE_URL = e2eUrl;
   process.env.PGBOSS_ENABLED = String(pgBoss);
   process.env.THROTTLE_LIMIT = '10000';
   process.env.MOCK_AUTH = 'false';
   process.env.CLERK_ISSUER = '';
+  process.env.LOCAL_AUTH_ENABLED = 'true';
+  process.env.SECRET_KEY = SECRET_KEY;
   process.env.DRIFT_POLL_INTERVAL_SECONDS = '0';
 
   await start();

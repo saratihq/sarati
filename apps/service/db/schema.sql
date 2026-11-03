@@ -89,7 +89,7 @@ SET default_table_access_method = heap;
 CREATE TABLE public.api_keys (
     id uuid NOT NULL,
     user_id uuid NOT NULL,
-    org_id uuid,
+    org_id uuid NOT NULL,
     name character varying(120) NOT NULL,
     key_hash character varying(128) NOT NULL,
     prefix character varying(12) NOT NULL,

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
+import { isOrgPinned } from '../../auth/principal';
 import type { ApiScope } from '../../auth/scopes';
 import { EnvironmentsService } from '../../environments/environments.service';
 import { OrgsService } from '../../orgs/orgs.service';
@@ -66,7 +67,7 @@ export class ContextTool implements McpTool {
         id: orgId,
         name: orgId ? await this.orgs.nameOf(orgId) : null,
         role: principal.activeOrgRole,
-        pinned: principal.kind === 'api_key' && principal.keyOrgId !== null,
+        pinned: isOrgPinned(principal),
       },
       capabilities: [...ctx.availableTools],
       environments: environments.map((env) => ({

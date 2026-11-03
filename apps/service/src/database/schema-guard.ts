@@ -202,6 +202,11 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='composio_webhook_deliveries' AND column_name='admitted_at'",
   },
+  {
+    migration: '046_api_keys_pinned.sql',
+    probe:
+      "SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='api_keys' AND column_name='org_id' AND is_nullable='NO'",
+  },
 ];
 
 /**

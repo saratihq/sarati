@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -9,6 +9,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { OrgManagementService } from '../src/orgs/org-management.service';
 import {
   callerBinding,
   INTERNAL_ISSUER,
@@ -16,6 +17,7 @@ import {
   PLATFORM_KEYS_AUDIENCE,
 } from '../src/platform/internal-token';
 import { PLATFORM_KEY_NAMES, PlatformKeysService } from '../src/platform/platform-keys.service';
+import { insertApiKey } from './support/api-keys';
 import { listenOnLoopback } from './support/listen';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
@@ -41,7 +43,8 @@ describe('platform keys (e2e, isolated DB)', () => {
   const keyOwner = 'ork_platform_owner_key_1234567890';
   const keyAdmin = 'ork_platform_admin_key_1234567890';
   const keyMember = 'ork_platform_member_key_123456789';
-  const hash = (k: string): string => createHash('sha256').update(k, 'utf8').digest('hex');
+  const keyAdminHome = 'ork_platform_admin_home_key_12345';
+  const keyMemberHome = 'ork_platform_member_home_key_1234';
 
   const as = (r: request.Test, key: string): request.Test =>
     r.set('Authorization', `Bearer ${key}`).set('X-Org-Id', orgId);
@@ -79,23 +82,11 @@ describe('platform keys (e2e, isolated DB)', () => {
       { id: personalAdmin, userId: admin, name: 'Admin' },
       { id: personalMember, userId: member, name: 'Member' },
     );
-    await db.query(
-      `INSERT INTO api_keys (id, user_id, name, key_hash, prefix, created_at)
-       VALUES (gen_random_uuid(), $1, 'o', $2, $3, now()),
-              (gen_random_uuid(), $4, 'a', $5, $6, now()),
-              (gen_random_uuid(), $7, 'm', $8, $9, now())`,
-      [
-        owner,
-        hash(keyOwner),
-        keyOwner.slice(0, 12),
-        admin,
-        hash(keyAdmin),
-        keyAdmin.slice(0, 12),
-        member,
-        hash(keyMember),
-        keyMember.slice(0, 12),
-      ],
-    );
+    await insertApiKey(db, owner, orgId, { key: keyOwner });
+    await insertApiKey(db, admin, orgId, { key: keyAdmin });
+    await insertApiKey(db, member, orgId, { key: keyMember });
+    await insertApiKey(db, admin, personalAdmin, { key: keyAdminHome });
+    await insertApiKey(db, member, personalMember, { key: keyMemberHome });
 
     process.env.DATABASE_URL = e2eUrl;
     process.env.PGBOSS_ENABLED = 'false';
@@ -253,12 +244,8 @@ describe('platform keys (e2e, isolated DB)', () => {
 
     it('the role is checked against THAT org, not any org the caller happens to own', async () => {
       // The member owns their own organization; that confers nothing over Acme's keys.
-      const created = await request(app.getHttpServer())
-        .post('/api/orgs')
-        .set('Authorization', `Bearer ${keyMember}`)
-        .send({ name: 'Member Corp' })
-        .expect(201);
-      const ownOrgId = created.body.id as string;
+      const ownOrgId = (await app.get(OrgManagementService).createOrg(member, 'Member Corp')).id;
+      const keyMemberCorp = await insertApiKey(db, member, ownOrgId);
       const role = await db.query(`SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2`, [
         ownOrgId,
         member,
@@ -272,7 +259,7 @@ describe('platform keys (e2e, isolated DB)', () => {
       // In their OWN org they are the owner, so there they may.
       await request(app.getHttpServer())
         .put('/api/platform-keys/composio_api_key')
-        .set('Authorization', `Bearer ${keyMember}`)
+        .set('Authorization', `Bearer ${keyMemberCorp}`)
         .set('X-Org-Id', ownOrgId)
         .send({ value: 'their-own-orgs-key' })
         .expect(200);
@@ -281,14 +268,14 @@ describe('platform keys (e2e, isolated DB)', () => {
     it('anyone may write their OWN key, in their personal context', async () => {
       await request(app.getHttpServer())
         .put('/api/platform-keys/anthropic_api_key')
-        .set('Authorization', `Bearer ${keyMember}`)
+        .set('Authorization', `Bearer ${keyMemberHome}`)
         .set('X-Org-Id', personalMember)
         .send({ value: 'sk-ant-mine' })
         .expect(200);
 
       const res = await request(app.getHttpServer())
         .get('/api/platform-keys')
-        .set('Authorization', `Bearer ${keyMember}`)
+        .set('Authorization', `Bearer ${keyMemberHome}`)
         .set('X-Org-Id', personalMember)
         .expect(200);
       expect(res.body).toMatchObject({ scope: 'user', can_manage: true });
@@ -377,7 +364,7 @@ describe('platform keys (e2e, isolated DB)', () => {
       // The member writes their OWN key, in their own personal context.
       await request(app.getHttpServer())
         .put('/api/platform-keys/composio_api_key')
-        .set('Authorization', `Bearer ${keyMember}`)
+        .set('Authorization', `Bearer ${keyMemberHome}`)
         .set('X-Org-Id', personalMember)
         .send({ value: 'members-own-key' })
         .expect(200);
@@ -385,7 +372,7 @@ describe('platform keys (e2e, isolated DB)', () => {
       // The admin, in THEIR personal context, sees nothing of it.
       const other = await request(app.getHttpServer())
         .get('/api/platform-keys')
-        .set('Authorization', `Bearer ${keyAdmin}`)
+        .set('Authorization', `Bearer ${keyAdminHome}`)
         .set('X-Org-Id', personalAdmin)
         .expect(200);
       expect(other.body.keys.composio_api_key.present).toBe(false);
@@ -419,7 +406,7 @@ describe('platform keys (e2e, isolated DB)', () => {
 
     it('a user outside any org uses their own', async () => {
       const personal = (r: request.Test): request.Test =>
-        r.set('Authorization', `Bearer ${keyMember}`).set('X-Org-Id', personalMember);
+        r.set('Authorization', `Bearer ${keyMemberHome}`).set('X-Org-Id', personalMember);
 
       await personal(http().get('/api/connections/capabilities')).expect(200, {
         managed_available: false,
