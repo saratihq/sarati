@@ -864,18 +864,20 @@ function ReferenceTextInput({
     inputRef.current.setSelectionRange(caret, caret);
   }, [value]);
 
-  // Escape closes; a scroll/resize invalidates the fixed anchor, so close too.
+  // Escape is claimed in capture so the panel behind stays open; a scroll/resize invalidates the fixed anchor.
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenu(null);
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setMenu(null);
     };
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
     return () => {
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", close);
     };

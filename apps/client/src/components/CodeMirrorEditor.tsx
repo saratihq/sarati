@@ -48,7 +48,14 @@ export default function CodeMirrorEditor({ value, language, onChange, ariaLabel 
     [language],
   );
   return (
-    <div aria-label={ariaLabel} data-testid="code-editor">
+    // Escape stays with the editor: CodeMirror's Escape-then-Tab is how keyboard focus leaves it.
+    <div
+      aria-label={ariaLabel}
+      data-testid="code-editor"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.preventDefault();
+      }}
+    >
       <CodeMirror
         value={value}
         onChange={onChange}
