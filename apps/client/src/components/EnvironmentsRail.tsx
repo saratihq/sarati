@@ -10,12 +10,6 @@ import { Tooltip } from "@/components/ui/term";
 import { ENV_POINTER_GATE } from "@/store/useOrgs";
 import { getTagColor } from "@/lib/envPresentation";
 
-/** The live/draft version the rail points at (number + its IR document). */
-interface RunTarget {
-  number: number;
-  json: Record<string, unknown>;
-}
-
 const CARD_STYLE = {
   background: "var(--orchestr-surface-card)",
   border: "1px solid var(--orchestr-line)",
@@ -39,8 +33,8 @@ export default function EnvironmentsRail({
 }: EnvironmentsRailProps) {
   // Save ≠ Live: `live` is the version the active pointer names, `draft` is the highest-numbered.
   const [runtime, setRuntime] = useState<{
-    live: RunTarget | null;
-    draft: RunTarget | null;
+    live: number | null;
+    draft: number | null;
     pointers: EnvPointer[];
   } | null>(null);
 
@@ -67,15 +61,9 @@ export default function EnvironmentsRail({
         const liveV = res.active_version_id
           ? (versions.find((v) => v.id === res.active_version_id) ?? null)
           : null;
-        const asTarget = (
-          v: (typeof versions)[number] | null,
-        ): RunTarget | null =>
-          v?.workflow_json
-            ? { number: v.version_number, json: v.workflow_json }
-            : null;
         setRuntime({
-          live: asTarget(liveV),
-          draft: asTarget(head),
+          live: liveV?.version_number ?? null,
+          draft: head?.version_number ?? null,
           pointers: res.env_pointers ?? [],
         });
         setFailed(false);
@@ -93,7 +81,7 @@ export default function EnvironmentsRail({
   const live = runtime?.live ?? null;
   const draft = runtime?.draft ?? null;
   const unpublished =
-    draft != null && (live == null || draft.number > live.number);
+    draft != null && (live == null || draft > live);
   // One environment keeps the single "Live" line; more than one renders the per-env list.
   const pointers = runtime?.pointers ?? [];
   const multiEnv = pointers.length > 1;
@@ -118,20 +106,20 @@ export default function EnvironmentsRail({
             >
               <span
                 className="w-1.5 h-1.5 rounded-full"
-                style={{ background: live ? "var(--orchestr-success)" : "var(--orchestr-ink-subtle)" }}
+                style={{ background: live != null ? "var(--orchestr-success)" : "var(--orchestr-ink-subtle)" }}
               />
               <span
                 className="text-[12px] font-semibold group-hover:underline underline-offset-2"
                 style={{ color: "var(--orchestr-ink)" }}
               >
-                {live ? "Live on Sarati" : "Not live yet"}
+                {live != null ? "Live on Sarati" : "Not live yet"}
               </span>
-              {!multiEnv && live && (
+              {!multiEnv && live != null && (
                 <span
                   className="text-[12px] font-mono font-semibold"
                   style={{ color: "var(--orchestr-ink)" }}
                 >
-                  v{live.number}
+                  v{live}
                 </span>
               )}
               <span
@@ -171,13 +159,13 @@ export default function EnvironmentsRail({
               })}
             </div>
           )}
-          {unpublished && draft ? (
+          {unpublished && draft != null ? (
             <div className="mt-2.5 flex items-center gap-2 flex-wrap">
               <span
                 className="text-[11px]"
                 style={{ color: "var(--orchestr-ink-subtle)" }}
               >
-                latest: v{draft.number}
+                latest: v{draft}
               </span>
               {onRequestPublish &&
                 (canPublish ? (

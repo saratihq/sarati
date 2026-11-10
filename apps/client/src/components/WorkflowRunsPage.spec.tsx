@@ -38,6 +38,17 @@ describe("WorkflowRunsPage", () => {
     vi.useRealTimers();
   });
 
+  // The editor's Run is the one control that starts a run for every trigger kind; the overview has none.
+  it("an empty history points to Run in the editor, never to the overview", async () => {
+    listRuns.mockResolvedValue({ runs: [] });
+    render(<WorkflowRunsPage />);
+
+    const editor = await screen.findByRole("link", { name: "editor" });
+    expect(editor).toHaveAttribute("href", "/workflows/wf-1/edit");
+    expect(editor.parentElement?.textContent).toBe("No runs yet — start one with Run in the editor.");
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual(["/workflows/wf-1/edit"]);
+  });
+
   // The statuses are the service's own words; `error` used to fall through as a grey, lower-case "error".
   it("names each status the service reports, and a failed run reads Failed in the failure colour", async () => {
     listRuns.mockResolvedValue({
