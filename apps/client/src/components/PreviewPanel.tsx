@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Undo2, Redo2 } from "lucide-react";
 import { useWorkflow } from "@/store/useWorkflow";
 import { useCanvasHistory } from "@/lib/useCanvasHistory";
@@ -50,6 +50,21 @@ function HistoryButtons({
   );
 }
 
+type Slot = { kind: "inspector"; nodeId: string } | { kind: "catalog" } | null;
+
+// A click on a modal's text also drops focus to the body, so the body counts only with no modal open.
+function escapeIsForSurface(
+  target: EventTarget | null,
+  root: HTMLElement | null,
+): boolean {
+  if (!root || !(target instanceof Node)) return false;
+  if (root.contains(target)) return true;
+  return (
+    target === document.body &&
+    !document.querySelector('[aria-modal="true"]')
+  );
+}
+
 /** The Review workspace — a real editor: drag, wire ports, add steps, configure in the inspector. */
 // `scratch` (build page) speaks building rather than editing; `bare` (compose)
 // drops the AI chrome but keeps the manual editing tools.
@@ -72,7 +87,8 @@ export default function PreviewPanel({
   );
   const deleteWorkflowNode = useWorkflow((s) => s.deleteWorkflowNode);
 
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [slot, setSlot] = useState<Slot>(null);
 
   useEffect(() => {
     setStripReady(true);
@@ -92,9 +108,9 @@ export default function PreviewPanel({
   // intercepts ⌘Z on a loading or preview-only surface.
   const { undo, redo, canUndo, canRedo } = useCanvasHistory(canEditIr);
 
-  // Bumping pasteSelection's nonce tells the canvas to select the freshly-pasted clones.
+  // Bumping the nonce makes the canvas select exactly `ids`.
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
-  const [pasteSelection, setPasteSelection] = useState<{
+  const [selectRequest, setSelectRequest] = useState<{
     ids: string[];
     nonce: number;
   }>({ ids: [], nonce: 0 });
@@ -102,14 +118,12 @@ export default function PreviewPanel({
     (ids: string[]) => setSelectedNodeIds(ids),
     [],
   );
-  const handlePasted = useCallback((newIds: string[]) => {
-    setSelectedNodeIds(newIds);
-    setPasteSelection((p) => ({ ids: newIds, nonce: p.nonce + 1 }));
+  const selectOnCanvas = useCallback((ids: string[]) => {
+    setSelectedNodeIds(ids);
+    setSelectRequest((p) => ({ ids, nonce: p.nonce + 1 }));
   }, []);
-  useCanvasClipboard(canEditIr, selectedNodeIds, handlePasted);
+  useCanvasClipboard(canEditIr, selectedNodeIds, selectOnCanvas);
 
-  // The inspector and the catalog panel share the right-hand slot.
-  const [catalogOpen, setCatalogOpen] = useState(false);
   const irNodeIds = useMemo(() => {
     const nodes = (workflowJson?.nodes as Array<{ id?: string }>) ?? [];
     // The trigger node is included — it carries its own inspector config as a
@@ -117,14 +131,35 @@ export default function PreviewPanel({
     return new Set(nodes.filter((n) => n.id).map((n) => n.id as string));
   }, [workflowJson]);
   const irActiveSelection =
-    canEditIr && selectedName && irNodeIds.has(selectedName)
-      ? selectedName
+    canEditIr && slot?.kind === "inspector" && irNodeIds.has(slot.nodeId)
+      ? slot.nodeId
       : null;
+  const catalogOpen = canEditIr && slot?.kind === "catalog";
+  const slotOpen = irActiveSelection !== null || catalogOpen;
 
   const handleNodeClick = useCallback((id: string) => {
-    setSelectedName(id);
+    setSlot({ kind: "inspector", nodeId: id });
   }, []);
-  const handleCanvasClick = useCallback(() => setSelectedName(null), []);
+  const closeSlot = useCallback(() => setSlot(null), []);
+  const toggleCatalog = useCallback(
+    () => setSlot((s) => (s?.kind === "catalog" ? null : { kind: "catalog" })),
+    [],
+  );
+
+  // Inner layers (the field menu, CodeMirror) claim their Escape first via preventDefault.
+  useEffect(() => {
+    if (!slotOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (!escapeIsForSurface(e.target, rootRef.current)) return;
+      e.preventDefault();
+      setSlot(null);
+      selectOnCanvas([]);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [slotOpen, selectOnCanvas]);
+
   const handleDeleteNodes = useCallback(
     (names: string[]) => {
       names.forEach(deleteWorkflowNode);
@@ -156,7 +191,7 @@ export default function PreviewPanel({
       : "Click a node to configure it · drag cards to rearrange · drag port → port to wire steps";
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={rootRef} className="flex flex-col h-full min-h-0">
       {bare && canEditIr && (
         // pr-3 keeps the toolbar off the edge while the canvas below runs edge-to-edge.
         <div className="flex justify-end items-center gap-2 mb-2 pr-3">
@@ -167,11 +202,7 @@ export default function PreviewPanel({
             canRedo={canRedo}
           />
           <EditorRunButton />
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setCatalogOpen((o) => !o)}
-          >
+          <Button variant="secondary" size="sm" onClick={toggleCatalog}>
             {catalogOpen ? "Close catalog" : "+ Add step"}
           </Button>
         </div>
@@ -208,11 +239,7 @@ export default function PreviewPanel({
                   canRedo={canRedo}
                 />
                 <EditorRunButton />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setCatalogOpen((o) => !o)}
-                >
+                <Button variant="secondary" size="sm" onClick={toggleCatalog}>
                   {catalogOpen ? "Close catalog" : "+ Add step"}
                 </Button>
               </div>
@@ -255,29 +282,29 @@ export default function PreviewPanel({
           fill
           transparent
           onNodeClick={canEditIr ? handleNodeClick : undefined}
-          onCanvasClick={handleCanvasClick}
+          onCanvasClick={closeSlot}
           onNodeMoved={updateNodePosition}
           onConnectNodes={addWorkflowConnection}
           onDeleteNodes={handleDeleteNodes}
           onDeleteEdges={handleDeleteEdges}
           onSelectionChange={handleSelectionChange}
-          selectNodeIds={pasteSelection.ids}
-          selectNonce={pasteSelection.nonce}
+          selectNodeIds={selectRequest.ids}
+          selectNonce={selectRequest.nonce}
         />
-        {(irActiveSelection || (catalogOpen && canEditIr)) && (
+        {slotOpen && (
           <div className="absolute top-0 right-0 h-full flex z-20">
             {irActiveSelection ? (
               <IrNodeInspector
                 key={irActiveSelection}
                 nodeId={irActiveSelection}
-                onClose={() => setSelectedName(null)}
+                onClose={closeSlot}
               />
-            ) : catalogOpen && canEditIr ? (
+            ) : (
               <NodeCatalogPanel
                 onAdd={addIrNodeFromCatalog}
-                onClose={() => setCatalogOpen(false)}
+                onClose={closeSlot}
               />
-            ) : null}
+            )}
           </div>
         )}
       </div>
