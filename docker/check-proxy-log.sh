@@ -61,7 +61,7 @@ probe() { docker exec "$visitor" curl -s -o /dev/null --max-time 20 "$@" || true
 lines() { docker logs "$1" 2>&1 | wc -l | tr -d ' '; }
 visits() { docker logs "$1" 2>&1 | tail -n "+$(($2 + 1))" | grep -F -e "\"client_ip\": \"$ip\"" -e "\"client_ip\":\"$ip\"" || true; }
 count() { [ -z "$1" ] && echo 0 || printf '%s\n' "$1" | wc -l | tr -d ' '; }
-result() { printf '%s{"request": {"client_ip": "%s"}, "status": %s}' "$tab" "$ip" "$1"; }
+result() { printf '%s{"request": {"client_ip": "%s"}, "status": %s}' "$tab" "${2:-$ip}" "$1"; }
 
 # logged <container> <its lines before the probes> <status of its one error line, or -> <statuses of its access lines...>
 logged() {
@@ -90,6 +90,33 @@ $got
 EOF
   [ $# -eq 0 ] && { [ "$failed" = - ] || [ "$errors" = 1 ]; } || fail "the proxy in $box did not log each request as its time, status and visitor: $got"
   echo "ok: $box logged no address, header or redirect, and each request as its time, status and visitor alone"
+}
+
+# probed <container> <status its health check gets>: its own health check as Docker sends it, then a page request the proxy logs
+probed() {
+  box=$1 status=$2
+  since=$(lines "$box")
+  docker exec "$box" node -e "fetch('http://127.0.0.1:8080/api/ready').then((r) => process.exit(r.status === $status ? 0 : 1), () => process.exit(1))" ||
+    fail "the health check of $box did not get $status, so this proves nothing"
+  docker exec "$box" node -e "fetch('http://127.0.0.1:8080/', { redirect: 'manual' }).then(() => process.exit(0), () => process.exit(1))" ||
+    fail "$box did not answer the request sent after its health check"
+  local_access="${tab}http.log.access${tab}handled request${tab}{\"request\": {\"client_ip\": \"127.0.0.1\"}"
+  i=0
+  until own=$(docker logs "$box" 2>&1 | tail -n "+$((since + 1))") && printf '%s\n' "$own" | grep -qF "$local_access"; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || fail "the proxy in $box never logged the request sent after its health check: $own"
+    sleep 1
+  done
+  [ "$(printf '%s\n' "$own" | grep -cF "$local_access")" = 1 ] ||
+    fail "the proxy in $box logged the container's own health check as a request: $own"
+  if [ "$status" = 200 ]; then
+    ! printf '%s\n' "$own" | grep -qF '"url":"/api/ready"' || fail "the service in $box logged a health check that passed: $own"
+    echo "ok: $box logged none of its own health checks that passed"
+  else
+    printf '%s\n' "$own" | grep -F "${tab}http.log.error${tab}" | grep -qF "$(result "$status" 127.0.0.1)" ||
+      fail "the proxy in $box did not log a health check it could not pass on: $own"
+    echo "ok: $box logged its own health check that the proxy could not pass on as an error, with no request line"
+  fi
 }
 
 before=$(lines "$proxy")
@@ -125,6 +152,8 @@ if [ "$mode" = compose ]; then
 else
   logged "$proxy" "$before" - 200 "${page%% *}"
   logged "$down" "$from" "$error" "$error"
+  probed "$one" 200
+  probed "$down" 502
 fi
 
 if [ -n "$stopped" ]; then

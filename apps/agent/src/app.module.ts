@@ -6,6 +6,7 @@ import { genRequestId } from './common/request-id';
 import { validateEnv } from './config/env.config';
 import { ComposerModule } from './composer/composer.module';
 import { HealthController } from './health/health.controller';
+import { requestLogLevel } from './health/request-log-level';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { HealthController } from './health/health.controller';
           return typeof existing === 'string' ? existing : genRequestId(req, res);
         },
         autoLogging: true,
+        customLogLevel: requestLogLevel,
         redact: {
           paths: ['req.headers.authorization', 'req.headers.cookie'],
           censor: '[REDACTED]',

@@ -17,6 +17,7 @@ import { CoreModule } from './core.module';
 import { DatabaseModule } from './database/database.module';
 import { EnvironmentsModule } from './environments/environments.module';
 import { HealthController } from './health/health.controller';
+import { requestLogLevel } from './health/request-log-level';
 import { JobsModule } from './jobs/jobs.module';
 import { OrgsModule } from './orgs/orgs.module';
 import { ReviewsModule } from './reviews/reviews.module';
@@ -57,6 +58,7 @@ import { rateLimitKey } from './common/rate-limit-key';
           return typeof existing === 'string' ? existing : genRequestId(req, res);
         },
         autoLogging: true,
+        customLogLevel: requestLogLevel,
         serializers: REQUEST_LOG_SERIALIZERS,
         level: process.env.LOG_LEVEL ?? 'info',
       },

@@ -794,6 +794,14 @@ versions dropped it when the page went away in that time, by a reload, a closed 
 switching workspace, and the wait stayed undecided. It is now sent as the page goes, as the account
 and in the workspace that rejected it. See [Deciding](/run/approvals/#deciding).
 
+#### A health check that passes is not logged
+
+Docker checks Sarati's health every 10 seconds, and earlier versions logged every check: two lines on
+one container, one from the proxy and one from the service, and one line each from the service and
+the agent on five, about 17,000 lines a day on an idle install. A check that passes is now logged only
+at `LOG_LEVEL=debug`; one that fails is still logged at the default level, with its status.
+See [Reading the logs](/operate/troubleshooting/#reading-the-logs).
+
 ### v0.2.26: the service opens no port but its own
 
 The service listens on its `PORT` alone. Earlier versions, with durable runs on (`DBOS_ENABLED`, the

@@ -38,6 +38,13 @@
 }
 
 :8080 {
+	# The container's own health check stays out of the access log: the service logs one that fails, and the error log one this proxy cannot pass on.
+	@probe {
+		path /api/ready
+		remote_ip 127.0.0.1
+	}
+	log_skip @probe
+
 	handle /api/composer/* {
 		reverse_proxy 127.0.0.1:8010 {
 			header_up X-Forwarded-For {client_ip}
