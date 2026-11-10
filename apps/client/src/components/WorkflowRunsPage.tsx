@@ -444,13 +444,17 @@ export default function WorkflowRunsPage() {
             color: "var(--orchestr-ink-muted)",
           }}
         >
-          No runs yet — trigger one from the{" "}
+          No runs yet — start one with{" "}
+          <span className="font-semibold" style={{ color: "var(--orchestr-ink)" }}>
+            Run
+          </span>{" "}
+          in the{" "}
           <Link
-            href={`/workflows/${workflowId}/overview`}
+            href={`/workflows/${workflowId}/edit`}
             className="underline underline-offset-2"
             style={{ color: "var(--orchestr-ink)" }}
           >
-            overview
+            editor
           </Link>
           .
         </div>

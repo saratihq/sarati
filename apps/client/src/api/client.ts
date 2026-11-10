@@ -591,10 +591,6 @@ export interface DeployResult {
   ref_warnings?: string[];
 }
 
-export interface ExecuteResult {
-  execution_id: string;
-}
-
 // ─── Dashboard Types ───
 
 export interface WorkflowSummary {
@@ -793,16 +789,6 @@ export async function getWorkflowConfig(
   id: string,
 ): Promise<ConfigurationResponse> {
   return request(`/workflows/${id}/config`);
-}
-
-export async function executeWorkflowWithInputs(
-  workflow_id: string,
-  inputs?: Record<string, unknown>,
-): Promise<ExecuteResult> {
-  return request("/execute", {
-    method: "POST",
-    body: JSON.stringify({ workflow_id, inputs }),
-  });
 }
 
 // ─── Node Icons API ───
