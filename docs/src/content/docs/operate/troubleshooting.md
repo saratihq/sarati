@@ -358,8 +358,10 @@ starts again instead, still naming who decided.
 Without an Anthropic key the composer is absent, not broken: **New workflow** opens a bare canvas and
 the editor has no Composer panel. An empty dashboard says which of the two reasons it is.
 
-**"AI composer needs an Anthropic API key — add one under Settings"** — an owner or admin adds one in
-**Settings → Platform keys**. It takes effect immediately; reload any other tab that was already open.
+**"AI composer needs an Anthropic API key — add one under Settings"** — the workspace you are in has
+no key. In an organization an owner or admin adds one in **Settings → Platform keys**; in your
+personal workspace you add your own there. It takes effect immediately; reload any other tab that
+was already open.
 
 **"AI composer isn't configured on this instance — see docs"** — the agent container is missing the
 shared secret, so it can neither verify your session nor read the stored key. `docker compose` passes
@@ -457,6 +459,20 @@ one-click trigger's subscription fail the same way, with
 an address that answers the request itself rather than redirecting it to another origin; an `http://` address that
 redirects to its `https://` form is another origin too. See
 [Private addresses](/operate/configuration/#private-addresses).
+
+## A managed step says the connection to Composio broke
+
+```
+slack.send_channel_message failed: the connection to https://backend.composio.dev broke possibly after the request was sent: other side closed
+```
+
+The connection to Composio was lost after the request went out, or, for `… broke while reading the
+response`, while its answer was being read, so the app may have acted on it. A `POST` or `PATCH`
+that broke this way is not sent again: check the app before you run the step again. A `GET`, `HEAD`,
+`PUT` or `DELETE` is sent again up to three times first, and so is a request that never reached
+Composio, which reads `could not reach https://backend.composio.dev: …`. With `COMPOSIO_BASE_URL`
+set, the message names that address's origin instead: its scheme, host and any port, without a
+path.
 
 ## A step says the monthly limit of app actions is used up
 
@@ -556,8 +572,9 @@ Testing a branch under an environment runs it on that environment's accounts bef
 passed it, so it takes the right to promote there: in an organization an owner or admin, and through
 an API key the `workflow:deploy` scope as well as `run:execute`. The refusal is `403` with the code
 `promote_not_permitted`, and nothing ran. Test on Default, or have an owner or admin test it under
-the environment. For the second message, mint a key with `workflow:deploy` as well; a member's key is
-refused with the first message once it holds that scope. See [Who can promote](/run/environments/#who-can-promote).
+the environment. For the second message, mint a key with `workflow:deploy` as well. A key never gets
+the first: it acts only in your personal workspace, where you may promote. See
+[Who can promote](/run/environments/#who-can-promote).
 
 ## An API call returns 403 naming a scope
 

@@ -59,6 +59,7 @@ Other answers:
 | `415` | Sarati can't read the body: its `Content-Type`, `charset` or `Content-Encoding` is not one of those below. Nothing ran. See [A webhook returns 415](/operate/troubleshooting/#a-webhook-returns-415). |
 | `400 The request body is not valid JSON` | Sent as JSON, but it does not parse. Nothing ran. |
 | `422 Workflow can't run: …` | The version live in that environment can't run. Nothing ran. |
+| `429` | The workspace has as many runs going as its [run limits](/operate/configuration/#run-limits) allow. Nothing ran and nothing was recorded. Send it again after `Retry-After`. |
 | `500` | Sarati could not start the run, for example because its database was unreachable. Send the delivery again: it is not treated as a duplicate, and nothing it already started runs twice. |
 
 ### What the run receives
@@ -123,10 +124,11 @@ The comparison is constant-time.
 
 ### Sample event
 
-**Send a test event — I'll catch it** waits for one real request and keeps it as a sample, so later
-steps can pick real field names instead of guessing. The sample is the trigger as a run would see
-it: the body at `body`, and an object's fields beside it. No sender handy? Paste a sample event
-instead.
+**Send a test event — I'll catch it** gives you an address to send real requests to and keeps the
+latest one as a sample, so later steps can pick real field names instead of guessing. The sample is
+the trigger as a run would see it: the body at `body`, and an object's fields beside it. No sender
+handy? Paste a sample event instead: it is read as a delivery's body and shaped the same way.
+**Clear**, or a paste, stays until another event arrives.
 
 Catching a sample does not run the workflow.
 

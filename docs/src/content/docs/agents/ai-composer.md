@@ -3,11 +3,14 @@ title: The AI composer
 description: Describe a workflow and it builds one on the canvas. What it does well, and where to check it.
 ---
 
-The composer is off until the instance has an Anthropic key. An owner or admin adds one in
-**Settings → Platform keys**, and it takes effect immediately — nothing to edit, nothing to restart.
+The composer is off until the workspace you are working in has an Anthropic key. In an organization
+an owner or admin adds it in **Settings → Platform keys**, and every member's composer uses it; in
+your personal workspace you add your own there. It takes effect immediately — nothing to edit,
+nothing to restart.
 Get a key from the [Anthropic Console](https://console.anthropic.com/settings/keys).
 
-If you are not an owner or admin, Settings tells you so and names who can add it.
+In an organization, if you are not an owner or admin, Settings says only an owner or admin of it can
+change its keys, and that you can set keys of your own in your personal workspace.
 
 That key powers the composer and nothing else. An **AI Agent** step runs on a Claude
 [connection](/build/connections/#the-ai-agent-step-needs-one-too) of your own, which is a separate

@@ -149,7 +149,7 @@ Durable resume covers a worker that comes back. A worker that does not come back
 leave runs stuck `running` forever, so a reaper sweeps at boot and every five minutes. At boot it
 first ends, in `error`, every run that can't survive a restart — a dry run, a run that ran while DBOS
 was off, a run whose start was not yet saved to DBOS, or any run when the service starts again with
-DBOS off — that the service was running when it stopped. Each pass then stops a run running here
+DBOS off — that was running or waiting when the service stopped. Each pass then stops a run running here
 past the time its limits give it, as a cancel would stop it, reading *Run limit reached:*. Then it
 moves to a terminal `error`:
 

@@ -67,8 +67,9 @@ docker compose logs -f
 docker compose down
 ```
 
-Running it by hand instead, it is `docker logs -f sarati` and `docker rm -f sarati`. Removing the
-container leaves the volume alone — that is how you [upgrade](/operate/upgrades/).
+Running it by hand instead, it is `docker logs -f sarati`, and
+`docker stop -t 30 sarati && docker rm sarati` to remove it. Removing the container leaves the
+volume alone — that is how you [upgrade](/operate/upgrades/).
 
 ## Run a second instance
 
@@ -94,7 +95,7 @@ SARATI_STACK=compose sh -c 'curl -fsSL https://get.sarati.io | sh'
 ```
 
 That fetches [`docker-compose.yaml`](https://github.com/saratihq/sarati/blob/main/docker-compose.yaml)
-instead and starts five containers, generating `SECRET_KEY`, `FERNET_KEY` and `POSTGRES_PASSWORD`
+and `docker/Caddyfile` instead and starts five containers, generating `SECRET_KEY`, `FERNET_KEY` and `POSTGRES_PASSWORD`
 into `.env`, or adding them to a `.env` you wrote yourself. **Back that file up** — losing `FERNET_KEY` makes stored credentials unrecoverable.
 
 An install that already exists keeps the shape it was built with, so re-running the installer over a
@@ -115,8 +116,9 @@ one supervisor in the single container.
 | `agent` | The AI composer. Idle until you give it a key. |
 | `db` | Postgres 16. |
 
-The AI composer is off until an owner or admin adds an Anthropic key in **Settings → Platform
-keys** — inside the running app, not in `.env`. Everything else works without it.
+The AI composer is off in a workspace until it has an Anthropic key, added in **Settings → Platform
+keys** (by an owner or admin in an organization) — inside the running app, not in `.env`.
+Everything else works without it.
 
 ## What it talks to
 

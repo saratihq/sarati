@@ -28,7 +28,7 @@ A branch can be protected, which means it only takes change through an approved 
 
 An environment is a pointer at one version.
 
-A fresh install has `production`, `staging` and `uat`. `production` and `uat` cannot be renamed or
+Each workspace starts with `production`, `staging` and `uat`. `production` and `uat` cannot be renamed or
 deleted. You can add others.
 
 Promoting moves the pointer — nothing is copied, and the version being promoted does not change.

@@ -196,7 +196,7 @@ Composio account of its own**, so nobody needs a Composio key. Each person still
 Anthropic key in Settings if they want the AI composer.
 
 ```bash
-# Both or neither — the service stops at boot naming the one missing.
+# Both or neither — the service stops at boot naming the one missing, and the limit below needs both.
 INSTANCE_COMPOSIO_API_KEY=ak_…
 INSTANCE_COMPOSIO_WEBHOOK_SECRET=whsec_…
 # App actions each person may run on it per UTC calendar month. Default 500; 0 runs none.
@@ -403,8 +403,9 @@ without retrying and names where it pointed, so neither the key nor the request 
 
 Running the Docker stack, not from a clone:
 
-- **`DBOS_ENABLED` defaults to `true`** and `DBOS_APP_VERSION` to a stable in-code value, so
-  [durable resume](/run/runs/#durability) is on without configuring anything.
+- **`DBOS_ENABLED` defaults to `true`** and `DBOS_APP_VERSION` to `orchestr-1`, so
+  [durable resume](/run/runs/#durability) is on without configuring anything. Never change
+  `DBOS_APP_VERSION`: DBOS resumes only the runs recorded under the value it starts with.
 - `ENVIRONMENT=production` and `PORT=8001` are baked into the image.
 - **`TRUST_PROXY_HOPS=1`** comes from the one-container image and from `docker-compose.yaml`: Sarati's
   own proxy is the one hop in front. The one-container image also listens on loopback only

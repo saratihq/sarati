@@ -119,9 +119,9 @@ Once single sign-on is [configured](/operate/configuration/#single-sign-on):
   says so — on a shared computer, sign out there too.
 - **Offboarding:** removing someone at the provider does not touch what they already hold here. To
   end their access to an organization at once, remove them from it in Settings → Organization: that
-  covers a session still open and their [API keys](/agents/api-keys/), since no key reaches an
-  organization its owner has left. Keys they made keep working in their personal workspace until
-  revoked, and only their owner sees them, in Settings → API keys.
+  covers a session still open. Their [API keys](/agents/api-keys/) act only in their personal
+  workspace, never in an organization, and keep working there until revoked; only their owner sees
+  them, in Settings → API keys.
 
 ### Connecting accounts from the server
 

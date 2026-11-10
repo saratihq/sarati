@@ -5,10 +5,10 @@ description: Move to a new version without losing anything, and be able to go ba
 
 ## Upgrade
 
-Re-run the installer. It keeps your `.env`, refreshes the stack definition, pulls the new images and
-restarts what changed in place — the proxy too, unless the installer last started it on the same
-`docker/Caddyfile` it just fetched and found that file on disk unchanged. No need to stop anything
-first.
+Re-run the installer. It keeps your `.env`, adding the install's name (`COMPOSE_PROJECT_NAME`) when
+it has none, refreshes the stack definition, pulls the new images and restarts what changed in place
+— the proxy too, unless the installer last started it on the same `docker/Caddyfile` it just fetched
+and found that file on disk unchanged. No need to stop anything first.
 
 ```bash
 curl -fsSL https://get.sarati.io | sh
@@ -24,7 +24,7 @@ cd sarati && docker compose pull && docker compose up -d
 Running it by hand, without the installer:
 
 ```bash
-docker pull sarati/sarati && docker rm -f sarati
+docker pull sarati/sarati && docker stop -t 30 sarati && docker rm sarati
 ```
 
 ```bash
@@ -46,7 +46,8 @@ steps runs again. A restart treats it the same
 way. Let those runs finish first, or run them again after. Runs v0.2.25 or later started resume where
 they were, through later restarts and upgrades.
 
-The boot log counts the runs v0.2.24 or earlier started that are in flight, for example
+The boot log counts the runs v0.2.24 or earlier started that are in flight under this install's
+`DBOS_APP_VERSION` and `DBOS_EXECUTOR_ID`, the ones it resumes, for example
 `Runs v0.2.24 or earlier started, in flight at boot: 3 can resume, 1 can't be resumed safely and will fail, 0 had already ended`,
 and names each one that fails at warn level with its reason, followed by a `RunNotResumable` error
 and its stack trace: that is the run ending, not the service failing. Runs v0.2.25 or later started
@@ -57,7 +58,7 @@ judged this way. From v0.2.24 on, you can list them before you restart or upgrad
 cd sarati && docker compose exec sarati sarati-legacy-report
 ```
 
-It only reads, and prints each run v0.2.24 or earlier started that is in flight as `would resume`
+It only reads, and prints each run the boot log would count as `would resume`
 or `would fail` with the reason, or `already ended` for one that had finished or been cancelled but
 not yet stopped, which stays as it ended. A run can still move on between the report and the
 restart, so each is judged again as it resumes. On a five-container install it is
@@ -141,6 +142,22 @@ where you deleted or renamed it, and a promote to a name the workspace doesn't h
 Coming back keeps what they made: delete those environments, or empty those slots, under
 **Integrations → Environments**.
 
+**Sign-in, going back to v0.2.26 or earlier.** Those versions have no single sign-on in the browser,
+and they turn email and password on unless `CLERK_ISSUER` is set or `LOCAL_AUTH_ENABLED=false`.
+While it is on there, a single sign-on session issued here keeps working until it expires, 12 hours
+after sign-in; while it is off, none does.
+After that, an account single sign-on made has no password, so it can't sign in there until an
+operator sets one with `sarati-set-password`. With `OIDC_ISSUER` set, those versions take an
+identity provider's token sent as `Authorization: Bearer` again, and an invite there admits any
+signed-in account holding its link.
+
+**Composio, going back to v0.2.26 or earlier.** Those versions ignore the `INSTANCE_COMPOSIO_*`
+variables: each person and organization uses the Composio key it stored, so a connection made
+through the instance's account, which lives in the instance's Composio project, has to be connected
+again. The `composio_usage` table and the new column on the table of Composio deliveries stay,
+unread. A delivery this version took but could not start every run for is dropped there as a
+duplicate if Composio sends it again.
+
 **Going back to v0.2.25 or earlier** also undoes everything else
 [v0.2.26 changed](#v0226-the-service-opens-no-port-but-its-own). Above all, with durable runs on, the
 images' default, the service opens the DBOS admin API on port 3001 again, on every interface: it
@@ -154,13 +171,69 @@ describes, and the installer warns when it starts such a version.
 
 ### v0.2.27
 
-**Five containers: re-run the installer.** The stack file changed: with the new `docker/Caddyfile`,
-the proxy logs each request as its time, status and visitor's address alone — never the address asked
-for, its headers or where it was redirected, which can carry an invite link, a webhook address or a
-sign-in callback's code. Only the installer refreshes that file, and it restarts the proxy to load it,
-so `docker compose pull` alone is not enough this time. One container gets the same from the new
-image. Lines the proxy wrote before go with the container it replaces, unless Docker sends its logs
-somewhere else, where they still hold those addresses.
+**Re-run the installer, on one container too.** Both stack files changed, and only the installer
+refreshes them, so `docker compose pull` alone is not enough this time.
+
+- **Five containers:** with the new `docker/Caddyfile`, the proxy logs each request as its time,
+  status and visitor's address alone — never the address asked for, its headers or where it was
+  redirected, which can carry an invite link, a webhook address or a sign-in callback's code. The
+  installer restarts the proxy to load it, and says
+  `Restarted the proxy, so it runs the docker/Caddyfile just fetched.` It now marks the proxy with
+  that file's checksum, which only it sets, so the first `docker compose up -d` you run yourself
+  after it restarts the proxy once. One container gets the same proxy log from the new image. Lines
+  the proxy wrote before go with the container it replaces, unless Docker sends its logs somewhere
+  else, where they still hold those addresses.
+- **One container:** the stack file now gives the container 30 seconds to stop
+  (`stop_grace_period: 30s`) instead of Docker's 10. Inside it the service has up to 15 seconds, then
+  the bundled database 10 more. With the old file, a stop while DBOS waits on a durable run kills
+  the container before the database has shut down, and the database then recovers from its log at
+  the next start. Running it by hand, stop it with `docker stop -t 30 sarati` before
+  `docker rm sarati`.
+- **The installer saves the install's name in its `.env`.** Its first run adds
+  `COMPOSE_PROJECT_NAME=sarati`, or the name a second install was given, and says
+  `Saved COMPOSE_PROJECT_NAME=sarati into .env, so docker compose here acts on this install alone.`
+  A second install made with the old instructions shared the first one's name, so `docker compose`
+  in its directory acted on the first install. Run the installer for the first install's directory
+  first, then for each of the others — see
+  [After the old second-instance instructions](/operate/troubleshooting/#after-the-old-second-instance-instructions).
+- **The installer stops before downloading anything, and says what to run, rather than take over or
+  break an install.** Besides checking Docker, earlier versions refused only a port in use, a
+  five-container database whose `.env` was gone, and an unknown `SARATI_STACK`. It now also stops
+  when an install of the same name runs from another directory, keeps its data with nothing running,
+  or was started from a directory since moved or deleted; when the directory could hold more than
+  one install, or its `.env` names none and could belong to another; when the install's
+  `COMPOSE_PROJECT_NAME`, given on the command line or in `.env`, is not a valid name, or one given
+  on the command line differs from the one in `.env` or the one started there; when `.env` records a
+  shape other than the one the install's data is kept in, or `SARATI_STACK` asks for a shape other
+  than the install's, which it used to switch to; when a five-container `.env` lacks `SECRET_KEY`,
+  `FERNET_KEY` or `POSTGRES_PASSWORD` while its database exists; when it cannot read `.env`, or must
+  write to a read-only one, to save the name in one that has none or add a key a five-container one
+  lacks, naming the line to add or the `chmod` to run; and on a `SARATI_PORT` that is not a port
+  from 1 to 65535, optionally after an IP address, or that the command line gives other than `.env`
+  does. To change the port, change it in `.env`, with `SARATI_URL` to match. See
+  [The installer refuses to take over another install](/operate/troubleshooting/#the-installer-refuses-to-take-over-another-install).
+- **The installer takes the port from `.env`.** Earlier versions checked, and waited on, port 8080
+  unless `SARATI_PORT` was given. It looks for something already on the port at the address it
+  binds, from Linux's socket table where it can read it, else with `nc`, and names another install
+  started from the same directory that holds it.
+- **A five-container `.env` you wrote yourself gets the keys it lacks** when there is no database
+  yet, and the installer says
+  `Keeping the existing .env, and adding the keys a five-container install needs…`. A `.env` that
+  names no shape is taken for five containers only when it holds `POSTGRES_PASSWORD`; otherwise the
+  install keeps the shape of its data, and a new one is one container unless `SARATI_STACK` says
+  otherwise. Earlier versions took any `.env` for five containers.
+- **A failed download leaves the file it was fetching as it was,** where it could leave it cut short.
+
+**The service's own log carries no credential either.** Its request log now prints every query
+value, and the secret part of an invite, webhook, catch or chat address, as `[REDACTED]`, and a
+referring page as its origin alone; a request line no longer has `query` or `params` fields. A new
+invite no longer logs its link and the invitee's address, only
+`No mail provider is configured, so the <role> invite to "<org>" was not emailed; its link is in the organization's settings`.
+Sarati sends no invite email, so copy the link under **Settings → Organization**. The error of a
+failed delete of an app trigger's webhook, which the log prints, now has the account's credential
+taken out, as every other call to an app already did. See [Reading the logs](/operate/troubleshooting/#reading-the-logs).
+Lines the service wrote before go with the container it replaces, unless Docker sends its logs
+somewhere else, where they still hold those links and addresses.
 
 #### Runs have limits
 
@@ -169,8 +242,8 @@ within limits on runs at once — see [Run limits](/operate/configuration/#run-l
 leave a normal install alone, unless a workspace already holds about as many runs as they allow. A
 run past one ends reading *Run limit reached:*; a run its workspace has no room for is refused `429`
 with `Retry-After` and recorded nowhere, and a webhook, schedule or polling trigger delivers it again
-as it would after any refusal. The upgrade adds three columns to the runs table and two indexes;
-`db:migrate` runs it.
+as it would after any refusal. The upgrade adds three columns and an index to the runs table, and
+an index to its steps; `db:migrate` runs it.
 
 - **Runs in flight across the upgrade** keep running without limits of their own, since they started
   before there were any, but they count toward their workspace's limits on runs at once. Before
@@ -190,12 +263,102 @@ as it would after any refusal. The upgrade adds three columns to the runs table 
   marked crashed while it goes on; it is left to finish, or stopped once past `RUN_MAX_ACTIVE_SECONDS`.
 - **Cancelling a durable run** now cancels a workflow it is calling too, which before finished first.
 - **A dry run, a run that ran while DBOS was off, a run whose start was not yet saved to DBOS, or any
-  run when the service starts again with DBOS off,** that the service was running when it stopped is
-  now ended as it starts again, rather than left `running` until `RUN_MAX_DURATION_SECONDS` passed.
+  run when the service starts again with DBOS off,** that was running or waiting when the service
+  stopped, is now ended in `error` as the service starts again, reading
+  *The service restarted while this run was going, and nothing can resume it…*. Earlier versions
+  left it until `RUN_MAX_DURATION_SECONDS`, or its wait's window, passed. A decision already on its
+  way to it is still recorded, with who made it. With DBOS off, that includes every run waiting on
+  an approval when you upgrade. With DBOS on, starting the service once with `DBOS_ENABLED=false`
+  ends every unfinished run, and turning DBOS back on doesn't bring them back.
+- **A run its workspace has no room for frees its `Idempotency-Key`,** so a retry with the same key
+  runs. A retry with the key of any other refused request still gets that refusal back. A schedule
+  or polling trigger refused this way records why on its trigger, which the workflow overview shows
+  as *Trigger error:*. In the editor, such a run reads **Not started**, not **Failed**.
 - **`RUN_MAX_DURATION_SECONDS=0`** no longer turns the reaper off: it still runs every five minutes,
   to stop runs past `RUN_MAX_ACTIVE_SECONDS`.
 - **Going back to v0.2.26** keeps every run: a run this version started carries on there without
   limits, and coming back picks its limits and step count up again. A run a limit ended stays ended.
+
+#### A webhook is answered once its run has started
+
+A webhook, an app trigger's own webhook and a Composio delivery are now answered only once each run
+they start is recorded and saved to DBOS. Earlier versions answered first and started the run after,
+so a stop or a restart in between lost the event: the sender had its answer and sent nothing again.
+The upgrade adds a column to the table of Composio deliveries; `db:migrate` runs it. See
+[Incoming webhook](/build/triggers/#incoming-webhook).
+
+What a sender or caller sees change:
+
+- **A delivery whose run can't be started answers `500`**, where it answered `202`. It is not taken
+  as a duplicate, so sending it again runs it, and a run it had already started does not run twice.
+- **A webhook whose live version can't run answers `422`** with `Workflow can't run: …`, and nothing
+  runs. It used to answer `202`, and only the service log said why.
+- **A run recorded but not started ends in `error`,** reading
+  `Workflow can't run: it could not be started: …`.
+- **A schedule, or an app trigger that checks a feed, moves past what it found only once each run is
+  started.** A check that fails part-way, or that a stop cuts short, is made again at the next poll,
+  and a run it had already started does not run twice. See
+  [Schedules and polled app triggers](/build/triggers/#schedules-and-polled-app-triggers).
+
+#### A stop holds the work under way to one 8-second deadline
+
+A stop, a restart or an upgrade now gives the work under way one deadline of 8 seconds, after which
+the service drops the connections still open. Earlier versions could be held by one open request,
+such as a chat's event stream, until Docker killed the container. While it stops:
+
+- **Every response asks its client to close the connection,** and the service keeps answering until
+  its scheduled jobs have stopped, then closes HTTP. No new scheduled job is taken, but a webhook or
+  run request that reaches the service before HTTP closes is still answered, and its run started.
+- **An MCP call answers `503`** with `Retry-After: 10` and a JSON-RPC error saying the service is
+  stopping.
+- **A call that waits a bounded time for its run answers at once with the run's id,** and the run
+  carries on.
+- **A chat's live event stream ends.**
+- **A scheduled job stops at a safe point.** A job just handed out goes back to its queue without
+  spending a retry, and one still running at the deadline is failed for pg-boss to retry.
+- **A run going on in the service's own process** (a dry run, or any run with `DBOS_ENABLED=false`)
+  gets until the deadline to finish or park, and none is cancelled. A durable run carries on after
+  the restart, as before. DBOS still waits for one that is running or parked, so such a stop lasts
+  until the service is killed: on five containers Docker kills its container at 10 seconds; on one,
+  supervisord kills the service at 15, then stops the database.
+- **A branch test that a stop keeps from starting either run keeps no result,** like a cancelled one.
+  See [Reviews](/version-control/reviews/).
+- **On the next start, scheduled jobs begin only once DBOS has launched.**
+
+On one container, the new image signals the proxy, the composer, the client and the service at
+once, so an open request no longer holds the service's stop back. The proxy gives the answers still
+on their way 9 seconds, past the service's 8-second deadline, so what the service answers in that
+time gets through. The bundled database stops after them.
+
+#### Triggers are judged by their account as the service starts
+
+There is nothing to change on upgrade. Each time the service starts it reconciles every workflow
+with an app trigger that listens as its environment's account, without waiting for the
+fifteen-minute sweep: a trigger whose account stopped being active while the service was down is
+held, one held whose account is active again listens again, and one held back for an account that
+is now active is set up with it. Earlier versions, as they started, reconciled only a trigger whose
+last change hadn't finished, or a webhook registered at an old address. Upgrading from v0.2.25 or
+earlier, a trigger the [v0.2.26 note](#v0226-the-service-opens-no-port-but-its-own) says stops
+listening at the first sweep does so as the service starts.
+
+The workflow overview's trigger card now puts *Trigger error:* before a trigger's own failure, such
+as a check of its feed that failed or a run its workspace had no room for, where it read
+*Last run failed:*.
+
+#### `DBOS_APP_VERSION` stays as it is
+
+The images set `DBOS_APP_VERSION` to `orchestr-1`. Leave it that way: DBOS resumes only the runs
+recorded under the value it starts with, so a new value strands every run in flight, and no upgrade
+needs one. Running outside the images in production, the service refuses to start without it, and
+its error now says so. The boot count of runs v0.2.24 or earlier started, and
+`sarati-legacy-report`, now list only the runs recorded under this install's `DBOS_APP_VERSION` and
+`DBOS_EXECUTOR_ID`, which are the runs DBOS resumes. Earlier versions also counted the runs recorded
+under another value, which DBOS leaves where they are. Their wording changed too, so a search or an
+alert on the old lines needs the new ones: the boot log reads
+`Runs v0.2.24 or earlier started, in flight at boot: …`, or
+`Couldn't judge the runs v0.2.24 or earlier started, in flight at boot: …`, and the report starts
+`Runs v0.2.24 or earlier started, in flight as of now; …`. Each said `an earlier version` where they
+now say `v0.2.24 or earlier`.
 
 #### Sign in through your own identity provider, and invites for one address
 
@@ -242,6 +405,15 @@ What changes once you set the three `OIDC_*` values:
   the service at boot. Moving from Clerk means connecting each account to its subject at the new
   provider — [Switching from Clerk](/operate/users/#switching-from-clerk).
 
+#### Signing in goes back only to a page of this app
+
+After signing in, by password, single sign-on or Clerk, Sarati opens the page named in the sign-in
+address's `redirect_url`. Earlier versions let through a value the browser reads as another site,
+such as `/%5Cevil.example`, so a link to your sign-in page could send someone there once they signed
+in. A value with a backslash or a control character, or whose dot segments make it start with `//`,
+now opens the dashboard, as one naming another site already did. A page of this app opens as before,
+with its query and fragment.
+
 #### Signing up with an invite makes an account only by joining
 
 There is nothing to change on upgrade. What a caller of `POST /api/auth/local/register` sees
@@ -273,10 +445,12 @@ Each thing it does is a warning in the upgrade log, on a line starting `044`:
   workspace with its owner. The removed member can no longer open any of them, and nothing moves a
   workflow from one workspace to another. Each `044 removed …` line gives the number of workflows
   that member created there. An earlier version could file a member's work under "Personal" in this
-  workspace without their choosing, so a non-zero count is worth raising with them. An owner a
-  member had demoted gets the role back (`044 gave … back the owner role …`), and one a member had
-  removed is added back (`044 added … back …`). The owner is the account the workspace was made for,
-  worked out from its records, never someone an invite let in.
+  workspace without their choosing, so a non-zero count is worth raising with them. A trigger on one
+  of those workflows still runs it as the member who created it, so on Default its steps use that
+  member's own accounts: delete the workflow, signed in as the owner, if they should no longer act
+  there. An owner a member had demoted gets the role back (`044 gave … back the owner role …`), and
+  one a member had removed is added back (`044 added … back …`). The owner is the account the
+  workspace was made for, worked out from its records, never someone an invite let in.
 - **It empties each environment slot there filled with a removed member's connection**
   (`044 emptied the <app> slot of environment <name> in personal workspace <id>: it held connection
   <id> of <email>, …`). A step or trigger that ran as that account in that environment stops until
@@ -343,13 +517,18 @@ What a caller of the API sees change on such a key:
 - **A request naming another workspace in `X-Org-Id` is refused** with `403` and
   `This API key is scoped to a different organization`, a team organization its owner belongs to
   included, and that organization's workflows answer `404`.
-- **It no longer creates or joins an organization**, nor manages a team organization's settings,
-  members, invites or platform keys. Do that signed in.
+- **It no longer manages a team organization's settings, members, invites or platform keys.** Do
+  that signed in.
 - **A workflow in no workspace answers `404` to it.** Only an account with no personal workspace made
   one, on an earlier version; open it signed in.
 
-And on every key: **`GET /api/orgs` lists only the workspace the key acts in.** It listed every
-workspace its owner belongs to.
+And on every key:
+
+- **`GET /api/orgs` lists only the workspace the key acts in.** It listed every workspace its owner
+  belongs to.
+- **Creating an organization and accepting an invite are refused** with `403`, and the invite stays
+  unused; a key holding `org:manage` gets `This API key is scoped to a different organization`.
+  Earlier versions let such a key do both. Do them signed in.
 
 Going back to v0.2.26 or earlier keeps every key in its one workspace — see
 [Going back](#going-back).
@@ -365,9 +544,14 @@ What changes:
 - **A promote to a name the workspace doesn't have answers `404` and creates nothing.** It used to
   create the environment, so a promote to a deleted `staging`, to `default` or to a typo made one.
   The refusal has the code `environment_not_found` and says to create the environment under
-  Integrations → Environments first; for `default` it says the name belongs to the connection pool. `POST /api/workflows/<id>/promote` takes `environment_id`, the
-  environment's `id`, which a rename doesn't change; a name in `environment` still works, in any
-  letter case, and `prod` still reaches `production`. See [Promote](/run/environments/#promote).
+  Integrations → Environments first; for `default` it says the name belongs to the connection pool.
+  `POST /api/workflows/<id>/promote` takes `environment_id`, the environment's `id`, which a rename
+  doesn't change; a name in `environment` still works, in any letter case, and `prod` still reaches
+  `production`. See [Promote](/run/environments/#promote).
+- **The Promote menu lists only the environments the workflow's workspace has.** If it can't load
+  them it reads *Couldn't load environments, so there's nothing to promote to yet.*, with **Retry**.
+  It used to offer `production`, `staging` and `uat` anyway. A workspace with none reads
+  *This workspace has no environments yet.*
 - **Listing environments no longer makes any.** Earlier versions made each of `production`,
   `staging` and `uat` a workspace lacked whenever its environments were listed, as
   Integrations → Environments does, so a deleted or renamed `staging` came back. The upgrade gives
@@ -398,6 +582,142 @@ After upgrading:
   environment is made for a name it gives that the workspace doesn't have. Add the environment if
   the workspace lacks it, then assign its slot an account under Integrations → Environments.
 
+#### A branch test acts in its workflow's workspace
+
+There is nothing to change on upgrade. `POST /api/workflows/<id>/reviews/<review-id>/test` and
+`GET …/test/readiness` now answer `404` `Workflow <id> not found` when the request acts in a
+workspace other than the workflow's, as a run of it does, and nothing is kept. Such a request —
+another `X-Org-Id`, or none for a workflow outside your personal workspace — used to get an
+**Inconclusive** result, both sides failing `Workflow <id> not found`, which became the review's
+last test. The environment, and the right to test under it, are now decided in the workflow's
+workspace.
+
+#### Opening a workflow from another of your workspaces switches to it
+
+Opening a workflow in another of your workspaces — a teammate's link, a bookmark, an entry in the
+approvals inbox — now reloads the page in that workspace and says *Switched to* and its name.
+Earlier versions opened it in the active workspace, with that workspace's role, environments and
+connections, and there **Run** answered `404` `Workflow <id> not found` and **Test this branch** gave
+an **Inconclusive** result, both sides failing `Workflow <id> not found`. If the
+switch doesn't hold, the page reads *Couldn't switch to* and the workspace's name, with
+**Try again**. A link to a workflow in a workspace you are not in still doesn't open. See
+[Users](/operate/users/#personal-and-organization).
+
+#### The composer works in the workspace you are in
+
+In a team organization the composer showed as available on the organization's Anthropic key, then
+ran each message on your personal workspace's key, or answered
+*The AI composer needs an Anthropic API key* when that workspace had none, and its tools acted in
+your personal workspace. Each message now uses the active workspace's key, so in an organization
+the organization's key pays for it, and its tools act in that organization. Your personal workspace
+works as before.
+
+#### The agent keeps running when a composer message can't start
+
+Earlier versions stopped the agent process when a composer message could not start: when the agent
+could not read the Anthropic key as the message began (the service was down, slow or answered an
+error, the key had just been removed, or the visitor had run past the rate limit), or when the Agent
+SDK failed to start. Every conversation under way went with it. Now that one message ends with the
+reason and the others carry on — see
+[The composer answers with an error](/operate/troubleshooting/#the-composer-answers-with-an-error).
+A conversation cleared while its message is starting stops before the model is called, and a canvas
+holding a step that isn't an object no longer breaks the message or its tools.
+
+#### A managed write that may have reached the app is sent once
+
+A step on a managed (Composio) connection that writes, such as a `POST` or `PATCH` that posts a
+Slack message, could reach the app up to four times: when the connection to Composio broke after the
+request went out, or while its answer was being read, Sarati sent it again up to three more times.
+Now it is sent once and the step fails, reading
+`<action> failed: the connection to https://backend.composio.dev broke possibly after the request was sent: …`
+or `… broke while reading the response: …`, with the origin of your `COMPOSIO_BASE_URL` in place
+of Composio's address if you set one. It used to read `Composio proxy unreachable: …`. The app may have acted on
+it, so check there before you run it again. A `GET`, `HEAD`, `PUT` or `DELETE` is still sent again,
+and so is a request that never reached Composio, which now reads
+`could not reach https://backend.composio.dev: …`. A step's own **Retry on failure** still runs the
+step again after either failure. See
+[the message](/operate/troubleshooting/#a-managed-step-says-the-connection-to-composio-broke).
+
+The same release moves the Actions SDK to 0.3.0, so **an AI Agent step runs each tool call its model
+asks for in one turn as a call of its own.** A model sometimes gave two calls in one turn the same
+id. Earlier versions then ran both under one step key, so they shared an `Idempotency-Key`, and a
+second call to a sub-workflow tool wrote over the first one's run. Each call now gets an id of its
+own in its turn.
+
+#### One Composio account for the whole instance
+
+An instance can now connect everyone's apps through one Composio account of its own, with a monthly
+allowance of app actions for each person — see
+[One Composio account for the whole instance](/operate/configuration/#one-composio-account-for-the-whole-instance).
+Nothing changes until you set `INSTANCE_COMPOSIO_API_KEY` and `INSTANCE_COMPOSIO_WEBHOOK_SECRET`:
+until then each person or organization uses its own key, as before. Setting one without the other,
+or `INSTANCE_COMPOSIO_MONTHLY_ACTIONS_PER_PERSON` without both, stops the service at boot, naming
+what is missing. The upgrade adds one table, `composio_usage`, which stays empty until then;
+`db:migrate` runs it.
+
+What changes for every instance:
+
+- **A Composio trigger subscription left behind in a personal workspace is now removed.** At most
+  every fifteen minutes, as triggers are polled, the service deletes a subscription from your
+  Composio project when it is on an account Sarati connected and no live trigger has used it on two
+  passes in a row. Earlier versions looked a personal workspace's Composio key up as an
+  organization's, and left those subscriptions in place. The first passes after the upgrade can
+  delete some that no workflow was using.
+- **Changing the Composio key in your personal workspace logs a warning** for each workflow there
+  whose live subscription was made with the previous key, as it already did in an organization.
+
+#### A key that may only read sends nothing on an account
+
+Loading a step's dropdown from a connected account (`POST /api/node-types/<type>/options` with a
+`connection_id`) and asking an app again which account a connection is
+(`GET /api/connections/<id>/account?refresh=1`) send requests on that account, so an API key now needs
+`connection:write` for them, where `workflow:read` or `connection:read` was enough. Without it they
+answer `403` naming the scope, and nothing is sent. Such a key still loads a dropdown that needs no
+account and reads the account a connection last named; for a connection never asked, it gets
+`account: null` without Sarati asking. Signed-in sessions are unchanged.
+
+#### Merging a branch takes turns with protecting it and with its reviews
+
+There is nothing to change on upgrade. What a caller of the API sees change:
+
+- **Merge into main and the delete of its branch are one step.** A protect that reaches the branch
+  while the merge is under way waits for it, then answers `404` for the branch it deleted; a protect
+  that landed first keeps the branch, and the merge answers `merged` with `cleaned_up: null`. A
+  protect landing between the two used to make the merge land and then answer `409`
+  `branch_protected`, so the app showed an error for a merge that had happened. Merging the default
+  branch into another (`POST /api/workflows/<id>/branches/<name>/merge`) answers `merged` and keeps
+  it, where it landed the merge and then answered `400`.
+- **Updating a protected branch is refused `409` `branch_protected` even when the protect lands
+  while the update waits,** where the update could land in it.
+- **A review rejected or closed while a merge of its branches is under way is never overridden.** One
+  that lands first is seen, so a merge into a protected branch with no approved review left is
+  refused. One that arrives while the merge holds the review waits for it. The merge used to go
+  through on an approval just withdrawn, or delete a review just closed, with its comments.
+- **Two branch deletes at once no longer fail on a deadlock** when reviews run between the two
+  branches both ways: one waits for the other.
+
+#### A Wait wakes at the time it shows
+
+There is nothing to change on upgrade. What a run shows change:
+
+- **A parked Wait wakes at the time its run shows.** The `until` a parked **Wait** shows, and the
+  `slept_until` the step outputs, are now the time its timer was set for. Earlier versions could
+  show a time a little before or after the moment it woke.
+- **A wait with more than about 24.8 days to go no longer ends the moment it starts** inside a
+  workflow another run calls, in a dry run, or with `DBOS_ENABLED=false`. That covers a **Wait** step
+  and the timeout of a **Wait for event**, such as a 30-day approval. It now waits its full time.
+- **Those waits read the clock at least every 10 seconds,** so one whose time a machine's sleep or a
+  clock jump passed wakes within 10 seconds of it, where it woke late by the jump.
+
+#### A run killed just after it completed stays completed
+
+With durable runs on, a run can complete in the moment before the service is killed, before DBOS
+records its end. As the service starts again, that run is now recovered as completed: nothing in it
+runs again, and its history stays as it was. Earlier versions recorded it as failed in DBOS, and
+sending its `run_id` again to `POST /api/runs` answered `422` `run_failed`,
+*Run … failed: Run already ended completed*. It now answers with the outputs the run recorded and an
+empty `trace`.
+
 #### A TypeScript Code step may await and return
 
 A **Code** step written in TypeScript runs as the async function body its editor describes, so one
@@ -426,6 +746,14 @@ A webhook, a test-event catch and a chat now read the body by its `Content-Type`
 text reach the run, and a signature is checked over the body's bytes whatever its type. See
 [What the run receives](/build/triggers/#what-the-run-receives).
 
+In the editor, a sample pasted on a webhook trigger is now read as a delivery's body and shaped as a
+caught one is, so `{{trigger.body.email}}` resolves in **Test this step**, and any JSON value is
+taken. A paste used to be kept as pasted, so `{{trigger.body…}}` found nothing, and a value other
+than an object was refused. While **Send a test event** listens, each event it catches is applied
+once, so **Clear** or a paste stays until another event lands; it used to put the last event back
+within two seconds. A later step's field picker offers **Send a test event** only when the trigger
+is a webhook; for any other trigger it takes a pasted object, kept as pasted.
+
 What a caller of the API sees change:
 
 - **Form fields, text and any JSON value reach `{{trigger.body}}`.** A body sent as
@@ -451,17 +779,20 @@ What a caller of the API sees change:
 - **A GitHub delivery sent as form fields is its event:** `{{trigger.body}}` is the event, as when it
   is sent as JSON, where it used to be empty.
 - **A caught test event is the trigger as a run sees it.** `GET /api/catch/:id` returns `payload` with
-  the body at `body` and an object's fields beside it, where it returned the body alone.
+  the body at `body` and an object's fields beside it, where it returned the body alone. It also
+  returns `deliveries`, how many events have landed on the catch.
+- **`POST /api/triggers/webhook-sample` is new.** It reads its body as a webhook delivery's and
+  answers `payload`, the trigger a run of it would see. It takes `workflow:write` and stores nothing.
+- **A body refused before it reaches a route, as invalid JSON, too large or of a type Sarati can't
+  read, carries the CORS headers,** so a browser on an origin in `CORS_ORIGINS` can read the refusal,
+  where it saw a network error.
 
-#### A key that may only read sends nothing on an account
+#### A rejection left behind Undo is still sent
 
-Loading a step's dropdown from a connected account (`POST /api/node-types/<type>/options` with a
-`connection_id`) and asking an app again which account a connection is
-(`GET /api/connections/<id>/account?refresh=1`) send requests on that account, so an API key now needs
-`connection:write` for them, where `workflow:read` or `connection:read` was enough. Without it they
-answer `403` naming the scope, and nothing is sent. Such a key still loads a dropdown that needs no
-account and reads the account a connection last named; for a connection never asked, it gets
-`account: null` without Sarati asking. Signed-in sessions are unchanged.
+A rejection in the Approvals inbox waits five seconds behind **Undo** before it is sent. Earlier
+versions dropped it when the page went away in that time, by a reload, a closed tab, signing out or
+switching workspace, and the wait stayed undecided. It is now sent as the page goes, as the account
+and in the workspace that rejected it. See [Deciding](/run/approvals/#deciding).
 
 ### v0.2.26: the service opens no port but its own
 
