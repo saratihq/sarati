@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
 
 import { ACTIVATION_LOCK_SPACE } from '../database/advisory-lock-spaces';
@@ -9,7 +10,7 @@ export async function withActivationLock<T>(
   work: () => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
-  return releasing(client, async () => {
+  return releasing(client, activationId, async () => {
     await client.query('SELECT pg_advisory_lock($1, hashtext($2))', [ACTIVATION_LOCK_SPACE, activationId]);
     return holding(client, activationId, work);
   });
@@ -22,7 +23,7 @@ export async function ifActivationUnlocked<T>(
   work: () => Promise<T>,
 ): Promise<T | null> {
   const client = await pool.connect();
-  return releasing(client, async () => {
+  return releasing(client, activationId, async () => {
     const { rows } = await client.query<{ locked: boolean }>(
       'SELECT pg_try_advisory_lock($1, hashtext($2)) AS locked',
       [ACTIVATION_LOCK_SPACE, activationId],
@@ -39,7 +40,17 @@ async function holding<T>(client: PoolClient, activationId: string, work: () => 
   }
 }
 
-async function releasing<T>(client: PoolClient, body: () => Promise<T>): Promise<T> {
+async function releasing<T>(client: PoolClient, activationId: string, body: () => Promise<T>): Promise<T> {
+  // Checked out, the connection is out of the pool's hearing; unheard, its 'error' would end the process.
+  let heard = false;
+  const lost = (err: Error): void => {
+    if (heard) return;
+    heard = true;
+    new Logger('ActivationLock').warn(
+      `Activation ${activationId} lost its lock with its database connection: ${err.message}`,
+    );
+  };
+  client.on('error', lost);
   try {
     const result = await body();
     client.release();
@@ -48,5 +59,7 @@ async function releasing<T>(client: PoolClient, body: () => Promise<T>): Promise
     // A session lock lasts as long as its connection, so one that may still hold it is closed, not pooled.
     client.release(true);
     throw err;
+  } finally {
+    client.off('error', lost);
   }
 }
