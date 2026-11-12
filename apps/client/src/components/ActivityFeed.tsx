@@ -764,7 +764,7 @@ export default function ActivityFeed({
         title: `Remove v${v.version_number} from ${env.name}?`,
         message: `${env.name} stops running v${v.version_number}.`,
         consequence: env.is_prod
-          ? "The workflow goes dark — no live version; Run live and prod triggers stop until you promote again."
+          ? "The workflow goes dark — no live version; prod triggers stop until you promote again."
           : `${env.name} triggers will skip until you promote another version.`,
         confirmLabel: `Remove from ${env.name}`,
         destructive: true,

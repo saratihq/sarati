@@ -12,7 +12,6 @@ import { DRY_RUN_EXPLAINED, dryRunMarkerOf, withheldSummary } from "@/lib/dryRun
 import { REAL_RUN_CONSEQUENCE } from "@/lib/realRun";
 import { useMissingRequired } from "@/lib/workflow-validation";
 
-// Same cadence as the overview's run watcher (EnvironmentsRail).
 const RUN_POLL_MS = 3000;
 const RUN_POLL_CAP_MS = 5 * 60_000;
 
