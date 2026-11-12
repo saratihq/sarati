@@ -1,4 +1,4 @@
-import { Global, Inject, Injectable, Module, OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Injectable, Logger, Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Pool } from 'pg';
@@ -113,12 +113,18 @@ export class DatabaseShutdown implements OnApplicationShutdown {
       inject: [ConfigService],
       useFactory: (config: ConfigService<{ env: EnvConfig }, true>): Pool => {
         const env = config.get('env', { infer: true });
-        return new Pool({
+        const pool = new Pool({
           connectionString: env.databaseUrl,
           max: 20,
           idleTimeoutMillis: 30_000,
           connectionTimeoutMillis: 5_000,
+          application_name: 'sarati-pg-pool',
         });
+        // The pool drops an idle connection the database ends; unheard, its 'error' would end the process.
+        pool.on('error', (err) =>
+          new Logger('PgPool').warn(`Lost an idle database connection: ${err.message}`),
+        );
+        return pool;
       },
     },
     DatabaseShutdown,

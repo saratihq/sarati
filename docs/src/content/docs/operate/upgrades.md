@@ -802,6 +802,14 @@ the agent on five, about 17,000 lines a day on an idle install. A check that pas
 at `LOG_LEVEL=debug`; one that fails is still logged at the default level, with its status.
 See [Reading the logs](/operate/troubleshooting/#reading-the-logs).
 
+#### The service keeps running when Postgres ends a connection
+
+Earlier versions stopped the whole service process when Postgres ended one of its idle connections,
+as a database restart, a failover or an `idle_session_timeout` does, or the connection a polling
+trigger held its lock on, and Docker started it again. Now the service logs a warning,
+`Lost an idle database connection: …` or `Activation <id> lost its lock with its database connection: …`,
+and carries on, opening a new connection when it next needs one.
+
 ### v0.2.26: the service opens no port but its own
 
 The service listens on its `PORT` alone. Earlier versions, with durable runs on (`DBOS_ENABLED`, the
