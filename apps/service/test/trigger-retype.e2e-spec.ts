@@ -1406,11 +1406,19 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
           runs[0]!.run_id,
         ])
       ).rows[0]!.status;
-    const heldActivationLocks = await db.query(
-      `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
-        WHERE l.locktype = 'advisory' AND l.objsubid = 2 AND l.granted AND d.datname = current_database()`,
-    );
-    expect(heldActivationLocks.rows).toEqual([]);
+    const heldActivationLocks = async (): Promise<number> =>
+      (
+        await db.query(
+          `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+            WHERE l.locktype = 'advisory' AND l.objsubid = 2 AND l.granted AND d.datname = current_database()`,
+        )
+      ).rows.length;
+    // The run row is written under the poll's lock; the lock must go within half the run's six-second wait.
+    for (let i = 0; i < 120 && (await heldActivationLocks()) > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(await heldActivationLocks()).toBe(0);
+    expect(await runStatus()).toBe('running');
 
     await commitAndPublish(wfId, waitingScheduleDoc(10));
 
