@@ -39,6 +39,14 @@ const answering = (base: string): Promise<boolean> =>
     () => false,
   );
 
+/** The pino lines of a service's log, without the plain-text lines DBOS writes beside them. */
+export function pinoLines<T>(log: string): T[] {
+  return log
+    .split('\n')
+    .filter((line) => line.startsWith('{"level":'))
+    .map((line) => JSON.parse(line) as T);
+}
+
 /** A service in a process of its own. */
 export interface ServiceProcess {
   /** Where it answers, `http://127.0.0.1:<port>`. */

@@ -726,3 +726,8 @@ service's own; with five, they are in `cd sarati && docker compose logs proxy`.
 The service's own request log prints each path with every query value, and the secret part of an
 invite, webhook, catch or chat address, as `[REDACTED]`; it shows a referring page as its origin alone,
 and the `Authorization` and `Cookie` headers as `[REDACTED]`.
+
+Docker checks Sarati's health every 10 seconds. The service and the agent log a check that passes only
+at `LOG_LEVEL=debug`, and one that fails at the default level, with its status. On one container, the
+proxy leaves its own health check out of its request lines but still logs one it cannot pass on, with
+the reason. `docker compose ps` shows whether each container is healthy.

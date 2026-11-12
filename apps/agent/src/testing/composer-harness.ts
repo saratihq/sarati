@@ -80,7 +80,7 @@ export class AgentProcess {
     readonly base: string,
     private readonly kill: () => void,
     private readonly exited: Promise<number | null>,
-    private readonly log: () => string,
+    readonly log: () => string,
   ) {}
 
   static async start(env: Record<string, string>): Promise<AgentProcess> {

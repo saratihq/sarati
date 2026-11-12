@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { mintSession } from '../src/auth/local/local-session';
-import { bootService, THIS_SERVICE, type ServiceProcess } from './support/service-process';
+import { bootService, pinoLines, THIS_SERVICE, type ServiceProcess } from './support/service-process';
 import { insertPersonalOrgs } from './support/personal-org';
 import { ADMIN_URL, createE2eDatabase } from './support/test-db';
 
@@ -23,14 +23,6 @@ const REDACTED = '[REDACTED]';
 const SECRET_KEY = 'an-e2e-secret-key-for-request-log-sessions';
 
 const hash = (key: string): string => createHash('sha256').update(key, 'utf8').digest('hex');
-
-// DBOS writes plain-text lines beside the service's pino lines.
-function logLines(log: string): LogLine[] {
-  return log
-    .split('\n')
-    .filter((line) => line.startsWith('{"level":'))
-    .map((line) => JSON.parse(line) as LogLine);
-}
 
 describe('the service log never prints a credential a request carried in its URL (e2e, own process)', () => {
   const owner = randomUUID();
@@ -73,7 +65,7 @@ describe('the service log never prints a credential a request carried in its URL
   async function endedLines(): Promise<Map<string, LogLine>> {
     for (let i = 0; i < 150; i++) {
       const ended = new Map(
-        logLines(service!.log())
+        pinoLines<LogLine>(service!.log())
           .filter((line) => line.responseTime !== undefined && line.req?.id !== undefined)
           .map((line) => [line.req!.id!, line]),
       );
@@ -247,7 +239,7 @@ describe('the service log never prints a credential a request carried in its URL
     const ended = await endedLines();
     expect(ended.get(previewId)?.req?.headers?.referer).toBe(service!.base);
 
-    const unhandled = logLines(service!.log()).find(
+    const unhandled = pinoLines<LogLine>(service!.log()).find(
       (line) => line.req?.id === unhandledId && line.msg?.startsWith('Unhandled error'),
     );
     expect(unhandled?.msg).toContain(

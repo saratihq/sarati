@@ -5,19 +5,22 @@ import type { Pool } from 'pg';
 import { errorMessage } from '../common/error-message';
 import { PG_POOL } from '../database/database.module';
 
+/** The readiness route, which the container's health check calls. */
+export const READY_PATH = '/api/ready';
+
 /** Liveness (`/api/health`, no I/O) and readiness (`/api/ready`, where a failed DB check gates 503). */
-@Controller('api')
+@Controller()
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
   constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
-  @Get('health')
+  @Get('api/health')
   health(): { status: string } {
     return { status: 'ok' };
   }
 
-  @Get('ready')
+  @Get(READY_PATH)
   async ready(@Res() res: Response): Promise<void> {
     let databaseOk = false;
     try {
