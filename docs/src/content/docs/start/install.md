@@ -55,6 +55,21 @@ installer's `.env`, or pass it with `-e`.
 DATABASE_URL=postgresql://user:password@host:5432/sarati
 ```
 
+Runs keep their checkpoints in a second database, named after that one with `_dbos` added —
+`sarati_dbos` here. Sarati creates it on first start, which needs a user with the `CREATEDB` privilege;
+without that the service does not start, and its log says `permission denied to create database`.
+Create it beforehand, owned by that user:
+
+```sql
+CREATE DATABASE sarati_dbos OWNER "user";
+```
+
+Or point the checkpoints at a database of another name, also owned by that user:
+
+```bash
+DBOS_SYSTEM_DATABASE_URL=postgresql://user:password@host:5432/sarati_checkpoints
+```
+
 ## Everyday commands
 
 From the `sarati` directory the installer created:
