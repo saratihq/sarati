@@ -178,15 +178,17 @@ describes, and the installer warns when it starts such a version.
 ### v0.2.28: a signing secret that names no environment guards production
 
 A webhook signing secret set through the API without `environment`, on a workflow in a workspace, was
-kept for no environment. A delivery is checked against its own environment's secret, so none was
-ever checked against that one: the trigger took unsigned deliveries, though setting the secret
-answered that it was set and reading it back said it was there. The editor always names production,
-so only a secret set through the API or a script was affected.
+kept for no environment. A delivery is checked against its own environment's secret, so that one was
+never read: where production had no secret of its own, a trigger with **Verify signatures** on took
+unsigned deliveries there, though setting the secret answered that it was set and reading it back said
+it was there. The editor always names production, so only a secret set through the API or a script
+was affected.
 
 Now setting, reading or clearing a secret without `environment` acts on production's. Upgrading gives
-production each secret kept for no environment, and from then on a delivery to production without a
-valid signature is refused `401`, as setting the secret asked. Where production already had a secret
-of its own for that trigger, that one stays and the other goes. Each is logged:
+production each secret kept for no environment, so wherever the trigger's live production version has
+**Verify signatures** on, a delivery there without a valid signature is refused `401`. Where
+production already had a secret of its own for that trigger, deliveries are checked against it as
+before, and the other goes. Each is logged:
 
 ```
 049 gave the signing secret of trigger <node> in workflow <id>, which named no environment, to its production environment <id>: …
@@ -194,8 +196,11 @@ of its own for that trigger, that one stays and the other goes. Each is logged:
 ```
 
 Find them after upgrading with `cd sarati && docker compose logs sarati | grep '049 '`; on five
-containers it is `docker compose logs service`. Going back to v0.2.27 keeps each one production's,
-and checked there.
+containers it is `docker compose logs service`.
+
+Going back to v0.2.27 keeps each one production's, and checked there. But there a secret set, read or
+cleared without `environment` is again kept for no environment, so name `production` to reach it;
+and coming back, the upgrade deletes one set that way for a trigger production has a secret for.
 
 ### v0.2.27
 
