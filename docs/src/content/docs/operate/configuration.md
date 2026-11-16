@@ -16,9 +16,10 @@ Running it by hand without the installer, they are `-e` flags instead:
 docker run -d --name sarati -p 8080:8080 -v sarati:/data -e LOG_LEVEL=debug sarati/sarati
 ```
 
-Five values are owned by the install and should not be set by hand: `DATABASE_URL`, `SECRET_KEY`,
-`FERNET_KEY`, `CORS_ORIGINS` and `FRONTEND_URL` — those follow `SARATI_URL` and the generated
-secrets. `PUBLIC_BASE_URL` follows `SARATI_URL` as well, and is the one address you may
+Four values are owned by the install and should not be set by hand: `SECRET_KEY`, `FERNET_KEY`,
+`CORS_ORIGINS` and `FRONTEND_URL` — those follow `SARATI_URL` and the generated secrets. So is
+`DATABASE_URL`, except to run one container on [your own Postgres](/start/install/#your-own-postgres).
+`PUBLIC_BASE_URL` follows `SARATI_URL` as well, and is the one address you may
 [set apart](#commonly-set).
 
 ## What the installer writes

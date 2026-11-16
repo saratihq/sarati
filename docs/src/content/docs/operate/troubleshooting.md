@@ -715,6 +715,11 @@ bundled database and the proxy. On a five-container install each part is its own
 service's log is `docker compose logs -f service`; running it by hand without the installer, it is
 `docker logs -f sarati`.
 
+On the first start Postgres logs `database "sarati_dbos" does not exist` twice as `FATAL` — Sarati
+checking for the database that keeps run checkpoints before it creates it — and never again; an
+`ERROR` saying `relation "dbos.workflow_status" does not exist` in their place is the same check,
+made when that database already existed. On five containers these are in `docker compose logs db`.
+
 Turn up detail with `LOG_LEVEL=debug` in `.env`.
 
 The proxy logs each request as its time, its status and the visitor's address alone — not the address
