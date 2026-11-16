@@ -195,10 +195,6 @@ interface WorkflowState {
   deleteWorkflow: (id: string) => Promise<void>;
   selectWorkflow: (id: string | null) => void;
   fetchWorkflowConfig: (id: string) => Promise<ConfigurationResponse | null>;
-  executeFromDashboard: (
-    id: string,
-    inputs?: Record<string, unknown>,
-  ) => Promise<string | null>;
   clearHighlight: () => void;
 }
 
@@ -1305,18 +1301,6 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
       const config = await api.getWorkflowConfig(id);
       set({ selectedConfig: config });
       return config;
-    } catch {
-      return null;
-    }
-  },
-
-  executeFromDashboard: async (
-    id: string,
-    inputs?: Record<string, unknown>,
-  ) => {
-    try {
-      const result = await api.executeWorkflowWithInputs(id, inputs);
-      return result.execution_id;
     } catch {
       return null;
     }
