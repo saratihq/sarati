@@ -175,6 +175,28 @@ describes, and the installer warns when it starts such a version.
 
 ## Notes for specific versions
 
+### v0.2.28: a signing secret that names no environment guards production
+
+A webhook signing secret set through the API without `environment`, on a workflow in a workspace, was
+kept for no environment. A delivery is checked against its own environment's secret, so none was
+ever checked against that one: the trigger took unsigned deliveries, though setting the secret
+answered that it was set and reading it back said it was there. The editor always names production,
+so only a secret set through the API or a script was affected.
+
+Now setting, reading or clearing a secret without `environment` acts on production's. Upgrading gives
+production each secret kept for no environment, and from then on a delivery to production without a
+valid signature is refused `401`, as setting the secret asked. Where production already had a secret
+of its own for that trigger, that one stays and the other goes. Each is logged:
+
+```
+049 gave the signing secret of trigger <node> in workflow <id>, which named no environment, to its production environment <id>: …
+049 deleted the signing secret of trigger <node> in workflow <id> that named no environment: …
+```
+
+Find them after upgrading with `cd sarati && docker compose logs sarati | grep '049 '`; on five
+containers it is `docker compose logs service`. Going back to v0.2.27 keeps each one production's,
+and checked there.
+
 ### v0.2.27
 
 **Re-run the installer, on one container too.** Both stack files changed, and only the installer

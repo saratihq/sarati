@@ -6,6 +6,7 @@ import { EncryptionService } from '../common/crypto/encryption.service';
 import { DomainError } from '../common/domain-error';
 import { rawMutateReturning } from '../database/raw-query';
 import type { WorkflowEntity } from '../database/entities/workflow.entity';
+import { PROD_ENV } from '../environments/env-name';
 import { EnvironmentsService } from '../environments/environments.service';
 import { lockWorkflowForWrite } from '../workflows/workflow-row-lock';
 
@@ -94,15 +95,15 @@ export class WebhookSecretsService {
     return row ? this.encryption.decryptToken(row.secret) : null;
   }
 
-  // Only an org workflow has env rows; without one, or without a name, the secret is the env-less default.
+  // In a workspace an unnamed environment is production, the one its intake checks; a workflow in no workspace has one env-less secret.
   private async environmentIdOf(
     em: EntityManager,
     wf: SecretOwner,
     environment: string | undefined,
     lock: boolean,
   ): Promise<string | null> {
-    if (!environment || !wf.orgId) return null;
-    const env = await this.environments.findByNameForOrg(em, wf.orgId, environment, lock);
+    if (!wf.orgId) return null;
+    const env = await this.environments.findByNameForOrg(em, wf.orgId, environment ?? PROD_ENV, lock);
     if (!env) throw new DomainError('Environment not found', 404);
     return env.id;
   }
