@@ -29,9 +29,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Every other documented setting — OIDC, BYO OAuth, the SSRF allowlist, limits — reaches the
-    # service by being in .env. The Composio and Anthropic keys are the exception: they are set in
-    # Settings. `environment:` below still wins for what compose owns.
+    # Every other documented setting — OIDC, BYO OAuth, the SSRF allowlist, limits, the instance's
+    # Composio account — reaches the service by being in .env. The Anthropic key and each person's
+    # Composio key are set in Settings instead. `environment:` below still wins for what compose owns.
     env_file: [.env]
     environment:
       DATABASE_URL: postgresql://sarati:${POSTGRES_PASSWORD}@db:5432/sarati

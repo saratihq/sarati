@@ -3,16 +3,16 @@ import type { ServerResponse } from 'node:http';
 import PgBoss from 'pg-boss';
 
 import { ir } from './support/golden-docs';
-import { lastRelease } from './support/earlier-build';
+import { lastReleaseWithout } from './support/earlier-build';
 import { callStep, chain } from './support/limits-fixture';
 import { MOCK_USER_ID, rollbackSuite } from './support/rollback';
 
-const LAST_RELEASE = lastRelease();
+const BEFORE_048 = lastReleaseWithout('apps/service/db/migrations/048_run_limits.sql');
 const TIME_LIMIT =
   /^Run limit reached: this run was in flight for more than 2 s since it started or last resumed from a wait/;
 
-/** A run this build budgets, across a rollback to the release it replaces and back (child processes, DBOS on, mock auth). */
-describe(`a run's budget across a rollback to ${LAST_RELEASE.tag} and back (e2e)`, () => {
+/** A run this build budgets, across a rollback to the last release before run limits and back (child processes, DBOS on, mock auth). */
+describe(`a run's budget across a rollback to ${BEFORE_048.tag} and back (e2e)`, () => {
   const hits = new Map<string, number>();
   const holding = new Set<string>();
   const held: Array<{ path: string; res: ServerResponse }> = [];
@@ -20,7 +20,7 @@ describe(`a run's budget across a rollback to ${LAST_RELEASE.tag} and back (e2e)
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end('{"ok":true}');
   };
-  const rollback = rollbackSuite(LAST_RELEASE.sha, (req, res) => {
+  const rollback = rollbackSuite(BEFORE_048.sha, (req, res) => {
     const path = req.url ?? '';
     hits.set(path, (hits.get(path) ?? 0) + 1);
     if (holding.has(path)) held.push({ path, res });
@@ -49,7 +49,7 @@ describe(`a run's budget across a rollback to ${LAST_RELEASE.tag} and back (e2e)
       ),
     });
 
-  it('a run this build admitted under limits carries on under the last release uncharged, and back here keeps its limits and its count', async () => {
+  it('a run this build admitted under limits carries on under the release before run limits uncharged, and back here keeps its limits and its count', async () => {
     const env = { RUN_MAX_STEPS: '6' };
     const ids = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8'];
     holding.add('/b3');
@@ -69,7 +69,7 @@ describe(`a run's budget across a rollback to ${LAST_RELEASE.tag} and back (e2e)
     await rollback.eventually(
       () => Promise.resolve(hitsOn('/b5')),
       (n) => n === 1,
-      `b5 in flight on ${LAST_RELEASE.tag}`,
+      `b5 in flight on ${BEFORE_048.tag}`,
     );
     expect(await runRow('budgeted')).toMatchObject({ status: 'running', steps_used: 3 });
     await service.crash();
@@ -139,7 +139,7 @@ describe(`a run's budget across a rollback to ${LAST_RELEASE.tag} and back (e2e)
     await rollback.eventually(
       () => Promise.resolve(service.log()),
       (log) => log.includes('DBOS launched ('),
-      `${LAST_RELEASE.tag} launching DBOS`,
+      `${BEFORE_048.tag} launching DBOS`,
     );
     expect(await runRow('stopped')).toMatchObject({ status: 'error', error: stopped!.error });
     await service.crash();
