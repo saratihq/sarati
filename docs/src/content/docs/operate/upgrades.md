@@ -150,6 +150,12 @@ After that, an account single sign-on made has no password, so it can't sign in 
 operator sets one with `sarati-set-password`. With `OIDC_ISSUER` set, those versions take an
 identity provider's token sent as `Authorization: Bearer` again, and an invite there admits any
 signed-in account holding its link.
+Here one address can belong to two accounts: one made by password or an invite, and one single
+sign-on made from an address the provider did not confirm. Those versions find an account by its
+address alone, so there a password sign-in can refuse the real owner and `sarati-set-password` can
+change the wrong account's password. Before going back, list such addresses with
+`SELECT lower(email), count(*) FROM users GROUP BY 1 HAVING count(*) > 1`, and give each account in
+them with `email_verified = false` another address, or remove it.
 
 **Composio, going back to v0.2.26 or earlier.** Those versions ignore the `INSTANCE_COMPOSIO_*`
 variables: each person and organization uses the Composio key it stored, so a connection made
@@ -464,7 +470,10 @@ to own, becomes a shared organization and keeps its members (`044 made personal 
 organization …`), and every API key pinned to it is revoked (`044 revoked API key … that is now a
 shared organization`): a new key is pinned only to its holder's personal workspace, so its members
 reach the organization by signing in. And an account left with no personal workspace gets one, with
-production, staging and uat (`044 gave … a personal workspace of its own …`).
+production, staging and uat (`044 gave … a personal workspace of its own …`). The workflows such an
+account made in no workspace, as one the upgrade adds back to its own workspace did while out of it,
+stay in none: they leave its dashboard, and **Run** and **Test this branch** answer `404` for them,
+though each still opens by its link and its triggers still run it.
 
 To find what it emptied, revoked and removed after upgrading:
 
@@ -520,7 +529,8 @@ What a caller of the API sees change on such a key:
 - **It no longer manages a team organization's settings, members, invites or platform keys.** Do
   that signed in.
 - **A workflow in no workspace answers `404` to it.** Only an account with no personal workspace made
-  one, on an earlier version; open it signed in.
+  one, on an earlier version. Signed in, it opens by its link, but it is not on the dashboard and
+  **Run** answers `404` for it too.
 
 And on every key:
 
@@ -805,8 +815,9 @@ See [Reading the logs](/operate/troubleshooting/#reading-the-logs).
 #### The service keeps running when Postgres ends a connection
 
 Earlier versions stopped the whole service process when Postgres ended one of its idle connections,
-as a database restart, a failover or an `idle_session_timeout` does, or the connection a polling
-trigger held its lock on, and Docker started it again. Now the service logs a warning,
+as a database restart, a failover or an `idle_session_timeout` does, or the connection a trigger's
+lock was held on while it was polled, set up, changed or removed, and the service then started
+again: by Docker on five containers, by the container's own supervisor on one. Now the service logs a warning,
 `Lost an idle database connection: …` or `Activation <id> lost its lock with its database connection: …`,
 and carries on, opening a new connection when it next needs one.
 

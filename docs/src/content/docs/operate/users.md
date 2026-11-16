@@ -92,7 +92,7 @@ Once single sign-on is [configured](/operate/configuration/#single-sign-on):
   address. An account made from an address the provider did not confirm (no `email_verified: true`)
   is still made, but no invite is matched to it, and it does not stop the person the provider does
   confirm at that address — or a password sign-up for it — from getting an account of their own. So
-  someone who signs in first with another person's address locks no one out and gains no
+  someone who signs in first with another person's address locks no one out on this version, and gains no
   organization, and the sign-in answers alike whether an account already has that address or not.
   The address does show wherever their own account appears. For a provider that lets people set
   their own address, set `OIDC_ALLOWED_DOMAINS` too, which also requires the address to be confirmed.
