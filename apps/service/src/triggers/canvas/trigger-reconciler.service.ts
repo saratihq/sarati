@@ -304,14 +304,49 @@ export class TriggerReconcilerService {
     }
   }
 
-  /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or that listens as its slot, as every registered webhook does, so its account's status and its webhook's URL are judged afresh after a stretch no build of this one saw. */
+  /** Queue a reconcile of every workflow with an activation whose last apply did not finish (a poll passes it over) or that listens as its slot, as every registered webhook does, so its account's status and its webhook's URL are judged afresh after a stretch no build of this one saw; and of every workflow whose activations differ from its pointers' triggers, one missing, on another version, or standing for none. */
   async reconcileStale(): Promise<void> {
     const rows = await this.dataSource.manager.find(RuntimeTriggerActivationEntity);
     const stale = rows.filter((r) => {
       const actual = actualOf(r);
       return !applyFinished(actual) || listensAsSlot(actual);
     });
-    for (const workflowId of new Set(stale.map((r) => r.workflowId))) await this.signals.enqueue(workflowId);
+    const drifted = await this.driftedFromPointers(rows);
+    for (const workflowId of new Set([...stale.map((r) => r.workflowId), ...drifted])) {
+      await this.signals.enqueue(workflowId);
+    }
+  }
+
+  // A reconcile lost before it ran, or a pointer migration 050 links, leaves activations short of, behind or beyond its pointers' triggers (constitution row 11).
+  private async driftedFromPointers(rows: RuntimeTriggerActivationEntity[]): Promise<string[]> {
+    const pointers = await rawQuery<Omit<PointerRow, 'environment'> & { workflow_id: string }>(
+      this.dataSource.manager,
+      `SELECT p.workflow_id, p.environment_id, p.version_id
+         FROM workflow_env_pointers p
+         JOIN environments e ON e.id = p.environment_id`,
+    );
+    const irByVersion = await this.loadIrs(pointers.map((p) => p.version_id));
+    const desired = pointers.flatMap((p) => {
+      const ir = irByVersion.get(p.version_id);
+      if (!ir) return [];
+      return deriveDesiredActivations({
+        workflowId: p.workflow_id,
+        pointers: [{ environmentId: p.environment_id, versionId: p.version_id, ir }],
+        kindOf: (node) => activationKindOf(node.node_type),
+        connectionOf: () => null,
+        webhookUrlOf: () => null,
+      });
+    });
+    const versionByKey = new Map(rows.map((r) => [activationKeyString(activationKeyOf(r)), r.versionId]));
+    const desiredKeys = new Set(desired.map((d) => activationKeyString(d.key)));
+    return [
+      ...desired
+        .filter((d) => versionByKey.get(activationKeyString(d.key)) !== d.versionId)
+        .map((d) => d.key.workflowId),
+      ...rows
+        .filter((r) => !desiredKeys.has(activationKeyString(activationKeyOf(r))))
+        .map((r) => r.workflowId),
+    ];
   }
 
   // ─── apply ───

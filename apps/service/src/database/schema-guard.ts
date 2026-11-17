@@ -223,6 +223,12 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       'SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM webhook_trigger_secrets s JOIN workflows w ON w.id = s.workflow_id WHERE s.environment_id IS NULL AND w.org_id IS NOT NULL)',
   },
+  {
+    migration: '050_orgless_workflows_to_personal_workspace.sql',
+    // Data canary: a workflow in no workspace whose owner has a personal one means 050 never ran.
+    probe:
+      'SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM workflows w JOIN organizations o ON o.personal_owner_id = w.user_id WHERE w.org_id IS NULL)',
+  },
 ];
 
 /**

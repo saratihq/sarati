@@ -220,7 +220,7 @@ export class WorkflowsReadService {
     const offset = Math.max(0, offsetRaw);
     const em = this.dataSource.manager;
 
-    // Org-scoped listing (the guard already resolved X-Org-Id → membership); user_id only for org-less legacy rows.
+    // A caller with no workspace lists the workflows it made in none.
     const scope = activeOrgId ? { orgId: activeOrgId } : { userId };
     const where = nameQuery ? { ...scope, name: ILike(likePattern(nameQuery)) } : scope;
     const total = await em.count(WorkflowEntity, { where });
