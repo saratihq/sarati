@@ -45,6 +45,7 @@ describe('migration 046: every API key acts in one org, an unpinned one pinned t
   const team = randomUUID();
   const teamFlow = randomUUID();
   const orglessFlow = randomUUID();
+  const ownerlessFlow = randomUUID();
   const keys = {
     adaLegacy: 'ork_e2e_046_ada_legacy_aaaaaaaaaaaaaaaa',
     adaRevoked: 'ork_e2e_046_ada_revoked_bbbbbbbbbbbbbbb',
@@ -85,8 +86,9 @@ describe('migration 046: every API key acts in one org, an unpinned one pinned t
       [team, ada, bo],
     );
     await db.query(
-      `INSERT INTO workflows (id, name, user_id, org_id) VALUES ($1, 'Team Flow', $3, $4), ($2, 'Orgless Flow', $3, NULL)`,
-      [teamFlow, orglessFlow, ada, team],
+      `INSERT INTO workflows (id, name, user_id, org_id)
+       VALUES ($1, 'Team Flow', $3, $4), ($2, 'Orgless Flow', $3, NULL), ($5, 'Ownerless Flow', NULL, NULL)`,
+      [teamFlow, orglessFlow, ada, team, ownerlessFlow],
     );
     const insertKey = (
       userId: string,
@@ -190,14 +192,16 @@ describe('migration 046: every API key acts in one org, an unpinned one pinned t
       restoreEnv();
     });
 
-    it('a key that was unpinned acts in its owner’s personal workspace, and is refused a team org its owner belongs to and a workflow in none', async () => {
+    it('a key that was unpinned acts in its owner’s personal workspace, reaches the workflow it made in no workspace, which the upgrade moved into its personal workspace, and is refused a team org its owner belongs to and a workflow no upgrade could move', async () => {
       await as(keys.adaLegacy, from(app).get('/api/workflows')).expect(200);
       const refused = await as(keys.adaLegacy, from(app).get('/api/workflows').set('X-Org-Id', team)).expect(
         403,
       );
       expect(refused.body.detail).toBe(KEY_SCOPED_TO_OTHER_ORG);
       await as(keys.adaLegacy, from(app).get(`/api/workflows/${teamFlow}`)).expect(404);
-      await as(keys.adaLegacy, from(app).get(`/api/workflows/${orglessFlow}`)).expect(404);
+      const moved = await as(keys.adaLegacy, from(app).get(`/api/workflows/${orglessFlow}`)).expect(200);
+      expect(moved.body.org_id).toBe(adaHome);
+      await as(keys.adaLegacy, from(app).get(`/api/workflows/${ownerlessFlow}`)).expect(404);
       expect(await orgsOf(keys.adaLegacy)).toEqual([adaHome]);
 
       const made = await as(keys.adaLegacy, from(app).post('/api/deploy'))

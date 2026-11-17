@@ -67,8 +67,8 @@ A missing scope is refused by name, so the fix is obvious:
 A key acts only in the one workspace it is made for: your personal workspace. A request with it acts
 there, with or without `X-Org-Id`; one whose `X-Org-Id` names another workspace is refused, a team
 organization you belong to included. That organization's workflows answer `404` as if they did not
-exist, even ones you can open yourself, and so does a workflow in no workspace at all. Its
-organization routes refuse, and so do creating an organization and accepting an invite into one:
+exist, even ones you can open yourself. Its organization routes refuse, and so do creating an
+organization and accepting an invite into one:
 
 ```json
 {"detail":"This API key is scoped to a different organization"}
@@ -79,7 +79,9 @@ keys under **Settings → Platform keys**. Work in a team organization signed in
 
 An earlier version could leave a key with no workspace, reaching every one its owner belonged to.
 Upgrading to v0.2.27 gives each such key its owner's personal workspace —
-[what changes](/operate/upgrades/#every-api-key-acts-in-one-workspace).
+[what changes](/operate/upgrades/#every-api-key-acts-in-one-workspace). A workflow you made in no
+workspace on an earlier version is out of a key's reach until v0.2.28 moves it into your personal
+workspace — [what changes](/operate/upgrades/#a-workflow-in-no-workspace-moves-into-its-owners-personal-workspace).
 
 ## Revoke
 

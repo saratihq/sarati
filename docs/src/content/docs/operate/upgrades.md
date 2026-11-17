@@ -175,7 +175,9 @@ describes, and the installer warns when it starts such a version.
 
 ## Notes for specific versions
 
-### v0.2.28: a signing secret that names no environment guards production
+### v0.2.28
+
+#### A signing secret that names no environment guards production
 
 A webhook signing secret set through the API without `environment`, on a workflow in a workspace, was
 kept for no environment. A delivery is checked against its own environment's secret, so that one was
@@ -201,6 +203,77 @@ containers it is `docker compose logs service`.
 Going back to v0.2.27 keeps each one production's, and checked there. But there a secret set, read or
 cleared without `environment` is again kept for no environment, so name `production` to reach it;
 and coming back, the upgrade deletes one set that way for a trigger production has a secret for.
+
+#### A workflow in no workspace moves into its owner's personal workspace
+
+On v0.2.26 or earlier, an account with no personal workspace made its workflows in no workspace, and
+so did an owner a member had removed from their own personal workspace. v0.2.27 gave each such
+account a personal workspace, or added the owner back to theirs, and every session of theirs acts
+there, so those workflows left their dashboard: **Run**, starting one through the API and **Test
+this branch** answered `404`, and their API keys could not reach them. Each still opened by its
+link, and only its webhook and chat triggers ran it.
+
+The upgrade moves each one into its owner's personal workspace. A workflow with no owner stays in
+none, where nobody reaches it. Each change is a warning in the upgrade log:
+
+```
+050 moved workflow <name> (<id>) of <email> into their personal workspace <id>, with its <n> unfinished run(s): …
+050 linked workflow <name> (<id>) to environment <name> of workspace <id>: … (assigned: <apps, or none>), …
+050 dropped the <name> pointer of workflow <name> (<id>) at version <id> (v<n> on <branch>): …
+050 gave the signing secret of trigger <node> in workflow <name> (<id>), which named no environment, to each environment of workspace <id> without its own (<names>): …
+050 moved workflow <name> (<id>) out of reach of workspace <name> (<id>), whose runs called it <n> time(s): …
+```
+
+Find them after upgrading with `cd sarati && docker compose logs sarati | grep '050 '`; on five
+containers it is `docker compose logs service`; running it by hand, `docker logs sarati`. A second
+boot changes nothing and logs none of these.
+
+What changes for a moved workflow:
+
+- **It is back on its owner's dashboard**, and **Run**, an asynchronous start and **Test this
+  branch** work. The owner's API keys, which act in their personal workspace, reach it and its
+  runs, and a version of it published to production as a tool joins the workspace's MCP tools —
+  where one named like a tool already there leaves both out, so rename one.
+- **Each environment it was promoted to by name is the workspace's environment of that name**, in
+  any letter case (`050 linked …`). A name the workspace has no environment for — a `staging`
+  deleted there, a name only ever promoted to, or `default` — is dropped (`050 dropped …`): its
+  webhook and chat URLs under that name answer `404` from now on. To serve the version the line
+  names, promote it to an environment the workspace has and use that environment's URL —
+  production and uat take only a version on main — or create an environment of that name and
+  promote it there. `default` is reserved, so for it create one under another name.
+- **Its schedule triggers start, and so do its polls that sign in to nothing.** In no workspace
+  they never ran. They start as the service starts after the upgrade, with pg-boss on or off.
+  **Each other poll or app trigger starts once the account assigned to its app in that environment
+  serves it**: active, one-click for a Composio trigger, its own credentials for an SDK one.
+  Until then it is held back, saying why, and starts once you assign one that does under
+  **Integrations → Environments**.
+- **A run its triggers start takes the environment's accounts**: each app step runs as the account
+  assigned to that environment for its app, not as the owner's own, and one whose app has none
+  assigned answers `428` until you assign one under **Integrations → Environments**. Each
+  `050 linked …` line lists the apps assigned there. **Run** and **Test this branch** on Default
+  still use the owner's accounts.
+- **A workflow it calls runs at the version promoted to the environment it was fired in.** Fired
+  under `qa`, it calls the version each called workflow has in `qa`, and a called workflow promoted
+  only to production fails the call with `has no live version in the "qa" environment — promote it
+  there first`. In no workspace it always called production's. An AI Agent's workflow tools follow
+  the same rule.
+- **Its signing secret guards each environment of the workspace** (`050 gave the signing secret …`):
+  wherever the trigger has **Verify signatures** on, a delivery there without a valid signature is
+  refused `401`. The editor sets production's; set another environment's through the API with
+  `environment`.
+- **Its unfinished runs count against the workspace's run limits**, from the first boot.
+- **A run in another workspace can no longer call it.** A workflow calls only workflows in its own
+  workspace, and one in no workspace could be called by its owner's runs from anywhere. Each
+  workspace whose runs called it is a `050 moved workflow … out of reach of workspace …` line, and a
+  call from there now fails with `Sub-workflow "<id>" not found or not accessible.` A workspace whose
+  workflows call it but never did is not in the log. Recreate the workflow in the workspace that
+  calls it.
+
+Going back to v0.2.27 keeps every moved workflow in the personal workspace: on the dashboard,
+runnable, and its signing secret checked under each environment. But a run started in no workspace
+before this upgrade, on v0.2.27 or earlier, that calls another workflow only after you go back fails
+that call there with `Sub-workflow "<id>" not found or not accessible.`: let such runs finish, here
+or before upgrading, before going back. Coming back moves nothing again.
 
 ### v0.2.27
 
@@ -500,7 +573,8 @@ reach the organization by signing in. And an account left with no personal works
 production, staging and uat (`044 gave … a personal workspace of its own …`). The workflows such an
 account made in no workspace, as one the upgrade adds back to its own workspace did while out of it,
 stay in none: they leave its dashboard, and **Run** and **Test this branch** answer `404` for them,
-though each still opens by its link and its triggers still run it.
+though each still opens by its link and its webhook and chat triggers still run it. v0.2.28
+[moves them into that workspace](#a-workflow-in-no-workspace-moves-into-its-owners-personal-workspace).
 
 To find what it emptied, revoked and removed after upgrading:
 
@@ -557,7 +631,9 @@ What a caller of the API sees change on such a key:
   that signed in.
 - **A workflow in no workspace answers `404` to it.** Only an account with no personal workspace made
   one, on an earlier version. Signed in, it opens by its link, but it is not on the dashboard and
-  **Run** answers `404` for it too.
+  **Run** answers `404` for it too. v0.2.28
+  [moves it into its owner's personal workspace](#a-workflow-in-no-workspace-moves-into-its-owners-personal-workspace),
+  where the key reaches it.
 
 And on every key:
 

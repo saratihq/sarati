@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import ts from 'typescript';
 
+import { CANARIES } from '../database/schema-guard';
 import { RUN_LIMITS } from '../entitlements/run-limits';
 import { ENV_NAME_SHAPE } from '../environments/env-name';
 
@@ -555,16 +556,22 @@ describe('vault: one definition site per load-bearing question', () => {
     expect(unrelated.flatMap((source) => toolExecutions(source))).toEqual([]);
   });
 
-  /** Constitution #22: which org is a user's personal one is answered by `OrgsService.personalOrgOf`, by the account it belongs to, never by a membership in a personal org. */
+  /** Constitution #22: which org is a user's personal one is answered by `OrgsService.personalOrgOf`, by the account it belongs to, never by a membership in a personal org; migration 050's boot canary asks it in SQL, as 050 does. */
   it("only personalOrgOf asks which org is a user's personal one", () => {
+    const named = (f: { text: string }): number =>
+      nodesNaming(f.text, 'personal_owner_id', 'personalOwnerId').length;
     const byOwner = sources()
-      .filter((f) => nodesNaming(f.text, 'personal_owner_id', 'personalOwnerId').length > 0)
+      .filter((f) => named(f) > 0)
       .map((f) => f.rel);
     const byMembership = sources()
       .filter((f) => asksPersonalByMembership(f.text))
       .map((f) => f.rel);
 
-    expect(byOwner).toEqual(['orgs/orgs.service.ts']);
+    expect(byOwner).toEqual(['database/schema-guard.ts', 'orgs/orgs.service.ts']);
+    expect(named(sources().find((f) => f.rel === 'database/schema-guard.ts')!)).toBe(1);
+    expect(
+      CANARIES.filter((c) => columnPattern('personal_owner_id').test(c.probe)).map((c) => c.migration),
+    ).toEqual(['050_orgless_workflows_to_personal_workspace.sql']);
     expect(byMembership).toEqual([]);
   });
 

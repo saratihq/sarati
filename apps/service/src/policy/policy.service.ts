@@ -10,7 +10,7 @@ export type PolicyAction = 'read' | 'write' | 'deploy' | 'merge' | 'manage';
 
 export interface PolicySubject {
   orgId?: string | null;
-  /** Legacy single-owner column — coexistence fallback while org_id backfills. */
+  /** The workflow's creator, which decides access only to a workflow in no workspace. */
   ownerUserId?: string | null;
 }
 

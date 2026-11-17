@@ -25,7 +25,7 @@ export class WorkflowEntity {
   @Column({ name: 'user_id', type: 'uuid', nullable: true })
   userId!: string | null;
 
-  /** Tenancy owner; nullable during coexistence, backfilled to the personal org. */
+  /** The workspace; null only for a workflow made in no workspace that migration 050 could not move into its owner's personal one. */
   @Column({ name: 'org_id', type: 'uuid', nullable: true })
   orgId!: string | null;
 

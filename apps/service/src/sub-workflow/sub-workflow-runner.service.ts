@@ -10,6 +10,7 @@ import { isIdShape } from '../database/ids';
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import type { WorkflowIR } from '../ir/models';
+import { OrgsService } from '../orgs/orgs.service';
 import { RunsService } from '../runs/runs.service';
 import { MAX_SUB_WORKFLOW_DEPTH } from '../runtime/base-plan-interpreter';
 import type { SubWorkflowCall, SubWorkflowContext, SubWorkflowRunner } from '../runtime/sub-workflow-runner';
@@ -42,6 +43,7 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
     private readonly compiler: RuntimeCompiler,
     private readonly envPointers: EnvPointersService,
     private readonly toolContracts: WorkflowToolContractService,
+    private readonly orgs: OrgsService,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -151,11 +153,18 @@ export class SubWorkflowRunnerService implements SubWorkflowRunner, OnModuleInit
     if (!isIdShape(id)) throw notFound;
     const wf = await em.findOne(WorkflowEntity, { where: { id } });
     if (!wf) throw notFound;
-    const sameOrg = ctx.orgId !== null && wf.orgId === ctx.orgId;
+    const callerOrg =
+      ctx.orgId ?? (wf.orgId === null ? null : await this.personalOrgOf(em, ctx.externalUserId));
+    const sameOrg = callerOrg !== null && wf.orgId === callerOrg;
     // The creator may call their own workflow only while it has no org; inside an org, the org decides.
     const owned = wf.orgId === null && wf.userId !== null && wf.userId === ctx.externalUserId;
     if (!sameOrg && !owned) throw notFound;
     return wf;
+  }
+
+  // A run started in no workspace acts in its runner's personal one, as a request naming none does (constitution row 22).
+  private async personalOrgOf(em: EntityManager, userId: string): Promise<string | null> {
+    return isIdShape(userId) ? ((await this.orgs.personalOrgOf(em, userId))?.id ?? null) : null;
   }
 }
 
