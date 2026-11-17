@@ -217,6 +217,12 @@ export const CANARIES: Array<{ migration: string; probe: string }> = [
     probe:
       "SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='active_since' AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='steps_used') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='runtime_runs' AND column_name='limits') AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='ix_runtime_runs_workspace_unfinished') AND EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='ix_runtime_run_steps_open')",
   },
+  {
+    migration: '049_webhook_secret_production.sql',
+    // Data canary: a workspace workflow's secret kept for no environment means 049 never ran.
+    probe:
+      'SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM webhook_trigger_secrets s JOIN workflows w ON w.id = s.workflow_id WHERE s.environment_id IS NULL AND w.org_id IS NOT NULL)',
+  },
 ];
 
 /**

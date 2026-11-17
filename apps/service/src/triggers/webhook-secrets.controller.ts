@@ -20,7 +20,7 @@ class SetSecretDto {
   @MaxLength(4096)
   secret!: string;
 
-  /** Environment name (matches the intake path); omit for the org-less/prod default. */
+  /** Environment name (matches the intake path); omitted, production, or a workflow in no workspace's one secret. */
   @IsOptional()
   @IsString()
   environment?: string;

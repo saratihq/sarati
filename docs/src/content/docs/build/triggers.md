@@ -102,7 +102,8 @@ curl -X PUT http://localhost:8080/api/workflows/<id>/webhook-secret \
   -d '{"node_id":"trigger","secret":"whsec_…","environment":"production"}'
 ```
 
-Reading it back tells you only whether one exists — `{"secret_present":true}`.
+Leave out `environment` and the secret is production's. Reading it back tells you only whether one
+exists — `{"secret_present":true}`.
 
 Signing a delivery is an HMAC over the **exact bytes** you send:
 

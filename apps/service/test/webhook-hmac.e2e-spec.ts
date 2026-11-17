@@ -168,6 +168,31 @@ describe('webhook HMAC verification (e2e, isolated DB)', () => {
     await fire({}, JSON.stringify({ title: 'after-clear' })).expect(202);
   });
 
+  it("a secret set, read and cleared naming no environment is production's, the one a delivery there is checked against", async () => {
+    await asA(http().put(`/api/workflows/${wfId}/webhook-secret`).set('X-Org-Id', orgId))
+      .send({ node_id: 'trigger', secret: SECRET })
+      .expect(200);
+    for (const query of ['node_id=trigger', 'node_id=trigger&environment=production']) {
+      const status = await asA(
+        http().get(`/api/workflows/${wfId}/webhook-secret?${query}`).set('X-Org-Id', orgId),
+      ).expect(200);
+      expect(status.body).toEqual({ secret_present: true });
+    }
+
+    const raw = JSON.stringify({ title: 'unnamed' });
+    await fire({}, raw).expect(401);
+    await fire({ 'x-hub-signature-256': githubSig(raw, SECRET) }, raw).expect(202);
+
+    const cleared = await asA(
+      http().delete(`/api/workflows/${wfId}/webhook-secret?node_id=trigger`).set('X-Org-Id', orgId),
+    ).expect(200);
+    expect(cleared.body.status).toBe('cleared');
+    expect(
+      (await db.query(`SELECT 1 FROM webhook_trigger_secrets WHERE workflow_id = $1`, [wfId])).rowCount,
+    ).toBe(0);
+    await fire({}, JSON.stringify({ title: 'unnamed, cleared' })).expect(202);
+  });
+
   it('a foreign workflow id on the secret endpoint is an indistinguishable 404', async () => {
     await asA(http().put(`/api/workflows/${randomUUID()}/webhook-secret`).set('X-Org-Id', orgId))
       .send({ node_id: 'trigger', secret: SECRET })
