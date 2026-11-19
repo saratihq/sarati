@@ -15,7 +15,12 @@ import {
 import { isComposioDirectApp } from '../connections/managed-app-rails';
 import { accountRefFields, accountRefText, fillAccountRefs, isAccountRefField } from '../runtime/account-ref';
 import { accountProbeFor, type AccountTarget, identityFrom } from './account-probes';
-import { composioTriggerSpec, POLL_CURSOR_KEY, type ComposioTriggerSpec } from './composio-trigger.registry';
+import {
+  composioTriggerSpec,
+  POLL_CURSOR_KEY,
+  pollNotServedMessage,
+  type ComposioTriggerSpec,
+} from './composio-trigger.registry';
 import { withheldManagedStep } from './dry-run-marker';
 import { alignComposioOutput } from './composio-output-shape';
 import {
@@ -35,13 +40,6 @@ import type {
   TriggerEvent,
   TriggerInput,
 } from './managed-integration-provider';
-
-function pollNotServed(triggerType: string, spec: ComposioTriggerSpec): DomainError {
-  return new DomainError(
-    `Use "${spec.subscribedInstead.name}" (${spec.subscribedInstead.type}) instead: this instance doesn't run "${spec.catalog.name}" (${triggerType}), which would spend one of the account owner's monthly app actions on every poll, whether or not anything arrived. Composio checks the app for the one to use, and each event it delivers counts as a trigger event, not an app action`,
-    422,
-  );
-}
 
 /** Picks each action's rail in the static order marked in `route`; only a MANAGED connection takes Composio. */
 @Injectable()
@@ -231,7 +229,7 @@ export class ActionRouterProvider implements ManagedIntegrationProvider {
   ): Promise<{ spec: ComposioTriggerSpec; ref: ManagedConnectionRef } | null> {
     const spec = composioTriggerSpec(input.triggerId);
     if (!spec) return null;
-    if (this.platformKeys.composioManagedByInstance()) throw pollNotServed(input.triggerId, spec);
+    if (this.platformKeys.composioManagedByInstance()) throw new DomainError(pollNotServedMessage(spec), 422);
     const ref = await this.managedRefOf(input.externalUserId, input.auth);
     return ref?.authType === 'managed' ? { spec, ref } : null;
   }

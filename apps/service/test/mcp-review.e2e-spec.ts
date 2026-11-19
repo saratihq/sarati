@@ -108,7 +108,7 @@ describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
       {
         id: 'send',
         name: 'Send Email',
-        node_type: 'email.send',
+        node_type: 'text.concat',
         type_version: 1,
         parameters: { subject, body },
         position: { x: 300, y: 0 },
@@ -533,5 +533,50 @@ describe('orchestr_open_review (e2e, real MCP client, isolated DB)', () => {
       .set('Authorization', `Bearer ${authorKey}`)
       .send({})
       .expect(403);
+  });
+
+  it('reports a pair whose clean merge the author gate refuses as NOT mergeable, as the real merge refuses it', async () => {
+    const pythonId = randomUUID();
+    const pythonV1 = randomUUID();
+    const head = ir('base', 'base body') as { nodes: Array<Record<string, unknown>> };
+    head.nodes.push({
+      id: 'calc',
+      name: 'Calc',
+      node_type: 'orchestr:code',
+      type_version: 1,
+      parameters: { language: 'python', code: 'return 1' },
+      position: { x: 600, y: 0 },
+      metadata: {},
+    });
+    // A head saved before the gate refused the language, forked at main@v1.
+    await db.query(
+      `INSERT INTO workflow_branches (id, workflow_id, name, is_default, is_protected, created_at)
+       VALUES ($1, $2, 'python', false, false, now())`,
+      [pythonId, wfId],
+    );
+    await db.query(
+      `INSERT INTO workflow_versions (id, workflow_id, version_number, workflow_json, commit_message, branch_id, parent_id, created_at)
+       VALUES ($1, $2, 1, $3, 'adds a Python step', $4, $5, now())`,
+      [pythonV1, wfId, JSON.stringify(head), pythonId, mainV1],
+    );
+    await db.query(`UPDATE workflow_branches SET head_version_id = $1 WHERE id = $2`, [pythonV1, pythonId]);
+    const before = await repoState();
+
+    const proposal = await openReview({
+      workflow_id: wfId,
+      source_branch: 'python',
+      target_branch: 'main',
+      title: 'Add a Python step',
+    });
+    expect(proposal.mergeable).toBe(false);
+    expect(await repoState()).toEqual(before);
+
+    const refused = await request(app.getHttpServer())
+      .post(`/api/workflows/${wfId}/reviews/${proposal.review_id}/merge`)
+      .set('Authorization', `Bearer ${deployKey}`)
+      .send({})
+      .expect(422);
+    expect(refused.body).toMatchObject({ code: 'unsupported_code_language', node_id: 'calc' });
+    expect(await repoState()).toEqual(before);
   });
 });

@@ -60,7 +60,7 @@ const Output = z.object({
   mergeable: z
     .union([z.boolean(), z.literal('unknown')])
     .describe(
-      'A read-only three-way merge probe that minted no version and moved no branch. False means field-level conflicts a human must resolve; "unknown" means it could not be evaluated.',
+      'A read-only three-way merge probe that minted no version and moved no branch. False means field-level conflicts a human must resolve, or a merged document the author gate refuses (orchestr_validate says why); "unknown" means it could not be evaluated.',
     ),
 });
 

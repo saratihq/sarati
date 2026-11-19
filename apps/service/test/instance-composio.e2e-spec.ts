@@ -596,10 +596,30 @@ describe('an instance with its own Composio account (e2e, isolated DB, loopback 
     expect(instead).toBeDefined();
     expect(catalog.map((t) => t.type)).not.toContain(HAND_POLLED_GMAIL);
 
-    const deployed = await as(a, http().post('/api/deploy'), shared.id)
+    const refused = await as(a, http().post('/api/deploy'), shared.id)
       .send({ workflow_json: deliveryDoc('mail', HAND_POLLED_GMAIL) })
+      .expect(422);
+    expect(refused.body).toMatchObject({
+      code: 'unknown_trigger_type',
+      node_type: HAND_POLLED_GMAIL,
+      detail: `Node "mail" is this workflow's trigger. ${HAND_POLL_NOT_SERVED}.`,
+    });
+    const retyped = await as(a, http().post('/api/compose/apply-ops'), shared.id)
+      .send({
+        ir: deliveryDoc('mail', 'orchestr:trigger'),
+        ops: [{ op: 'update_node', node_id: 'mail', node_type: HAND_POLLED_GMAIL }],
+      })
+      .expect(422);
+    expect(retyped.body.detail).toBe(`ops[0] update_node "mail": ${HAND_POLL_NOT_SERVED}`);
+    // Not offered, so refused at save: only a version saved before the instance provided its account holds one.
+    const deployed = await as(a, http().post('/api/deploy'), shared.id)
+      .send({ workflow_json: deliveryDoc('mail', 'orchestr:trigger') })
       .expect(201);
     const workflowId = deployed.body.workflow_id as string;
+    await db.query(
+      `UPDATE workflow_versions SET workflow_json = $1, workflow_ir = $1 WHERE workflow_id = $2`,
+      [JSON.stringify(deliveryDoc('mail', HAND_POLLED_GMAIL)), workflowId],
+    );
     const production = await productionOf(shared.id);
     await db.query(
       `INSERT INTO environment_connections (environment_id, app, connection_id) VALUES ($1, 'gmail', $2)`,

@@ -33,6 +33,7 @@ import { withActivationLock } from '../src/triggers/activation-lock';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
 import { EnvPointersService } from '../src/workflows/env-pointers.service';
+import { listComposioTriggers } from './support/composio-trigger-listing';
 import { listenOnLoopback } from './support/listen';
 import { deferred, lockProbes } from './support/lock-probes';
 import { setPlatformKey } from './support/platform-keys';
@@ -365,6 +366,7 @@ async function start(): Promise<void> {
   jest.spyOn(composio, 'verifyWebhook').mockResolvedValue({ ok: true });
   accountStatus = jest.spyOn(moduleRef.get(ComposioProvider), 'getAccountStatus').mockResolvedValue('active');
   jest.spyOn(moduleRef.get(ComposioProvider), 'accountDeleter').mockResolvedValue(() => Promise.resolve());
+  listComposioTriggers(moduleRef.get(ComposioProvider), TRIGGERS.composio.nodeType, 'slack.reaction_added');
   seeded = jest.spyOn(moduleRef.get(SdkPollingProvider), 'enable');
   registered = jest.spyOn(moduleRef.get(SdkWebhookProvider), 'enable');
   const booted = jest.spyOn(moduleRef.get(TriggerReconcilerService), 'reconcile');
@@ -2515,7 +2517,12 @@ describe('an app trigger listens only as a slot that serves it (e2e, isolated DB
 
   it('holds back no trigger for a slot the preflight asks no slot for: one whose type names no app', async () => {
     const { org, staging } = await workspace('names no app');
-    const { wf, v1 } = await deploy(org, triggerDoc('Acme.new_deal', 'Nameless', {}));
+    // The author gate refuses such a type at save, so only a version saved before it can hold one.
+    const { wf, v1 } = await deploy(org, triggerDoc('orchestr:trigger', 'Nameless', {}));
+    await db.query(
+      `UPDATE workflow_versions SET workflow_json = $1, workflow_ir = $1 WHERE workflow_id = $2`,
+      [JSON.stringify(triggerDoc('Acme.new_deal', 'Nameless', {})), wf],
+    );
     await asA(
       http()
         .post(`/api/workflows/${wf}/promote`)

@@ -1,8 +1,15 @@
 import { type Location, type Message, type TransformFailure, transformSync } from 'esbuild';
 
+import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import type { DagCodeNode, Guard } from '../runtime/dag-plan';
-import type { CodeNode } from '../runtime/run-plan';
+import {
+  CODE_LANGUAGE_CHOICES,
+  CODE_LANGUAGES,
+  type CodeLanguage,
+  type CodeNode,
+  DEFAULT_CODE_LANGUAGE,
+} from '../runtime/run-plan';
 
 const TS_FRAME = '__orchestr_ts';
 const FRAME_OPENING_LINES = 1;
@@ -14,19 +21,31 @@ interface SnippetError {
   location: Location;
 }
 
+/** The language the Code step `nodeId` runs in, absent or null meaning the default; any other throws `unsupported_code_language`. */
+export function codeLanguageOf(nodeId: string, raw: unknown): CodeLanguage {
+  if (raw === undefined || raw === null) return DEFAULT_CODE_LANGUAGE;
+  const language = CODE_LANGUAGES.find((runnable) => runnable === raw);
+  if (language) return language;
+  throw new DomainError(
+    `Code node "${nodeId}" has "language": ${JSON.stringify(raw)}, which the sandbox does not run — set it to ${CODE_LANGUAGE_CHOICES}, or remove it for "${DEFAULT_CODE_LANGUAGE}"`,
+    400,
+    { code: 'unsupported_code_language', node_id: nodeId },
+  );
+}
+
 /** Lower a `CodeNode` to runnable JS; TypeScript is type-stripped, not type-checked: a syntax error fails. */
 export function toDagCodeNode(node: CodeNode, guards: Guard[]): DagCodeNode {
   return {
     kind: 'code',
     id: node.id,
-    code: transpileToJs(node.code, node.language, node.id),
+    code: transpileToJs(node.code, codeLanguageOf(node.id, node.language), node.id),
     guards,
     ...(node.onError === 'continue' ? { onError: 'continue' as const } : {}),
     ...(node.retry ? { retry: node.retry } : {}),
   };
 }
 
-function transpileToJs(code: string, language: 'js' | 'ts', nodeId: string): string {
+function transpileToJs(code: string, language: CodeLanguage, nodeId: string): string {
   if (language === 'js') return code;
   try {
     // Transpiled as the async function body it runs as: on its own, `await` makes `return` illegal.

@@ -1,12 +1,17 @@
 import { Injectable } from '@nestjs/common';
 
 import { DomainError } from '../common/domain-error';
-import type { CatalogFacts } from './author-validation';
+import { type AuthoringFacts, type CatalogFacts, triggerTypesOf } from './author-validation';
 import { CONTROL_NODE_SCHEMAS } from '../generation/control-node-types';
 import { VectorStore } from '../generation/vector-store';
-import { MANUAL_TRIGGER, TriggerCatalogService } from '../triggers/trigger-catalog.service';
-import { actionNeedsAccount } from '../providers/sdk-actions.registry';
-import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { CODE_LANGUAGE_CHOICES, DEFAULT_CODE_LANGUAGE } from '../runtime/run-plan';
+import {
+  MANUAL_TRIGGER,
+  TriggerCatalogService,
+  type UnreadListing,
+} from '../triggers/trigger-catalog.service';
+import { actionNeedsAccount, isAppTriggerType } from '../providers/sdk-actions.registry';
+import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 import {
   toCatalogEntry,
@@ -23,6 +28,11 @@ import {
 
 const COLLECTION = 'orchestr_actions';
 
+const TRIGGER_LISTING_WAIT_MS = 5_000;
+
+/** Whose workspace a document is judged for: a workflow's own, or, for one not made yet, its caller's. */
+export type AuthoringScope = { workflowId: string } | { userId: string; orgId: string | null };
+
 /**
  * Agent-facing node copy projected over `CONTROL_NODE_SCHEMAS` — the parameter SCHEMA is
  * single-sourced there and must not be re-declared here; a missing entry falls back to it.
@@ -33,7 +43,8 @@ const COMPOSER_NODE_DESCRIPTIONS: Record<string, string> = {
   'orchestr:switch':
     'Route by condition, N ways — If generalized. Wire each case output in order: source_port 0 for case 0, source_port 1 for case 1, …, and source_port cases.length for the default/fallback (taken when no case matches). Cases are evaluated in order and the FIRST match wins. Parameters: cases — an ordered array of conditions, each {left, op (eq|ne|gt|gte|lt|lte|contains|truthy|falsy), right}.',
   'orchestr:code':
-    'Run a code snippet in a secure sandbox to transform the run data — for logic the catalog actions can\'t express (reshaping, math, string work, filtering). The snippet is an (async) function body that receives the run so far as `steps` (prior nodes keyed by id, e.g. `steps.<nodeId>.body.<field>`) plus a `trigger` alias, may `await`, and returns a value that becomes this node\'s output. No network/filesystem/host access; 5s + 128MB bounds. Parameters: language ("js" or "ts", default "js"), code (the snippet).',
+    "Run a code snippet in a secure sandbox to transform the run data — for logic the catalog actions can't express (reshaping, math, string work, filtering). The snippet is an (async) function body that receives the run so far as `steps` (prior nodes keyed by id, e.g. `steps.<nodeId>.body.<field>`) plus a `trigger` alias, may `await`, and returns a value that becomes this node's output. No network/filesystem/host access; 5s + 128MB bounds. " +
+    `Parameters: language (${CODE_LANGUAGE_CHOICES}, default "${DEFAULT_CODE_LANGUAGE}"), code (the snippet).`,
   'orchestr:loop':
     'Repeat a body sub-flow. Wire the body from source_port 0 (runs each round) and any after-loop steps from source_port 1 (runs once, after the loop); steps after the loop read the per-round results as {{<loop node id>}}. Two modes via the "mode" param: "items" (default) runs the body once per element of a collection — the body reads {{item}}/{{itemIndex}} (params: items = an expression resolving to an array, item_var default "item"); "while" repeats the body do-while a condition holds (it always runs at least once) bounded by a required max_iterations cap — the body reads the round index as {{loopRound}} and the previous round\'s outputs as {{loopPrev}} (params: condition = a {left, op, right} shape like IF, max_iterations = a positive integer).',
   'orchestr:agent':
@@ -79,6 +90,7 @@ export class ComposeCatalogService {
   constructor(
     private readonly vectorStore: VectorStore,
     private readonly triggerCatalog: TriggerCatalogService,
+    private readonly platformKeys: PlatformKeysService,
   ) {}
 
   /**
@@ -98,6 +110,33 @@ export class ComposeCatalogService {
       authOf: (nodeType: string) => (actionNeedsAccount(nodeType) ? 'connection' : 'none'),
       isTriggerType: (nodeType: string) => this.triggerCatalog.isKnownTriggerType(nodeType),
     };
+  }
+
+  /** {@link authoringFactsFor} the trigger types `ir` holds. */
+  authoringFacts(ir: Record<string, unknown>, at: AuthoringScope): Promise<AuthoringFacts> {
+    return this.authoringFactsFor(triggerTypesOf(ir), at);
+  }
+
+  /** The author gate's facts in `at`'s workspace for the trigger types `triggerTypes`, asking Composio within a bound only when one of them needs it — call before any transaction. */
+  async authoringFactsFor(triggerTypes: readonly string[], at: AuthoringScope): Promise<AuthoringFacts> {
+    const decided = (type: string): boolean | null => this.triggerCatalog.offeredWithoutComposio(type);
+    const asksComposio = triggerTypes.some((type) => decided(type) === null && isAppTriggerType(type));
+    const live = asksComposio ? await this.liveTriggerTypes(at) : 'listing_unavailable';
+    return {
+      ...this.facts(),
+      offersTrigger: (type) => decided(type) ?? (typeof live === 'string' ? live : live.has(type)),
+    };
+  }
+
+  private async liveTriggerTypes(at: AuthoringScope): Promise<ReadonlySet<string> | UnreadListing> {
+    const scope = await this.scopeOf(at);
+    return scope ? this.triggerCatalog.liveTypes(scope, TRIGGER_LISTING_WAIT_MS) : 'no_composio_key';
+  }
+
+  private scopeOf(at: AuthoringScope): Promise<PlatformKeyScope | null> {
+    return 'workflowId' in at
+      ? this.platformKeys.scopeForWorkflow(at.workflowId)
+      : this.platformKeys.scopeFor(at.userId, at.orgId);
   }
 
   /** Paged retrieval over actions, triggers, or both — the composer's and MCP's one search. */
@@ -143,16 +182,6 @@ export class ComposeCatalogService {
       this.allowed = new Set([...types, ...CONTROL_TYPES.map((c) => c.type as string)]);
     }
     return this.allowed;
-  }
-
-  /**
-   * Trigger types the agent may re-type the canvas trigger node to — the SAME rows the
-   * picker offers, so a trigger a human can place is a trigger an agent can author. Uncached: the
-   * Composio projection behind it refreshes on its own TTL.
-   */
-  async allowedTriggerTypes(scope: PlatformKeyScope): Promise<ReadonlySet<string>> {
-    const rows = await this.triggerCatalog.list(scope);
-    return new Set([MANUAL_TRIGGER, ...rows.map((row) => String(row.entry.type))]);
   }
 
   /** Vector hits over the action collection, with control constructs pinned by intent. */

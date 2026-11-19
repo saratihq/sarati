@@ -11,6 +11,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
+import { ComposioProvider } from '../src/connections/composio.provider';
 import { AppModule } from '../src/app.module';
 import { mintSession } from '../src/auth/local/local-session';
 import { configureApp } from '../src/bootstrap';
@@ -29,6 +30,7 @@ import {
 } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggerSignalsService } from '../src/triggers/trigger-signals.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { listComposioTriggers } from './support/composio-trigger-listing';
 import { listenOnLoopback } from './support/listen';
 import { bounded, lockProbes, reached } from './support/lock-probes';
 import { seedPlatformKeyEverywhere, setPlatformKey } from './support/platform-keys';
@@ -717,6 +719,13 @@ describe('changing a live trigger (e2e, isolated DB, fake providers)', () => {
     const org = await asA(http().post('/api/orgs').send({ name: 'Acme' })).expect(201);
     orgId = org.body.id as string;
     await seedPlatformKeyEverywhere(app, 'composio_api_key', 'ck_e2e_fake_key');
+    listComposioTriggers(
+      app.get(ComposioProvider),
+      'acmecrm.new_deal',
+      'acmecrm.deal_won',
+      'acmecrm.deal_lost',
+      'stripe.subscription_created',
+    );
 
     const composio = app.get(ComposioTriggerProvider);
     createSpy = jest

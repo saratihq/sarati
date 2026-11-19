@@ -21,6 +21,7 @@ import {
 } from './run-as-account';
 import { lockConnectionsForDelete, lockOrgForWrite } from '../orgs/org-row-lock';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { isAppSlug } from '../runtime/app-slug';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
 import {
   byoClientToConfig,
@@ -43,9 +44,6 @@ const REASON_UNREADABLE =
 
 /** Deliberately-unusable placeholder a managed row resolves to — Composio masks the real token, so none can leak. */
 export const MANAGED_TOKEN_PREFIX = '__ORCHESTR_MANAGED__:';
-
-/** A provider only names an app an action id can address (`<app>.<action>`) when it matches this. */
-const PUBLIC_APP_SLUG_RE = /^[a-z][a-z0-9_-]*$/;
 
 /** Public (secret-free) view of a connection. */
 export interface ConnectionSummary {
@@ -445,7 +443,7 @@ export class ConnectionsService implements RunAsAccounts {
     return {
       id: row.id,
       provider: row.provider,
-      app_slug: PUBLIC_APP_SLUG_RE.test(row.provider) ? row.provider : null,
+      app_slug: isAppSlug(row.provider) ? row.provider : null,
       kind: row.authType === 'managed' ? 'managed' : 'byo',
       status: row.status || 'active',
       ...(host ? { host } : {}),

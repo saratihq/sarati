@@ -6,7 +6,7 @@ import { Allow, IsArray, IsObject, IsOptional } from 'class-validator';
 import { AuthGuard } from '../auth/auth.guard';
 import type { WorkflowIR } from '../ir/models';
 
-import { ApplyOpsError, applyOps, MAX_OPS_PER_BATCH, parseOp } from './apply-ops';
+import { ApplyOpsError, applyOps, MAX_OPS_PER_BATCH, opNodeTypes, parseOp } from './apply-ops';
 import type { DetailedCatalogEntry } from './catalog-entry';
 import {
   ComposeCatalogService,
@@ -72,10 +72,14 @@ export class ComposeController {
     if (body.ops.length > MAX_OPS_PER_BATCH) {
       throw new HttpException({ detail: `too many ops in one batch (max ${MAX_OPS_PER_BATCH})` }, 422);
     }
-    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes(await this.scope(req));
+    const principal = requirePrincipal(req);
     try {
       const ops = body.ops.map((raw, i) => parseOp(raw, i));
-      const ir = applyOps(irOrNull(body.ir), ops, this.catalog.allowedTypes(), allowedTriggerTypes);
+      const { offersTrigger } = await this.catalog.authoringFactsFor(opNodeTypes(ops), {
+        userId: principal.user.id,
+        orgId: principal.activeOrgId,
+      });
+      const ir = applyOps(irOrNull(body.ir), ops, this.catalog.allowedTypes(), offersTrigger);
       return { ir };
     } catch (err) {
       if (err instanceof ApplyOpsError) {

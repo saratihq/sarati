@@ -262,6 +262,116 @@ describe("ActivityFeed merge into main", () => {
 
     await vi.waitFor(() => expect(onMerged).toHaveBeenCalledWith("main"));
     expect(toast.success).toHaveBeenCalledWith("Branch merged", '"lane" merged into "main" and was deleted');
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("says what the service flagged about the document it merged", async () => {
+    vi.mocked(api.listVersions).mockResolvedValue(laneVersions as never);
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
+    const flagged = { code: "trigger_type_unverified", message: "Its trigger type could not be checked.", node_id: "start" };
+    vi.mocked(api.mergeBranch).mockResolvedValue({ status: "merged", merged_version_id: "v-merged", warnings: [flagged] });
+    const onMerged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={onMerged} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    await user.click(await screen.findByRole("button", { name: "Merge" }));
+
+    await vi.waitFor(() => expect(onMerged).toHaveBeenCalledWith("main"));
+    expect(toast.warning).toHaveBeenCalledWith("Merged, with a warning", flagged.message);
+  });
+});
+
+describe("ActivityFeed merge warnings", () => {
+  const flagged = { code: "trigger_type_unverified", message: "Its trigger type could not be checked.", node_id: "start" };
+  const conflict: api.ConflictInfo = {
+    node_id: "announce",
+    node_name: "Announce",
+    kind: "field",
+    field_path: "parameters.texts",
+    source_value: ["lane"],
+    target_value: ["main"],
+    ancestor_value: ["base"],
+  };
+  const onLane = () => {
+    vi.mocked(api.listVersions).mockResolvedValue(laneVersions);
+    vi.mocked(api.listReviews).mockResolvedValue({ workflow_id: "wf", reviews: [] });
+    vi.mocked(api.listBranches).mockResolvedValue({ workflow_id: "wf", branches: [] });
+  };
+  const resolveConflict = async (user: ReturnType<typeof userEvent.setup>) => {
+    expect(await screen.findByText("Resolve merge conflicts")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /Use theirs/ }));
+    await user.click(screen.getByRole("button", { name: /Complete merge/ }));
+  };
+
+  it("says what the service flagged about a review it merged", async () => {
+    vi.mocked(api.getReview).mockResolvedValue({ ...approvedDetail, approval_current: true, approval_stale_reason: null });
+    vi.mocked(api.mergeReview).mockResolvedValue({ status: "merged", merged_version_id: "v-merged", warnings: [flagged] });
+    const user = userEvent.setup();
+    render(
+      <ActivityFeed workflowId="wf" branch="main" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} initialReviewId="r1" />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Merge" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Merge" }));
+
+    await vi.waitFor(() => expect(toast.warning).toHaveBeenCalledWith("Merged, with a warning", flagged.message));
+  });
+
+  it("says what the service flagged about a branch it updated", async () => {
+    onLane();
+    vi.mocked(api.mergeBranch).mockRejectedValue(
+      new api.ApiError("Branch 'main' is protected, so conflicts can't be resolved while merging into it.", 409, "protected_merge_conflicts"),
+    );
+    vi.mocked(api.updateBranch).mockResolvedValue({ status: "merged", merged_version_id: "v-lane-2", warnings: [flagged] });
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(await screen.findByRole("button", { name: "Update lane from main" }));
+
+    await vi.waitFor(() => expect(toast.warning).toHaveBeenCalledWith("Updated, with a warning", flagged.message));
+  });
+
+  it("says what the service flagged about a merge whose conflicts were resolved", async () => {
+    onLane();
+    vi.mocked(api.mergeBranch)
+      .mockResolvedValueOnce({ status: "conflicts", conflicts: [conflict] })
+      .mockResolvedValueOnce({ status: "merged", merged_version_id: "v-merged", warnings: [flagged] });
+    const onMerged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={vi.fn()} onMerged={onMerged} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await resolveConflict(user);
+
+    await vi.waitFor(() => expect(onMerged).toHaveBeenCalledWith("main"));
+    expect(toast.warning).toHaveBeenCalledWith("Merged, with a warning", flagged.message);
+  });
+
+  it("calls the flagged result of an update whose conflicts were resolved an update", async () => {
+    onLane();
+    vi.mocked(api.mergeBranch).mockRejectedValue(
+      new api.ApiError("Branch 'main' is protected, so conflicts can't be resolved while merging into it.", 409, "protected_merge_conflicts"),
+    );
+    vi.mocked(api.updateBranch)
+      .mockResolvedValueOnce({ status: "conflicts", conflicts: [conflict] })
+      .mockResolvedValueOnce({ status: "merged", merged_version_id: "v-lane-2", warnings: [flagged] });
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    render(<ActivityFeed workflowId="wf" branch="lane" refreshKey={0} onChanged={onChanged} onMerged={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Merge into main" }));
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(await screen.findByRole("button", { name: "Update lane from main" }));
+    await resolveConflict(user);
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(toast.warning).toHaveBeenCalledWith("Updated, with a warning", flagged.message);
+    expect(toast.warning).not.toHaveBeenCalledWith("Merged, with a warning", expect.anything());
   });
 });
 

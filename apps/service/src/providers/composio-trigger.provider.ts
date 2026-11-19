@@ -9,6 +9,7 @@ import {
 } from '../connections/composio.provider';
 import { toOurSlug } from '../connections/managed-connections.service';
 import { verifyComposioWebhook, type ComposioWebhookVerifyResult } from './composio-webhook-verify';
+import { isAppTriggerType } from './sdk-actions.registry';
 import { PlatformKeysService, type PlatformKeyScope } from '../platform/platform-keys.service';
 
 /** The catalog cache TTL — the Composio trigger-type catalog is stable within a process. */
@@ -41,6 +42,8 @@ export class ComposioTriggerProvider {
   private readonly logger = new Logger(ComposioTriggerProvider.name);
   // Per project partition: a Composio key addresses one project, so one project's catalog is not another's.
   private readonly cache = new Map<string, CatalogCache>();
+  // One listing at a time per partition: a caller arriving while it runs waits on that one.
+  private readonly refreshing = new Map<string, Promise<ComposioProjectedCatalogEntry[] | null>>();
 
   constructor(
     private readonly composio: ComposioProvider,
@@ -54,9 +57,30 @@ export class ComposioTriggerProvider {
 
   /** The projected picker rows, lazily cached; a Composio hiccup serves the stale cache (or `[]`), never throws. */
   async catalog(scope: PlatformKeyScope): Promise<ComposioProjectedCatalogEntry[]> {
-    if (!(await this.isConfigured(scope))) return [];
-    const cached = this.cache.get(this.platformKeys.composioPartition(scope));
-    if (cached && Date.now() - cached.at < cached.ttl) return cached.entries;
+    return (await this.knownCatalog(scope)) ?? [];
+  }
+
+  /** {@link catalog}'s rows when they are known, fresh or cached; null when they can't be: no key for this scope, or a failed or empty listing with nothing cached. */
+  async knownCatalog(scope: PlatformKeyScope): Promise<ComposioProjectedCatalogEntry[] | null> {
+    if (!(await this.isConfigured(scope))) return null;
+    const partition = this.platformKeys.composioPartition(scope);
+    const cached = this.cache.get(partition);
+    if (cached && Date.now() - cached.at < cached.ttl) return knownOrNull(cached.entries);
+    const refresh = this.refreshing.get(partition) ?? this.startRefresh(scope, partition);
+    // A listing once known is served while it refreshes, so only one never read yet waits on Composio.
+    return cached && cached.entries.length > 0 ? cached.entries : refresh;
+  }
+
+  private startRefresh(
+    scope: PlatformKeyScope,
+    partition: string,
+  ): Promise<ComposioProjectedCatalogEntry[] | null> {
+    const refresh = this.refresh(scope).finally(() => this.refreshing.delete(partition));
+    this.refreshing.set(partition, refresh);
+    return refresh;
+  }
+
+  private async refresh(scope: PlatformKeyScope): Promise<ComposioProjectedCatalogEntry[] | null> {
     try {
       const [types, managed] = await Promise.all([
         this.composio.listTriggerTypes(scope),
@@ -68,10 +92,10 @@ export class ComposioTriggerProvider {
         return projected.entries;
       }
       // An HTTP-200 with `items: []` is a transient blip — it must NOT overwrite a previously good cache.
-      return this.negativeCache(scope);
+      return knownOrNull(this.negativeCache(scope));
     } catch (err) {
       this.logger.warn(`Composio trigger catalog refresh failed: ${errorMessage(err)}`);
-      return this.negativeCache(scope);
+      return knownOrNull(this.negativeCache(scope));
     }
   }
 
@@ -95,14 +119,16 @@ export class ComposioTriggerProvider {
    */
   slugForPublicType(publicType: string): string | null {
     const dot = publicType.indexOf('.');
-    if (dot <= 0) return null;
+    // A version saved before the gate refused a capital after the dot still subscribes, as it did then.
+    const type = publicType.slice(0, dot + 1) + publicType.slice(dot + 1).toLowerCase();
+    if (!isAppTriggerType(type)) return null;
     // Any warm scope's mapping is a valid hint — the slug is Composio's, not the project's —
     // and the deterministic reversal below is the answer when none is warm.
     for (const entry of this.cache.values()) {
-      const recorded = entry.slugByType.get(publicType);
+      const recorded = entry.slugByType.get(type);
       if (recorded) return recorded;
     }
-    return publicType.slice(dot + 1).toUpperCase();
+    return type.slice(dot + 1).toUpperCase();
   }
 
   /** Subscribe: create (idempotent upsert) the Composio trigger instance; returns its id. */
@@ -183,6 +209,8 @@ export class ComposioTriggerProvider {
       }
       const app = toOurSlug(t.toolkitSlug);
       const type = `${app}.${t.slug.toLowerCase()}`;
+      // The author gate refuses a type that is no `<app>.<trigger>`, so the picker never offers one.
+      if (!isAppTriggerType(type)) continue;
       if (slugByType.has(type)) continue; // one row per public type (first slug wins)
       slugByType.set(type, t.slug);
       entries.push({
@@ -244,4 +272,8 @@ function fieldType(jsonSchemaType: unknown): string {
     default:
       return 'SHORT_TEXT'; // string / array / object / unknown → a text field
   }
+}
+
+function knownOrNull(entries: ComposioProjectedCatalogEntry[]): ComposioProjectedCatalogEntry[] | null {
+  return entries.length > 0 ? entries : null;
 }

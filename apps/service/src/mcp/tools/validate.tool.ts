@@ -4,6 +4,8 @@ import { z } from 'zod';
 import type { ApiScope } from '../../auth/scopes';
 import { validateAuthoredIr } from '../../compose/author-validation';
 import { ComposeCatalogService } from '../../compose/compose-catalog.service';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
+import { judgedIn } from '../judged-in';
 import type { McpCallContext, McpTool } from '../mcp-tool';
 
 const Input = z.object({
@@ -12,11 +14,12 @@ const Input = z.object({
     .string()
     .optional()
     .describe(
-      'The workflow this document belongs to. Pass it whenever you have it — without it a self-referential sub-workflow call cannot be detected, and the document would still be refused at commit.',
+      "The workflow this document belongs to. Pass it whenever you have it — without it a self-referential sub-workflow call cannot be detected, and the document would still be refused at commit; with it, the document is judged in that workflow's workspace, as a commit judges it.",
     ),
 });
 
-const Issue = z.object({
+/** One thing wrong with a document, as the author gate names it. */
+export const ValidationIssue = z.object({
   code: z.string(),
   message: z.string(),
   node_id: z.string().optional(),
@@ -26,9 +29,9 @@ const Issue = z.object({
 
 const Output = z.object({
   valid: z.boolean().describe('False when a commit would be refused.'),
-  errors: z.array(Issue).describe('Blocking: fix every one of these before committing.'),
+  errors: z.array(ValidationIssue).describe('Blocking: fix every one of these before committing.'),
   warnings: z
-    .array(Issue)
+    .array(ValidationIssue)
     .describe('Advisory: real problems the engine tolerates, so they never block a commit.'),
   ref_warnings: z.array(z.string()).describe('Data references that will not resolve at run time.'),
   unconfigured_connections: z
@@ -61,12 +64,16 @@ export class ValidateTool implements McpTool {
     openWorldHint: false,
   };
 
-  constructor(private readonly catalog: ComposeCatalogService) {}
+  constructor(
+    private readonly catalog: ComposeCatalogService,
+    private readonly access: WorkflowAccessService,
+  ) {}
 
-  run(input: unknown, _ctx: McpCallContext): Promise<z.infer<typeof Output>> {
+  async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
     const { workflow_ir: ir, workflow_id: workflowId } = Input.parse(input);
-    const report = validateAuthoredIr(ir, this.catalog.facts(), workflowId);
-    return Promise.resolve({
+    const facts = await this.catalog.authoringFacts(ir, await judgedIn(this.access, ctx, workflowId));
+    const report = validateAuthoredIr(ir, facts, workflowId);
+    return {
       valid: report.valid,
       errors: report.errors,
       warnings: report.warnings,
@@ -77,6 +84,6 @@ export class ValidateTool implements McpTool {
         node_type: req.node_type,
         auth: req.auth,
       })),
-    });
+    };
   }
 }

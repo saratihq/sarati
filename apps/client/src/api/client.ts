@@ -579,6 +579,13 @@ export interface DiscoveredNode {
   parameters?: Record<string, unknown>;
 }
 
+/** Something the service flagged about a document it saved anyway, as its author gate names it. */
+export interface SaveWarning {
+  code: string;
+  message: string;
+  node_id?: string;
+}
+
 export interface DeployResult {
   workflow_id: string;
   workflow_url: string;
@@ -589,6 +596,7 @@ export interface DeployResult {
   activated?: boolean;
   activation_error?: string | null;
   ref_warnings?: string[];
+  warnings?: SaveWarning[];
 }
 
 // ─── Dashboard Types ───
@@ -812,6 +820,7 @@ export interface WorkflowVersionSummary {
   id: string;
   version_number: number;
   ref_warnings?: string[];
+  warnings?: SaveWarning[];
   /** True when the save matched the head exactly — nothing was minted. */
   no_changes?: boolean;
   workflow_json: Record<string, unknown>;
@@ -890,6 +899,7 @@ export interface MergeResultResponse {
   conflicts?: ConflictInfo[];
   /** Set when Merge into main deleted the source branch afterwards — it keeps it while a review of it is open. */
   cleaned_up?: { branch_deleted: string } | null;
+  warnings?: SaveWarning[];
 }
 
 /** Layout is presentation, not history: PATCH the branch head's node positions in place. */
@@ -1258,6 +1268,7 @@ export interface UpdateBranchResult {
   status: "merged" | "conflicts" | "up_to_date";
   merged_version_id?: string | null;
   conflicts?: ConflictInfo[];
+  warnings?: SaveWarning[];
 }
 
 /** Bring `fromBranch`'s changes into `branch` — where a merge into a protected branch has its conflicts resolved. */

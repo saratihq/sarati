@@ -15,6 +15,7 @@ import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
 import { requirePrincipal } from '../auth/principal';
 import { DomainError } from '../common/domain-error';
+import { isAppSlug } from '../runtime/app-slug';
 import { EnvironmentsService, type EnvironmentView } from './environments.service';
 import { Scope } from '../auth/scope.decorator';
 
@@ -53,8 +54,8 @@ class AssignSlotDto {
   connection_id!: string;
 }
 
-/** App slugs, one vocabulary with action/trigger public types (`slack`, `gmail`, …). */
-const APP_SHAPE = /^[a-z][a-z0-9_-]{0,119}$/;
+/** The longest app slug a slot names. */
+const MAX_APP_SLUG = 120;
 
 /** Env lifecycle + slot curation for the active org: reads need membership, writes owner/admin. */
 @Controller('api/environments')
@@ -142,7 +143,7 @@ export class EnvironmentsController {
   }
 
   private validApp(app: string): string {
-    if (!APP_SHAPE.test(app)) throw new DomainError('Invalid app slug', 400);
+    if (!isAppSlug(app) || app.length > MAX_APP_SLUG) throw new DomainError('Invalid app slug', 400);
     return app;
   }
 }

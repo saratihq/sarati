@@ -1,4 +1,5 @@
 import type { IRNode } from '../ir/models';
+import { APP_SLUG } from '../runtime/app-slug';
 import type { Condition, CompareOp } from '../runtime/conditions';
 import type { CodeNode, RunNode } from '../runtime/run-plan';
 import { assertAnswerableTopic } from '../runtime/timer-wait';
@@ -54,7 +55,7 @@ const ORCHESTR_SCHEDULE = 'orchestr:schedule';
 const ORCHESTR_CHAT = 'orchestr:chat';
 
 /** Node types that map 1:1 to an action: the public `<app>.<action>` namespace. */
-export const PUBLIC_ACTION_TYPE = /^[a-z][a-z0-9_-]*\.[\w.-]+$/;
+export const PUBLIC_ACTION_TYPE = new RegExp(`^${APP_SLUG}\\.[\\w.-]+$`);
 /** The internal `@scope/pkg:action` action form (back-compat). */
 export const INTERNAL_ACTION_TYPE = /^@[\w.-]+\/[\w.-]+:[\w.-]+$/;
 
@@ -137,11 +138,11 @@ function buildCodeNode(node: IRNode): CodeNode {
   if (typeof rawCode !== 'string' || rawCode.trim() === '') {
     throw new Error(`Code node "${node.name}" needs a non-empty "code" snippet`);
   }
-  const { onError, retry } = node.parameters;
+  const { onError, retry, language } = node.parameters;
   return {
     kind: 'code',
     id: node.id,
-    language: node.parameters.language === 'ts' ? 'ts' : 'js',
+    language,
     code: rawCode,
     ...(onError === 'continue' ? { onError: 'continue' as const } : {}),
     ...retryPolicyOf(retry),

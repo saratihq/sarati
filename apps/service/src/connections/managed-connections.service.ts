@@ -5,6 +5,7 @@ import { ComposioProvider } from './composio.provider';
 import { ConnectionsService } from './connections.service';
 import { isExecutableApp } from './managed-app-rails';
 import type { PlatformKeyScope } from '../platform/platform-keys.service';
+import { isAppSlug } from '../runtime/app-slug';
 
 /** An app offered for one-click managed connect. */
 export interface ManagedApp {
@@ -59,9 +60,6 @@ const TOOLKIT_TO_APP_SLUG: Record<string, string> = {
 };
 export const toOurSlug = (toolkit: string): string => TOOLKIT_TO_APP_SLUG[toolkit] ?? toolkit;
 
-/** Our public action-slug rule — a toolkit that can't be addressed as `<slug>.<action>` could never match an action. */
-const PUBLIC_SLUG_RE = /^[a-z][a-z0-9_-]*$/;
-
 @Injectable()
 export class ManagedConnectionsService {
   private readonly logger = new Logger(ManagedConnectionsService.name);
@@ -78,7 +76,7 @@ export class ManagedConnectionsService {
     const bySlug = new Map<string, ManagedApp>();
     for (const t of toolkits) {
       const slug = toOurSlug(t.slug);
-      if (!PUBLIC_SLUG_RE.test(slug) || bySlug.has(slug)) continue; // unaddressable or already offered
+      if (!isAppSlug(slug) || bySlug.has(slug)) continue; // unaddressable or already offered
       bySlug.set(slug, { slug, name: t.name, executable: isExecutableApp(slug) });
     }
     return [...bySlug.values()]

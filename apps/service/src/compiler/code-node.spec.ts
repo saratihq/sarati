@@ -1,3 +1,4 @@
+import { DomainError } from '../common/domain-error';
 import { emptySettings, type IREdge, type IRNode, type WorkflowIR } from '../ir/models';
 import type { DagCodeNode } from '../runtime/dag-plan';
 import type { CodeNode, RunPlan } from '../runtime/run-plan';
@@ -39,6 +40,15 @@ const ir = (nodes: IRNode[], edges: IREdge[] = []): WorkflowIR => ({
   settings: emptySettings(),
   metadata: {},
 });
+
+function refusalDetails(compile: () => unknown): Record<string, unknown> | undefined {
+  try {
+    compile();
+  } catch (err) {
+    return err instanceof DomainError ? err.details : undefined;
+  }
+  return undefined;
+}
 const codeNodeOf = (plan: { nodes: { id: string; kind: string }[] }, id: string): DagCodeNode =>
   plan.nodes.find((n) => n.id === id && n.kind === 'code') as DagCodeNode;
 
@@ -103,6 +113,30 @@ describe('code node compilation', () => {
       expect(() => compileWorkflowIrDag(ir([codeIrNode('empty', { code: '   ' })]))).toThrow(/non-empty/);
     });
 
+    it('refuses a language the sandbox does not run, rather than running the snippet as JavaScript', () => {
+      for (const language of ['python', 'typescript', 'javascript', '', 5]) {
+        const step = { ...codeIrNode('py', { language, code: 'return 1;' }), name: 'Score it' };
+        expect(() => compileWorkflowIrDag(ir([step]))).toThrow(
+          new DomainError(
+            `Code node "py" has "language": ${JSON.stringify(language)}, which the sandbox does not run — set it to "js" or "ts", or remove it for "js"`,
+          ),
+        );
+        expect(refusalDetails(() => compileWorkflowIrDag(ir([step])))).toEqual({
+          code: 'unsupported_code_language',
+          node_id: 'py',
+        });
+      }
+    });
+
+    it('runs a snippet with no language, or a null one, as JavaScript, untouched', () => {
+      for (const parameters of [{}, { language: null }]) {
+        const plan = compileWorkflowIrDag(
+          ir([codeIrNode('plain', { ...parameters, code: 'const n = 1; return n;' })]),
+        );
+        expect(codeNodeOf(plan, 'plain').code).toBe('const n = 1; return n;');
+      }
+    });
+
     it('rejects a TypeScript snippet that does not compile', () => {
       expect(() =>
         compileWorkflowIrDag(ir([codeIrNode('bad', { language: 'ts', code: 'const x: = ;' })])),
@@ -128,6 +162,25 @@ describe('code node compilation', () => {
       expect(node.code).not.toContain(': number');
       expect(node.guards).toEqual([{ source: 'first', port: 0 }]); // runs after the previous sibling
       expect(node.onErrorBranch?.nodes.map((n) => n.id)).toEqual(['onFail']);
+    });
+
+    it('refuses a language the sandbox does not run, rather than transpiling it as TypeScript', () => {
+      const code = { kind: 'code', id: 'py', language: 'python', code: 'return 1;' } as unknown as CodeNode;
+      expect(() => runPlanToDag({ id: 'p', nodes: [code] })).toThrow(
+        'Code node "py" has "language": "python", which the sandbox does not run — set it to "js" or "ts", or remove it for "js"',
+      );
+      expect(refusalDetails(() => runPlanToDag({ id: 'p', nodes: [code] }))).toEqual({
+        code: 'unsupported_code_language',
+        node_id: 'py',
+      });
+    });
+
+    it('runs a snippet with no language as JavaScript, untouched, rather than transpiling it as TypeScript', () => {
+      const dag = runPlanToDag({
+        id: 'p',
+        nodes: [{ kind: 'code', id: 'plain', code: 'const n = 1; return n;' }],
+      });
+      expect(codeNodeOf(dag, 'plain').code).toBe('const n = 1; return n;');
     });
   });
 });

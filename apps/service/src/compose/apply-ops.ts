@@ -1,7 +1,14 @@
 import { isRecord } from '../common/json-util';
 import { isTriggerNode } from '../compiler/compile-ir';
 import { sameEdgeEndpoints, type EdgeEndpoints } from '../ir/diff';
-import { isToolEligibleTarget, NODE_ID_RE } from './author-validation';
+import {
+  admitsTrigger,
+  type AuthoringFacts,
+  isToolEligibleTarget,
+  NODE_ID_RE,
+  uncheckedTriggerMessage,
+  unknownTriggerTypeHint,
+} from './author-validation';
 import type { IREdge, IRNode, WorkflowIR } from '../ir/models';
 import { cloneIr, emptySettings, MAIN_PORT_TYPE } from '../ir/models';
 
@@ -135,7 +142,7 @@ function requireNode(ir: WorkflowIR, nodeId: string, op: string): IRNode {
 /** What one op is allowed to do, and where a node that still needs a layout slot is collected. */
 interface ApplyContext {
   allowedTypes: ReadonlySet<string>;
-  allowedTriggerTypes: ReadonlySet<string>;
+  offersTrigger: AuthoringFacts['offersTrigger'];
   unplaced: Set<string>;
 }
 
@@ -169,7 +176,7 @@ function applyAddNode(ir: WorkflowIR, op: Extract<ComposeOp, { op: 'add_node' }>
     parameters: op.node.parameters ?? {},
     position: { x: 0, y: 0 }, // placeholder — layoutNewNodes assigns the real slot
     // App triggers are only recognizable by this marker (their type looks like an action's).
-    metadata: isAppTrigger(nodeType) && ctx.allowedTriggerTypes.has(nodeType) ? { trigger: true } : {},
+    metadata: isAppTrigger(nodeType) && ctx.offersTrigger(nodeType) === true ? { trigger: true } : {},
   });
   ctx.unplaced.add(id);
   return `added node "${id}" (${nodeType})`;
@@ -184,17 +191,16 @@ function retypeNode(
   node: IRNode,
   nextType: string,
   parameters: Record<string, unknown> | undefined,
-  allowedTriggerTypes: ReadonlySet<string>,
+  offersTrigger: AuthoringFacts['offersTrigger'],
 ): string {
   if (!isTriggerNode(node)) {
     throw new ApplyOpsError(
       `update_node "${node.id}": only the trigger node can change its type — remove and re-add an action to change it`,
     );
   }
-  if (!allowedTriggerTypes.has(nextType)) {
-    throw new ApplyOpsError(
-      `update_node "${node.id}": "${nextType}" is not a known trigger type — search the catalog with kind: "trigger" and copy an exact "type", or use orchestr:trigger | orchestr:webhook | orchestr:schedule | orchestr:chat`,
-    );
+  const admitted = admitsTrigger(nextType, offersTrigger);
+  if (admitted === false) {
+    throw new ApplyOpsError(`update_node "${node.id}": ${unknownTriggerTypeHint(nextType)}`);
   }
   node.node_type = nextType;
   // Mirror the client picker: app triggers carry metadata.trigger; native kinds clear it.
@@ -203,18 +209,19 @@ function retypeNode(
   else delete meta.trigger;
   node.metadata = meta;
   node.parameters = parameters ?? {};
-  return `retyped to "${nextType}" (parameters replaced)`;
+  const retyped = `retyped to "${nextType}" (parameters replaced)`;
+  return admitted === true ? retyped : `${retyped} — ${uncheckedTriggerMessage(node.id, nextType, admitted)}`;
 }
 
 function applyUpdateNode(
   ir: WorkflowIR,
   op: Extract<ComposeOp, { op: 'update_node' }>,
-  allowedTriggerTypes: ReadonlySet<string>,
+  offersTrigger: AuthoringFacts['offersTrigger'],
 ): string {
   const node = requireNode(ir, op.node_id, 'update_node');
   const changes: string[] = [];
   if (op.node_type !== undefined && op.node_type !== node.node_type) {
-    changes.push(retypeNode(node, op.node_type, op.parameters, allowedTriggerTypes));
+    changes.push(retypeNode(node, op.node_type, op.parameters, offersTrigger));
   } else if (op.parameters !== undefined) {
     // Shallow-merge: the agent sends only the keys it wants to set.
     node.parameters = { ...node.parameters, ...op.parameters };
@@ -487,7 +494,7 @@ function applyOne(ir: WorkflowIR, op: ComposeOp, ctx: ApplyContext): string {
     case 'add_node':
       return applyAddNode(ir, op, ctx);
     case 'update_node':
-      return applyUpdateNode(ir, op, ctx.allowedTriggerTypes);
+      return applyUpdateNode(ir, op, ctx.offersTrigger);
     case 'connect':
       return applyConnect(ir, op);
     case 'disconnect':
@@ -509,14 +516,24 @@ function isPlaced(node: IRNode): boolean {
   return isRecord(position) && typeof position.x === 'number' && typeof position.y === 'number';
 }
 
-/** Apply a batch atomically, returning a NEW document; throws an op-indexed {@link ApplyOpsError}. */
+/** The node types a batch sets — what it asks the trigger list about. */
+export function opNodeTypes(ops: readonly ComposeOp[]): string[] {
+  return ops.flatMap((op) => {
+    if (op.op === 'add_node') return [op.node.node_type];
+    return op.op === 'update_node' && op.node_type !== undefined ? [op.node_type] : [];
+  });
+}
+
+const OFFERS_NO_TRIGGER: AuthoringFacts['offersTrigger'] = () => false;
+
+/** Apply a batch atomically, returning a NEW document; throws an op-indexed {@link ApplyOpsError}. `offersTrigger` is the author gate's. */
 export function applyOps(
   input: WorkflowIR | null,
   ops: ComposeOp[],
   allowedTypes: ReadonlySet<string>,
-  allowedTriggerTypes: ReadonlySet<string> = new Set(),
+  offersTrigger: AuthoringFacts['offersTrigger'] = OFFERS_NO_TRIGGER,
 ): WorkflowIR {
-  return applyOpsDetailed(input, ops, allowedTypes, allowedTriggerTypes).ir;
+  return applyOpsDetailed(input, ops, allowedTypes, offersTrigger).ir;
 }
 
 /** {@link applyOps} plus one line per op describing what it did, in op order. */
@@ -524,12 +541,12 @@ export function applyOpsDetailed(
   input: WorkflowIR | null,
   ops: ComposeOp[],
   allowedTypes: ReadonlySet<string>,
-  allowedTriggerTypes: ReadonlySet<string> = new Set(),
+  offersTrigger: AuthoringFacts['offersTrigger'] = OFFERS_NO_TRIGGER,
 ): { ir: WorkflowIR; applied: string[] } {
   const ir = input ? cloneIr(input) : emptyIr();
   const ctx: ApplyContext = {
     allowedTypes,
-    allowedTriggerTypes,
+    offersTrigger,
     unplaced: new Set(ir.nodes.filter((node) => !isPlaced(node)).map((node) => node.id)),
   };
   const applied = ops.map((op, i) => {

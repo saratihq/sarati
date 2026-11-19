@@ -85,11 +85,8 @@ const CodeMirrorEditor = dynamic(() => import("./CodeMirrorEditor"), {
   ),
 });
 
-// The Code node (orchestr:code) offers only js/ts for now; Python lands later.
-const CODE_LANGUAGES: ReadonlyArray<{ value: "js" | "ts"; label: string }> = [
-  { value: "js", label: "JavaScript" },
-  { value: "ts", label: "TypeScript" },
-];
+// The select's value for a stored language the service does not run; disabled, so it is never written.
+const UNSUPPORTED_LANGUAGE = "__unsupported__";
 
 // Stable identity so the samples selector doesn't churn renders when out of scope.
 const EMPTY_SAMPLES: Record<string, unknown> = {};
@@ -3197,18 +3194,31 @@ function CodeUpstreamRefs({ upstream }: { upstream: UpstreamStep[] }) {
 function CodeNodeEditor({
   nodeId,
   language,
+  languageSpec,
+  languagesLoaded,
   code,
   onLanguageChange,
   onCodeChange,
   upstream,
 }: {
   nodeId: string;
-  language: "js" | "ts";
+  /** The stored `language`, as it is: absent, null, a runnable one, or one the sandbox does not run. */
+  language: unknown;
+  /** The served schema of `language`: its options and its default. */
+  languageSpec: NodeParamSchema | undefined;
+  languagesLoaded: boolean;
   code: string;
-  onLanguageChange: (language: "js" | "ts") => void;
+  onLanguageChange: (language: unknown) => void;
   onCodeChange: (code: string) => void;
   upstream: UpstreamStep[];
 }) {
+  const options = toOptions(languageSpec?.options ?? []);
+  const shown = language === undefined || language === null ? (languageSpec?.default ?? null) : language;
+  // A value that isn't a plain name (an empty string, a number) shows as written, so it never reads as blank.
+  const label = typeof shown === "string" && /^[\w.-]+$/.test(shown) ? shown : JSON.stringify(shown);
+  const known = options.some((o) => o.value === shown);
+  const unsupported = options.length > 0 && shown !== null && !known;
+  const unreadable = languagesLoaded && options.length === 0;
   return (
     <div className="space-y-2" data-testid="code-node-editor">
       <div>
@@ -3216,19 +3226,43 @@ function CodeNodeEditor({
           Language
         </label>
         <select
-          value={language}
-          onChange={(e) => onLanguageChange(e.target.value === "ts" ? "ts" : "js")}
+          value={known ? String(shown) : unsupported ? UNSUPPORTED_LANGUAGE : ""}
+          onChange={(e) => {
+            const picked = options.find((o) => String(o.value) === e.target.value);
+            if (picked) onLanguageChange(picked.value);
+          }}
+          disabled={options.length === 0}
           aria-label="Snippet language"
           className="w-full h-8 px-2 rounded-lg text-[12px] outline-none"
           style={{ background: "var(--orchestr-field)", border: "1px solid var(--orchestr-line)", color: "var(--orchestr-ink)" }}
           data-testid="code-language-select"
         >
-          {CODE_LANGUAGES.map((l) => (
-            <option key={l.value} value={l.value} style={OPTION_STYLE}>
-              {l.label}
+          {!known && !unsupported && (
+            <option value="" disabled style={OPTION_STYLE}>
+              {!languagesLoaded ? "Loading languages…" : shown === null ? "Choose a language" : label}
+            </option>
+          )}
+          {unsupported && (
+            <option value={UNSUPPORTED_LANGUAGE} disabled style={OPTION_STYLE}>
+              {`${label} (not supported)`}
+            </option>
+          )}
+          {options.map((o) => (
+            <option key={String(o.value)} value={String(o.value)} style={OPTION_STYLE}>
+              {o.label}
             </option>
           ))}
         </select>
+        {unsupported && (
+          <p className="text-[10px] m-0 mt-1" style={{ color: "var(--orchestr-warning)" }}>
+            {`This step won't save or run in this language — pick ${options.map((o) => o.label).join(" or ")}.`}
+          </p>
+        )}
+        {unreadable && (
+          <p className="text-[10px] m-0 mt-1" style={{ color: "var(--orchestr-warning)" }}>
+            Couldn&apos;t load the languages — close this step and open it again to retry.
+          </p>
+        )}
       </div>
 
       <CodeUpstreamRefs upstream={upstream} />
@@ -3237,7 +3271,12 @@ function CodeNodeEditor({
         <label className="block text-[11px] mb-1" style={{ color: "var(--orchestr-ink-muted)" }}>
           Code *
         </label>
-        <CodeMirrorEditor value={code} language={language} onChange={onCodeChange} ariaLabel="Code snippet" />
+        <CodeMirrorEditor
+          value={code}
+          language={shown === "ts" ? "ts" : "js"}
+          onChange={onCodeChange}
+          ariaLabel="Code snippet"
+        />
         {isFieldEmpty(code) && (
           <p className="text-[10px] m-0 mt-1" style={{ color: "var(--orchestr-warning)" }}>
             Required
@@ -4354,7 +4393,6 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
     updateIrNode(node.id, { parameters: { ...params, [key]: value } });
   };
 
-  const codeLanguage: "js" | "ts" = params.language === "ts" ? "ts" : "js";
   const codeValue = typeof params.code === "string" ? params.code : "";
 
   // Retry policy; maxAttempts ≤ 1 clears the key, and the compiler clamps on save.
@@ -4859,7 +4897,9 @@ export default function IrNodeInspector({ nodeId, onClose }: { nodeId: string; o
         {isCode && (
           <CodeNodeEditor
             nodeId={node.id}
-            language={codeLanguage}
+            language={params.language}
+            languageSpec={schema?.parameters?.language}
+            languagesLoaded={schemaResolved}
             code={codeValue}
             onLanguageChange={(language) => commit("language", language)}
             onCodeChange={(code) => commit("code", code)}

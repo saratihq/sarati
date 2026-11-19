@@ -275,6 +275,86 @@ before this upgrade, on v0.2.27 or earlier, that calls another workflow only aft
 that call there with `Sub-workflow "<id>" not found or not accessible.`: let such runs finish, here
 or before upgrading, before going back. Coming back moves nothing again.
 
+#### A Code step in another language, or a trigger nothing can fire, is refused
+
+A **Code** step runs JavaScript or TypeScript. A workflow that gave one any other `language`, such
+as `python` or `typescript` spelled out, was saved, and its snippet then ran as JavaScript. A
+workflow whose trigger had a type no trigger list offers, such as `orchestr:webhok`, `form_trigger`
+or a misspelled app trigger like `gmail.new_emial`, was saved too, and that trigger never fired. So
+was a document with no `edges` array, which no run could start. The editor offers none of these,
+so only a workflow written through the API, MCP or the composer, or merged with a value typed into
+the conflict resolver, could hold one.
+
+Now creating, deploying or saving such a workflow is refused `422`, and so is a merge whose result
+holds one — **Merge**, **Update** from another branch, or merging a review. Nothing is written,
+and `orchestr_open_review` reads such a merge as `mergeable: false`:
+
+- `unsupported_code_language`: `Code node "calc" has "language": "python", which the sandbox
+  does not run — set it to "js" or "ts", or remove it for "js"`. A Code step with no
+  `language`, or with `"language": null`, is still JavaScript.
+- `unknown_trigger_type`: `Node "start" is this workflow's trigger, but "orchestr:webhok" is not a
+  known trigger type — pick one from the trigger picker, or search the catalog for kind "trigger"
+  and copy its exact "type"; the built-in ones are orchestr:trigger, orchestr:webhook,
+  orchestr:schedule, orchestr:chat, orchestr:tool_trigger. As it is, the trigger never fires.`
+- `invalid_workflow_structure`: `A workflow document needs a "nodes" array and an "edges" array —
+  an empty "edges" when nothing is connected.`
+
+A merge now faces every check a save does, not only these, so a merge of branches saved on v0.2.27
+or earlier can be refused `422` for any reason a save gives, such as a step whose action is no
+longer in the catalog, and writes nothing. Open the branch whose head holds the problem, fix it
+there and save, then merge again.
+
+A trigger's type is checked against the list the trigger picker offers in the workflow's workspace,
+Composio's app triggers included, and the composer gives the same answer when it changes a trigger.
+`orchestr_validate` and `orchestr_edit_workflow` given a `workflow_id` you can read check in that
+workflow's workspace, as its save does. On an instance that provides its own Composio account that
+list leaves out the hand-polled `gmail.gmail_new_email_received`, so a workflow saved with it is
+refused there too, in the words its trigger already used: `Use "New Gmail Message Received Trigger"
+(gmail.gmail_new_gmail_message) instead: this instance doesn't run "New Email"
+(gmail.gmail_new_email_received), …`.
+
+An app trigger is named `<app>.<trigger>`: the app a lowercase slug (a letter, then letters, digits,
+`_` or `-`) other than `orchestr`, which names only the built-in triggers (`orchestr:webhook`), and
+the trigger after the dot lowercase and not empty. A type of any other shape, such as
+`Acme.new_deal`, `gmail.New_Mail`, `gmail.` or `orchestr.webhook`, is refused whatever Composio
+lists, and the trigger picker no longer offers a Composio trigger whose type has another shape. A
+version saved earlier with a capital after the dot is still subscribed as it was. A listing once
+read is used while it refreshes, so a save waits on Composio
+only until a workspace's listing has been read once since the service started, and while a listing
+has not answered within 5 seconds, saves after the one that waited don't wait on it. A merge asks
+for it only when the trigger of either branch, or of the merged workflow, is an app trigger only
+Composio fires, or when you typed an app's type to resolve a conflict. When Composio can't be asked
+— the workspace has no Composio key, its listing fails with none kept from earlier, or it does not
+answer within 5 seconds — an `<app>.<trigger>` type is saved or merged as written, never refused for
+that, and flagged `trigger_type_unverified`, saying which: on the save's, the merge's and
+`orchestr_validate`'s answer (`warnings`, also on `orchestr_commit` and `orchestr_create_workflow`),
+on `orchestr_edit_workflow`'s line for a change to it, and in the editor as **Saved, with a
+warning**, **Merged, with a warning** or **Updated, with a warning**. A merge whose branch moves
+while it runs, to a trigger not yet checked, checks that one; should it move so twice, the merge
+answers `409` `merge_moved`: merge again.
+
+- With no key: `Node "start" is this workflow's trigger, "gmail.new_emial", an app trigger only
+  Composio can fire, and this workspace has no Composio key: its list of app triggers can't be
+  checked, so nothing refuses it; it can't fire until the workspace has a Composio key, and then
+  only if Composio lists it.`
+- With a listing that failed or ran late: `…, and Composio's list of app triggers could not be
+  read just now — the listing failed or did not answer in time — so nothing refuses it; if
+  Composio lists no such trigger, it never fires.`
+
+**Run** in the editor, `POST /api/runs/from-ir`, and `POST /api/runs/async` and
+`orchestr_test_workflow` with a `workflow_ir`, now refuse such a workflow `400` `compile_failed`
+before any step runs, naming the language, the type or the missing array, and **Test this agent**
+answers `400` for a draft holding such a Code step anywhere in it. A run of a saved version is not
+refused for its trigger's type. A version saved earlier with such a Code step no longer runs its
+snippet as JavaScript: each run of it is refused before any step runs, and **Test step** on it
+answers `400`. The editor shows that step's language as, for example, `python (not supported)`: pick
+JavaScript or TypeScript and save. A plan sent to `POST /api/runs` is held to the same rule: a Code
+step naming another language, which was transpiled as TypeScript, is refused `400` `compile_failed`,
+and one naming none runs as JavaScript.
+
+Going back to v0.2.27 saves and merges such workflows again, and runs a Code step in another
+language as JavaScript again.
+
 ### v0.2.27
 
 **Re-run the installer, on one container too.** Both stack files changed, and only the installer

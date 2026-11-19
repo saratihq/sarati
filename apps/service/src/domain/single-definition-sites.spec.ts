@@ -17,6 +17,10 @@ const SRC = join(__dirname, '..');
 const SINGLE_DEFINITION = [
   // Constitution, "Rules of the vault" + — which nodes are triggers.
   { symbol: 'isTriggerNode', definedIn: 'compiler/compile-ir.ts' },
+  // Constitution, "Rules of the vault" — the languages a Code step runs in, the one it runs in naming none, and which one its `language` names.
+  { symbol: 'CODE_LANGUAGES', definedIn: 'runtime/run-plan.ts' },
+  { symbol: 'DEFAULT_CODE_LANGUAGE', definedIn: 'runtime/run-plan.ts' },
+  { symbol: 'codeLanguageOf', definedIn: 'compiler/code-node.ts' },
   // Constitution #4 — "did the content change?" is answered ONLY by computeDiff.
   { symbol: 'computeDiff', definedIn: 'ir/diff.ts' },
   // Constitution #7 — the name an environment may take, and the environment a name reaches without making one.
@@ -298,6 +302,81 @@ function toolExecutions(text: string): Array<{ at: string; chargedFirst: boolean
   return found;
 }
 
+const isJsOrTs = (node: ts.Node): boolean =>
+  ts.isStringLiteralLike(node) && (node.text === 'js' || node.text === 'ts');
+
+// An array element's own string, or the strings its properties hold when it is an object (an option list's `value`).
+const elementStrings = (element: ts.Expression): ts.Node[] =>
+  ts.isObjectLiteralExpression(element)
+    ? element.properties.flatMap((property) =>
+        ts.isPropertyAssignment(property) ? [property.initializer] : [],
+      )
+    : [element];
+
+// How many lists in a source name both 'js' and 'ts': an array literal of them or of objects holding them, or a union of string-literal types.
+function codeLanguageLists(text: string): number {
+  let found = 0;
+  const visit = (node: ts.Node): void => {
+    const members = ts.isArrayLiteralExpression(node)
+      ? node.elements.flatMap(elementStrings)
+      : ts.isUnionTypeNode(node)
+        ? node.types.map((type) => (ts.isLiteralTypeNode(type) ? type.literal : type))
+        : [];
+    const named = new Set(members.filter(isJsOrTs).map((member) => (member as ts.StringLiteralLike).text));
+    if (named.size === 2) found += 1;
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(parsed(text), visit);
+  return found;
+}
+
+const COMPARISONS = new Set([
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+]);
+
+// What a 'js' or 'ts' literal does where it is written: compares, is a `case`, a property's value, a type, or a plain value.
+function literalUse(literal: ts.Node): string {
+  const text = (literal as ts.StringLiteralLike).text;
+  const { parent } = literal;
+  if (ts.isBinaryExpression(parent) && COMPARISONS.has(parent.operatorToken.kind)) return `compares ${text}`;
+  if (ts.isCaseClause(parent)) return `case ${text}`;
+  if (ts.isPropertyAssignment(parent) && parent.initializer === literal) {
+    return `${parent.name.getText()}: ${text}`;
+  }
+  if (ts.isLiteralTypeNode(parent)) return `type ${text}`;
+  return text;
+}
+
+const TOP_LEVEL = '(top level)';
+
+// The name a literal is reported under: the function it is in, or the top-level declaration holding it.
+function declarationName(node: ts.Node, within: string): string {
+  const named =
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isTypeAliasDeclaration(node) ||
+    (ts.isVariableDeclaration(node) &&
+      (within === TOP_LEVEL ||
+        (node.initializer !== undefined &&
+          (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)))));
+  return named && node.name ? node.name.getText() : within;
+}
+
+// Every 'js' or 'ts' literal in a source, as `<the declaration it is in>: <what it does there>`.
+function codeLanguageLiterals(text: string): string[] {
+  const found: string[] = [];
+  const visit = (node: ts.Node, within: string): void => {
+    const name = declarationName(node, within);
+    if (isJsOrTs(node)) found.push(`${name}: ${literalUse(node)}`);
+    ts.forEachChild(node, (child) => visit(child, name));
+  };
+  ts.forEachChild(parsed(text), (child) => visit(child, TOP_LEVEL));
+  return found;
+}
+
 function tsFilesUnder(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -338,6 +417,82 @@ describe('vault: one definition site per load-bearing question', () => {
       .map((f) => f.rel);
 
     expect(fills).toEqual(['providers/action-router.provider.ts']);
+  });
+
+  /** Rules of the vault: a Code step's language is `codeLanguageOf`'s answer over `CODE_LANGUAGES`, so no path names, compares or defaults one itself. */
+  it("writes 'js' or 'ts' nowhere but run-plan.ts and the sandbox's own transpile step", () => {
+    const sites = sources()
+      .filter((f) => f.rel !== 'runtime/run-plan.ts')
+      .flatMap((f) => codeLanguageLiterals(f.text).map((site) => `${f.rel} ${site}`));
+
+    expect(sites).toEqual([
+      'compiler/code-node.ts transpileToJs: compares js',
+      'compiler/code-node.ts transpileToJs: loader: ts',
+      'compiler/code-node.ts bareParseError: loader: ts',
+    ]);
+  });
+
+  /** Rules of the vault: the guard above sees a language however it is written — compared under any name, a case, a default, a type — and never in a key or prose. */
+  it("finds every 'js' or 'ts' literal and what it does, and no key, mention or other extension", () => {
+    expect(
+      codeLanguageLiterals(
+        [
+          "export const runnable = (lang: unknown): boolean => lang === 'js' || lang !== 'ts';",
+          "function lower(l: string) { switch (l) { case 'ts': return 1; } return 0; }",
+          "function codeLanguageOf() { return 'js'; }",
+          "const options = { loader: 'ts' };",
+          "type Language = 'js' | 'py';",
+          'const tagged = `ts`;',
+          "const LABELS = { js: 'JavaScript', ts: 'TypeScript' };",
+          "const prose = \"'js' or 'ts'\";",
+          "const ext = ['.ts', 'jsx'];",
+          "// return 'js';",
+        ].join('\n'),
+      ),
+    ).toEqual([
+      'runnable: compares js',
+      'runnable: compares ts',
+      'lower: case ts',
+      'codeLanguageOf: js',
+      'options: loader: ts',
+      'Language: type js',
+      'tagged: ts',
+    ]);
+  });
+
+  /** Rules of the vault: the languages a Code step runs in are `CODE_LANGUAGES` alone, so no second list admits one the compiler refuses. */
+  it('only runtime/run-plan.ts lists the Code step languages', () => {
+    const listers = sources()
+      .filter((f) => codeLanguageLists(f.text) > 0)
+      .map((f) => f.rel);
+
+    expect(listers).toEqual(['runtime/run-plan.ts']);
+  });
+
+  /** Rules of the vault: the guard above sees a language list as an array, of names or of options, or a type, whatever else it holds, and not a lone name, a key or prose. */
+  it('finds a list of both Code step languages in an array or a union type, and not a single one, a key or a mention', () => {
+    const named = [
+      "const LANGUAGES = ['js', 'ts'];",
+      "const LANGUAGES = ['ts', 'js', 'python'] as const;",
+      "const RUNNABLE: readonly unknown[] = ['js', 'ts', undefined];",
+      "const runnable = new Set(['js', 'ts']);",
+      "if (['js', 'ts'].includes(language)) run();",
+      "type Language = 'js' | 'ts';",
+      "function lower(language: 'ts' | 'js' | undefined) { return language; }",
+      "const OPTIONS = [{ label: 'JavaScript', value: 'js' }, { label: 'TypeScript', value: 'ts' }];",
+    ];
+    const unnamed = [
+      "const LANGUAGES = ['js'];",
+      "type Language = 'js' | 'py';",
+      "const options = { loader: 'ts' };",
+      "const LABELS = { js: 'JavaScript', ts: 'TypeScript' };",
+      "const prose = \"'js' or 'ts'\";",
+      "// ['js', 'ts']",
+      "const pair = ['js', 'jsx'];",
+    ];
+
+    expect(named.filter((source) => codeLanguageLists(source) !== 1)).toEqual([]);
+    expect(unnamed.filter((source) => codeLanguageLists(source) !== 0)).toEqual([]);
   });
 
   /** Constitution #17: a save's ref warnings are `refWarningsOf`'s alone, so no save path skips its account check. */

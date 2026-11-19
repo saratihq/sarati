@@ -5,9 +5,11 @@ import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
 import request from 'supertest';
 
+import { ComposioProvider } from '../src/connections/composio.provider';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
+import { listComposioTriggers } from './support/composio-trigger-listing';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { insertPersonalOrgs } from './support/personal-org';
@@ -139,6 +141,7 @@ describe('Composio trigger intake (e2e, isolated DB)', () => {
     await listenOnLoopback(app);
     // The managed rail's key lives in the store, not the environment.
     await seedPlatformKeyEverywhere(app, 'composio_api_key', 'ck_e2e_fake_key');
+    listComposioTriggers(app.get(ComposioProvider), 'github.github_commit_event');
     // The signing secret is the same Composio project's credential, so it is scoped too.
     await seedPlatformKeyEverywhere(app, 'composio_webhook_secret', WEBHOOK_SECRET);
 

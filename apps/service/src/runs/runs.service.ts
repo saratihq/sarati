@@ -849,20 +849,25 @@ export class RunsService implements OnApplicationShutdown {
     return { plan, dispatch: { ...opts, runId, orgId: opts.orgId ?? opts.activeOrgId ?? null } };
   }
 
-  private assertAuthored(source: PlanSource): void {
+  private async assertAuthored(source: PlanSource, opts: IrRunOptions): Promise<void> {
     if (!this.catalog) throw new Error('no catalog to check the document against');
-    const problem =
-      'ir' in source
-        ? validateAuthoredIr(source.ir as unknown as Record<string, unknown>, this.catalog.facts()).errors[0]
-            ?.message
-        : runPlanIds(source.plan.nodes).map(nodeIdProblem).find(Boolean);
+    let problem: string | null | undefined;
+    if ('ir' in source) {
+      const ir = source.ir as unknown as Record<string, unknown>;
+      const at = opts.workflowId
+        ? { workflowId: opts.workflowId }
+        : { userId: opts.externalUserId, orgId: opts.activeOrgId ?? opts.orgId ?? null };
+      problem = validateAuthoredIr(ir, await this.catalog.authoringFacts(ir, at)).errors[0]?.message;
+    } else {
+      problem = runPlanIds(source.plan.nodes).map(nodeIdProblem).find(Boolean);
+    }
     if (problem) throw new Error(problem);
   }
 
   /** Compile what a run start was given; one that can't compile is answered 400 before any step runs, and recorded as refused unless its id already holds a run. */
   private async compile(source: PlanSource, opts: IrRunOptions, runId: string): Promise<DagPlan> {
     try {
-      if (opts.authored) this.assertAuthored(source);
+      if (opts.authored) await this.assertAuthored(source, opts);
       // The workflow id arms the compiler's direct-self-reference guard on `orchestr:call_workflow`.
       return 'ir' in source
         ? this.compiler.compile(source.ir, opts.workflowId ?? undefined)

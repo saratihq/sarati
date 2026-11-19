@@ -3,18 +3,13 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { DataSource } from 'typeorm';
 
 import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entity';
-import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
-import { threeWayMerge } from '../ir/merge';
+import { triggerTypesOf, validateAuthoredIr } from '../compose/author-validation';
 import { BranchService } from '../workflows/branch.service';
 
 /** `true`/`false` once the merge was actually evaluated; `'unknown'` when a head is missing and it cannot be. */
 export type Mergeability = boolean | 'unknown';
 
-/**
- * Read-only mergeability probe: the same `threeWayMerge` core the merge runs, off the same ancestor
- * walk, minting no version, moving no head and locking no row — invariant #5's one merge
- * implementation (`branch.service.ts mergeBranchIn`) stays the only thing that can land a merge.
- */
+/** Read-only mergeability probe: the merge's own three-way merge and author gate, minting, moving and locking nothing, so `mergeBranchIn` stays the one merge (invariant #5). */
 @Injectable()
 export class MergeProbeService {
   constructor(
@@ -31,16 +26,11 @@ export class MergeProbeService {
     if (!source?.headVersionId || !target?.headVersionId) return 'unknown';
     if (source.headVersionId === target.headVersionId) return true;
 
-    const [sourceHead, targetHead] = await Promise.all([
-      em.findOne(WorkflowVersionEntity, { where: { id: source.headVersionId } }),
-      em.findOne(WorkflowVersionEntity, { where: { id: target.headVersionId } }),
-    ]);
-    if (!sourceHead || !targetHead) return 'unknown';
-
-    const ancestor = await this.branches.findCommonAncestor(em, source.headVersionId, target.headVersionId);
-    const targetIr = this.branches.loadIrFor(targetHead);
-    // No shared history: the merge falls back to target as the base, so the probe must too.
-    const ancestorIr = ancestor ? this.branches.loadIrFor(ancestor) : targetIr;
-    return threeWayMerge(ancestorIr, this.branches.loadIrFor(sourceHead), targetIr).success;
+    const heads = await this.branches.mergeHeads(em, source.headVersionId, target.headVersionId);
+    if (!heads) return 'unknown';
+    if (!heads.result.success || !heads.result.merged) return false;
+    const merged = heads.result.merged as unknown as Record<string, unknown>;
+    const facts = await this.branches.factsFor(source.workflowId, triggerTypesOf(merged));
+    return validateAuthoredIr(merged, facts.gate, source.workflowId).valid;
   }
 }
