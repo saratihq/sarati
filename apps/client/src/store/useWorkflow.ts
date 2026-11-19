@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import * as api from "@/api/client";
+import { warnSaved } from "@/lib/save-warnings";
 import { toast } from "@/lib/toast";
 import * as irGraph from "@/lib/irGraph";
 import { irContentKey } from "@/lib/irCompare";
@@ -533,6 +534,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
         step: "execute",
       });
       warnBrokenRefs(deployResult.ref_warnings);
+      warnSaved("Saved, with a warning", deployResult.warnings);
       if (deployResult.is_live === false) {
         toast.success("Saved on Sarati", `"${deployResult.name}" v1 is saved on main — an owner or admin turns it on`);
         return;
@@ -704,8 +706,8 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
             : entry.type === "orchestr:loop"
               ? { items: "", item_var: "item" }
               : entry.type === "orchestr:code"
-                ? // A runnable starter, so the node isn't dropped with a blank required field.
-                  { language: "js", code: "// steps holds earlier outputs, trigger the firing event\nreturn steps;" }
+                ? // A runnable starter, so the node isn't dropped with a blank required field; no language is the default one.
+                  { code: "// steps holds earlier outputs, trigger the firing event\nreturn steps;" }
                 : // Seed schema-declared defaults, so a new action isn't dropped with an empty required field.
                   defaultParamsFromSchema(entry.parameters);
     const node = {
@@ -1042,6 +1044,7 @@ export const useWorkflow = create<WorkflowState>((set, get) => ({
     }
 
     warnBrokenRefs(version.ref_warnings);
+    warnSaved("Saved, with a warning", version.warnings);
     set({ isLoading: false, step: "execute", stripReady: false });
     if (!onMain) {
       toast.success(

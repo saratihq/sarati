@@ -5,8 +5,10 @@ import { DomainError } from '../common/domain-error';
 import { errorMessage } from '../common/error-message';
 import { isRecord } from '../common/json-util';
 import { edgePortType, type WorkflowIR } from '../ir/models';
-import { isRoutableActionType } from '../providers/sdk-actions.registry';
+import { composioTriggerSpec, pollNotServedMessage } from '../providers/composio-trigger.registry';
+import { isAppTriggerType, isRoutableActionType } from '../providers/sdk-actions.registry';
 import { accountRefFields, accountRefText } from '../runtime/account-ref';
+import { NATIVE_TRIGGER_TYPES, type UnreadListing } from '../triggers/trigger-catalog.service';
 
 /** A node id is a caller-assigned stable identifier (invariant #13) — this is its ONE format rule. */
 export const NODE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,59}$/;
@@ -81,6 +83,12 @@ export interface CatalogFacts {
   isTriggerType(nodeType: string): boolean;
 }
 
+/** {@link CatalogFacts} plus the trigger list of the workspace a document is judged for — what the author gate reads. */
+export interface AuthoringFacts extends CatalogFacts {
+  /** Whether the trigger picker offers `type` there, or why it can't say: only Composio's listing could, and it can't be read now. */
+  offersTrigger: (nodeType: string) => boolean | UnreadListing;
+}
+
 interface DocNode {
   id: string;
   name: string;
@@ -115,7 +123,7 @@ function edgesOf(ir: Record<string, unknown>): Record<string, unknown>[] {
 
 function checkNodes(
   nodes: DocNode[],
-  facts: CatalogFacts,
+  facts: AuthoringFacts,
   errors: ValidationError[],
   warnings: ValidationError[],
 ): void {
@@ -153,27 +161,92 @@ function checkNodes(
       });
       continue;
     }
-    if (isTriggerNode(node) || facts.controlTypes.has(node.node_type)) continue;
-    if (facts.isTriggerType(node.node_type)) {
-      errors.push({
-        code: 'trigger_not_marked',
-        node_id: node.id,
-        node_name: node.name,
-        node_type: node.node_type,
-        message: `Node "${node.id}" has the trigger type "${node.node_type}", but nothing marks it as this workflow's trigger — add "metadata": {"trigger": true} to the node. Without the marker it is treated as a step, and no step runs "${node.node_type}".`,
-      });
+    if (isTriggerNode(node)) {
+      checkTriggerType(node, facts, errors, warnings);
       continue;
     }
-    if (!isRoutableActionType(node.node_type)) {
-      errors.push({
-        code: 'unresolvable_node_type',
-        node_id: node.id,
-        node_name: node.name,
-        node_type: node.node_type,
-        message: `Node "${node.id}" has an unrecognized type "${node.node_type}" that isn't in the catalog — it can't run (likely a removed or renamed action).`,
-      });
-    }
+    const problem = stepTypeProblem(node, facts);
+    if (problem) errors.push(problem);
   }
+}
+
+/** Why the trigger list offers no `type`, worded once for this gate and the composer's retype. */
+export function unknownTriggerTypeHint(type: string): string {
+  // Hand-polled types are left out of the list only where the instance provides its own Composio account.
+  const handPolled = composioTriggerSpec(type);
+  if (handPolled) return pollNotServedMessage(handPolled);
+  return `"${type}" is not a known trigger type — pick one from the trigger picker, or search the catalog for kind "trigger" and copy its exact "type"; the built-in ones are ${NATIVE_TRIGGER_TYPES.join(', ')}`;
+}
+
+function unknownTriggerMessage(node: DocNode): string {
+  const hint = unknownTriggerTypeHint(node.node_type);
+  return composioTriggerSpec(node.node_type)
+    ? `Node "${node.id}" is this workflow's trigger. ${hint}.`
+    : `Node "${node.id}" is this workflow's trigger, but ${hint}. As it is, the trigger never fires.`;
+}
+
+/** Why trigger node `nodeId`'s `type` is admitted unchecked, worded once for this gate and the composer's retype. */
+export function uncheckedTriggerMessage(nodeId: string, type: string, why: UnreadListing): string {
+  const lead = `Node "${nodeId}" is this workflow's trigger, "${type}", an app trigger only Composio can fire`;
+  return why === 'no_composio_key'
+    ? `${lead}, and this workspace has no Composio key: its list of app triggers can't be checked, so nothing refuses it; it can't fire until the workspace has a Composio key, and then only if Composio lists it.`
+    : `${lead}, and Composio's list of app triggers could not be read just now — the listing failed or did not answer in time — so nothing refuses it; if Composio lists no such trigger, it never fires.`;
+}
+
+/** Whether a trigger of `type` is admitted: `true` when the picker offers it, the reason when it is admitted unchecked, `false` when refused — this gate's answer and the composer's retype's. */
+export function admitsTrigger(
+  type: string,
+  offersTrigger: AuthoringFacts['offersTrigger'],
+): boolean | UnreadListing {
+  const offered = offersTrigger(type);
+  if (offered === true) return true;
+  // Fail-open: Composio being down, or not set up here, never blocks a save — the type is flagged instead.
+  return offered !== false && isAppTriggerType(type) ? offered : false;
+}
+
+function checkTriggerType(
+  node: DocNode,
+  facts: AuthoringFacts,
+  errors: ValidationError[],
+  warnings: ValidationError[],
+): void {
+  const admitted = admitsTrigger(node.node_type, facts.offersTrigger);
+  if (admitted === true) return;
+  const at = { node_id: node.id, node_name: node.name, node_type: node.node_type };
+  if (admitted === false) {
+    errors.push({ code: 'unknown_trigger_type', ...at, message: unknownTriggerMessage(node) });
+    return;
+  }
+  warnings.push({
+    code: 'trigger_type_unverified',
+    ...at,
+    message: uncheckedTriggerMessage(node.id, node.node_type, admitted),
+  });
+}
+
+function stepTypeProblem(node: DocNode, facts: CatalogFacts): ValidationError | null {
+  if (facts.controlTypes.has(node.node_type)) return null;
+  const at = { node_id: node.id, node_name: node.name, node_type: node.node_type };
+  if (facts.isTriggerType(node.node_type)) {
+    return {
+      code: 'trigger_not_marked',
+      ...at,
+      message: `Node "${node.id}" has the trigger type "${node.node_type}", but nothing marks it as this workflow's trigger — add "metadata": {"trigger": true} to the node. Without the marker it is treated as a step, and no step runs "${node.node_type}".`,
+    };
+  }
+  if (isRoutableActionType(node.node_type)) return null;
+  return {
+    code: 'unresolvable_node_type',
+    ...at,
+    message: `Node "${node.id}" has an unrecognized type "${node.node_type}" that isn't in the catalog — it can't run (likely a removed or renamed action).`,
+  };
+}
+
+/** The type of every node this document marks as its trigger — what the gate asks the trigger list about. */
+export function triggerTypesOf(ir: Record<string, unknown>): string[] {
+  return nodesOf(ir)
+    .filter((node) => isTriggerNode(node))
+    .map((node) => node.node_type);
 }
 
 function checkTriggers(nodes: DocNode[], errors: ValidationError[]): void {
@@ -240,18 +313,29 @@ function checkEdges(
 
 function checkCompiles(
   ir: Record<string, unknown>,
+  nodes: DocNode[],
   workflowId: string | undefined,
   errors: ValidationError[],
 ): void {
-  if (!Array.isArray(ir.nodes) || !Array.isArray(ir.edges)) return;
+  if (!Array.isArray(ir.nodes) || !Array.isArray(ir.edges)) {
+    errors.push({
+      code: 'invalid_workflow_structure',
+      message:
+        'A workflow document needs a "nodes" array and an "edges" array — an empty "edges" when nothing is connected.',
+    });
+    return;
+  }
   try {
     compileWorkflowIrDag(ir as unknown as WorkflowIR, workflowId);
   } catch (err) {
     const details = err instanceof DomainError ? (err.details ?? {}) : {};
+    const nodeId = typeof details.node_id === 'string' ? details.node_id : undefined;
+    const node = nodes.find((candidate) => candidate.id === nodeId);
     errors.push({
-      code: 'invalid_workflow_structure',
+      code: typeof details.code === 'string' ? details.code : 'invalid_workflow_structure',
       message: errorMessage(err),
-      ...(typeof details.node_id === 'string' ? { node_id: details.node_id } : {}),
+      ...(nodeId === undefined ? {} : { node_id: nodeId }),
+      ...(node ? { node_name: node.name, node_type: node.node_type } : {}),
     });
   }
 }
@@ -295,21 +379,10 @@ export function refWarningsOf(ir: Record<string, unknown>, facts: CatalogFacts):
   return [...lintDataRefs(ir, signsInToNothing), ...accountless];
 }
 
-/**
- * The ONE author-time gate — every path that PERSISTS a document runs it: `commit`
- * (`versions-write.service.ts`), the two create paths (`workflow-lifecycle.service.ts`), and the
- * read-only `orchestr_validate` tool, so a hand-written document faces exactly what an ops-built
- * one does. `apply_ops` deliberately does NOT run it — it mutates a DRAFT mid-composition, where a
- * half-wired document is expected; it enforces the per-op subset instead, through the predicates
- * exported here (`NODE_ID_RE`, `isToolEligibleTarget`), never a second copy of them.
- * Whatever this accepts, the compiler must compile WHOLE: an edge or node it lets through and the
- * compiler then drops is the defect, not the document.
- * `workflowId` lets the compiler's self-referential `call_workflow` guard fire; omit it and a
- * document that 422s at commit would validate clean (the create paths have no id yet, so they can't).
- */
+/** The ONE author-time gate, run by every path that persists a document (`assertAuthoredIrValid`'s callers; a rollback re-heads a stored version unchecked, row 15), by the run doors given one (from-ir, async, `orchestr_test_workflow`) and by `orchestr_validate`; `apply_ops`, editing a draft, runs only its per-op subset through the predicates exported here; what it accepts the compiler must compile whole; without `workflowId` the self-call guard can't fire. */
 export function validateAuthoredIr(
   ir: Record<string, unknown>,
-  facts: CatalogFacts,
+  facts: AuthoringFacts,
   workflowId?: string,
 ): ValidationReport {
   const errors: ValidationError[] = [];
@@ -319,7 +392,7 @@ export function validateAuthoredIr(
   checkNodes(nodes, facts, errors, warnings);
   checkTriggers(nodes, errors);
   checkEdges(nodes, edgesOf(ir), errors, warnings);
-  checkCompiles(ir, workflowId, errors);
+  checkCompiles(ir, nodes, workflowId, errors);
 
   return {
     valid: errors.length === 0,
@@ -333,7 +406,7 @@ export function validateAuthoredIr(
 /** The commit path's face: the first error becomes a 422 carrying its machine code. */
 export function assertAuthoredIrValid(
   ir: Record<string, unknown>,
-  facts: CatalogFacts,
+  facts: AuthoringFacts,
   workflowId?: string,
 ): ValidationReport {
   const report = validateAuthoredIr(ir, facts, workflowId);

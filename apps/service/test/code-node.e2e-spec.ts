@@ -97,6 +97,59 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
     expect(res.body.outputs.loose).toEqual({ n: 'y', kind: 'string' });
   });
 
+  it('a language the sandbox does not run is refused before any step runs, never run as JavaScript', async () => {
+    const refusal = (prefix: string): string =>
+      `${prefix}Code node "calc" has "language": "python", which the sandbox does not run — set it to "js" or "ts", or remove it for "js"`;
+    const step = await request(app.getHttpServer())
+      .post('/api/runs/test-step')
+      .send({
+        node: {
+          id: 'calc',
+          name: 'Calc',
+          node_type: 'orchestr:code',
+          parameters: { language: 'python', code: 'return 1;' },
+        },
+      })
+      .expect(400);
+    expect(step.body.detail).toBe(refusal("Step can't run: "));
+
+    const drafted = await runIr(ir([codeNode('calc', { language: 'python', code: 'return 1;' })], [])).expect(
+      400,
+    );
+    expect(drafted.body).toMatchObject({
+      code: 'compile_failed',
+      steps: [],
+      detail: refusal("Workflow can't run: "),
+    });
+
+    const plan = await request(app.getHttpServer())
+      .post('/api/runs')
+      .send({
+        plan: { id: 'py', nodes: [{ kind: 'code', id: 'calc', language: 'python', code: 'return 1;' }] },
+      })
+      .expect(400);
+    expect(plan.body).toMatchObject({
+      code: 'compile_failed',
+      steps: [],
+      detail: refusal("Workflow can't run: "),
+    });
+  });
+
+  /** TypeScript reads `f < a > (b)` as a call of `f`, so this snippet answers only when it runs as JavaScript. */
+  it('a Code step with no language, or a null one, runs as JavaScript, a raw plan too', async () => {
+    const jsOnly = 'const f = 3, a = 2, b = 1; return { v: f < a > (b) };';
+    const res = await runIr(
+      ir([codeNode('unset', { code: jsOnly }), codeNode('nulled', { language: null, code: jsOnly })], []),
+    ).expect(201);
+    expect(res.body.outputs).toMatchObject({ unset: { v: false }, nulled: { v: false } });
+
+    const plan = await request(app.getHttpServer())
+      .post('/api/runs')
+      .send({ plan: { id: 'plain', nodes: [{ kind: 'code', id: 'plain', code: jsOnly }] } });
+    expect(plan.body).toMatchObject({ outputs: { plain: { v: false } } });
+    expect(plan.status).toBe(201);
+  });
+
   it("a TS syntax error is refused before any step runs, at the snippet's own line and column", async () => {
     const res = await runTs('bad', 'const total = 1;\nconst note = "€"; const x: = total;').expect(400);
     expect(res.body.code).toBe('compile_failed');
@@ -125,11 +178,25 @@ describe('code node over /api/runs/from-ir (e2e, isolated DB)', () => {
     expect(JSON.stringify(res.body)).toContain('intentional');
   });
 
-  it('lists orchestr:code as a placeable Code node in the catalog', async () => {
+  /** The editor's language dropdown is built from what this serves: its options and the one a step naming none runs in. */
+  it('lists orchestr:code as a placeable Code node in the catalog, serving the languages it runs in and its default', async () => {
     const res = await request(app.getHttpServer()).get('/api/node-types').expect(200);
     const code = (res.body.node_types as Array<{ type: string; name: string; category: string }>).find(
       (n) => n.type === 'orchestr:code',
     );
-    expect(code).toMatchObject({ name: 'Code', category: 'control' });
+    expect(code).toMatchObject({
+      name: 'Code',
+      category: 'control',
+      parameters: {
+        language: {
+          required: false,
+          default: 'js',
+          options: [
+            { label: 'JavaScript', value: 'js' },
+            { label: 'TypeScript', value: 'ts' },
+          ],
+        },
+      },
+    });
   });
 });

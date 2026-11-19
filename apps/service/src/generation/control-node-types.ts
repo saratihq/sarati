@@ -1,7 +1,16 @@
+import {
+  CODE_LANGUAGE_CHOICES,
+  CODE_LANGUAGES,
+  type CodeLanguage,
+  DEFAULT_CODE_LANGUAGE,
+} from '../runtime/run-plan';
+
 /**
  * The built-in engine's control nodes (`orchestr:*`) — the SINGLE SOURCE OF TRUTH for their
  * parameter schema; the palette and the compose catalog both derive from it (spec-guarded).
  */
+
+const CODE_LANGUAGE_LABELS: Record<CodeLanguage, string> = { js: 'JavaScript', ts: 'TypeScript' };
 
 /** One configurable parameter on a control node. */
 export type ControlNodeParam = {
@@ -12,6 +21,8 @@ export type ControlNodeParam = {
   defaultValue?: unknown;
   /** Advisory documented default (surfaced to the model; not seeded). */
   default?: unknown;
+  /** The only values it takes, as the editor's dropdown offers them. */
+  options?: ReadonlyArray<{ label: string; value: string }>;
 };
 
 /** A runtime control construct's catalog schema — the single source both surfaces derive from. */
@@ -107,9 +118,10 @@ export const CONTROL_NODE_SCHEMAS: readonly ControlNodeSchema[] = [
     parameters: {
       language: {
         type: 'string',
-        description:
-          'Snippet language: "js" or "ts" (TypeScript is type-stripped before it runs). Default "js".',
+        description: `Snippet language: ${CODE_LANGUAGE_CHOICES} (TypeScript is type-stripped before it runs). Default "${DEFAULT_CODE_LANGUAGE}".`,
         required: false,
+        default: DEFAULT_CODE_LANGUAGE,
+        options: CODE_LANGUAGES.map((value) => ({ label: CODE_LANGUAGE_LABELS[value], value })),
       },
       code: {
         type: 'string',

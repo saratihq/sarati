@@ -6,6 +6,7 @@ import { EnvPointersService } from '../../workflows/env-pointers.service';
 import { VersionsWriteService } from '../../workflows/versions-write.service';
 import { WorkflowsReadService } from '../../workflows/workflows-read.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
+import { ValidationIssue } from './validate.tool';
 import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 
 const Input = z.object({
@@ -46,6 +47,9 @@ const Output = z.object({
       'True when the document was content-equal to the head: no version was minted and `version_id` is the existing head.',
     ),
   ref_warnings: z.array(z.string()).describe('Data references that will not resolve at run time.'),
+  warnings: z
+    .array(ValidationIssue)
+    .describe("The author gate's advisory warnings, as orchestr_validate gives them: saved anyway."),
   is_live: z
     .literal(false)
     .describe(
@@ -83,7 +87,7 @@ export class CommitTool implements McpTool {
     const args = Input.parse(input);
     const wf = await this.access.require(ctx.principal, args.workflow_id, 'write');
 
-    const { version, refWarnings, noChanges } = await this.writes.commit({
+    const { version, refWarnings, warnings, noChanges } = await this.writes.commit({
       workflowId: args.workflow_id,
       workflowIr: args.workflow_ir,
       branchName: args.branch,
@@ -100,6 +104,7 @@ export class CommitTool implements McpTool {
       branch: args.branch,
       no_changes: noChanges ?? false,
       ref_warnings: refWarnings,
+      warnings,
       is_live: false,
       live_versions: await this.envPointers.listPointers(wf),
     };

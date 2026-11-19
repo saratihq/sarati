@@ -16,7 +16,7 @@ import { WorkflowBranchEntity } from '../database/entities/workflow-branch.entit
 import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { EventsService } from '../events/events.service';
 import type { MergeResolution } from '../ir/merge';
-import { BranchService, type ApprovalStanding } from './../workflows/branch.service';
+import { BranchService, type ApprovalStanding, type MergePair } from './../workflows/branch.service';
 import { lockWorkflowForWrite } from '../workflows/workflow-row-lock';
 
 const PG_LOCK_NOT_AVAILABLE = '55P03';
@@ -283,72 +283,79 @@ export class ReviewsService {
     userId: string,
     resolutions?: MergeResolution[],
   ): Promise<Record<string, unknown>> {
+    const seen = isIdShape(reviewId)
+      ? await this.dataSource.manager.findOne(WorkflowReviewEntity, { where: { id: reviewId, workflowId } })
+      : null;
+    const pair: MergePair | null = seen ? { ids: [seen.sourceBranchId, seen.targetBranchId] } : null;
     // ONE transaction: the NOWAIT review lock must be held ACROSS the merge.
-    return this.dataSource
-      .transaction(async (em) => {
-        await lockWorkflowForWrite(em, workflowId);
-        const review = await this.lockReview(em, workflowId, reviewId, true);
-        if (review.status === 'merged') throw new DomainError('Review is already merged');
-        if (review.status === 'closed') throw new DomainError('Review is closed');
+    return this.branches.withMergeFacts(workflowId, pair, resolutions, (facts) =>
+      this.dataSource
+        .transaction(async (em) => {
+          await lockWorkflowForWrite(em, workflowId);
+          const review = await this.lockReview(em, workflowId, reviewId, true);
+          if (review.status === 'merged') throw new DomainError('Review is already merged');
+          if (review.status === 'closed') throw new DomainError('Review is closed');
 
-        const target = await em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } });
-        const source = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
-        if (!target || !source) throw new DomainError('Review branches no longer exist');
+          const target = await em.findOne(WorkflowBranchEntity, { where: { id: review.targetBranchId } });
+          const source = await em.findOne(WorkflowBranchEntity, { where: { id: review.sourceBranchId } });
+          if (!target || !source) throw new DomainError('Review branches no longer exist');
 
-        if (target.isProtected && review.status !== 'approved') {
-          throw new DomainError('Target branch is protected — review must be approved before merging');
-        }
+          if (target.isProtected && review.status !== 'approved') {
+            throw new DomainError('Target branch is protected — review must be approved before merging');
+          }
 
-        const result = await this.branches.mergeBranchIn(
-          em,
-          workflowId,
-          source.name,
-          target.name,
-          userId,
-          resolutions,
-        );
-        if (!result.success) {
-          return {
-            status: 'conflicts',
-            conflicts: result.conflicts.map((c) => ({
-              node_id: c.node_id,
-              node_name: c.node_name,
-              kind: c.kind,
-              field_path: c.field_path,
-              deleted_on: c.deleted_on ?? null,
-              source_value: c.source_value,
-              target_value: c.target_value,
-              ancestor_value: c.ancestor_value,
-            })),
-          };
-        }
+          const result = await this.branches.mergeBranchIn(
+            em,
+            workflowId,
+            source.name,
+            target.name,
+            userId,
+            facts,
+            resolutions,
+          );
+          if (!result.success) {
+            return {
+              status: 'conflicts',
+              conflicts: result.conflicts.map((c) => ({
+                node_id: c.node_id,
+                node_name: c.node_name,
+                kind: c.kind,
+                field_path: c.field_path,
+                deleted_on: c.deleted_on ?? null,
+                source_value: c.source_value,
+                target_value: c.target_value,
+                ancestor_value: c.ancestor_value,
+              })),
+            };
+          }
 
-        review.status = 'merged';
-        review.mergedVersionId = result.mergedVersionId;
-        review.updatedAt = now();
-        await em.save(WorkflowReviewEntity, review);
-        const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
-        await this.events.emit(em, {
-          orgId: wf?.orgId ?? null,
-          actorUserId: userId,
-          type: 'review.merged',
-          subjectType: 'review',
-          subjectId: review.id,
-          payload: { merged_version_id: result.mergedVersionId },
-        });
-        return { status: 'merged', merged_version_id: result.mergedVersionId };
-      })
-      .catch((err: unknown) => {
-        const code =
-          (err as { driverError?: { code?: string }; code?: string }).driverError?.code ??
-          (err as { code?: string }).code;
-        if (code === PG_LOCK_NOT_AVAILABLE) {
-          throw new DomainError('This review is being changed by someone else — retry shortly', 409, {
-            code: 'review_busy',
+          review.status = 'merged';
+          review.mergedVersionId = result.mergedVersionId;
+          review.updatedAt = now();
+          await em.save(WorkflowReviewEntity, review);
+          const wf = await em.findOne(WorkflowEntity, { where: { id: workflowId } });
+          await this.events.emit(em, {
+            orgId: wf?.orgId ?? null,
+            actorUserId: userId,
+            type: 'review.merged',
+            subjectType: 'review',
+            subjectId: review.id,
+            payload: { merged_version_id: result.mergedVersionId },
           });
-        }
-        throw err;
-      });
+          return { status: 'merged', merged_version_id: result.mergedVersionId, warnings: result.warnings };
+        })
+        .catch((err: unknown) => {
+          const code =
+            (err as { driverError?: { code?: string }; code?: string }).driverError?.code ??
+            (err as { code?: string }).code;
+          if (code === PG_LOCK_NOT_AVAILABLE) {
+            throw new DomainError('This review is being changed by someone else — retry shortly', 409, {
+              code: 'review_busy',
+            });
+          }
+          throw err;
+        }),
+    );
   }
 
   /** Lock a review's branches and then the review, the order a branch delete takes them; `exclusive` takes the review FOR UPDATE NOWAIT. 404 once it is gone. */

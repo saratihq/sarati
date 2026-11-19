@@ -224,6 +224,7 @@ export class ReviewsController {
       merged_version_id: result.merged_version_id ?? null,
       conflicts: [],
       cleaned_up: null,
+      warnings: result.warnings,
     };
   }
 

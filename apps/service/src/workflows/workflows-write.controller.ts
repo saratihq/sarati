@@ -174,7 +174,7 @@ export class WorkflowsWriteController {
   ): Promise<Record<string, unknown>> {
     const principal = requirePrincipal(req);
     await this.authorize(req, workflowId, 'write');
-    const { version, refWarnings, noChanges } = await this.versionsWrite.commit({
+    const { version, refWarnings, warnings, noChanges } = await this.versionsWrite.commit({
       workflowId,
       workflowJson: body.workflow_json ?? null,
       workflowIr: body.workflow_ir ?? null,
@@ -194,6 +194,7 @@ export class WorkflowsWriteController {
       branch_name: null,
       parent_id: null,
       ref_warnings: refWarnings,
+      warnings,
       no_changes: noChanges ?? false,
     };
   }

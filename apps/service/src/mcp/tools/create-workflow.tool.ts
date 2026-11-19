@@ -5,6 +5,7 @@ import type { ApiScope } from '../../auth/scopes';
 import { WorkflowAccessService } from '../../workflows/workflow-access.service';
 import { WorkflowLifecycleService } from '../../workflows/workflow-lifecycle.service';
 import type { McpCallContext, McpTool } from '../mcp-tool';
+import { ValidationIssue } from './validate.tool';
 
 const Input = z.object({
   name: z
@@ -34,6 +35,9 @@ const Output = z.object({
     .literal(false)
     .describe('Always false: no environment points at a new workflow, so no trigger fires it.'),
   ref_warnings: z.array(z.string()).describe('Data references that will not resolve at run time.'),
+  warnings: z
+    .array(ValidationIssue)
+    .describe("The author gate's advisory warnings, as orchestr_validate gives them: saved anyway."),
   next_step: z.string(),
 });
 
@@ -78,6 +82,7 @@ export class CreateWorkflowTool implements McpTool {
       version_number: created.version.versionNumber,
       is_live: false,
       ref_warnings: created.refWarnings,
+      warnings: created.warnings,
       next_step: `Saved as version ${created.version.versionNumber} on '${created.branchName}'. Not live yet: no trigger fires it and no published-tool or sub-workflow call reaches it until it is published or promoted, and no MCP tool can move an environment pointer.`,
     };
   }

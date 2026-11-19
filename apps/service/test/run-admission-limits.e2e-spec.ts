@@ -3,8 +3,10 @@ import { createHmac } from 'node:crypto';
 import { Client } from 'pg';
 import request from 'supertest';
 
+import { ComposioProvider } from '../src/connections/composio.provider';
 import { RUN_ADMISSION_LOCK_SPACE } from '../src/database/advisory-lock-spaces';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { listComposioTriggers } from './support/composio-trigger-listing';
 import { ir, irNode } from './support/golden-docs';
 import {
   bootLimitsApp,
@@ -107,6 +109,7 @@ describe('run limits: a workspace’s runs in flight (e2e, DBOS on)', () => {
       )
     ).rows[0]!.id;
     await seedPlatformKeyEverywhere(limits.app, 'composio_api_key', 'ck_e2e_fake_key');
+    listComposioTriggers(limits.app.get(ComposioProvider), 'github.github_commit_event');
     await seedPlatformKeyEverywhere(limits.app, 'composio_webhook_secret', COMPOSIO_SECRET);
   }, 60_000);
 

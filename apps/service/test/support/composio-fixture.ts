@@ -27,6 +27,7 @@ const TRIGGER_TYPES = [
     toolkit: { slug: 'gmail' },
     type: 'poll',
   },
+  { slug: 'GITHUB_COMMIT_EVENT', name: 'Commit Event', toolkit: { slug: 'github' }, type: 'webhook' },
 ];
 const ZENDESK_PAGE_2 = 'https://acme.zendesk.com/api/v2/tickets.json?page=2&per_page=100';
 

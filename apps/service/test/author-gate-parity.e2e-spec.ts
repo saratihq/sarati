@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ThrottlerStorage } from '@nestjs/throttler';
 import { Client } from 'pg';
 import request from 'supertest';
 
@@ -71,7 +72,13 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
     db = new Client({ connectionString: e2eUrl });
     await db.connect();
 
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ThrottlerStorage)
+      .useValue({
+        increment: () =>
+          Promise.resolve({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }),
+      })
+      .compile();
     app = moduleRef.createNestApplication({ bodyParser: false, bufferLogs: true });
     configureApp(app);
     await app.init();
@@ -184,6 +191,260 @@ describe('author-gate ↔ compiler parity (e2e, isolated DB, mock auth)', () => 
     await http()
       .delete(`/api/workflows/${deployed.body.workflow_id as string}`)
       .expect(200);
+  });
+
+  const triggerRefusal = (type: string): Record<string, unknown> => ({
+    code: 'unknown_trigger_type',
+    node_id: 'start',
+    node_type: type,
+    detail: `Node "start" is this workflow's trigger, but "${type}" is not a known trigger type — pick one from the trigger picker, or search the catalog for kind "trigger" and copy its exact "type"; the built-in ones are orchestr:trigger, orchestr:webhook, orchestr:schedule, orchestr:chat, orchestr:tool_trigger. As it is, the trigger never fires.`,
+  });
+  const languageRefusal = (language: unknown): string =>
+    `Code node "calc" has "language": ${JSON.stringify(language)}, which the sandbox does not run — set it to "js" or "ts", or remove it for "js"`;
+  const withCode = (parameters: Record<string, unknown>): Record<string, unknown> =>
+    doc(
+      'code languages',
+      [node('start', 'orchestr:trigger'), node('calc', 'orchestr:code', parameters)],
+      [laneless('start', 'calc')],
+    );
+  const versionsOn = async (wf: string, branch: string): Promise<number> =>
+    (
+      (await http().get(`/api/workflows/${wf}/versions?branch=${branch}`).expect(200)).body
+        .versions as unknown[]
+    ).length;
+
+  it('a trigger no rail can fire is refused at create, at save and at an editor run; every native kind and an app trigger save', async () => {
+    const step = node('step', 'text.concat', { texts: ['hi'], separator: '' });
+    const withTrigger = (trigger: Record<string, unknown>): Record<string, unknown> =>
+      doc('trigger kinds', [trigger, step], [laneless('start', 'step')]);
+    const marked = (type: string): Record<string, unknown> => ({
+      ...node('start', type),
+      metadata: { trigger: true },
+    });
+
+    const created = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withTrigger(marked('orchestr:webhok')) })
+      .expect(422);
+    expect(created.body).toMatchObject(triggerRefusal('orchestr:webhok'));
+
+    const dep = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withTrigger(node('start', 'orchestr:trigger')) })
+      .expect(201);
+    const wf = dep.body.workflow_id as string;
+    const save = (trigger: Record<string, unknown>): request.Test =>
+      http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: withTrigger(trigger) });
+
+    // Each names no app — an app trigger is `<app>.<trigger>`, its app a lowercase slug and never the built-in nodes' `orchestr` — so no listing is asked.
+    for (const trigger of [
+      node('start', 'form_trigger'),
+      ...['Acme.new_deal', '.new_deal', 'gmail.', 'orchestr.webhook'].map(marked),
+    ]) {
+      const type = trigger.node_type as string;
+      const deployed = await http()
+        .post('/api/deploy')
+        .send({ workflow_json: withTrigger(trigger) })
+        .expect(422);
+      expect(deployed.body).toMatchObject(triggerRefusal(type));
+      const saved = await save(trigger).expect(422);
+      expect(saved.body).toMatchObject(triggerRefusal(type));
+    }
+    expect(await versionsOn(wf, 'main')).toBe(1);
+
+    const run = await http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: withTrigger(marked('orchestr:webhok')) })
+      .expect(400);
+    expect(run.body).toMatchObject({
+      code: 'compile_failed',
+      steps: [],
+      detail: `Workflow can't run: ${triggerRefusal('orchestr:webhok').detail as string}`,
+    });
+
+    const known = [
+      node('start', 'orchestr:webhook', { httpMethod: 'POST', path: 'gate-kinds' }),
+      node('start', 'orchestr:schedule', { interval_minutes: 60 }),
+      node('start', 'orchestr:chat'),
+      node('start', 'orchestr:tool_trigger', { tool_name: 'gate_kinds', description: 'Says hi.' }),
+      { ...node('start', 'rss.new_item', { url: feedUrl }), metadata: { trigger: true } },
+      // No Composio key here, so its listing can't be asked: an app trigger saves, unchecked.
+      marked('acmecrm.new_deal'),
+    ];
+    for (const trigger of known) {
+      const res = await save(trigger);
+      expect(res.body).not.toHaveProperty('code');
+      expect(res.status).toBe(201);
+    }
+    expect(await versionsOn(wf, 'main')).toBe(1 + known.length);
+
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
+  it('a Code step in a language the sandbox does not run is refused at create, at save and at an editor run; js, ts, none and null save', async () => {
+    const created = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withCode({ language: 'python', code: 'return 1' }) })
+      .expect(422);
+    expect(created.body).toMatchObject({
+      code: 'unsupported_code_language',
+      node_id: 'calc',
+      node_type: 'orchestr:code',
+      detail: languageRefusal('python'),
+    });
+    expect(created.body.errors).toHaveLength(1);
+
+    const dep = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withCode({ code: 'return 0;' }) })
+      .expect(201);
+    const wf = dep.body.workflow_id as string;
+    const save = (parameters: Record<string, unknown>): request.Test =>
+      http()
+        .post(`/api/workflows/${wf}/commit`)
+        .send({ workflow_ir: withCode(parameters) });
+
+    const saved = await save({ language: 'typescript', code: 'return 1;' }).expect(422);
+    expect(saved.body).toMatchObject({
+      code: 'unsupported_code_language',
+      node_id: 'calc',
+      node_type: 'orchestr:code',
+      detail: languageRefusal('typescript'),
+    });
+    expect(await versionsOn(wf, 'main')).toBe(1);
+
+    const run = await http()
+      .post('/api/runs/from-ir')
+      .send({ workflow_ir: withCode({ language: 'python', code: 'return 1;' }) })
+      .expect(400);
+    expect(run.body).toMatchObject({
+      code: 'compile_failed',
+      steps: [],
+      detail: `Workflow can't run: ${languageRefusal('python')}`,
+    });
+
+    const accepted = [
+      { language: 'js', code: 'return 1;' },
+      { language: 'ts', code: 'const n: number = 2; return n;' },
+      { code: 'return 3;' },
+      { language: null, code: 'return 4;' },
+    ];
+    for (const parameters of accepted) {
+      const res = await save(parameters);
+      expect(res.body).not.toHaveProperty('code');
+      expect(res.status).toBe(201);
+    }
+    expect(await versionsOn(wf, 'main')).toBe(1 + accepted.length);
+
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
+  it('a merge resolved into a Code step in a language the sandbox does not run is refused at every merge door, and writes nothing', async () => {
+    const dep = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withCode({ code: 'return 0;' }) })
+      .expect(201);
+    const wf = dep.body.workflow_id as string;
+    await http().post(`/api/workflows/${wf}/branches`).send({ name: 'lane' }).expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: withCode({ language: 'ts', code: 'return 0;' }), branch: 'lane' })
+      .expect(201);
+    await http()
+      .post(`/api/workflows/${wf}/commit`)
+      .send({ workflow_ir: withCode({ language: 'js', code: 'return 0;' }), branch: 'main' })
+      .expect(201);
+    const review = await http()
+      .post(`/api/workflows/${wf}/reviews`)
+      .send({ source_branch: 'lane', target_branch: 'main', title: 'lane → main' })
+      .expect(201);
+    const python = [
+      { node_id: 'calc', field_path: 'parameters.language', choice: 'custom', value: 'python' },
+    ];
+    const written = async (): Promise<unknown[]> => [
+      (await http().get(`/api/workflows/${wf}/branches/main/head`).expect(200)).body.head,
+      (await http().get(`/api/workflows/${wf}/branches/lane/head`).expect(200)).body.head,
+      await versionsOn(wf, 'main'),
+      await versionsOn(wf, 'lane'),
+    ];
+    const before = await written();
+
+    const conflicted = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main' })
+      .expect(201);
+    expect(conflicted.body.conflicts).toMatchObject([{ node_id: 'calc', field_path: 'parameters.language' }]);
+
+    for (const door of [
+      http()
+        .post(`/api/workflows/${wf}/branches/lane/merge`)
+        .send({ target_branch: 'main', resolutions: python }),
+      http()
+        .post(`/api/workflows/${wf}/branches/lane/update`)
+        .send({ from_branch: 'main', resolutions: python }),
+      http()
+        .post(`/api/workflows/${wf}/reviews/${review.body.id as string}/merge`)
+        .send({ resolutions: python }),
+    ]) {
+      const refused = await door.expect(422);
+      expect(refused.body).toMatchObject({
+        code: 'unsupported_code_language',
+        node_id: 'calc',
+        node_type: 'orchestr:code',
+        detail: languageRefusal('python'),
+      });
+    }
+    expect(await written()).toEqual(before);
+    expect(
+      (
+        await http()
+          .get(`/api/workflows/${wf}/reviews/${review.body.id as string}`)
+          .expect(200)
+      ).body.status,
+    ).toBe('open');
+
+    const merged = await http()
+      .post(`/api/workflows/${wf}/branches/lane/merge`)
+      .send({ target_branch: 'main', resolutions: [{ ...python[0], value: 'ts' }] })
+      .expect(201);
+    expect(merged.body.status).toBe('merged');
+
+    await http().delete(`/api/workflows/${wf}`).expect(200);
+  });
+
+  it('a document with no edges array, which can never compile, is refused at create, at save and at an editor run', async () => {
+    const edgeless = (): Record<string, unknown> => {
+      const document = withCode({ language: 'python', code: 'return 1;' });
+      delete document.edges;
+      return document;
+    };
+    const structure = {
+      code: 'invalid_workflow_structure',
+      detail:
+        'A workflow document needs a "nodes" array and an "edges" array — an empty "edges" when nothing is connected.',
+    };
+    expect(
+      (await http().post('/api/deploy').send({ workflow_json: edgeless() }).expect(422)).body,
+    ).toMatchObject(structure);
+    const dep = await http()
+      .post('/api/deploy')
+      .send({ workflow_json: withCode({ code: 'return 0;' }) })
+      .expect(201);
+    const wf = dep.body.workflow_id as string;
+    expect(
+      (await http().post(`/api/workflows/${wf}/commit`).send({ workflow_ir: edgeless() }).expect(422)).body,
+    ).toMatchObject(structure);
+    expect(await versionsOn(wf, 'main')).toBe(1);
+    const run = await http().post('/api/runs/from-ir').send({ workflow_ir: edgeless() }).expect(400);
+    expect(run.body).toMatchObject({
+      code: 'compile_failed',
+      steps: [],
+      detail: `Workflow can't run: ${structure.detail}`,
+    });
+
+    await http().delete(`/api/workflows/${wf}`).expect(200);
   });
 
   it('a stored version with no node positions still diffs, and re-committing it mints nothing', async () => {

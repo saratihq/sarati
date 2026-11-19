@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { repairDocumentLayout } from '../compose/apply-ops';
+import {
+  type AuthoringFacts,
+  assertAuthoredIrValid,
+  triggerTypesOf,
+  type ValidationError,
+} from '../compose/author-validation';
+import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { In, type DataSource, type EntityManager } from 'typeorm';
 
@@ -13,7 +20,7 @@ import { WorkflowVersionEntity } from '../database/entities/workflow-version.ent
 import { WorkflowVersionTagEntity } from '../database/entities/workflow-version-tag.entity';
 import { EventsService } from '../events/events.service';
 import { computeDiff } from '../ir/diff';
-import { threeWayMerge, type ConflictEntry, type MergeResolution } from '../ir/merge';
+import { threeWayMerge, type ConflictEntry, type MergeResolution, type MergeResult } from '../ir/merge';
 import type { WorkflowIR } from '../ir/models';
 import type { ReviewTestSummary } from '../reviews/review-test.types';
 import { rawQuery } from '../database/raw-query';
@@ -25,6 +32,24 @@ export interface BranchMergeOutcome {
   conflicts: ConflictEntry[];
   /** The pair's reviews not yet merged or closed, held FOR UPDATE since before the protection gate read them. */
   reviews: WorkflowReviewEntity[];
+  /** The author gate's warnings about the merged document; none when nothing was minted. */
+  warnings: ValidationError[];
+}
+
+/** The author gate's facts for a merge, and the trigger types they were read for. */
+export interface MergeFacts {
+  gate: AuthoringFacts;
+  readFor: ReadonlySet<string>;
+}
+
+/** A merge's two branches, source first, by name or by id. */
+export type MergePair = { names: [string, string] } | { ids: [string, string] };
+
+/** A merged document holding a trigger its facts were not read for — neither head's trigger nor a typed-in `node_type`. */
+export class MergeFactsOutdated extends DomainError {
+  constructor(readonly triggerTypes: readonly string[]) {
+    super('A branch moved while this merge was being prepared — merge again.', 409, { code: 'merge_moved' });
+  }
 }
 
 /** A branch's inherited starting point, carrying the version's number in ITS OWN branch's numbering. */
@@ -43,7 +68,71 @@ export class BranchService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly events: EventsService,
+    private readonly catalog: ComposeCatalogService,
   ) {}
+
+  /** Runs `merge`, a transaction around {@link mergeBranchIn}, with the author gate's facts read before it opens, reading them again once for a trigger they missed. */
+  async withMergeFacts<T>(
+    workflowId: string,
+    pair: MergePair | null,
+    resolutions: MergeResolution[] | undefined,
+    merge: (facts: MergeFacts) => Promise<T>,
+  ): Promise<T> {
+    const types = pair ? await this.mergeCandidates(workflowId, pair, resolutions) : [];
+    try {
+      return await merge(await this.factsFor(workflowId, types));
+    } catch (err) {
+      if (!(err instanceof MergeFactsOutdated)) throw err;
+      return merge(await this.factsFor(workflowId, [...types, ...err.triggerTypes]));
+    }
+  }
+
+  /** The author gate's facts for a merge into `workflowId` whose document holds the triggers `triggerTypes`. */
+  async factsFor(workflowId: string, triggerTypes: readonly string[]): Promise<MergeFacts> {
+    return {
+      gate: await this.catalog.authoringFactsFor(triggerTypes, { workflowId }),
+      readFor: new Set(triggerTypes),
+    };
+  }
+
+  /** The trigger types merging `pair` likely holds, read from its heads without locking: each head's triggers, and a typed-in `node_type`. */
+  private async mergeCandidates(
+    workflowId: string,
+    pair: MergePair,
+    resolutions: MergeResolution[] = [],
+  ): Promise<string[]> {
+    const em = this.dataSource.manager;
+    const branches = await em.find(WorkflowBranchEntity, {
+      where: 'names' in pair ? { workflowId, name: In(pair.names) } : { workflowId, id: In(pair.ids) },
+    });
+    const headIds = branches.flatMap((b) => (b.headVersionId ? [b.headVersionId] : []));
+    const heads =
+      headIds.length > 0 ? await em.find(WorkflowVersionEntity, { where: { id: In(headIds) } }) : [];
+    const fromHeads = heads.flatMap((head) =>
+      triggerTypesOf(this.loadIrFor(head) as unknown as Record<string, unknown>),
+    );
+    const typedIn = resolutions.flatMap((r) =>
+      r.field_path === 'node_type' && typeof r.value === 'string' ? [r.value] : [],
+    );
+    return [...new Set([...fromHeads, ...typedIn])];
+  }
+
+  /** The three-way merge of two heads over their merge base, which the merge and a review's probe share; null when a head can't be loaded. */
+  async mergeHeads(
+    em: EntityManager,
+    sourceHeadId: string,
+    targetHeadId: string,
+    resolutions?: MergeResolution[],
+  ): Promise<{ result: MergeResult; targetIr: WorkflowIR } | null> {
+    const ancestor = await this.findCommonAncestor(em, sourceHeadId, targetHeadId);
+    const sourceHead = await em.findOne(WorkflowVersionEntity, { where: { id: sourceHeadId } });
+    const targetHead = await em.findOne(WorkflowVersionEntity, { where: { id: targetHeadId } });
+    if (!sourceHead || !targetHead) return null;
+    const targetIr = this.loadIrFor(targetHead);
+    // No shared history: the merge falls back to target as the base.
+    const ancestorIr = ancestor ? this.loadIrFor(ancestor) : targetIr;
+    return { result: threeWayMerge(ancestorIr, this.loadIrFor(sourceHead), targetIr, resolutions), targetIr };
+  }
 
   async createBranch(
     workflowId: string,
@@ -454,13 +543,14 @@ export class BranchService {
     return base ? em.findOne(WorkflowVersionEntity, { where: { id: base } }) : null;
   }
 
-  /** The ONE merge (constitution #5), inside the CALLER's transaction, which already holds the workflow row. */
+  /** The ONE merge (constitution #5), inside the CALLER's transaction, which already holds the workflow row; `facts` are {@link withMergeFacts}'. */
   async mergeBranchIn(
     em: EntityManager,
     workflowId: string,
     sourceBranchName: string,
     targetBranchName: string,
     userId: string | null,
+    facts: MergeFacts,
     resolutions?: MergeResolution[],
   ): Promise<BranchMergeOutcome> {
     const { source, target } = await this.lockBranchPair(em, workflowId, sourceBranchName, targetBranchName);
@@ -514,26 +604,23 @@ export class BranchService {
     }
 
     if (await this.historyContains(em, target.headVersionId, source.headVersionId)) {
-      return { success: true, mergedVersionId: null, conflicts: [], reviews };
+      return { success: true, mergedVersionId: null, conflicts: [], reviews, warnings: [] };
     }
 
-    const ancestor = await this.findCommonAncestor(em, source.headVersionId, target.headVersionId);
-    const sourceHead = await em.findOne(WorkflowVersionEntity, { where: { id: source.headVersionId } });
-    const targetHead = await em.findOne(WorkflowVersionEntity, { where: { id: target.headVersionId } });
-    if (!sourceHead || !targetHead) throw new DomainError('Could not load branch head versions');
-
-    const sourceIr = this.loadIrFor(sourceHead);
-    const targetIr = this.loadIrFor(targetHead);
-    const ancestorIr = ancestor ? this.loadIrFor(ancestor) : targetIr;
-
-    const result = threeWayMerge(ancestorIr, sourceIr, targetIr, resolutions);
+    const heads = await this.mergeHeads(em, source.headVersionId, target.headVersionId, resolutions);
+    if (!heads) throw new DomainError('Could not load branch head versions');
+    const { result, targetIr } = heads;
     if (!result.success || !result.merged) {
       if (target.isProtected) throw protectedMergeConflicts(source, targetBranchName);
-      return { success: false, mergedVersionId: null, conflicts: result.conflicts, reviews };
+      return { success: false, mergedVersionId: null, conflicts: result.conflicts, reviews, warnings: [] };
     }
 
     // Native: the stored document IS the IR (identity).
     const mergedJson = JSON.parse(JSON.stringify(result.merged)) as Record<string, unknown>;
+    const unread = triggerTypesOf(mergedJson).filter((type) => !facts.readFor.has(type));
+    if (unread.length > 0) throw new MergeFactsOutdated(unread);
+    // The one author gate, as a commit faces it: two valid heads, or a hand-typed resolution, can merge into a document that can't run.
+    const { warnings } = assertAuthoredIrValid(mergedJson, facts.gate, workflowId);
     const irDiff = computeDiff(targetIr, result.merged);
 
     const maxRow = await rawQuery<{ max: number }>(
@@ -580,7 +667,7 @@ export class BranchService {
       payload: { source: sourceBranchName, target: targetBranchName, version_number: nextVersion },
     });
 
-    return { success: true, mergedVersionId: mergeVersion.id, conflicts: [], reviews };
+    return { success: true, mergedVersionId: mergeVersion.id, conflicts: [], reviews, warnings };
   }
 
   /** Per-branch `latest` find-or-create. */

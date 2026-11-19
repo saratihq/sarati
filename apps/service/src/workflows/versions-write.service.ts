@@ -14,7 +14,12 @@ import { WorkflowVersionEntity } from '../database/entities/workflow-version.ent
 import { EventsService } from '../events/events.service';
 import { computeDiff, type IRDiff } from '../ir/diff';
 import type { WorkflowIR } from '../ir/models';
-import { assertAuthoredIrValid, refWarningsOf } from '../compose/author-validation';
+import {
+  assertAuthoredIrValid,
+  type AuthoringFacts,
+  refWarningsOf,
+  type ValidationError,
+} from '../compose/author-validation';
 import { composerMerge } from '../compose/compose-merge';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { BranchService } from './branch.service';
@@ -34,6 +39,15 @@ export interface CommitInput {
   principal?: Principal;
   /** Optimistic-concurrency token: the head the client edited from; a moved branch is a 409, never a silent clobber. Omitted → no guard. */
   baseVersionId?: string | null;
+}
+
+/** A save's outcome: the version, and what the save says about it without refusing it. */
+export interface CommitResult {
+  version: WorkflowVersionEntity;
+  refWarnings: string[];
+  /** The author gate's warnings: real problems the engine tolerates, such as a trigger type it could not check. */
+  warnings: ValidationError[];
+  noChanges?: boolean;
 }
 
 /** One field-level collision a caller must resolve by hand before re-committing. */
@@ -267,10 +281,10 @@ export class VersionsWriteService {
     });
   }
 
-  async commit(
-    input: CommitInput & { workflowId: string },
-  ): Promise<{ version: WorkflowVersionEntity; refWarnings: string[]; noChanges?: boolean }> {
+  /** Save a document as the branch's next version; `known` is the gate's facts its caller already read for it in this workflow's workspace. */
+  async commit(input: CommitInput & { workflowId: string }, known?: AuthoringFacts): Promise<CommitResult> {
     const irData = documentOf(input);
+    const facts = known ?? (await this.catalog.authoringFacts(irData, { workflowId: input.workflowId }));
 
     return this.dataSource.transaction(async (em) => {
       await lockWorkflowForWrite(em, input.workflowId);
@@ -302,14 +316,14 @@ export class VersionsWriteService {
       if (branch.headVersionId) {
         const head = await em.findOne(WorkflowVersionEntity, { where: { id: branch.headVersionId } });
         if (head?.workflowIr && diffAgainstHead(head.workflowIr, irData).entries.length === 0) {
-          return { version: head, refWarnings: refWarningsOf(irData, this.catalog.facts()), noChanges: true };
+          return { version: head, refWarnings: refWarningsOf(irData, facts), warnings: [], noChanges: true };
         }
       }
 
       // The ONE author-time gate: a doc that only fails at RUN must fail at SAVE, and a
       // hand-written document faces exactly what an ops-built one does. Write path only — reads of
       // an existing phantom stay open so the user can fix it.
-      const report = assertAuthoredIrValid(irData, this.catalog.facts(), wf.id);
+      const report = assertAuthoredIrValid(irData, facts, wf.id);
 
       const version = await this.insertVersion(em, {
         wf,
@@ -321,8 +335,8 @@ export class VersionsWriteService {
         actorId: input.actorId,
         eventType: 'workflow.committed',
       });
-      // Broken data refs surface at save, not at run time.
-      return { version, refWarnings: report.ref_warnings };
+      // Broken data refs and the gate's warnings surface at save, not at run time.
+      return { version, refWarnings: report.ref_warnings, warnings: report.warnings };
     });
   }
 

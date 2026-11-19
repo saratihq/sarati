@@ -6,9 +6,11 @@ import { useWorkflow } from "@/store/useWorkflow";
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof api>()),
   deployWorkflow: vi.fn(),
+  commitVersion: vi.fn(),
 }));
 
 const deployWorkflow = vi.mocked(api.deployWorkflow);
+const commitVersion = vi.mocked(api.commitVersion);
 
 const result = (over: Partial<api.DeployResult> = {}): api.DeployResult => ({
   workflow_id: "wf-1",
@@ -58,6 +60,49 @@ describe("deploy: the activation the service reports", () => {
     await useWorkflow.getState().deploy();
 
     expect(warnings()).toEqual([]);
+  });
+});
+
+describe("deploy: what the service flagged about the document it saved", () => {
+  const unchecked = {
+    code: "trigger_type_unverified",
+    message: 'Node "start" is this workflow\'s trigger, "gmail.new_mail", an app trigger only Composio can fire, and this workspace has no Composio key.',
+    node_id: "start",
+  };
+
+  it("says what it flagged, and how many more", async () => {
+    deployWorkflow.mockResolvedValue(result({ warnings: [unchecked] }));
+    await useWorkflow.getState().deploy();
+    expect(warnings()).toMatchObject([{ title: "Saved, with a warning", description: unchecked.message }]);
+
+    useToasts.setState({ toasts: [] });
+    deployWorkflow.mockResolvedValue(result({ warnings: [unchecked, { ...unchecked, node_id: "other" }] }));
+    await useWorkflow.getState().deploy();
+    expect(warnings()).toMatchObject([{ description: `${unchecked.message} (+1 more)` }]);
+  });
+
+  it("stays quiet when it flagged nothing", async () => {
+    deployWorkflow.mockResolvedValue(result({ warnings: [] }));
+    await useWorkflow.getState().deploy();
+    expect(warnings()).toEqual([]);
+  });
+
+  it("says what it flagged on a save of an edit, too", async () => {
+    useWorkflow.setState({
+      workflowId: "wf-1",
+      workflowJson: { nodes: [{ id: "start" }], edges: [] },
+      lastGeneratedJson: { nodes: [], edges: [] },
+      editBranch: "lane",
+      baseVersionId: "v1",
+    });
+    commitVersion.mockResolvedValue({
+      id: "v2",
+      version_number: 2,
+      warnings: [unchecked],
+    } as Awaited<ReturnType<typeof api.commitVersion>>);
+
+    expect(await useWorkflow.getState().saveDeployedEdits()).toMatchObject({ kind: "committed" });
+    expect(warnings()).toMatchObject([{ title: "Saved, with a warning", description: unchecked.message }]);
   });
 });
 

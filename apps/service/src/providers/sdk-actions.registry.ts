@@ -5,6 +5,7 @@ import { type Action, actions, type AuthScheme, type ManifestEntry } from '@sara
 
 import { errorMessage } from '../common/error-message';
 import { dataFile } from '../generation/data-dir';
+import { APP_SLUG, isAppSlug } from '../runtime/app-slug';
 
 /** Merge-time curation counts are logged here (no DI — a standalone Logger). */
 const logger = new Logger('SdkActionsRegistry');
@@ -139,7 +140,17 @@ export function validatedAppSlug(type: string): string | null {
   const dot = type.indexOf('.');
   if (dot <= 0) return null;
   const slug = type.slice(0, dot);
-  return /^[a-z][a-z0-9_-]*$/.test(slug) ? slug : null;
+  return isAppSlug(slug) ? slug : null;
+}
+
+const BUILT_IN_NAMESPACE = 'orchestr';
+
+/** Whether `type` is a well-formed public `<app>.<trigger>` trigger type: an app slug, never the built-in nodes' `orchestr`, and a non-empty lowercase trigger after it, as every trigger list writes one. */
+export function isAppTriggerType(type: string): boolean {
+  const app = validatedAppSlug(type);
+  if (app === null || app === BUILT_IN_NAMESPACE) return false;
+  const trigger = type.slice(app.length + 1);
+  return trigger !== '' && trigger === trigger.toLowerCase();
 }
 
 // ─── Composio universal fallback catalog ────────────────────────────────────
@@ -289,7 +300,7 @@ export function isRoutableActionType(type: string): boolean {
 const MUTATION_VERB_RE = /^(create|post|insert|upload|update|patch|put|send|add|delete|remove|set|replace)_/;
 
 /** A well-formed public `<app>.<action>` id — the letter-first app slug + a snake action tail. */
-const OFFERABLE_TYPE_RE = /^[a-z][a-z0-9_-]*\.[a-z0-9_]+$/;
+const OFFERABLE_TYPE_RE = new RegExp(`^${APP_SLUG}\\.[a-z0-9_]+$`);
 
 /**
  * Whether a Composio catalog ROW is worth OFFERING: (a) well-formed id + non-empty `composioSlug`,

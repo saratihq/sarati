@@ -12,7 +12,11 @@ import { WorkflowEntity } from '../database/entities/workflow.entity';
 import { WorkflowVersionEntity } from '../database/entities/workflow-version.entity';
 import { WorkflowVersionTagEntity } from '../database/entities/workflow-version-tag.entity';
 import { EventsService } from '../events/events.service';
-import { assertAuthoredIrValid } from '../compose/author-validation';
+import {
+  assertAuthoredIrValid,
+  type AuthoringFacts,
+  type ValidationError,
+} from '../compose/author-validation';
 import { ComposeCatalogService } from '../compose/compose-catalog.service';
 import { EnvPointersService } from './env-pointers.service';
 import { TriggerSignalsService } from '../triggers/trigger-signals.service';
@@ -41,6 +45,8 @@ export interface DraftCreateResult {
   branchName: string;
   version: WorkflowVersionEntity;
   refWarnings: string[];
+  /** The author gate's warnings about v1. */
+  warnings: ValidationError[];
 }
 
 /** Workflow lifecycle: create from an IR document, delete, metadata save, tenancy attribution. */
@@ -60,10 +66,12 @@ export class WorkflowLifecycleService {
    * author-time gate as every other version, and nothing goes live — release stays the explicit
    * Publish act (invariant #2).
    */
-  async createDraft(input: DraftCreateInput): Promise<DraftCreateResult> {
+  async createDraft(input: DraftCreateInput, known?: AuthoringFacts): Promise<DraftCreateResult> {
     const { user, activeOrgId: orgId } = input.principal;
+    // The creator's workspace is the one the workflow is made in, so its commit reads these same facts.
+    const facts = known ?? (await this.catalog.authoringFacts(input.irDoc, { userId: user.id, orgId }));
     // The gate runs before anything is written, so a refused document leaves no empty workflow behind.
-    assertAuthoredIrValid(input.irDoc, this.catalog.facts());
+    assertAuthoredIrValid(input.irDoc, facts);
 
     const { wf, branchName } = await this.dataSource.transaction(async (em) => {
       if (orgId) await lockOrgForWrite(em, orgId);
@@ -90,16 +98,19 @@ export class WorkflowLifecycleService {
       return { wf: created, branchName: branch.name };
     });
 
-    const { version, refWarnings } = await this.versionsWrite.commit({
-      workflowId: wf.id,
-      workflowIr: input.irDoc,
-      branchName,
-      commitMessage: input.commitMessage ?? 'Initial version',
-      author: user.name,
-      actorId: user.id,
-      principal: input.principal,
-    });
-    return { workflow: wf, branchName, version, refWarnings };
+    const { version, refWarnings, warnings } = await this.versionsWrite.commit(
+      {
+        workflowId: wf.id,
+        workflowIr: input.irDoc,
+        branchName,
+        commitMessage: input.commitMessage ?? 'Initial version',
+        author: user.name,
+        actorId: user.id,
+        principal: input.principal,
+      },
+      facts,
+    );
+    return { workflow: wf, branchName, version, refWarnings, warnings };
   }
 
   /**
@@ -115,14 +126,18 @@ export class WorkflowLifecycleService {
     }
     // This route mints a version AND makes it live, so it faces the same author-time gate as commit —
     // otherwise a document refused at save is accepted straight into production here.
-    const report = assertAuthoredIrValid(irDoc, this.catalog.facts());
-    const name = typeof irDoc.name === 'string' && irDoc.name ? irDoc.name : 'Generated Workflow';
     const userId = principal.user.id;
     const orgId = principal.activeOrgId;
+    const facts = await this.catalog.authoringFacts(irDoc, { userId, orgId });
+    const report = assertAuthoredIrValid(irDoc, facts);
+    const name = typeof irDoc.name === 'string' && irDoc.name ? irDoc.name : 'Generated Workflow';
     const author = principal.user.name;
 
     if (await this.envPointers.promoteRightMissing(this.dataSource.manager, orgId, principal)) {
-      const draft = await this.createDraft({ principal, name, irDoc, commitMessage: 'Initial version' });
+      const draft = await this.createDraft(
+        { principal, name, irDoc, commitMessage: 'Initial version' },
+        facts,
+      );
       return {
         workflow_id: draft.workflow.id,
         workflow_url: '',
@@ -132,6 +147,7 @@ export class WorkflowLifecycleService {
         activated: false,
         activation_error: null,
         ref_warnings: draft.refWarnings,
+        warnings: draft.warnings,
       };
     }
 
@@ -208,8 +224,9 @@ export class WorkflowLifecycleService {
       is_live: true,
       activated: activation.activated,
       activation_error: activation.error,
-      // Broken data refs surface at save, not at run time.
+      // Broken data refs and the gate's warnings surface at save, not at run time.
       ref_warnings: report.ref_warnings,
+      warnings: report.warnings,
     };
   }
 

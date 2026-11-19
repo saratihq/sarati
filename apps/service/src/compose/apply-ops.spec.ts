@@ -6,9 +6,11 @@ import {
   applyOpsDetailed,
   emptyIr,
   LAYOUT,
+  opNodeTypes,
   parseOp,
   type ComposeOp,
 } from './apply-ops';
+import type { UnreadListing } from '../triggers/trigger-catalog.service';
 
 const ALLOWED = new Set([
   'orchestr:trigger',
@@ -116,12 +118,13 @@ describe('applyOps', () => {
   });
 
   describe('trigger re-typing (— the canvas is the only place a trigger is set)', () => {
-    const TRIGGERS = new Set([
-      'orchestr:trigger',
-      'orchestr:webhook',
-      'orchestr:schedule',
-      'gmail.new_email',
-    ]);
+    const OFFERED = new Set(['orchestr:trigger', 'orchestr:webhook', 'orchestr:schedule', 'gmail.new_email']);
+    const TRIGGERS = (type: string): boolean => OFFERED.has(type);
+    // The author gate's answer where Composio's part of the list can't be read: only an in-process type is decided.
+    const UNREAD =
+      (why: UnreadListing) =>
+      (type: string): boolean | UnreadListing =>
+        type.startsWith('orchestr:') ? OFFERED.has(type) : why;
     const withTrigger = () =>
       applyOps(
         null,
@@ -232,6 +235,60 @@ describe('applyOps', () => {
           TRIGGERS,
         ),
       ).toThrow(/is not a known trigger type/);
+    });
+
+    it("admits a well-formed app trigger it can't check, as the author gate does, saying why, and still refuses one naming no app", () => {
+      for (const why of ['no_composio_key', 'listing_unavailable'] as const) {
+        const { ir, applied } = applyOpsDetailed(
+          withTrigger(),
+          ops({ op: 'update_node', node_id: 'trigger', node_type: 'gmail.new_emial' }),
+          ALLOWED,
+          UNREAD(why),
+        );
+        const trig = ir.nodes.find((n) => n.id === 'trigger')!;
+        expect(trig).toMatchObject({ node_type: 'gmail.new_emial', metadata: { trigger: true } });
+        expect(applied[0]).toMatch(
+          /^updated node "trigger": retyped to "gmail\.new_emial" \(parameters replaced\) — Node "trigger" is this workflow's trigger, "gmail\.new_emial", an app trigger only Composio can fire, and /,
+        );
+        expect(applied[0]).toContain(
+          why === 'no_composio_key' ? 'has no Composio key' : 'could not be read just now',
+        );
+        for (const type of ['Acme.new_deal', 'orchestr.webhook', 'gmail.', 'orchestr:webhok']) {
+          expect(() =>
+            applyOps(
+              withTrigger(),
+              ops({ op: 'update_node', node_id: 'trigger', node_type: type }),
+              ALLOWED,
+              UNREAD(why),
+            ),
+          ).toThrow(`ops[0] update_node "trigger": "${type}" is not a known trigger type`);
+        }
+      }
+    });
+
+    it('marks an added app trigger only when the list offers it, never one it could not check', () => {
+      const added = (offers: (type: string) => boolean | UnreadListing) =>
+        applyOps(
+          null,
+          ops({ op: 'add_node', node: { id: 'inbox', node_type: 'gmail.new_email' } }),
+          new Set([...ALLOWED, 'gmail.new_email']),
+          offers,
+        ).nodes[0]!.metadata;
+      expect(added(TRIGGERS)).toEqual({ trigger: true });
+      expect(added(UNREAD('listing_unavailable'))).toEqual({});
+    });
+
+    it('asks the trigger list about every type a batch sets, and nothing else', () => {
+      expect(
+        opNodeTypes(
+          ops(
+            { op: 'add_node', node: { id: 'post', node_type: 'slack.send_channel_message' } },
+            { op: 'update_node', node_id: 'trigger', node_type: 'gmail.new_email' },
+            { op: 'update_node', node_id: 'post', name: 'Post' },
+            { op: 'connect', source_node_id: 'trigger', target_node_id: 'post' },
+          ),
+        ),
+      ).toEqual(['slack.send_channel_message', 'gmail.new_email']);
     });
   });
 

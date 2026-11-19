@@ -5,12 +5,14 @@ import { Test } from '@nestjs/testing';
 import { Client } from 'pg';
 import request from 'supertest';
 
+import { ComposioProvider } from '../src/connections/composio.provider';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { ConnectionsService } from '../src/connections/connections.service';
 import { ComposioTriggerProvider } from '../src/providers/composio-trigger.provider';
 import { TriggerReconcilerService } from '../src/triggers/canvas/trigger-reconciler.service';
 import { TriggersService } from '../src/triggers/triggers.service';
+import { listComposioTriggers } from './support/composio-trigger-listing';
 import { listenOnLoopback } from './support/listen';
 import { seedPlatformKeyEverywhere } from './support/platform-keys';
 import { insertPersonalOrgs } from './support/personal-org';
@@ -174,6 +176,7 @@ describe('Composio trigger reconcile lifecycle (e2e, isolated DB)', () => {
     await listenOnLoopback(app);
     // The managed rail's key lives in the store, not the environment.
     await seedPlatformKeyEverywhere(app, 'composio_api_key', 'ck_e2e_fake_key');
+    listComposioTriggers(app.get(ComposioProvider), 'acmecrm.new_deal');
   }, 30_000);
 
   afterAll(async () => {

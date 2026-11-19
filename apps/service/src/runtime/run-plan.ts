@@ -31,6 +31,18 @@ export interface ActionNode {
   onErrorBranch?: RunNode[];
 }
 
+/** The languages the sandbox runs a Code step in — the ONE list the compiler, the palette and the composer read. */
+export const CODE_LANGUAGES = ['js', 'ts'] as const;
+
+/** A language the sandbox runs a Code step in. */
+export type CodeLanguage = (typeof CODE_LANGUAGES)[number];
+
+/** The language of a Code step that names none. */
+export const DEFAULT_CODE_LANGUAGE: CodeLanguage = 'js';
+
+/** {@link CODE_LANGUAGES} as prose, for the words that name them. */
+export const CODE_LANGUAGE_CHOICES = CODE_LANGUAGES.map((language) => `"${language}"`).join(' or ');
+
 /**
  * Run a user-authored code snippet in a secure sandbox: an async function body receiving
  * the run scope as `steps` (plus a `trigger` alias) whose return becomes the node's output.
@@ -38,8 +50,8 @@ export interface ActionNode {
 export interface CodeNode {
   kind: 'code';
   id: string;
-  /** Source language of `code`; `ts` is transpiled to JS before it runs. */
-  language: 'js' | 'ts';
+  /** Source language of `code` as written — `codeLanguageOf` decides it, absent or null meaning {@link DEFAULT_CODE_LANGUAGE}. */
+  language?: unknown;
   /** The snippet — an (async) function body that returns the node's output. */
   code: string;
   /** Per-node failure policy; `"continue"` tolerates a throw. Absent ⇒ stop. */

@@ -8,12 +8,14 @@ import {
   ApplyOpsError,
   emptyIr,
   MAX_OPS_PER_BATCH,
+  opNodeTypes,
   parseOp,
 } from '../../compose/apply-ops';
 import { ComposeCatalogService } from '../../compose/compose-catalog.service';
 import type { WorkflowIR } from '../../ir/models';
+import { WorkflowAccessService } from '../../workflows/workflow-access.service';
+import { judgedIn } from '../judged-in';
 import type { McpCallContext, McpTool } from '../mcp-tool';
-import { PlatformKeysService } from '../../platform/platform-keys.service';
 
 /**
  * The vocabulary lives in the description, not in the input schema: the MCP runtime rejects a
@@ -39,6 +41,12 @@ const Input = z.object({
       'The document to edit: a workflow document with nodes[] and edges[]. Pass what orchestr_get_workflow returned (its nodes and edges), what a previous orchestr_edit_workflow returned, or {"nodes":[],"edges":[]} to start from a blank graph.',
     ),
   ops: z.array(z.record(z.string(), z.unknown())).describe(OPS_DOC),
+  workflow_id: z
+    .string()
+    .optional()
+    .describe(
+      "The workflow this document belongs to. Pass it whenever you have it — with it, a change to the trigger is judged in that workflow's workspace, as its commit judges it.",
+    ),
 });
 
 const Output = z.object({
@@ -80,11 +88,11 @@ export class EditWorkflowTool implements McpTool {
 
   constructor(
     private readonly catalog: ComposeCatalogService,
-    private readonly platformKeys: PlatformKeysService,
+    private readonly access: WorkflowAccessService,
   ) {}
 
   async run(input: unknown, ctx: McpCallContext): Promise<z.infer<typeof Output>> {
-    const { workflow_ir: raw, ops: rawOps } = Input.parse(input);
+    const { workflow_ir: raw, ops: rawOps, workflow_id: workflowId } = Input.parse(input);
     if (rawOps.length === 0) throw new DomainError('ops must contain at least one operation.', 422);
     if (rawOps.length > MAX_OPS_PER_BATCH) {
       throw new DomainError(
@@ -93,17 +101,13 @@ export class EditWorkflowTool implements McpTool {
       );
     }
     const document = toDocument(raw);
-    const allowedTriggerTypes = await this.catalog.allowedTriggerTypes(
-      await this.platformKeys.scopeFor(ctx.principal.user.id, ctx.principal.activeOrgId),
-    );
     try {
       const ops = rawOps.map((op, index) => parseOp(op, index));
-      const { ir, applied } = applyOpsDetailed(
-        document,
-        ops,
-        this.catalog.allowedTypes(),
-        allowedTriggerTypes,
+      const { offersTrigger } = await this.catalog.authoringFactsFor(
+        opNodeTypes(ops),
+        await judgedIn(this.access, ctx, workflowId),
       );
+      const { ir, applied } = applyOpsDetailed(document, ops, this.catalog.allowedTypes(), offersTrigger);
       return { workflow_ir: ir as unknown as Record<string, unknown>, applied };
     } catch (err) {
       // The op-indexed message is the point: it tells the agent WHICH op to fix.

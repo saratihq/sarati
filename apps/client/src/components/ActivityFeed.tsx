@@ -25,6 +25,7 @@ import { canMoveEnvPointers, ENV_POINTER_GATE, useOrgs } from "@/store/useOrgs";
 import { branchHasNothingNew } from "@/lib/branchChanges";
 import { timeAgo } from "@/lib/format";
 import { getTagColor, isProtectedEnv } from "@/lib/envPresentation";
+import { warnSaved } from "@/lib/save-warnings";
 import { toast } from "@/lib/toast";
 import ConflictResolver from "./ConflictResolver";
 import DiffView from "./DiffView";
@@ -793,6 +794,7 @@ export default function ActivityFeed({
   const handleResolverMerged = (result: MergeResultResponse) => {
     const ctx = resolver;
     setResolver(null);
+    warnSaved(ctx?.updated ? "Updated, with a warning" : "Merged, with a warning", result.warnings);
     if (ctx?.updated) {
       toast.success("Branch updated", ctx.updated);
       onChanged();
@@ -833,6 +835,7 @@ export default function ActivityFeed({
       const result = await api.mergeReview(workflowId, review.id);
       if (result.status === "merged") {
         toast.success("Review merged", `"${review.source_branch}" merged into "${review.target_branch}"`);
+        warnSaved("Merged, with a warning", result.warnings);
         onMerged(review.target_branch);
       } else {
         openResolver(review.source_branch, review.target_branch, result.conflicts, (resolutions) =>
@@ -858,6 +861,7 @@ export default function ActivityFeed({
       const result = await api.mergeBranch(workflowId, branch, "main");
       if (result.status === "merged") {
         toast.success("Branch merged", mergedDetail(branch, "main", result));
+        warnSaved("Merged, with a warning", result.warnings);
         onMerged("main");
       } else {
         openResolver(branch, "main", result.conflicts, (resolutions) =>
@@ -903,6 +907,7 @@ export default function ActivityFeed({
         return;
       }
       toast.success(result.status === "up_to_date" ? "Already up to date" : "Branch updated", next);
+      warnSaved("Updated, with a warning", result.warnings);
       onChanged();
     } catch (e) {
       setUpdateOffer(null);

@@ -153,6 +153,11 @@ export function composioTriggerSpec(publicTriggerType: string): ComposioTriggerS
   return REGISTRY.get(publicTriggerType);
 }
 
+/** Why an instance that provides its own Composio account serves no `spec`, leading with its subscribed twin by the name the picker shows. */
+export function pollNotServedMessage(spec: ComposioTriggerSpec): string {
+  return `Use "${spec.subscribedInstead.name}" (${spec.subscribedInstead.type}) instead: this instance doesn't run "${spec.catalog.name}" (${spec.catalog.type}), which would spend one of the account owner's monthly app actions on every poll, whether or not anything arrived. Composio checks the app for the one to use, and each event it delivers counts as a trigger event, not an app action`;
+}
+
 /** Every registered public trigger type — the rails-consistency test's input. */
 export function composioTriggerTypes(): ReadonlySet<string> {
   return new Set(REGISTRY.keys());

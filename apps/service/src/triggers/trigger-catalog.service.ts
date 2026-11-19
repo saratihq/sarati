@@ -1,6 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
-import { ComposioTriggerProvider } from '../providers/composio-trigger.provider';
+import { withDeadline } from '../common/deadline';
+import { errorMessage } from '../common/error-message';
+import {
+  type ComposioProjectedCatalogEntry,
+  ComposioTriggerProvider,
+} from '../providers/composio-trigger.provider';
 import { composioTriggerCatalog, composioTriggerTypes } from '../providers/composio-trigger.registry';
 import { SdkPollingProvider } from '../providers/sdk-polling.provider';
 import { SdkWebhookProvider } from '../providers/sdk-webhook.provider';
@@ -117,12 +122,25 @@ const NATIVE_TRIGGERS: ReadonlyArray<Record<string, unknown>> = [
   },
 ];
 
+/** Why Composio's part of a workspace's trigger list can't be read now: the workspace has no Composio key, or its listing failed, came back empty or ran late. */
+export type UnreadListing = 'no_composio_key' | 'listing_unavailable';
+
+/** The built-in trigger types, the manual one first — what every workspace offers whatever it has connected. */
+export const NATIVE_TRIGGER_TYPES: readonly string[] = [
+  MANUAL_TRIGGER,
+  ...NATIVE_TRIGGERS.map((entry) => String(entry.type)),
+];
+
 /**
  * THE trigger catalog: the ONE source the picker route, the compose vocabulary and the
  * MCP surface all read, so a trigger the palette offers is a trigger `apply_ops` accepts.
  */
 @Injectable()
 export class TriggerCatalogService {
+  private readonly logger = new Logger(TriggerCatalogService.name);
+  // Partitions whose listing ran past one caller's wait: later callers don't wait on it again until it settles.
+  private readonly overdue = new Set<string>();
+
   constructor(
     private readonly sdkWebhooks: SdkWebhookProvider,
     private readonly sdkPolling: SdkPollingProvider,
@@ -146,8 +164,45 @@ export class TriggerCatalogService {
 
   /** Native + SDK + Composio triggers; a first-party entry wins any public-type overlap, and the hand-polled Composio ones are left out where the instance provides its own Composio account. */
   async list(scope: PlatformKeyScope): Promise<TriggerCatalogRow[]> {
+    const rows = this.inProcessRows();
+    return [...rows, ...liveRows(rows, await this.composioTriggers.catalog(scope))];
+  }
+
+  /** Whether the trigger picker offers `type` in every scope — the manual trigger, or a row of {@link list} — whatever Composio lists; null when only Composio's live listing can say. */
+  offeredWithoutComposio(type: string): boolean | null {
+    if (type === MANUAL_TRIGGER || this.inProcessRows().some((row) => row.entry.type === type)) return true;
+    return composioTriggerTypes().has(type) ? false : null;
+  }
+
+  /** The types Composio's live listing adds to {@link list} for `scope`, or why they can't be known within `waitMs`. */
+  async liveTypes(scope: PlatformKeyScope, waitMs: number): Promise<ReadonlySet<string> | UnreadListing> {
+    const partition = this.platformKeys.composioPartition(scope);
+    if (this.overdue.has(partition)) return 'listing_unavailable';
+    const listing = this.composioTriggers.knownCatalog(scope);
+    const late = new Error(`no answer within ${waitMs}ms`);
+    let entries: ComposioProjectedCatalogEntry[] | null;
+    try {
+      entries = await withDeadline(listing, waitMs, () => late);
+    } catch (err) {
+      if (err === late) this.holdBackUntilSettled(partition, listing);
+      this.logger.warn(`Composio's trigger listing is unknown for now: ${errorMessage(err)}`);
+      return 'listing_unavailable';
+    }
+    if (entries) return new Set(liveRows(this.inProcessRows(), entries).map((row) => String(row.entry.type)));
+    return (await this.composioTriggers.isConfigured(scope)) ? 'listing_unavailable' : 'no_composio_key';
+  }
+
+  private holdBackUntilSettled(partition: string, listing: Promise<unknown>): void {
+    this.overdue.add(partition);
+    const settled = (): void => {
+      this.overdue.delete(partition);
+    };
+    void listing.then(settled, settled);
+  }
+
+  private inProcessRows(): TriggerCatalogRow[] {
     const handPolled = this.platformKeys.composioManagedByInstance() ? [] : composioTriggerCatalog();
-    const rows: TriggerCatalogRow[] = [
+    return [
       ...NATIVE_TRIGGERS.map((entry) => ({ entry, rail: 'native' as const })),
       ...this.sdkWebhooks.catalog().map((entry) => ({ entry, rail: 'sdk' as const })),
       ...this.sdkPolling.catalog().map((entry) => ({ entry, rail: 'sdk' as const })),
@@ -156,12 +211,19 @@ export class TriggerCatalogService {
         rail: 'composio' as const,
       })),
     ];
-    const seen = new Set([...rows.map((row) => String(row.entry.type)), ...composioTriggerTypes()]);
-    for (const entry of await this.composioTriggers.catalog(scope)) {
-      if (seen.has(entry.type)) continue;
-      seen.add(entry.type);
-      rows.push({ entry: entry as unknown as Record<string, unknown>, rail: 'composio' });
-    }
-    return rows;
   }
+}
+
+function liveRows(
+  inProcess: readonly TriggerCatalogRow[],
+  entries: readonly ComposioProjectedCatalogEntry[],
+): TriggerCatalogRow[] {
+  const seen = new Set([...inProcess.map((row) => String(row.entry.type)), ...composioTriggerTypes()]);
+  const rows: TriggerCatalogRow[] = [];
+  for (const entry of entries) {
+    if (seen.has(entry.type)) continue;
+    seen.add(entry.type);
+    rows.push({ entry: entry as unknown as Record<string, unknown>, rail: 'composio' });
+  }
+  return rows;
 }

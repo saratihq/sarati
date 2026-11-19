@@ -1,5 +1,6 @@
 import { CONTROL_NODE_SCHEMAS } from '../generation/control-node-types';
 import type { VectorStore } from '../generation/vector-store';
+import type { PlatformKeysService } from '../platform/platform-keys.service';
 import type { TriggerCatalogService } from '../triggers/trigger-catalog.service';
 
 import { ComposeCatalogService } from './compose-catalog.service';
@@ -52,7 +53,7 @@ const stubVectorStore = {
 const stubTriggerCatalog = { list: () => Promise.resolve([]) } as unknown as TriggerCatalogService;
 
 describe('control-node schema parity — palette (node-types controller) vs composer (compose-catalog)', () => {
-  const catalog = new ComposeCatalogService(stubVectorStore, stubTriggerCatalog);
+  const catalog = new ComposeCatalogService(stubVectorStore, stubTriggerCatalog, {} as PlatformKeysService);
 
   it('the palette serves exactly the 8 shared control constructs', () => {
     expect([...CONTROL_NODE_SCHEMAS].map((s) => s.type).sort()).toEqual([...SHARED_CONTROL_TYPES].sort());

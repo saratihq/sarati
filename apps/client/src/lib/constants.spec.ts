@@ -19,7 +19,6 @@ describe("getNodeCategory: EXACT type matching", () => {
     "orchestr:schedule",
     "orchestr:chat",
     "orchestr:webhook",
-    "orchestr:webhook_trigger",
   ])("classifies %s as a trigger", (type) => {
     expect(getNodeCategory(type)).toBe("trigger");
   });

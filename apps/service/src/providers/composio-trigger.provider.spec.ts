@@ -248,6 +248,122 @@ describe('ComposioTriggerProvider', () => {
       expect(provider.slugForPublicType('github.github_commit_event')).toBe('GITHUB_COMMIT_EVENT');
       expect(provider.slugForPublicType('malformed')).toBeNull();
     });
+
+    it('names no slug for a type that is not a well-formed <app>.<trigger>, warm or not', async () => {
+      const { provider } = makeProvider();
+      for (const warm of [false, true]) {
+        if (warm) await provider.catalog(SCOPE);
+        for (const type of [
+          'gmail.',
+          'Acme.new_deal',
+          '.new_deal',
+          '1password.item_added',
+          'orchestr.webhook',
+        ]) {
+          expect(provider.slugForPublicType(type)).toBeNull();
+        }
+      }
+    });
+
+    it('still names the slug for a version saved with a capital after the dot', async () => {
+      const { provider } = makeProvider();
+      expect(provider.slugForPublicType('gmail.New_Mail')).toBe('NEW_MAIL');
+      await provider.catalog(SCOPE);
+      expect(provider.slugForPublicType('calendar.GoogleCalendar_Event')).toBe('GOOGLECALENDAR_EVENT');
+    });
+  });
+
+  // What the author gate reads: whether the listing is known at all, never a guess from an empty one.
+  describe('knownCatalog', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('is the listing when it can be read, fresh or from the cache a failed refresh keeps', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(3_000_000);
+      const { provider, fake } = makeProvider();
+      expect((await provider.knownCatalog(SCOPE))?.map((e) => e.type)).toHaveLength(3);
+      fake.listTriggerTypes.mockRejectedValueOnce(new Error('composio 502'));
+      nowSpy.mockReturnValue(3_000_000 + 11 * 60_000);
+      expect(await provider.knownCatalog(SCOPE)).toHaveLength(3);
+    });
+
+    it('serves a listing once known at once while it refreshes, and waits only on one never read', async () => {
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(4_000_000);
+      const settled = <T>(listing: Promise<T>): Promise<T | 'waiting'> =>
+        Promise.race([listing, new Promise<'waiting'>((resolve) => setImmediate(() => resolve('waiting')))]);
+      const hanging = (fake: FakeComposio): ((types: ComposioTriggerType[]) => void) => {
+        let answer: (types: ComposioTriggerType[]) => void = () => undefined;
+        fake.listTriggerTypes.mockImplementationOnce(
+          () => new Promise<ComposioTriggerType[]>((resolve) => (answer = resolve)),
+        );
+        return (types) => answer(types);
+      };
+
+      const { provider, fake } = makeProvider();
+      expect(await provider.knownCatalog(SCOPE)).toHaveLength(3);
+      const answer = hanging(fake);
+      nowSpy.mockReturnValue(4_000_000 + 11 * 60_000);
+      expect(await settled(provider.knownCatalog(SCOPE))).toHaveLength(3);
+      expect(await settled(provider.catalog(SCOPE))).toHaveLength(3);
+      expect(fake.listTriggerTypes).toHaveBeenCalledTimes(2);
+      answer([SAMPLE_TYPES[0]!]);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await provider.knownCatalog(SCOPE)).toHaveLength(1);
+      expect(fake.listTriggerTypes).toHaveBeenCalledTimes(2);
+
+      const cold = makeProvider();
+      const coldAnswer = hanging(cold.fake);
+      const first = cold.provider.knownCatalog(SCOPE);
+      expect(await settled(first)).toBe('waiting');
+      coldAnswer(SAMPLE_TYPES);
+      expect(await first).toHaveLength(3);
+    });
+
+    it('asks Composio once for callers arriving while a listing runs, and they all get its answer', async () => {
+      const { provider, fake } = makeProvider();
+      let answer: (types: ComposioTriggerType[]) => void = () => undefined;
+      fake.listTriggerTypes.mockImplementationOnce(
+        () => new Promise<ComposioTriggerType[]>((resolve) => (answer = resolve)),
+      );
+      const waiting = [provider.knownCatalog(SCOPE), provider.knownCatalog(SCOPE), provider.catalog(SCOPE)];
+      await new Promise((resolve) => setImmediate(resolve));
+      answer(SAMPLE_TYPES);
+      for (const listing of await Promise.all(waiting)) expect(listing).toHaveLength(3);
+      expect(fake.listTriggerTypes).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists no type a save would refuse: one that is no well-formed <app>.<trigger>', async () => {
+      const malformed = (toolkitSlug: string, slug: string): ComposioTriggerType => ({
+        ...SAMPLE_TYPES[0]!,
+        toolkitSlug,
+        slug,
+      });
+      const { provider } = makeProvider({
+        types: [
+          ...SAMPLE_TYPES,
+          malformed('Acme', 'ACME_NEW_DEAL'),
+          malformed('orchestr', 'WEBHOOK'),
+          malformed('gmail', ''),
+        ],
+        managed: [
+          ...SAMPLE_MANAGED_TOOLKITS,
+          { slug: 'Acme', name: 'Acme' },
+          { slug: 'orchestr', name: 'Orchestr' },
+        ],
+      });
+      expect((await provider.knownCatalog(SCOPE))?.map((e) => e.type)).toEqual([
+        'gmail.gmail_new_gmail_message',
+        'github.github_commit_event',
+        'calendar.googlecalendar_event',
+      ]);
+    });
+
+    it('is unknown with no key, or when a listing fails or comes back empty with nothing cached', async () => {
+      expect(await makeProvider({ configured: false }).provider.knownCatalog(SCOPE)).toBeNull();
+      const failed = makeProvider({ types: new Error('composio 502') }).provider;
+      expect(await failed.knownCatalog(SCOPE)).toBeNull();
+      expect(await failed.knownCatalog(SCOPE)).toBeNull();
+      expect(await makeProvider({ types: [] }).provider.knownCatalog(SCOPE)).toBeNull();
+    });
   });
 
   describe('subscribe / unsubscribe delegation', () => {
